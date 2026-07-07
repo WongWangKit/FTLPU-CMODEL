@@ -1,0 +1,82 @@
+cmake_minimum_required(VERSION 3.20)
+
+project(FTLPU_CMODEL LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+add_library(ftlpu_cmodel INTERFACE)
+target_include_directories(ftlpu_cmodel INTERFACE include)
+
+enable_testing()
+
+add_executable(stream_register_test tests/stream_register_test.cpp)
+target_link_libraries(stream_register_test PRIVATE ftlpu_cmodel)
+add_test(NAME stream_register_test COMMAND stream_register_test)
+
+add_executable(mem_slice_test tests/mem_slice_test.cpp)
+target_link_libraries(mem_slice_test PRIVATE ftlpu_cmodel)
+add_test(NAME mem_slice_test COMMAND mem_slice_test)
+
+add_executable(topology_test tests/topology_test.cpp)
+target_link_libraries(topology_test PRIVATE ftlpu_cmodel)
+add_test(NAME topology_test COMMAND topology_test)
+
+add_executable(instruction_pipeline_test tests/instruction_pipeline_test.cpp)
+target_link_libraries(instruction_pipeline_test PRIVATE ftlpu_cmodel)
+add_test(NAME instruction_pipeline_test COMMAND instruction_pipeline_test)
+
+add_executable(array_model_test tests/array_model_test.cpp)
+target_link_libraries(array_model_test PRIVATE ftlpu_cmodel)
+add_test(NAME array_model_test COMMAND array_model_test)
+
+add_executable(vector_roundtrip_test tests/vector_roundtrip_test.cpp)
+target_link_libraries(vector_roundtrip_test PRIVATE ftlpu_cmodel)
+add_test(NAME vector_roundtrip_test COMMAND vector_roundtrip_test)
+
+add_executable(mxm_supercell_test tests/mxm_supercell_test.cpp)
+target_link_libraries(mxm_supercell_test PRIVATE ftlpu_cmodel)
+add_test(NAME mxm_supercell_test COMMAND mxm_supercell_test)
+
+add_executable(mxm_array_test tests/mxm_array_test.cpp)
+target_link_libraries(mxm_array_test PRIVATE ftlpu_cmodel)
+add_test(NAME mxm_array_test COMMAND mxm_array_test)
+
+add_executable(mxm_control_slice_test tests/mxm_control_slice_test.cpp)
+target_link_libraries(mxm_control_slice_test PRIVATE ftlpu_cmodel)
+add_test(NAME mxm_control_slice_test COMMAND mxm_control_slice_test)
+
+add_executable(mem_mxm_integration_test tests/mem_mxm_integration_test.cpp)
+target_link_libraries(mem_mxm_integration_test PRIVATE ftlpu_cmodel)
+add_test(NAME mem_mxm_integration_test COMMAND mem_mxm_integration_test)
+
+add_executable(gemm_320_test tests/gemm_320_test.cpp)
+target_link_libraries(gemm_320_test PRIVATE ftlpu_cmodel)
+add_test(NAME gemm_320_test COMMAND gemm_320_test)
+
+add_executable(vxm_alu_test tests/vxm_alu_test.cpp)
+target_link_libraries(vxm_alu_test PRIVATE ftlpu_cmodel)
+add_test(NAME vxm_alu_test COMMAND vxm_alu_test)
+
+add_executable(vxm_lane_test tests/vxm_lane_test.cpp)
+target_link_libraries(vxm_lane_test PRIVATE ftlpu_cmodel)
+add_test(NAME vxm_lane_test COMMAND vxm_lane_test)
+
+add_executable(northbound_pipeline_demo examples/northbound_pipeline_demo.cpp)
+target_link_libraries(northbound_pipeline_demo PRIVATE ftlpu_cmodel)
+
+add_executable(array_trace_demo examples/array_trace_demo.cpp)
+target_link_libraries(array_trace_demo PRIVATE ftlpu_cmodel)
+
+add_executable(vector_roundtrip_demo examples/vector_roundtrip_demo.cpp)
+target_link_libraries(vector_roundtrip_demo PRIVATE ftlpu_cmodel)
+
+add_executable(mxm_control_trace_demo examples/mxm_control_trace_demo.cpp)
+target_link_libraries(mxm_control_trace_demo PRIVATE ftlpu_cmodel)
+
+add_executable(mem_mxm_trace_demo examples/mem_mxm_trace_demo.cpp)
+target_link_libraries(mem_mxm_trace_demo PRIVATE ftlpu_cmodel)
+
+add_executable(gemm_320_trace_demo examples/gemm_320_trace_demo.cpp)
+target_link_libraries(gemm_320_trace_demo PRIVATE ftlpu_cmodel)
