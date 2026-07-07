@@ -2,6 +2,15 @@
 
 Cycle-level C++ model experiments for FTLPU-style stream and memory behavior.
 
+## Project Layout
+
+- `include/ftlpu/core/`: common topology, stream, and instruction-pipeline primitives.
+- `include/ftlpu/mem/`: MEM slice and 20-row tile-array models.
+- `include/ftlpu/mxm/`: MXM supercell, array, control, and GEMM execution models.
+- `include/ftlpu/vxm/`: VXM ALU and scalar lane pipeline models.
+- `tests/<module>/`: unit tests grouped by subsystem, with `tests/integration/` for cross-subsystem tests.
+- `examples/<module>/`: trace/demo executables grouped by subsystem.
+
 ## Current Models
 
 - `ftlpu::StreamRegister<T>`: one-cycle stream register with `valid` represented by `std::optional`.
@@ -51,7 +60,7 @@ ctest --test-dir build --output-on-failure
 To generate a per-cycle stream-register trace:
 
 ```powershell
-.\build-vs2019\Debug\array_trace_demo.exe array_trace.log
+.\build-vs2019\Debug\tile_array_trace_demo.exe tile_array_trace.log
 ```
 
 To run the west-in/east-out vector roundtrip scenario:
