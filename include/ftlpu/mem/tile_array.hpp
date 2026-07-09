@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <optional>
 #include <ostream>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -115,6 +116,17 @@ public:
         check_register_file(register_file);
         check_east_stream(stream);
         return east_regs_[tile][lane][register_file][stream];
+    }
+
+    StreamSlot consume_east_register(std::size_t tile, std::size_t lane, std::size_t register_file, std::size_t stream)
+    {
+        check_tile(tile);
+        check_lane(lane);
+        check_register_file(register_file);
+        check_east_stream(stream);
+        auto value = east_regs_[tile][lane][register_file][stream];
+        east_regs_[tile][lane][register_file][stream].reset();
+        return value;
     }
 
     const StreamSlot& west_register(std::size_t tile, std::size_t lane, std::size_t register_file, std::size_t stream) const
@@ -488,7 +500,13 @@ private:
                 ? east_regs_[write.tile][write.lane][write.register_file][write.stream]
                 : west_regs_[write.tile][write.lane][write.register_file][write.stream];
             if (slot.has_value()) {
-                throw std::logic_error("stream register write collision after MEM read");
+                std::ostringstream os;
+                os << "stream register write collision after MEM read"
+                   << " tile=" << write.tile
+                   << " lane=" << write.lane
+                   << " sreg=" << write.register_file
+                   << " stream=" << direction_name(write.direction) << write.stream;
+                throw std::logic_error(os.str());
             }
             slot = write.word;
         }

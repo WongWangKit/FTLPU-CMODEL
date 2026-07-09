@@ -47,11 +47,48 @@ int main()
     ftlpu::MxmControlSlice control(*array);
     std::ostringstream log;
     constexpr std::size_t kColumn = 7;
+    constexpr std::uint32_t kColumnMask = 1u << kColumn;
 
     control.issue_south(ftlpu::MxmControlInstruction::IW(kColumn));
 
     for (std::size_t cycle = 0; cycle < ftlpu::hw::kMxmSupercellsPerPlane; ++cycle) {
         control.set_weight_input(cycle, row_input(cycle, kColumn));
+        control.tick(log);
+    }
+
+    for (std::size_t tile = 0; tile < ftlpu::hw::kMxmSupercellsPerPlane; ++tile) {
+        if (!require(array->buffered_weight(tile, kColumn, 15, 15) == expected_weight(tile, kColumn, 15, 15), "buffered weight mismatch")) {
+            return 1;
+        }
+        if (!require(array->weight(tile, kColumn, 15, 15) == 0, "IW should not commit weight matrix")) {
+            return 1;
+        }
+        if (!require(!control.loaded_cell(tile, kColumn), "IW should not set loaded-cell marker")) {
+            return 1;
+        }
+    }
+
+    auto parallel_array = std::make_unique<ftlpu::MxmArray>();
+    ftlpu::MxmControlSlice parallel_control(*parallel_array);
+    parallel_control.issue_south(ftlpu::MxmControlInstruction::IW(kColumn));
+    parallel_control.issue_south(ftlpu::MxmControlInstruction::Compute());
+    parallel_control.set_weight_input(0, row_input(0, kColumn));
+    parallel_control.tick(log);
+    if (!require(parallel_control.compute_active(0), "Compute should issue in parallel with IW")) {
+        return 1;
+    }
+    if (!require(
+            parallel_array->buffered_weight(0, kColumn, 15, 15) == expected_weight(0, kColumn, 15, 15),
+            "parallel IW should fill weight buffer")) {
+        return 1;
+    }
+    if (!require(parallel_array->weight(0, kColumn, 15, 15) == 0, "parallel IW should not switch active weights")) {
+        return 1;
+    }
+
+    control.issue_south(ftlpu::MxmControlInstruction::LW(kColumnMask));
+
+    for (std::size_t cycle = 0; cycle < ftlpu::hw::kMxmSupercellsPerPlane; ++cycle) {
         control.tick(log);
     }
 
@@ -100,7 +137,16 @@ int main()
     if (!require(text.find("tile 19 IW col=7") != std::string::npos, "missing tile 19 IW log")) {
         return 1;
     }
-    if (!require(text.find("IW load matrix=0x") != std::string::npos, "missing IW load log")) {
+    if (!require(text.find("tile 0 LW mask=0x00080") != std::string::npos, "missing tile 0 LW log")) {
+        return 1;
+    }
+    if (!require(text.find("tile 19 LW mask=0x00080") != std::string::npos, "missing tile 19 LW log")) {
+        return 1;
+    }
+    if (!require(text.find("IW buffer=0x") != std::string::npos, "missing IW buffer log")) {
+        return 1;
+    }
+    if (!require(text.find("LW matrix=0x") != std::string::npos, "missing LW load log")) {
         return 1;
     }
     if (!require(text.find("load_matrix:") != std::string::npos, "missing 20x20 load matrix log")) {

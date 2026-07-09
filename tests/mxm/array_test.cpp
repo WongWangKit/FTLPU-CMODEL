@@ -72,7 +72,7 @@ int main()
     assert(caught);
 
     const auto text = log.str();
-    assert(text.find("mxm_array cell(0,0) mxm_supercell: IW enable_load") != std::string::npos);
+    assert(text.find("mxm_array cell(0,0) mxm_supercell: IW buffer=0x") != std::string::npos);
     assert(text.find("mxm_array cell(19,19) mxm_supercell: LW matrix=0x") != std::string::npos);
 
     return 0;

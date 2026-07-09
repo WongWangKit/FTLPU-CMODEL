@@ -20,6 +20,7 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
 {
     return lhs.opcode == rhs.opcode
         && lhs.supercell_column == rhs.supercell_column
+        && lhs.column_mask == rhs.column_mask
         && lhs.stream_base == rhs.stream_base;
 }
 
@@ -92,6 +93,7 @@ bool verify_mxm_codec()
 {
     const ftlpu::MxmControlInstruction instructions[] {
         ftlpu::MxmControlInstruction::IW(19),
+        ftlpu::MxmControlInstruction::LW(0x54321u),
         ftlpu::MxmControlInstruction::Compute(),
         ftlpu::MxmControlInstruction::Output(36),
     };

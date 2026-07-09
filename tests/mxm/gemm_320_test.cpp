@@ -104,7 +104,7 @@ void load_weight_column_through_mem(
 {
     auto mem = std::make_unique<ftlpu::TileArrayModel>();
     ftlpu::MxmControlSlice control(array);
-    for (std::size_t cycle = 0; cycle < kMxmHandoffBaseCycle + kBlocks; ++cycle) {
+    for (std::size_t cycle = 0; cycle < kMxmHandoffBaseCycle + 2 * kBlocks; ++cycle) {
         if (cycle < kBlocks) {
             inject_weight_streams(*mem, cycle, column_block);
         }
@@ -116,7 +116,10 @@ void load_weight_column_through_mem(
         if (cycle == kMxmHandoffBaseCycle) {
             control.issue_south(ftlpu::MxmControlInstruction::IW(column_block));
         }
-        if (cycle >= kMxmHandoffBaseCycle) {
+        if (cycle == kMxmHandoffBaseCycle + kBlocks) {
+            control.issue_south(ftlpu::MxmControlInstruction::LW(1u << column_block));
+        }
+        if (cycle >= kMxmHandoffBaseCycle && cycle < kMxmHandoffBaseCycle + kBlocks) {
             const auto tile = cycle - kMxmHandoffBaseCycle;
             control.set_weight_input(tile, collect_weight_input(*mem, tile));
         }

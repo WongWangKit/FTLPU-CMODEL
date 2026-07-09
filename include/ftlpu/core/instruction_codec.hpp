@@ -22,7 +22,9 @@ namespace isa {
 // MEM 32b:
 //   [1:0] opcode, [7:2] stream, [13:8] map stream, [26:14] SRAM address.
 // MXM control 32b:
-//   [1:0] opcode, [6:2] supercell column, [12:7] stream base.
+//   IW     [1:0] opcode, [6:2] supercell column.
+//   LW     [1:0] opcode, [21:2] 20-bit supercell-column mask.
+//   Output [1:0] opcode, [12:7] stream base.
 // VXM ALU 3x32b:
 //   word0 [4:0] opcode, [6:5] lhs kind, [12:7] lhs index,
 //         [14:13] rhs kind, [20:15] rhs index, [21] cast target,
@@ -185,40 +187,61 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
 {
     constexpr std::uint32_t kOpcodeMask = 0x3;
     constexpr std::uint32_t kSupercellColumnMask = 0x1f;
+    constexpr std::uint32_t kColumnMaskMask = 0xfffff;
     constexpr std::uint32_t kStreamBaseMask = 0x3f;
 
     detail::require_unsigned_fit(
         static_cast<std::uint64_t>(instruction.opcode),
         kOpcodeMask,
         "MXM opcode does not fit encoded instruction");
-    detail::require_unsigned_fit(
-        static_cast<std::uint64_t>(instruction.supercell_column),
-        kSupercellColumnMask,
-        "MXM supercell column does not fit encoded instruction");
-    detail::require_unsigned_fit(
-        static_cast<std::uint64_t>(instruction.stream_base),
-        kStreamBaseMask,
-        "MXM stream base does not fit encoded instruction");
-
-    return static_cast<std::uint32_t>(instruction.opcode)
-        | (static_cast<std::uint32_t>(instruction.supercell_column) << 2)
-        | (static_cast<std::uint32_t>(instruction.stream_base) << 7);
+    const auto opcode = static_cast<std::uint32_t>(instruction.opcode);
+    switch (instruction.opcode) {
+    case MxmControlOpcode::IW:
+        detail::require_unsigned_fit(
+            static_cast<std::uint64_t>(instruction.supercell_column),
+            kSupercellColumnMask,
+            "MXM supercell column does not fit encoded instruction");
+        return opcode | (static_cast<std::uint32_t>(instruction.supercell_column) << 2);
+    case MxmControlOpcode::LW:
+        detail::require_unsigned_fit(
+            static_cast<std::uint64_t>(instruction.column_mask),
+            kColumnMaskMask,
+            "MXM LW column mask does not fit encoded instruction");
+        if (instruction.column_mask == 0) {
+            throw std::logic_error("MXM LW column mask must select at least one column");
+        }
+        return opcode | (instruction.column_mask << 2);
+    case MxmControlOpcode::Compute:
+        return opcode;
+    case MxmControlOpcode::Output:
+        detail::require_unsigned_fit(
+            static_cast<std::uint64_t>(instruction.stream_base),
+            kStreamBaseMask,
+            "MXM stream base does not fit encoded instruction");
+        return opcode | (static_cast<std::uint32_t>(instruction.stream_base) << 7);
+    }
+    throw std::logic_error("unknown MXM opcode");
 }
 
 inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
 {
-    constexpr std::uint32_t kUsedMask = 0x00001fffu;
-    detail::require_reserved_zero(word, kUsedMask, "encoded MXM instruction has non-zero reserved bits");
     const auto opcode = static_cast<MxmControlOpcode>(word & 0x3u);
     const auto supercell_column = static_cast<std::size_t>((word >> 2) & 0x1fu);
+    const auto column_mask = static_cast<std::uint32_t>((word >> 2) & 0xfffffu);
     const auto stream_base = static_cast<std::size_t>((word >> 7) & 0x3fu);
 
     switch (opcode) {
     case MxmControlOpcode::IW:
+        detail::require_reserved_zero(word, 0x0000007fu, "encoded MXM IW instruction has non-zero reserved bits");
         return MxmControlInstruction::IW(supercell_column);
+    case MxmControlOpcode::LW:
+        detail::require_reserved_zero(word, 0x003fffffu, "encoded MXM LW instruction has non-zero reserved bits");
+        return MxmControlInstruction::LW(column_mask);
     case MxmControlOpcode::Compute:
+        detail::require_reserved_zero(word, 0x00000003u, "encoded MXM Compute instruction has non-zero reserved bits");
         return MxmControlInstruction::Compute();
     case MxmControlOpcode::Output:
+        detail::require_reserved_zero(word, 0x00001f83u, "encoded MXM Output instruction has non-zero reserved bits");
         return MxmControlInstruction::Output(stream_base);
     }
     throw std::logic_error("unknown encoded MXM opcode");

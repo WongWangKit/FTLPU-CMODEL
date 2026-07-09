@@ -178,14 +178,14 @@ private:
         }
     }
 
-    MxmControlSlice::WeightInput collect_mxm_weight_input_from_streams(std::size_t mxm, std::size_t tile) const
+    MxmControlSlice::WeightInput collect_mxm_weight_input_from_streams(std::size_t mxm, std::size_t tile)
     {
         constexpr auto kTargetSreg = hw::kStreamRegisterColumns - 1;
         auto input = MxmControlSlice::WeightInput {};
         const auto stream_base = mxm * hw::kMxmLoadStreamsPerCycle;
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             for (std::size_t stream = 0; stream < hw::kMxmLoadStreamsPerCycle; ++stream) {
-                const auto& slot = mem_.east_register(tile, lane, kTargetSreg, stream_base + stream);
+                const auto slot = mem_.consume_east_register(tile, lane, kTargetSreg, stream_base + stream);
                 if (!slot.has_value()) {
                     throw std::logic_error("MXM IW reached tile before MEM east stream arrived at sreg11");
                 }

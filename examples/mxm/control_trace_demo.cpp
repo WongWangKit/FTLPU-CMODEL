@@ -43,6 +43,10 @@ int main(int argc, char** argv)
         control.set_weight_input(cycle, row_input(cycle, kColumn));
         control.tick(log);
     }
+    control.issue_south(ftlpu::MxmControlInstruction::LW(1u << kColumn));
+    for (std::size_t cycle = 0; cycle < ftlpu::hw::kMxmSupercellsPerPlane; ++cycle) {
+        control.tick(log);
+    }
 
     std::cout << "wrote MXM control trace log: " << log_path << '\n';
     return 0;

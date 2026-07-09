@@ -46,11 +46,29 @@ public:
         return cell(supercell_row, supercell_column).weight(row, column);
     }
 
-    void issue_iw(std::size_t row, std::size_t column, std::ostream& os)
+    Weight buffered_weight(
+        std::size_t supercell_row,
+        std::size_t supercell_column,
+        std::size_t row,
+        std::size_t column) const
+    {
+        return cell(supercell_row, supercell_column).buffered_weight(row, column);
+    }
+
+    void issue_iw(std::size_t row, std::size_t column, InputVector input, std::ostream& os)
     {
         auto& target = cell(row, column);
         os << "mxm_array cell(" << row << "," << column << ") ";
+        target.set_input(input);
         target.issue(MxmInstruction::IW());
+        target.tick(os);
+    }
+
+    void issue_lw(std::size_t row, std::size_t column, std::ostream& os)
+    {
+        auto& target = cell(row, column);
+        os << "mxm_array cell(" << row << "," << column << ") ";
+        target.issue(MxmInstruction::LW());
         target.tick(os);
     }
 
@@ -58,28 +76,19 @@ public:
     {
         auto& target = cell(row, column);
         os << "mxm_array cell(" << row << "," << column << ") ";
+        target.set_input(input);
         target.issue(MxmInstruction::IW());
         target.tick(os);
 
         os << "mxm_array cell(" << row << "," << column << ") ";
-        target.set_input(input);
         target.issue(MxmInstruction::LW());
         target.tick(os);
     }
 
-    void tick_cell_iw(std::size_t row, std::size_t column, std::ostream& os)
+    void tick_cell_lw(std::size_t row, std::size_t column, std::ostream& os)
     {
         auto& target = cell(row, column);
         os << "mxm_array cell(" << row << "," << column << ") ";
-        target.issue(MxmInstruction::IW());
-        target.tick(os);
-    }
-
-    void tick_cell_lw(std::size_t row, std::size_t column, InputVector input, std::ostream& os)
-    {
-        auto& target = cell(row, column);
-        os << "mxm_array cell(" << row << "," << column << ") ";
-        target.set_input(input);
         target.issue(MxmInstruction::LW());
         target.tick(os);
     }
@@ -88,7 +97,9 @@ public:
     {
         auto& target = cell(row, column);
         os << "mxm_array cell(" << row << "," << column << ") ";
-        target.load_weights_with_iw(input, os);
+        target.set_input(input);
+        target.issue(MxmInstruction::IW());
+        target.tick(os);
     }
 
 private:

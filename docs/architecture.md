@@ -82,8 +82,8 @@ Current components:
 
 - `MxmSupercell`: one 16 x 16 int8 weight block.
 - `MxmArray`: a 20 x 20 grid of supercells.
-- `MxmControlSlice`: south-to-north control pipeline for `IW`, `Compute`, and
-  `Output`.
+- `MxmControlSlice`: south-to-north control pipeline for `IW`, `LW`, `Compute`,
+  and `Output`.
 - `MxmGemmEngine`: execution helper for 320 x 320 int8 GEMM with int32
   accumulation.
 - `Mxm`: wrapper containing an array and its control slice.
@@ -92,15 +92,23 @@ The system contains two MXMs on the east side of MEM.
 
 ### Weight Loading
 
-`IW(column_block)` loads one 16 x 16 supercell weight matrix per tile row. The
-weight bytes arrive from MEM at the east handoff stream register. Each MXM uses
-16 streams per cycle:
+`IW(column_block)` writes one 16 x 16 supercell weight matrix into that
+supercell's weight buffer. `LW(mask20)` carries a 20-bit supercell-column mask;
+each bit set to `1` commits the corresponding buffered matrix into the active
+weights used by compute. This separation is the first step toward a future
+ping-pong weight-buffer model.
+
+The weight bytes for `IW` arrive from MEM at the east handoff stream register.
+Each MXM uses 16 streams per cycle:
 
 - MXM 0 consumes streams `E0..E15`.
 - MXM 1 consumes streams `E16..E31`.
 
-For a full 320 x 320 weight matrix, there are 20 column blocks, so loading one
-MXM plane takes 20 `IW` cycles after data reaches the MXM boundary.
+For a full 320 x 320 weight matrix, there are 20 column blocks. The current
+tests issue 20 continuous `IW` pulses followed by one full-mask `LW(0xfffff)`
+pulse. Compute can start at tile 0 on the cycle after tile 0 receives the
+full-mask `LW`; later tile rows receive the same instruction one cycle later
+per row.
 
 ### Compute
 
@@ -262,12 +270,6 @@ The generated data uses non-trivial symmetric quantization scales so the output
 is not mostly zero. The test compares SRAM contents against golden reference
 data computed in the test.
 
-### Online-Style Test
-
-`mem_dual_mxm_swiglu_test` schedules some work from the test harness while the
-simulation runs. It is useful for debugging phase timing and generating detailed
-logs.
-
 ### Offline ICU Test
 
 `mem_dual_mxm_swiglu_offline_icu_test` uses the same source file with
@@ -287,15 +289,36 @@ The current offline test still has a small runtime bridge for the standalone
 `MxmGemmEngine`, because numeric GEMM execution is not yet fully embedded in the
 system tick.
 
+The test also exercises the MXM weight-buffer path. `IW` fills each
+supercell's weight buffer, then a single `LW(mask20)` commits all selected
+columns into the active weights. MXM control has separate load and compute
+queues, so `IW` can fill the next weight buffer while `Compute` continues to use
+the current active weights. The second gate/up pass and the down pass use this
+ping-pong schedule:
+
+- MXM0 starts `IW` immediately when the previous GEMM starts. Shared activation
+  traffic uses alternate stream IDs during the first few rows so it does not
+  collide with `E0..E15`.
+- MXM1 starts `IW` immediately after MXM0's 20-cycle `IW` window. The current
+  FFN schedule uses `MXM0: cycles 39..58` and `MXM1: cycles 59..78` for the
+  second gate/up pass.
+- Both MXMs issue one-cycle `LW(mask20)` commands only after the current GEMM
+  compute window has ended and both weight buffers are ready.
+
+`mxm.log` includes per-phase and total MXM performance counters:
+
+```text
+offline_gate_up_p0_mxm0 perf cycles=160 active_cycles=160 ...
+offline_total_mxm0 perf cycles=613 active_cycles=480 ...
+```
+
+The per-phase utilization uses the tile0 compute window. The total utilization
+also uses tile0 scheduling time and includes weight-load, writeback, and wait
+cycles, so it is the number to watch when changing the scheduler.
+
 ## Logs
 
 The integration tests write logs under the build directory.
-
-Online FFN:
-
-```text
-build-vs2019/logs/mem_dual_mxm_swiglu/
-```
 
 Offline ICU FFN:
 
@@ -309,14 +332,14 @@ Each directory contains:
 - `mem.log`: MEM stream/register/SRAM activity.
 - `mxm.log`: MXM load/compute state.
 - `vxm.log`: VXM ALU state for tile 0.
-- `pipeline.svg`: phase timeline with separate MEM read, MEM write, MXM, and
-  VXM rows.
+- `pipeline.svg`: phase timeline with separate MEM weight-read, MEM
+  activation-read, MEM write, MXM load, MXM compute, and VXM rows.
 
 The offline ICU log prints the key phase starts, for example:
 
 ```text
 offline ICU FFN program loaded before cycle 0
-  load0=0 gemm0=38 load1=239 gemm1=277 down_load=478 down_gemm=516
+  load0.mxm0_iw=18 load0.mxm1_iw=18 load0.lw=38 gemm0=39 load1.mxm1_iw=59 load1.mxm0_iw=39 load1.lw=239 gemm1=240 down_load.mxm1_iw=260 down_load.mxm0_iw=240 down_load.lw=440 down_gemm=453
 ```
 
 ## Data Layout Summary

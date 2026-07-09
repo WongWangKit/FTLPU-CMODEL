@@ -126,7 +126,7 @@ void load_all_weights_through_mem(
     std::ostream& mxm_log)
 {
     ftlpu::MxmControlSlice control(array);
-    constexpr std::size_t kLastLoadCycle = kMxmHandoffBaseCycle + 2 * (kBlocks - 1);
+    constexpr std::size_t kLastLoadCycle = kMxmHandoffBaseCycle + 2 * kBlocks - 1;
     for (std::size_t cycle = 0; cycle <= kLastLoadCycle; ++cycle) {
         issue_pipelined_weight_reads_for_cycle(weight_mem, cycle);
         weight_mem.tick(mem_log);
@@ -134,6 +134,9 @@ void load_all_weights_through_mem(
         if (cycle >= kMxmHandoffBaseCycle && cycle < kMxmHandoffBaseCycle + kBlocks) {
             const auto column_block = cycle - kMxmHandoffBaseCycle;
             control.issue_south(ftlpu::MxmControlInstruction::IW(column_block));
+        }
+        if (cycle == kMxmHandoffBaseCycle + kBlocks) {
+            control.issue_south(ftlpu::MxmControlInstruction::LW(ftlpu::MxmControlInstruction::kColumnMaskBits));
         }
 
         for (std::size_t tile = 0; tile < kBlocks; ++tile) {
@@ -344,13 +347,13 @@ int run_demo(int argc, char** argv)
     store_activation_matrix_to_mem(*memory, mem_log);
     store_weight_matrix_to_mem(*memory, mem_log);
 
-    constexpr std::size_t kTile0WeightsReadyPhaseCycle = kMxmHandoffBaseCycle + kBlocks - 1;
+    constexpr std::size_t kTile0WeightsReadyPhaseCycle = kMxmHandoffBaseCycle + kBlocks;
     constexpr std::size_t kComputeStartPhaseCycle = kTile0WeightsReadyPhaseCycle + 1;
-    constexpr std::size_t kLastLoadPhaseCycle = kMxmHandoffBaseCycle + 2 * (kBlocks - 1);
+    constexpr std::size_t kLastLoadPhaseCycle = kMxmHandoffBaseCycle + 2 * kBlocks - 1;
     constexpr std::size_t kLastComputePhaseCycle = kComputeStartPhaseCycle + kComputeCycles + kComputeFlushCycles;
     const auto phase_base_mem_cycle = memory->cycle();
 
-    mxm_log << "loading resident B[320,320] from MEM into MXM through continuous IW pipeline\n";
+    mxm_log << "loading resident B[320,320] from MEM into MXM through continuous IW buffer fills and one full-mask LW commit\n";
     mxm_log << "compute A[320,320] x B[320,320], Compute is issued every cycle for " << kComputeCycles
             << " cycles after tile0 weights are loaded at phase cycle " << kComputeStartPhaseCycle
             << " (MEM cycle " << (phase_base_mem_cycle + kComputeStartPhaseCycle) << ")\n";
@@ -374,6 +377,9 @@ int run_demo(int argc, char** argv)
         if (phase_cycle >= kMxmHandoffBaseCycle && phase_cycle < kMxmHandoffBaseCycle + kBlocks) {
             const auto column_block = phase_cycle - kMxmHandoffBaseCycle;
             control.issue_south(ftlpu::MxmControlInstruction::IW(column_block));
+        }
+        if (phase_cycle == kMxmHandoffBaseCycle + kBlocks) {
+            control.issue_south(ftlpu::MxmControlInstruction::LW(ftlpu::MxmControlInstruction::kColumnMaskBits));
         }
         if (phase_cycle >= kComputeStartPhaseCycle && phase_cycle < kComputeStartPhaseCycle + kComputeCycles) {
             control.issue_south(ftlpu::MxmControlInstruction::Compute());

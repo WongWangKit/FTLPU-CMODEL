@@ -53,14 +53,16 @@ int main()
     ftlpu::MxmSupercell supercell;
     std::ostringstream log;
 
+    supercell.set_input(full_input());
     supercell.issue(ftlpu::MxmInstruction::IW());
     supercell.tick(log);
-    assert(supercell.load_enabled());
+    assert(supercell.weight_buffer_valid());
+    assert(supercell.weight(15, 15) == 0);
+    assert(supercell.buffered_weight(15, 15) == static_cast<std::int8_t>(15 * 16 + 15));
 
-    supercell.set_input(full_input());
     supercell.issue(ftlpu::MxmInstruction::LW());
     supercell.tick(log);
-    assert(!supercell.load_enabled());
+    assert(supercell.weight_buffer_valid());
 
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
         for (std::size_t stream = 0; stream < ftlpu::hw::kMxmLoadStreamsPerCycle; ++stream) {
@@ -97,9 +99,9 @@ int main()
 
     assert(supercell.outputs().size() == ftlpu::hw::kMxmSupercellColumns);
 
+    supercell.reset();
     bool caught = false;
     try {
-        supercell.set_input(full_input());
         supercell.issue(ftlpu::MxmInstruction::LW());
         supercell.tick(log);
     } catch (const std::logic_error&) {
@@ -112,10 +114,8 @@ int main()
     missing[15][15].reset();
     caught = false;
     try {
-        supercell.issue(ftlpu::MxmInstruction::IW());
-        supercell.tick(log);
         supercell.set_input(missing);
-        supercell.issue(ftlpu::MxmInstruction::LW());
+        supercell.issue(ftlpu::MxmInstruction::IW());
         supercell.tick(log);
     } catch (const std::logic_error&) {
         caught = true;
@@ -123,7 +123,7 @@ int main()
     assert(caught);
 
     const auto text = log.str();
-    assert(text.find("IW enable_load") != std::string::npos);
+    assert(text.find("IW buffer=0x000102030405060708090a0b0c0d0e0f") != std::string::npos);
     assert(text.find("LW matrix=0x000102030405060708090a0b0c0d0e0f") != std::string::npos);
     assert(text.find("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff") != std::string::npos);
     assert(text.find("MAC col=0 result=" + std::to_string(expected_dot(1, 0))) != std::string::npos);

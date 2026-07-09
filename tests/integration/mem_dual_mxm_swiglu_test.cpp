@@ -1,4 +1,5 @@
 #include "ftlpu/system/tsp_slice_system.hpp"
+#include "ftlpu/mxm/performance_monitor.hpp"
 
 #include <algorithm>
 #include <array>
@@ -14,6 +15,7 @@
 #include <stdexcept>
 #include <streambuf>
 #include <string>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -38,6 +40,8 @@ constexpr std::size_t kSwigluMemColumn1 = 41;
 constexpr std::size_t kFinalMemColumn = 42;
 constexpr std::size_t kActivationStream = 0;
 constexpr std::size_t kActivationStream1 = 16;
+constexpr std::size_t kActivationEarlyStream = 16;
+constexpr std::size_t kActivationBridgeStream = 30;
 constexpr std::size_t kGateStreamBase = 32;
 constexpr std::size_t kUpStreamBase = 36;
 constexpr std::size_t kGateWestStreamBase = kGateStreamBase - ftlpu::hw::kEastStreams;
@@ -593,7 +597,7 @@ void load_dual_mxm_from_mem(
         kLogTile,
         kLogTile,
     };
-    constexpr auto kTotalCycles = kWeightHandoffBaseCycle + kBlocks;
+    constexpr auto kTotalCycles = kWeightHandoffBaseCycle + 2 * kBlocks;
 
     for (std::size_t stream = 0; stream < kLoadStreams; ++stream) {
         const auto mxm0_column = stream;
@@ -660,6 +664,10 @@ void load_dual_mxm_from_mem(
                 system.icu().enqueue_mxm(1, ftlpu::MxmControlInstruction::IW(column_block));
             }
         }
+        if (cycle == kWeightHandoffBaseCycle + kBlocks) {
+            system.icu().enqueue_mxm(0, ftlpu::MxmControlInstruction::LW(ftlpu::MxmControlInstruction::kColumnMaskBits));
+            system.icu().enqueue_mxm(1, ftlpu::MxmControlInstruction::LW(ftlpu::MxmControlInstruction::kColumnMaskBits));
+        }
         system.tick(sinks);
     }
 }
@@ -690,6 +698,8 @@ std::array<MatrixI32, kMxmCount> run_dual_mxm_gemm(
     std::ostream null_stream(&null_buffer);
     MxmArrayStateSummary mxm0_summary {};
     MxmArrayStateSummary mxm1_summary {};
+    ftlpu::MxmPerformanceMonitor mxm0_perf {};
+    ftlpu::MxmPerformanceMonitor mxm1_perf {};
 
     constexpr auto kComputeTicks = kActivationRows + 2 * kBlocks;
     const auto activation_read_latency0 = east_stream_cycles_to_sreg11(activation_column0);
@@ -849,6 +859,8 @@ std::array<MatrixI32, kMxmCount> run_dual_mxm_gemm(
 
             mxm0_gemm->tick(null_stream, false, false);
             mxm1_gemm->tick(null_stream, false, false);
+            mxm0_perf.sample(*mxm0_gemm);
+            mxm1_perf.sample(*mxm1_gemm);
             const auto gate_events = emit_completed_mxm_outputs_to_mem(system, 0, *mxm0_gemm, outputs[0]);
             emit_completed_mxm_outputs_to_mem(system, 1, *mxm1_gemm, outputs[1]);
             if (swiglu_stream != nullptr || add_quant_stream != nullptr) {
@@ -937,6 +949,8 @@ std::array<MatrixI32, kMxmCount> run_dual_mxm_gemm(
     }
     flush_all_compute_summary(logs.mxm, "mxm0", mxm0_summary);
     flush_all_compute_summary(logs.mxm, "mxm1", mxm1_summary);
+    mxm0_perf.print(logs.mxm, "mxm0");
+    mxm1_perf.print(logs.mxm, "mxm1");
 
     logs.mxm << "dual_mxm_compute shared_activation_streams=E0..E15 rows=160 k=320\n";
     if (swiglu_stream != nullptr) {
@@ -1128,7 +1142,11 @@ public:
 
     void emit_mxm(std::size_t cycle, std::size_t mxm, ftlpu::MxmControlInstruction instruction)
     {
-        mxm_[mxm].push_back(ScheduledInstruction<ftlpu::MxmControlInstruction> {cycle, instruction});
+        if (instruction.opcode == ftlpu::MxmControlOpcode::Compute) {
+            mxm_compute_[mxm].push_back(ScheduledInstruction<ftlpu::MxmControlInstruction> {cycle, instruction});
+        } else {
+            mxm_load_[mxm].push_back(ScheduledInstruction<ftlpu::MxmControlInstruction> {cycle, instruction});
+        }
         last_cycle_ = std::max(last_cycle_, cycle);
     }
 
@@ -1147,21 +1165,29 @@ public:
     void load_into(ftlpu::InstructionControlUnit& icu)
     {
         for (std::size_t column = 0; column < mem_.size(); ++column) {
-            load_queue(mem_[column], [&](std::size_t nop) { icu.enqueue_mem_nop(column, nop); }, [&](auto instruction) {
+            load_queue(mem_[column], "mem" + std::to_string(column), [&](std::size_t nop) { icu.enqueue_mem_nop(column, nop); }, [&](auto instruction) {
                 icu.enqueue_mem(column, instruction);
             });
         }
-        for (std::size_t mxm = 0; mxm < mxm_.size(); ++mxm) {
-            load_queue(mxm_[mxm], [&](std::size_t nop) { icu.enqueue_mxm_nop(mxm, nop); }, [&](auto instruction) {
-                icu.enqueue_mxm(mxm, instruction);
-            });
+        for (std::size_t mxm = 0; mxm < mxm_load_.size(); ++mxm) {
+            load_queue(
+                mxm_load_[mxm],
+                "mxm" + std::to_string(mxm) + ".load",
+                [&](std::size_t nop) { icu.enqueue_mxm_load_nop(mxm, nop); },
+                [&](auto instruction) { icu.enqueue_mxm(mxm, instruction); });
+            load_queue(
+                mxm_compute_[mxm],
+                "mxm" + std::to_string(mxm) + ".compute",
+                [&](std::size_t nop) { icu.enqueue_mxm_compute_nop(mxm, nop); },
+                [&](auto instruction) { icu.enqueue_mxm(mxm, instruction); });
             load_queue(
                 mxm_output_[mxm],
+                "mxm" + std::to_string(mxm) + ".output",
                 [&](std::size_t nop) { icu.enqueue_mxm_output_nop(mxm, nop); },
                 [&](auto instruction) { icu.enqueue_mxm(mxm, instruction); });
         }
         for (std::size_t alu = 0; alu < vxm_.size(); ++alu) {
-            load_queue(vxm_[alu], [&](std::size_t nop) { icu.enqueue_vxm_nop(alu, nop); }, [&](auto instruction) {
+            load_queue(vxm_[alu], "vxm" + std::to_string(alu), [&](std::size_t nop) { icu.enqueue_vxm_nop(alu, nop); }, [&](auto instruction) {
                 icu.enqueue_vxm(alu, instruction);
             });
         }
@@ -1174,7 +1200,7 @@ public:
 
 private:
     template <typename Instruction, typename NopFn, typename EmitFn>
-    static void load_queue(std::vector<ScheduledInstruction<Instruction>>& events, NopFn nop, EmitFn emit)
+    static void load_queue(std::vector<ScheduledInstruction<Instruction>>& events, const std::string& name, NopFn nop, EmitFn emit)
     {
         std::sort(events.begin(), events.end(), [](const auto& lhs, const auto& rhs) {
             return lhs.cycle < rhs.cycle;
@@ -1182,7 +1208,12 @@ private:
         auto cursor = std::size_t {0};
         for (const auto& event : events) {
             if (event.cycle < cursor) {
-                throw std::logic_error("offline ICU program has two instructions in one queue cycle");
+                std::ostringstream os;
+                os << "offline ICU program has two instructions in one queue cycle"
+                   << " queue=" << name
+                   << " event_cycle=" << event.cycle
+                   << " cursor=" << cursor;
+                throw std::logic_error(os.str());
             }
             nop(event.cycle - cursor);
             emit(event.instruction);
@@ -1191,7 +1222,8 @@ private:
     }
 
     std::array<std::vector<ScheduledInstruction<ftlpu::MemInstruction>>, ftlpu::InstructionControlUnit::kMemQueues> mem_{};
-    std::array<std::vector<ScheduledInstruction<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmQueues> mxm_{};
+    std::array<std::vector<ScheduledInstruction<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmQueues> mxm_load_{};
+    std::array<std::vector<ScheduledInstruction<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmQueues> mxm_compute_{};
     std::array<std::vector<ScheduledInstruction<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmQueues> mxm_output_{};
     std::array<std::vector<ScheduledInstruction<ftlpu::VxmLaneAluInstruction>>, ftlpu::InstructionControlUnit::kVxmQueues> vxm_{};
     std::size_t last_cycle_{0};
@@ -1212,10 +1244,25 @@ struct OfflineComputePhase {
     std::size_t vxm_latency{0};
     std::size_t mem_column{0};
     std::size_t output_pass{0};
+    bool stagger_shared_activation_stream{false};
     MatrixI8* output_i8{nullptr};
     MatrixI32* mxm0_output{nullptr};
     MatrixI32* mxm1_output{nullptr};
 };
+
+std::size_t shared_activation_stream_for_row(const OfflineComputePhase& phase, std::size_t row)
+{
+    if (!phase.stagger_shared_activation_stream) {
+        return kActivationStream;
+    }
+    if (row < 15) {
+        return kActivationEarlyStream;
+    }
+    if (row < 19) {
+        return kActivationBridgeStream;
+    }
+    return kActivationStream;
+}
 
 void emit_offline_mem_read_sequence(
     OfflineIcuProgram& program,
@@ -1250,40 +1297,62 @@ void emit_offline_mem_write_sequence(
     }
 }
 
-void emit_offline_weight_load(
+void emit_offline_weight_iw_mxm(
     OfflineIcuProgram& program,
-    std::size_t start,
-    std::size_t matrix0,
-    std::size_t pass0,
-    std::size_t matrix1,
-    std::size_t pass1)
+    std::size_t iw_start,
+    std::size_t mxm,
+    std::size_t matrix,
+    std::size_t pass)
 {
+    const auto stream_base = mxm * kLoadStreams;
     for (std::size_t stream = 0; stream < kLoadStreams; ++stream) {
-        const auto mxm0_column = stream;
-        const auto mxm1_column = kLoadStreams + stream;
+        const auto column = stream_base + stream;
         emit_offline_mem_read_sequence(
             program,
-            start + kWeightHandoffBaseCycle - east_stream_cycles_to_sreg11(mxm0_column) - 1,
-            mxm0_column,
-            weight_address(matrix0, pass0, 0),
-            stream,
-            kBlocks,
-            kLanes);
-        emit_offline_mem_read_sequence(
-            program,
-            start + kWeightHandoffBaseCycle - east_stream_cycles_to_sreg11(mxm1_column) - 1,
-            mxm1_column,
-            weight_address(matrix1, pass1, 0),
-            kLoadStreams + stream,
+            iw_start - east_stream_cycles_to_sreg11(column) - 1,
+            column,
+            weight_address(matrix, pass, 0),
+            stream_base + stream,
             kBlocks,
             kLanes);
     }
 
     for (std::size_t column_block = 0; column_block < kBlocks; ++column_block) {
-        const auto handoff_cycle = start + kWeightHandoffBaseCycle + column_block;
-        program.emit_mxm(handoff_cycle, 0, ftlpu::MxmControlInstruction::IW(column_block));
-        program.emit_mxm(handoff_cycle, 1, ftlpu::MxmControlInstruction::IW(column_block));
+        const auto handoff_cycle = iw_start + column_block;
+        program.emit_mxm(handoff_cycle, mxm, ftlpu::MxmControlInstruction::IW(column_block));
     }
+}
+
+void emit_offline_activation_reads(OfflineIcuProgram& program, const OfflineComputePhase& phase)
+{
+    const auto latency0 = east_stream_cycles_to_sreg11(phase.activation_column0);
+    for (std::size_t row = 0; row < kActivationRows; ++row) {
+        program.emit_mem(
+            phase.start + row - latency0,
+            phase.activation_column0,
+            ftlpu::MemInstruction::Read(
+                activation_read_address(phase.activation_column0, phase.activation_pass0, row),
+                shared_activation_stream_for_row(phase, row)));
+    }
+
+    if (phase.activation_column1 == phase.activation_column0 && phase.activation_pass1 == phase.activation_pass0) {
+        return;
+    }
+
+    const auto latency1 = east_stream_cycles_to_sreg11(phase.activation_column1);
+    emit_offline_mem_read_sequence(
+        program,
+        phase.start - latency1,
+        phase.activation_column1,
+        activation_read_address(phase.activation_column1, phase.activation_pass1, 0),
+        kActivationStream1,
+        kActivationRows,
+        kLanes);
+}
+
+void emit_offline_weight_lw_mxm(OfflineIcuProgram& program, std::size_t cycle, std::size_t mxm)
+{
+    program.emit_mxm(cycle, mxm, ftlpu::MxmControlInstruction::LW(ftlpu::MxmControlInstruction::kColumnMaskBits));
 }
 
 void emit_offline_compute_phase(
@@ -1292,26 +1361,7 @@ void emit_offline_compute_phase(
     const ftlpu::VxmLane::SwigluParams& swiglu_params,
     const ftlpu::VxmLane::AddQuantParams& add_quant_params)
 {
-    const auto latency0 = east_stream_cycles_to_sreg11(phase.activation_column0);
-    const auto latency1 = east_stream_cycles_to_sreg11(phase.activation_column1);
-    emit_offline_mem_read_sequence(
-        program,
-        phase.start - latency0,
-        phase.activation_column0,
-        activation_read_address(phase.activation_column0, phase.activation_pass0, 0),
-        kActivationStream,
-        kActivationRows,
-        kLanes);
-    if (phase.activation_column1 != phase.activation_column0 || phase.activation_pass1 != phase.activation_pass0) {
-        emit_offline_mem_read_sequence(
-            program,
-            phase.start - latency1,
-            phase.activation_column1,
-            activation_read_address(phase.activation_column1, phase.activation_pass1, 0),
-            kActivationStream1,
-            kActivationRows,
-            kLanes);
-    }
+    emit_offline_activation_reads(program, phase);
 
     for (std::size_t row = 0; row < kActivationRows; ++row) {
         const auto compute_cycle = phase.start + row;
@@ -1364,23 +1414,144 @@ struct PipelineDiagram {
 
 std::size_t load_phase_cycles()
 {
-    return kWeightHandoffBaseCycle + kBlocks;
+    return kBlocks;
 }
 
-std::size_t compute_ticks()
+std::size_t compute_issue_cycles()
+{
+    return kActivationRows;
+}
+
+std::size_t compute_engine_ticks()
 {
     return kActivationRows + 2 * kBlocks;
 }
 
-std::size_t next_weight_load_start_after_gemm_start(std::size_t gemm_start)
+std::size_t lw_issue_cycles()
 {
-    return gemm_start + compute_ticks() + 1;
+    return 1;
+}
+
+std::size_t iw_issue_window_end(std::size_t iw_start)
+{
+    return iw_start + kBlocks;
+}
+
+struct DualMxmLoadSchedule {
+    std::size_t mxm0_iw_start{0};
+    std::size_t mxm1_iw_start{0};
+    std::size_t lw_cycle{0};
+
+    std::size_t done() const
+    {
+        return lw_cycle + lw_issue_cycles();
+    }
+};
+
+std::size_t post_op_write_start(std::size_t gemm_start, std::size_t vxm_latency, std::size_t vxm_mem_column);
+
+std::size_t tile0_weight_read_start(std::size_t iw_start, std::size_t mxm)
+{
+    const auto first_column = mxm * kLoadStreams;
+    return iw_start - east_stream_cycles_to_sreg11(first_column) - 1;
+}
+
+std::size_t mxm1_e31_weight_read_first_cycle(std::size_t iw_start)
+{
+    constexpr auto kMxm1LastColumn = 2 * kLoadStreams - 1;
+    return iw_start - east_stream_cycles_to_sreg11(kMxm1LastColumn) - 1;
+}
+
+std::size_t mxm1_e31_weight_read_last_cycle(std::size_t iw_start)
+{
+    return mxm1_e31_weight_read_first_cycle(iw_start) + kBlocks - 1;
+}
+
+std::size_t vxm_output_enters_mem_cycle(std::size_t gemm_start, std::size_t vxm_latency, std::size_t vxm_mem_column)
+{
+    const auto vxm_write_latency = vxm_mem_column / ftlpu::hw::kSlicesPerGroup + 2;
+    return post_op_write_start(gemm_start, vxm_latency, vxm_mem_column) - vxm_write_latency;
+}
+
+std::size_t vxm_output_leaves_shared_stream_cycle(
+    std::size_t gemm_start,
+    std::size_t vxm_latency,
+    std::size_t vxm_mem_column)
+{
+    return vxm_output_enters_mem_cycle(gemm_start, vxm_latency, vxm_mem_column)
+        + kActivationRows
+        + ftlpu::hw::kStreamRegisterColumns
+        - 1;
+}
+
+std::size_t avoid_mxm1_e31_vxm_output_conflict(
+    std::size_t candidate_iw_start,
+    std::size_t previous_gemm_start,
+    std::size_t vxm_latency,
+    std::size_t vxm_mem_column)
+{
+    const auto output_first = vxm_output_enters_mem_cycle(previous_gemm_start, vxm_latency, vxm_mem_column);
+    const auto output_last = vxm_output_leaves_shared_stream_cycle(previous_gemm_start, vxm_latency, vxm_mem_column);
+    const auto read_first = mxm1_e31_weight_read_first_cycle(candidate_iw_start);
+    const auto read_last = mxm1_e31_weight_read_last_cycle(candidate_iw_start);
+    if (read_last < output_first || read_first > output_last) {
+        return candidate_iw_start;
+    }
+    return output_last + 1 + east_stream_cycles_to_sreg11(2 * kLoadStreams - 1) + 1;
+}
+
+DualMxmLoadSchedule make_pingpong_load_schedule(
+    std::size_t mxm0_iw_start,
+    std::size_t mxm1_iw_start,
+    std::size_t compute_done_cycle)
+{
+    const auto lw_cycle = std::max({
+        compute_done_cycle,
+        iw_issue_window_end(mxm0_iw_start),
+        iw_issue_window_end(mxm1_iw_start),
+    });
+    return DualMxmLoadSchedule {mxm0_iw_start, mxm1_iw_start, lw_cycle};
+}
+
+DualMxmLoadSchedule initial_weight_load_schedule(std::size_t start)
+{
+    const auto iw_start = start + kWeightHandoffBaseCycle;
+    return DualMxmLoadSchedule {iw_start, iw_start, iw_issue_window_end(iw_start)};
+}
+
+std::size_t pingpong_candidate_load_start(std::size_t gemm_start)
+{
+    return gemm_start;
+}
+
+DualMxmLoadSchedule pingpong_buffer_load_after_gemm_start(std::size_t gemm_start)
+{
+    const auto mxm0_iw_start = pingpong_candidate_load_start(gemm_start);
+    const auto mxm1_iw_start = mxm0_iw_start + kBlocks;
+    return make_pingpong_load_schedule(mxm0_iw_start, mxm1_iw_start, gemm_start + compute_engine_ticks());
+}
+
+DualMxmLoadSchedule down_weight_load_after_gemm_start(std::size_t gemm0_start, std::size_t gemm1_start)
+{
+    const auto mxm0_iw_start = pingpong_candidate_load_start(gemm1_start);
+    auto mxm1_iw_start = mxm0_iw_start + kBlocks;
+    mxm1_iw_start = avoid_mxm1_e31_vxm_output_conflict(
+        mxm1_iw_start,
+        gemm0_start,
+        kSwigluLatency,
+        kSwigluMemColumn);
+    mxm1_iw_start = avoid_mxm1_e31_vxm_output_conflict(
+        mxm1_iw_start,
+        gemm1_start,
+        kSwigluLatency,
+        kSwigluMemColumn1);
+    return make_pingpong_load_schedule(mxm0_iw_start, mxm1_iw_start, gemm1_start + compute_engine_ticks());
 }
 
 std::size_t post_op_gemm_phase_cycles(std::size_t vxm_latency, std::size_t vxm_mem_column)
 {
     const auto vxm_write_latency = vxm_mem_column / ftlpu::hw::kSlicesPerGroup + 2;
-    return compute_ticks()
+    return compute_issue_cycles()
         + ftlpu::hw::kStreamRegisterColumns
         + vxm_latency
         + vxm_write_latency
@@ -1397,6 +1568,28 @@ std::size_t vxm_post_op_cycles(std::size_t vxm_latency, std::size_t vxm_mem_colu
 {
     const auto vxm_write_latency = vxm_mem_column / ftlpu::hw::kSlicesPerGroup + 2;
     return kActivationRows + vxm_latency + vxm_write_latency + kBlocks;
+}
+
+std::size_t vxm_issue_queues_ready(std::size_t gemm_start, std::size_t vxm_latency)
+{
+    return gemm_start + kActivationRows + vxm_latency;
+}
+
+std::size_t mxm_output_queues_ready(std::size_t gemm_start)
+{
+    return gemm_start + kActivationRows + kBlocks - 1;
+}
+
+std::size_t post_op_write_start(std::size_t gemm_start, std::size_t vxm_latency, std::size_t vxm_mem_column)
+{
+    const auto vxm_write_latency = vxm_mem_column / ftlpu::hw::kSlicesPerGroup + 2;
+    return gemm_start + kBlocks - 1 + ftlpu::hw::kStreamRegisterColumns + vxm_latency + vxm_write_latency;
+}
+
+std::size_t swiglu_outputs_ready_for_down_gemm(std::size_t gemm1_start)
+{
+    const auto last_write_done = post_op_write_start(gemm1_start, kSwigluLatency, kSwigluMemColumn1) + kActivationRows;
+    return last_write_done + east_stream_cycles_to_sreg11(kSwigluMemColumn1);
 }
 
 void add_block(
@@ -1419,9 +1612,62 @@ void add_block(
 
 void add_load_phase(PipelineDiagram& diagram, std::size_t start, const std::string& label)
 {
-    const auto duration = load_phase_cycles();
-    add_block(diagram, 0, start, duration, "weight read\n" + label, "#78b957");
-    add_block(diagram, 2, start + kWeightHandoffBaseCycle, kBlocks, "IW\n" + label, "#e8e8e8");
+    const auto iw_start = start + kWeightHandoffBaseCycle;
+    add_block(diagram, 0, tile0_weight_read_start(iw_start, 0), load_phase_cycles(), "W " + label + " M0", "#78b957");
+    add_block(diagram, 0, tile0_weight_read_start(iw_start, 1), load_phase_cycles(), "W " + label + " M1", "#78b957");
+    add_block(diagram, 3, start + kWeightHandoffBaseCycle, kBlocks, "IW " + label, "#e8e8e8");
+    add_block(diagram, 5, start + kWeightHandoffBaseCycle, kBlocks, "IW " + label, "#e8e8e8");
+}
+
+void add_load_phase(PipelineDiagram& diagram, DualMxmLoadSchedule schedule, const std::string& label)
+{
+    if (schedule.mxm0_iw_start == schedule.mxm1_iw_start) {
+        add_block(
+            diagram,
+            0,
+            tile0_weight_read_start(schedule.mxm0_iw_start, 0),
+            load_phase_cycles(),
+            "W " + label + " M0",
+            "#78b957");
+        add_block(
+            diagram,
+            0,
+            tile0_weight_read_start(schedule.mxm1_iw_start, 1),
+            load_phase_cycles(),
+            "W " + label + " M1",
+            "#78b957");
+        add_block(diagram, 3, schedule.mxm0_iw_start, kBlocks, "IW " + label, "#e8e8e8");
+        add_block(diagram, 5, schedule.mxm1_iw_start, kBlocks, "IW " + label, "#e8e8e8");
+        return;
+    }
+    add_block(
+        diagram,
+        0,
+        tile0_weight_read_start(schedule.mxm0_iw_start, 0),
+        load_phase_cycles(),
+        "W " + label + " M0",
+        "#78b957");
+    add_block(
+        diagram,
+        0,
+        tile0_weight_read_start(schedule.mxm1_iw_start, 1),
+        load_phase_cycles(),
+        "W " + label + " M1",
+        "#78b957");
+    add_block(
+        diagram,
+        5,
+        schedule.mxm1_iw_start,
+        kBlocks,
+        "IW " + label + " M1",
+        "#e8e8e8");
+    add_block(
+        diagram,
+        3,
+        schedule.mxm0_iw_start,
+        kBlocks,
+        "IW " + label + " M0",
+        "#e8e8e8");
 }
 
 void add_gemm_phase(
@@ -1436,12 +1682,13 @@ void add_gemm_phase(
     const auto vxm_start = start + vxm_post_op_start_offset();
     const auto vxm_write_latency = vxm_mem_column / ftlpu::hw::kSlicesPerGroup + 2;
     const auto mem_write_start = vxm_start + vxm_latency;
-    add_block(diagram, 0, start, kActivationRows, "activation\nread", "#d8ead2");
-    add_block(diagram, 1, mem_write_start, kActivationRows + vxm_write_latency + kBlocks, "result\nwrite", "#f5d28a");
-    add_block(diagram, 2, start, compute_ticks(), mxm_label, "#eeeeee");
+    add_block(diagram, 1, start, kActivationRows, "A", "#d8ead2");
+    add_block(diagram, 2, mem_write_start, kActivationRows + vxm_write_latency + kBlocks, "out", "#f5d28a");
+    add_block(diagram, 4, start, compute_issue_cycles(), mxm_label + " M0", "#eeeeee");
+    add_block(diagram, 6, start, compute_issue_cycles(), mxm_label + " M1", "#eeeeee");
     add_block(
         diagram,
-        3,
+        7,
         vxm_start,
         vxm_post_op_cycles(vxm_latency, vxm_mem_column),
         vxm_label,
@@ -1451,21 +1698,25 @@ void add_gemm_phase(
 PipelineDiagram build_mem_dual_mxm_swiglu_diagram()
 {
     PipelineDiagram diagram {};
-    const auto load0_start = std::size_t {0};
-    const auto gemm0_start = load0_start + load_phase_cycles();
-    const auto load1_start = next_weight_load_start_after_gemm_start(gemm0_start);
-    const auto gemm1_start = load1_start + load_phase_cycles();
-    const auto down_load_start = next_weight_load_start_after_gemm_start(gemm1_start);
-    const auto down_gemm_start = down_load_start + load_phase_cycles();
+    const auto load0 = initial_weight_load_schedule(0);
+    const auto gemm0_start = load0.done();
+    const auto load1 = pingpong_buffer_load_after_gemm_start(gemm0_start);
+    const auto gemm1_start = std::max({
+        load1.done(),
+        vxm_issue_queues_ready(gemm0_start, kSwigluLatency),
+        mxm_output_queues_ready(gemm0_start),
+    });
+    const auto down_load = down_weight_load_after_gemm_start(gemm0_start, gemm1_start);
+    const auto down_gemm_start = std::max(down_load.done(), swiglu_outputs_ready_for_down_gemm(gemm1_start));
 
-    add_load_phase(diagram, load0_start, "gate/up p0");
-    add_gemm_phase(diagram, gemm0_start, "GEMM gate/up\np0", "SwiGLU\np0", kSwigluLatency, kSwigluMemColumn);
+    add_load_phase(diagram, load0, "p0");
+    add_gemm_phase(diagram, gemm0_start, "GEMM p0", "SwiGLU p0", kSwigluLatency, kSwigluMemColumn);
 
-    add_load_phase(diagram, load1_start, "gate/up p1");
-    add_gemm_phase(diagram, gemm1_start, "GEMM gate/up\np1", "SwiGLU\np1", kSwigluLatency, kSwigluMemColumn1);
+    add_load_phase(diagram, load1, "p1");
+    add_gemm_phase(diagram, gemm1_start, "GEMM p1", "SwiGLU p1", kSwigluLatency, kSwigluMemColumn1);
 
-    add_load_phase(diagram, down_load_start, "down p0/p1");
-    add_gemm_phase(diagram, down_gemm_start, "GEMM down\np0+p1", "add + quant", kAddQuantLatency, kFinalMemColumn);
+    add_load_phase(diagram, down_load, "d");
+    add_gemm_phase(diagram, down_gemm_start, "GEMM d", "add+q", kAddQuantLatency, kFinalMemColumn);
 
     return diagram;
 }
@@ -1530,15 +1781,24 @@ void write_svg_lines(
 void write_pipeline_svg(const std::filesystem::path& path)
 {
     const auto diagram = build_mem_dual_mxm_swiglu_diagram();
-    constexpr double kLeft = 118.0;
+    constexpr double kLeft = 150.0;
     constexpr double kRight = 38.0;
     constexpr double kTop = 58.0;
-    constexpr double kRowGap = 72.0;
-    constexpr double kBlockHeight = 48.0;
+    constexpr double kRowGap = 54.0;
+    constexpr double kBlockHeight = 36.0;
     constexpr double kWidth = 1280.0;
-    constexpr double kHeight = 372.0;
+    constexpr double kHeight = 540.0;
     const auto scale = (kWidth - kLeft - kRight) / static_cast<double>(diagram.total_cycles);
-    const char* row_labels[] {"MEM read", "MEM write", "MXM", "VXM"};
+    const char* row_labels[] {
+        "MEM W read",
+        "MEM A read",
+        "MEM write",
+        "MXM0 load",
+        "MXM0 compute",
+        "MXM1 load",
+        "MXM1 compute",
+        "VXM",
+    };
 
     std::ofstream os(path);
     if (!os.good()) {
@@ -1555,10 +1815,10 @@ void write_pipeline_svg(const std::filesystem::path& path)
        << "\" y2=\"28\" stroke=\"#555\" stroke-width=\"3\" stroke-dasharray=\"12 10\" marker-end=\"url(#arrow)\"/>\n";
     os << "<text x=\"" << (kWidth - kRight - 100) << "\" y=\"34\" font-size=\"28\">Time</text>\n";
 
-    for (std::size_t row = 0; row < 4; ++row) {
+    for (std::size_t row = 0; row < 8; ++row) {
         const auto y = kTop + row * kRowGap;
-        os << "<text x=\"42\" y=\"" << (y + kBlockHeight / 2.0 + 7.0)
-           << "\" font-size=\"30\">" << row_labels[row] << "</text>\n";
+        os << "<text x=\"26\" y=\"" << (y + kBlockHeight / 2.0 + 6.0)
+           << "\" font-size=\"18\">" << row_labels[row] << "</text>\n";
     }
 
     for (const auto& block : diagram.blocks) {
@@ -1568,11 +1828,13 @@ void write_pipeline_svg(const std::filesystem::path& path)
         os << "<rect x=\"" << x << "\" y=\"" << y << "\" width=\"" << width
            << "\" height=\"" << kBlockHeight << "\" fill=\"" << block.fill
            << "\" stroke=\"#111\" stroke-width=\"1.5\"/>\n";
-        write_svg_lines(os, block.label, x + width / 2.0, y + kBlockHeight / 2.0, 20.0, 24.0);
+        if (width >= 18.0) {
+            write_svg_lines(os, block.label, x + width / 2.0, y + kBlockHeight / 2.0, 12.0, 12.0);
+        }
     }
 
-    os << "<text x=\"" << kLeft << "\" y=\"356\" font-size=\"16\" fill=\"#555\">0</text>\n";
-    os << "<text x=\"" << (kWidth - kRight - 92) << "\" y=\"356\" font-size=\"16\" fill=\"#555\">"
+    os << "<text x=\"" << kLeft << "\" y=\"522\" font-size=\"16\" fill=\"#555\">0</text>\n";
+    os << "<text x=\"" << (kWidth - kRight - 92) << "\" y=\"522\" font-size=\"16\" fill=\"#555\">"
        << diagram.total_cycles << " cycles</text>\n";
     os << "</g>\n</svg>\n";
 }
@@ -1604,12 +1866,16 @@ int run_offline_icu_ffn_test()
     stage_weight_matrices(system->mem());
     stage_activation_matrix(system->mem());
 
-    const auto load0_start = std::size_t {0};
-    const auto gemm0_start = load0_start + load_phase_cycles();
-    const auto load1_start = next_weight_load_start_after_gemm_start(gemm0_start);
-    const auto gemm1_start = load1_start + load_phase_cycles();
-    const auto down_load_start = next_weight_load_start_after_gemm_start(gemm1_start);
-    const auto down_gemm_start = down_load_start + load_phase_cycles();
+    const auto load0 = initial_weight_load_schedule(0);
+    const auto gemm0_start = load0.done();
+    const auto load1 = pingpong_buffer_load_after_gemm_start(gemm0_start);
+    const auto gemm1_start = std::max({
+        load1.done(),
+        vxm_issue_queues_ready(gemm0_start, kSwigluLatency),
+        mxm_output_queues_ready(gemm0_start),
+    });
+    const auto down_load = down_weight_load_after_gemm_start(gemm0_start, gemm1_start);
+    const auto down_gemm_start = std::max(down_load.done(), swiglu_outputs_ready_for_down_gemm(gemm1_start));
 
     auto swiglu = MatrixI8(kActivationRows * kHiddenColumns, 0);
     auto swiglu_chunk0 = MatrixI8(kActivationRows * kColumns, 0);
@@ -1633,6 +1899,7 @@ int run_offline_icu_ffn_test()
             kSwigluLatency,
             kSwigluMemColumn,
             0,
+            true,
             &swiglu_chunk0,
             &gate0,
             &up0,
@@ -1647,6 +1914,7 @@ int run_offline_icu_ffn_test()
             kSwigluLatency,
             kSwigluMemColumn1,
             1,
+            true,
             &swiglu_chunk1,
             &gate1,
             &up1,
@@ -1661,6 +1929,7 @@ int run_offline_icu_ffn_test()
             kAddQuantLatency,
             kFinalMemColumn,
             0,
+            false,
             &final,
             &down0,
             &down1,
@@ -1668,46 +1937,74 @@ int run_offline_icu_ffn_test()
     };
 
     auto program = OfflineIcuProgram {};
-    emit_offline_weight_load(program, load0_start, kGateMatrix, 0, kUpMatrix, 0);
+    emit_offline_weight_iw_mxm(program, load0.mxm0_iw_start, 0, kGateMatrix, 0);
+    emit_offline_weight_iw_mxm(program, load0.mxm1_iw_start, 1, kUpMatrix, 0);
+    emit_offline_weight_lw_mxm(program, load0.lw_cycle, 0);
+    emit_offline_weight_lw_mxm(program, load0.lw_cycle, 1);
     emit_offline_compute_phase(program, phases[0], swiglu_params, down_params);
-    emit_offline_weight_load(program, load1_start, kGateMatrix, 1, kUpMatrix, 1);
+    emit_offline_weight_iw_mxm(program, load1.mxm1_iw_start, 1, kUpMatrix, 1);
+    emit_offline_weight_iw_mxm(program, load1.mxm0_iw_start, 0, kGateMatrix, 1);
+    emit_offline_weight_lw_mxm(program, load1.lw_cycle, 0);
+    emit_offline_weight_lw_mxm(program, load1.lw_cycle, 1);
     emit_offline_compute_phase(program, phases[1], swiglu_params, down_params);
-    emit_offline_weight_load(program, down_load_start, kDownMatrix, 0, kDownMatrix, 1);
+    emit_offline_weight_iw_mxm(program, down_load.mxm1_iw_start, 1, kDownMatrix, 1);
+    emit_offline_weight_iw_mxm(program, down_load.mxm0_iw_start, 0, kDownMatrix, 0);
+    emit_offline_weight_lw_mxm(program, down_load.lw_cycle, 0);
+    emit_offline_weight_lw_mxm(program, down_load.lw_cycle, 1);
     emit_offline_compute_phase(program, phases[2], swiglu_params, down_params);
     program.load_into(system->icu());
 
     logs.icu << "offline ICU FFN program loaded before cycle 0\n";
-    logs.icu << "  load0=" << load0_start << " gemm0=" << gemm0_start
-             << " load1=" << load1_start << " gemm1=" << gemm1_start
-             << " down_load=" << down_load_start << " down_gemm=" << down_gemm_start << '\n';
+    logs.icu << "  load0.mxm0_iw=" << load0.mxm0_iw_start << " load0.mxm1_iw=" << load0.mxm1_iw_start
+             << " load0.lw=" << load0.lw_cycle
+             << " gemm0=" << gemm0_start
+             << " load1.mxm1_iw=" << load1.mxm1_iw_start << " load1.mxm0_iw=" << load1.mxm0_iw_start
+             << " load1.lw=" << load1.lw_cycle
+             << " gemm1=" << gemm1_start
+             << " down_load.mxm1_iw=" << down_load.mxm1_iw_start
+             << " down_load.mxm0_iw=" << down_load.mxm0_iw_start
+             << " down_load.lw=" << down_load.lw_cycle
+             << " down_gemm=" << down_gemm_start << '\n';
+    logs.icu << "  pingpong_candidate load1=" << pingpong_candidate_load_start(gemm0_start)
+             << " down_load=" << pingpong_candidate_load_start(gemm1_start)
+             << " split_IW_LW: MXM load queue lets IW overlap Compute; LW waits for compute drain"
+             << " and VXM E" << kSwigluOutputStream << " writeback stream pressure\n";
 
     struct RuntimePhase {
         const OfflineComputePhase* config{nullptr};
+        const char* name{nullptr};
         std::unique_ptr<ftlpu::MxmGemmEngine> mxm0{};
         std::unique_ptr<ftlpu::MxmGemmEngine> mxm1{};
         bool started{false};
         MxmArrayStateSummary mxm0_summary{};
         MxmArrayStateSummary mxm1_summary{};
+        ftlpu::MxmPerformanceMonitor mxm0_perf{};
+        ftlpu::MxmPerformanceMonitor mxm1_perf{};
     };
 
     std::array<RuntimePhase, 3> runtime_phases {
-        RuntimePhase {&phases[0]},
-        RuntimePhase {&phases[1]},
-        RuntimePhase {&phases[2]},
+        RuntimePhase {&phases[0], "gate_up_p0"},
+        RuntimePhase {&phases[1], "gate_up_p1"},
+        RuntimePhase {&phases[2], "down"},
     };
+    auto total_mxm0_perf = ftlpu::MxmPerformanceMonitor {};
+    auto total_mxm1_perf = ftlpu::MxmPerformanceMonitor {};
 
     NullBuffer null_buffer;
     std::ostream null_stream(&null_buffer);
     const auto final_write_latency = kFinalMemColumn / ftlpu::hw::kSlicesPerGroup + 2;
     const auto total_cycles = down_gemm_start
-        + compute_ticks()
+        + compute_engine_ticks()
         + ftlpu::hw::kStreamRegisterColumns
         + kAddQuantLatency
         + final_write_latency
         + kBlocks
         + 8;
+    const auto perf_total_cycles = down_gemm_start + compute_issue_cycles();
 
     for (std::size_t cycle = 0; cycle < total_cycles; ++cycle) {
+        auto mxm0_sampled = false;
+        auto mxm1_sampled = false;
         for (auto& phase : runtime_phases) {
             if (!phase.started && cycle == phase.config->start) {
                 phase.mxm0 = std::make_unique<ftlpu::MxmGemmEngine>(system->mxm_unit(0).array());
@@ -1737,14 +2034,18 @@ int run_offline_icu_ffn_test()
                 continue;
             }
             const auto compute_cycle = cycle - phase.config->start;
-            if (compute_cycle >= compute_ticks()) {
+            if (compute_cycle >= compute_engine_ticks()) {
                 continue;
             }
             for (std::size_t tile = 0; tile < kBlocks; ++tile) {
                 if (compute_cycle < tile || compute_cycle - tile >= kActivationRows) {
                     continue;
                 }
-                const auto activation0 = activation_input_from_streams(system->mem(), tile, kActivationStream);
+                const auto row = compute_cycle - tile;
+                const auto activation0 = activation_input_from_streams(
+                    system->mem(),
+                    tile,
+                    shared_activation_stream_for_row(*phase.config, row));
                 const auto activation1 = (phase.config->activation_column1 != phase.config->activation_column0
                                              || phase.config->activation_pass1 != phase.config->activation_pass0)
                     ? activation_input_from_streams(system->mem(), tile, kActivationStream1)
@@ -1755,6 +2056,16 @@ int run_offline_icu_ffn_test()
 
             phase.mxm0->tick(null_stream, false, false);
             phase.mxm1->tick(null_stream, false, false);
+            if (compute_cycle < compute_issue_cycles()) {
+                phase.mxm0_perf.sample(*phase.mxm0);
+                phase.mxm1_perf.sample(*phase.mxm1);
+                if (cycle < perf_total_cycles) {
+                    total_mxm0_perf.sample(*phase.mxm0);
+                    total_mxm1_perf.sample(*phase.mxm1);
+                    mxm0_sampled = true;
+                    mxm1_sampled = true;
+                }
+            }
             emit_completed_mxm_outputs_to_mem(system.operator*(), 0, *phase.mxm0, *phase.config->mxm0_output);
             emit_completed_mxm_outputs_to_mem(system.operator*(), 1, *phase.mxm1, *phase.config->mxm1_output);
             log_mxm_array_state(
@@ -1771,6 +2082,12 @@ int run_offline_icu_ffn_test()
                 system->mxm_unit(1).control(),
                 *phase.mxm1,
                 phase.mxm1_summary);
+        }
+        if (cycle < perf_total_cycles && !mxm0_sampled) {
+            total_mxm0_perf.sample_idle();
+        }
+        if (cycle < perf_total_cycles && !mxm1_sampled) {
+            total_mxm1_perf.sample_idle();
         }
 
         const auto bridge_sinks = ftlpu::TspSliceSystem::LogSinks {
@@ -1807,9 +2124,15 @@ int run_offline_icu_ffn_test()
     }
 
     for (auto& phase : runtime_phases) {
-        flush_all_compute_summary(logs.mxm, "offline_mxm0", phase.mxm0_summary);
-        flush_all_compute_summary(logs.mxm, "offline_mxm1", phase.mxm1_summary);
+        const auto mxm0_label = std::string("offline_") + phase.name + "_mxm0";
+        const auto mxm1_label = std::string("offline_") + phase.name + "_mxm1";
+        flush_all_compute_summary(logs.mxm, mxm0_label.c_str(), phase.mxm0_summary);
+        flush_all_compute_summary(logs.mxm, mxm1_label.c_str(), phase.mxm1_summary);
+        phase.mxm0_perf.print(logs.mxm, mxm0_label);
+        phase.mxm1_perf.print(logs.mxm, mxm1_label);
     }
+    total_mxm0_perf.print(logs.mxm, "offline_total_mxm0");
+    total_mxm1_perf.print(logs.mxm, "offline_total_mxm1");
 
     for (std::size_t row = 0; row < kActivationRows; ++row) {
         for (std::size_t column = 0; column < kColumns; ++column) {

@@ -17,7 +17,8 @@ The repository currently models:
 - `MEM`: 44 slice columns, 20 tile rows, 16 lanes per tile, 32 east streams and
   32 west streams per lane. Each stream register is one byte wide.
 - `MXM`: two east-side MXM units. Each unit is a 20 x 20 array of 16 x 16
-  supercells, for a 320 x 320 int8 GEMM datapath with int32 accumulation.
+  supercells, with explicit `IW` weight-buffer fill and `LW` active-weight load
+  steps for a 320 x 320 int8 GEMM datapath with int32 accumulation.
 - `VXM`: one west-side VXM slice with 20 superlanes/tiles. Each superlane has
   16 lanes, and each lane has 16 ALU issue queues.
 - `ICU`: per-queue instruction dispatch with `NOP N` and `Repeat n,d`, including
@@ -38,14 +39,10 @@ The largest integration test models an FFN-like path:
 8. Route the two int32 partial results into VXM for add + quant.
 9. Store the final int8 result back to MEM and compare against golden data.
 
-There are two versions of this test:
-
-- `mem_dual_mxm_swiglu_test`: a detailed integration test that still schedules
-  some phases from the test harness.
-- `mem_dual_mxm_swiglu_offline_icu_test`: the same FFN workload, but all MEM,
-  MXM, and VXM instructions are generated offline and loaded into the ICU before
-  cycle 0. The runtime loop only advances clocks and bridges data. This is the
-  shape intended for a future compiler backend.
+`mem_dual_mxm_swiglu_offline_icu_test` is the canonical FFN integration test.
+All MEM, MXM, MXM-output, and VXM instructions are generated offline and loaded
+into the ICU before cycle 0. The runtime loop only advances clocks and bridges
+data. This is the shape intended for a future compiler backend.
 
 ## Repository Layout
 
@@ -87,12 +84,6 @@ Run the offline ICU FFN test:
 ctest --test-dir build-vs2019 -C Debug -R mem_dual_mxm_swiglu_offline_icu --output-on-failure
 ```
 
-Run the ICU queue scheduling test:
-
-```powershell
-ctest --test-dir build-vs2019 -C Debug -R icu_stream --output-on-failure
-```
-
 Run the VXM tests:
 
 ```powershell
@@ -104,7 +95,6 @@ ctest --test-dir build-vs2019 -C Debug -R "vxm_alu|vxm_lane|vxm_superlane|vxm_sl
 Integration tests write logs under the build directory:
 
 - `build-vs2019/logs/mem_mxm/`
-- `build-vs2019/logs/mem_dual_mxm_swiglu/`
 - `build-vs2019/logs/mem_dual_mxm_swiglu_offline_icu/`
 
 The FFN tests generate four functional-unit logs:
@@ -116,10 +106,12 @@ The FFN tests generate four functional-unit logs:
 
 They also generate a pipeline diagram:
 
-- `build-vs2019/logs/mem_dual_mxm_swiglu/pipeline.svg`
 - `build-vs2019/logs/mem_dual_mxm_swiglu_offline_icu/pipeline.svg`
 
-The diagram separates `MEM read`, `MEM write`, `MXM`, and `VXM` rows.
+The diagram separates `MEM W read`, `MEM A read`, `MEM write`, `MXM0 load`,
+`MXM0 compute`, `MXM1 load`, `MXM1 compute`, and `VXM` rows. `LW(mask20)` is a
+one-cycle active weight commit, so it is folded into the compute transition
+instead of being drawn as a long load block.
 
 ## Demo Executables
 
