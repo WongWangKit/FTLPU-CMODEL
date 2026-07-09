@@ -4,22 +4,23 @@
 #include "ftlpu/sxm/permute.hpp"
 #include "ftlpu/sxm/shift.hpp"
 #include "ftlpu/sxm/transpose.hpp"
+#include "ftlpu/sxm/unit_group.hpp"
 
 namespace ftlpu {
 
 class SxmSlice {
 public:
     template <typename T>
-    using Vector = std::array<T, hw::kLanesPerTile>;
+    using TileVector = std::array<T, hw::kLanesPerTile>;
 
     template <typename T>
-    using Plane = std::array<Vector<T>, hw::kTileRows>;
+    using StreamVector = std::array<TileVector<T>, hw::kTileRows>;
 
     template <typename T>
-    using Matrix16 = std::array<Vector<T>, hw::kLanesPerTile>;
+    using Matrix16 = std::array<TileVector<T>, hw::kLanesPerTile>;
 
     template <typename T>
-    static Vector<T> distribute(const Vector<T>& input, const Distribute16::Map& map, T zero = T{})
+    static TileVector<T> distribute(const TileVector<T>& input, const Distribute16::Map& map, T zero = T{})
     {
         return Distribute16::apply(input, map, zero);
     }
@@ -31,8 +32,8 @@ public:
     }
 
     template <typename T>
-    static Plane<T> shift_select(
-        const Plane<T>& input,
+    static StreamVector<T> shift_select(
+        const StreamVector<T>& input,
         SxmShiftSource source,
         std::size_t distance = 1,
         T zero = T{})
@@ -41,7 +42,7 @@ public:
     }
 
     template <typename T>
-    static Plane<T> permute(const Plane<T>& input, const Permute320::Map& map)
+    static StreamVector<T> permute(const StreamVector<T>& input, const Permute320::Map& map)
     {
         return Permute320::apply(input, map);
     }

@@ -14,7 +14,7 @@ public:
     using Map = SxmInstruction::LaneMap;
 
     template <typename T>
-    using Vector = std::array<T, hw::kLanesPerTile>;
+    using TileVector = std::array<T, hw::kLanesPerTile>;
 
     static Map identity_map()
     {
@@ -26,9 +26,9 @@ public:
     }
 
     template <typename T>
-    static Vector<T> apply(const Vector<T>& input, const Map& map, T zero = T{})
+    static TileVector<T> apply(const TileVector<T>& input, const Map& map, T zero = T{})
     {
-        Vector<T> output{};
+        TileVector<T> output{};
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             const auto source = map[lane];
             if (source == kZeroFill) {

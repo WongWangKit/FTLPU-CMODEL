@@ -11,45 +11,55 @@ namespace ftlpu {
 class ShiftSelect {
 public:
     template <typename T>
-    using Vector = std::array<T, hw::kLanesPerTile>;
+    using TileVector = std::array<T, hw::kLanesPerTile>;
 
     template <typename T>
-    using Plane = std::array<Vector<T>, hw::kTileRows>;
+    using StreamVector = std::array<TileVector<T>, hw::kTileRows>;
 
     template <typename T>
-    static Plane<T> apply(
-        const Plane<T>& input,
+    static StreamVector<T> apply(
+        const StreamVector<T>& input,
         SxmShiftSource source,
         std::size_t distance = 1,
         T zero = T{})
     {
-        Plane<T> output{};
-        for (std::size_t row = 0; row < hw::kTileRows; ++row) {
-            const auto source_row = select_source_row(row, source, distance);
-            if (source_row >= hw::kTileRows) {
-                output[row].fill(zero);
+        StreamVector<T> output{};
+        for (std::size_t index = 0; index < SxmInstruction::kTotalLanes; ++index) {
+            const auto source_index = select_source_lane(index, source, distance);
+            if (source_index >= SxmInstruction::kTotalLanes) {
+                output[tile_of(index)][lane_of(index)] = zero;
                 continue;
             }
-            output[row] = input[source_row];
+            output[tile_of(index)][lane_of(index)] = input[tile_of(source_index)][lane_of(source_index)];
         }
         return output;
     }
 
 private:
-    static std::size_t select_source_row(std::size_t row, SxmShiftSource source, std::size_t distance)
+    static std::size_t select_source_lane(std::size_t lane, SxmShiftSource source, std::size_t distance)
     {
         switch (source) {
         case SxmShiftSource::Unshifted:
-            return row;
+            return lane;
         case SxmShiftSource::NorthShifted:
-            return row + distance;
+            return lane + distance;
         case SxmShiftSource::SouthShifted:
-            if (row < distance) {
-                return hw::kTileRows;
+            if (lane < distance) {
+                return SxmInstruction::kTotalLanes;
             }
-            return row - distance;
+            return lane - distance;
         }
         throw std::logic_error("unsupported SXM shift source");
+    }
+
+    static constexpr std::size_t tile_of(std::size_t lane)
+    {
+        return lane / hw::kLanesPerTile;
+    }
+
+    static constexpr std::size_t lane_of(std::size_t lane)
+    {
+        return lane % hw::kLanesPerTile;
     }
 };
 

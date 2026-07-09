@@ -27,6 +27,8 @@ constexpr std::size_t kMxmSupercellsPerPlane = 20;
 constexpr std::size_t kMxmLoadStreamsPerCycle = 16;
 constexpr std::size_t kMxmLoadBytesPerCycle = kLanesPerTile * kMxmLoadStreamsPerCycle * kStreamRegisterBytes;
 
+constexpr std::size_t kSxmConcurrentStreamOps = 16;
+
 constexpr std::size_t kHemispheres = 2;
 constexpr std::size_t kPublicSramBlocks = 88;
 constexpr std::size_t kModeledSramBlocks = kPublicSramBlocks / kHemispheres;
@@ -51,6 +53,7 @@ static_assert(kMxmRows == kMxmSupercellRows * kMxmSupercellsPerPlane);
 static_assert(kMxmColumns == kMxmSupercellColumns * kMxmSupercellsPerPlane);
 static_assert(kMxmLoadStreamsPerCycle == kMxmSupercellColumns);
 static_assert(kMxmLoadBytesPerCycle == 256);
+static_assert(kSxmConcurrentStreamOps == 16);
 static_assert(kSramBlockBytes == 5 * 1024 * 1024 / 2);
 static_assert(kTotalSramBytes == 110 * 1024 * 1024);
 static_assert(kPublicTotalSramBytes == 220 * 1024 * 1024);

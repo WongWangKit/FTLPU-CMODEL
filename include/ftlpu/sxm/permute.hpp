@@ -14,10 +14,10 @@ public:
     using Map = SxmInstruction::PermuteMap;
 
     template <typename T>
-    using Vector = std::array<T, hw::kLanesPerTile>;
+    using TileVector = std::array<T, hw::kLanesPerTile>;
 
     template <typename T>
-    using Plane = std::array<Vector<T>, hw::kTileRows>;
+    using StreamVector = std::array<TileVector<T>, hw::kTileRows>;
 
     static Map identity_map()
     {
@@ -43,11 +43,11 @@ public:
     }
 
     template <typename T>
-    static Plane<T> apply(const Plane<T>& input, const Map& map)
+    static StreamVector<T> apply(const StreamVector<T>& input, const Map& map)
     {
         validate_bijection(map);
 
-        Plane<T> output{};
+        StreamVector<T> output{};
         for (std::size_t out_index = 0; out_index < kTotalLanes; ++out_index) {
             const auto in_index = map[out_index];
             output[row_of(out_index)][lane_of(out_index)] = input[row_of(in_index)][lane_of(in_index)];
