@@ -141,15 +141,18 @@ public:
         return instruction_rows_[column][tile];
     }
 
-    void tick(std::ostream& os)
+    void tick(std::ostream& os, std::optional<std::size_t> log_tile = std::nullopt)
     {
+        if (log_tile.has_value()) {
+            check_tile(*log_tile);
+        }
         dispatch_from_queues();
         execute_current_instructions();
         advance_instructions();
         advance_streams();
         apply_pending_stream_writes();
         apply_pending_inputs();
-        log_cycle(os);
+        log_cycle(os, log_tile);
         executed_mem_.clear();
         executed_instructions_.clear();
         pending_stream_writes_.clear();
@@ -524,39 +527,59 @@ private:
         }
     }
 
-    void log_cycle(std::ostream& os) const
+    void log_cycle(std::ostream& os, std::optional<std::size_t> log_tile) const
     {
-        os << "cycle " << cycle_ << '\n';
-        log_instructions(os);
-        log_mem(os);
-        log_streams(os);
+        os << "mem cycle " << cycle_ << '\n';
+        log_instructions(os, log_tile);
+        log_mem(os, log_tile);
+        log_streams(os, log_tile);
     }
 
-    void log_instructions(std::ostream& os) const
+    void log_instructions(std::ostream& os, std::optional<std::size_t> log_tile) const
     {
         os << "  instructions:";
-        if (executed_instructions_.empty()) {
+        bool any = false;
+        for (const auto& trace : executed_instructions_) {
+            if (!log_tile.has_value() || trace.tile == *log_tile) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) {
             os << " idle\n";
             return;
         }
         os << '\n';
         for (const auto& trace : executed_instructions_) {
+            if (log_tile.has_value() && trace.tile != *log_tile) {
+                continue;
+            }
             os << "    c" << trace.column << ".t" << trace.tile << "=";
             print_instruction(os, trace.instruction);
             os << '\n';
         }
     }
 
-    void log_mem(std::ostream& os) const
+    void log_mem(std::ostream& os, std::optional<std::size_t> log_tile) const
     {
         os << "  mem:";
-        if (executed_mem_.empty()) {
+        bool any = false;
+        for (const auto& transfer : executed_mem_) {
+            if (!log_tile.has_value() || transfer.tile == *log_tile) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) {
             os << " idle\n";
             return;
         }
 
         os << '\n';
         for (const auto& transfer : executed_mem_) {
+            if (log_tile.has_value() && transfer.tile != *log_tile) {
+                continue;
+            }
             os << "    c" << transfer.column << ".t" << transfer.tile << ' ';
             os << (transfer.kind == MemTransfer::Kind::StoreStreamToSram ? "store" : "load");
             os << " " << direction_name(transfer.direction) << transfer.stream
@@ -596,10 +619,12 @@ private:
         return any;
     }
 
-    void log_streams(std::ostream& os) const
+    void log_streams(std::ostream& os, std::optional<std::size_t> log_tile) const
     {
         os << "  stream_registers (E/W combined):\n";
-        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+        const auto first_tile = log_tile.value_or(0);
+        const auto end_tile = log_tile.has_value() ? first_tile + 1 : hw::kTileRows;
+        for (std::size_t tile = first_tile; tile < end_tile; ++tile) {
             os << "    tile " << tile << ":\n";
             for (std::size_t reg = 0; reg < hw::kStreamRegisterColumns; ++reg) {
                 os << "      sreg " << reg << ":";

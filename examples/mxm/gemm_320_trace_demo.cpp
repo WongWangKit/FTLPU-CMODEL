@@ -351,8 +351,8 @@ int run_demo(int argc, char** argv)
     const auto phase_base_mem_cycle = memory->cycle();
 
     mxm_log << "loading resident B[320,320] from MEM into MXM through continuous IW pipeline\n";
-    mxm_log << "compute A[320,320] x B[320,320], Compute(" << kComputeCycles
-            << ") starts after tile0 weights are loaded at phase cycle " << kComputeStartPhaseCycle
+    mxm_log << "compute A[320,320] x B[320,320], Compute is issued every cycle for " << kComputeCycles
+            << " cycles after tile0 weights are loaded at phase cycle " << kComputeStartPhaseCycle
             << " (MEM cycle " << (phase_base_mem_cycle + kComputeStartPhaseCycle) << ")\n";
     mxm_log << "legend: L=loaded idle, C=valid computing 16MAC, .=completed/no valid\n";
     mem_log << "stream A[320,320] from MEM slice " << kActivationSlice
@@ -375,8 +375,10 @@ int run_demo(int argc, char** argv)
             const auto column_block = phase_cycle - kMxmHandoffBaseCycle;
             control.issue_south(ftlpu::MxmControlInstruction::IW(column_block));
         }
+        if (phase_cycle >= kComputeStartPhaseCycle && phase_cycle < kComputeStartPhaseCycle + kComputeCycles) {
+            control.issue_south(ftlpu::MxmControlInstruction::Compute());
+        }
         if (phase_cycle == kComputeStartPhaseCycle) {
-            control.issue_south(ftlpu::MxmControlInstruction::Compute(kComputeCycles));
             gemm->start_compute(kComputeCycles);
             gemm_started = true;
         }

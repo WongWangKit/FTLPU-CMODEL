@@ -7,7 +7,7 @@ Cycle-level C++ model experiments for FTLPU-style stream and memory behavior.
 - `include/ftlpu/core/`: common topology, stream, and instruction-pipeline primitives.
 - `include/ftlpu/mem/`: MEM slice and 20-row tile-array models.
 - `include/ftlpu/mxm/`: MXM supercell, array, control, and GEMM execution models.
-- `include/ftlpu/vxm/`: VXM ALU and scalar lane pipeline models.
+- `include/ftlpu/vxm/`: VXM ALU and lane-level issue-queue models.
 - `tests/<module>/`: unit tests grouped by subsystem, with `tests/integration/` for cross-subsystem tests.
 - `examples/<module>/`: trace/demo executables grouped by subsystem.
 
@@ -22,7 +22,10 @@ Cycle-level C++ model experiments for FTLPU-style stream and memory behavior.
 - `ftlpu::MxmControlSlice`: south-to-north MXM control pipeline. Each tile controls one row of 20 supercells; each row has its own local weight input. `IW(col)` loads that row's current weight input into the selected supercell column, and `Compute(cycles)` opens a compute window.
 - `ftlpu::MxmGemmEngine`: 320x320 int8 GEMM execution model. Activation streams enter tile rows with one-cycle south-to-north skew; each valid supercell consumes one 16-byte activation vector, performs 16 int8 dot products against its 16 weight columns, accumulates int32 partial sums, and forwards the activation vector east.
 - `ftlpu::VxmAlu`: first VXM building block. It models 16-lane pointwise ALU behavior for arithmetic, compare/select, nonlinear functions, accumulation, and int8 quantize/dequantize operations.
-- `ftlpu::VxmLane`: one scalar VXM lane with 16 serial ALU stages and one-cycle pipeline registers between stages. The first implemented program is SwiGLU: 4 byte streams form one int32 `gate`, 4 byte streams form one int32 `up`, both dequantize to fp32, sigmoid is built from primitive ALU instructions (`neg`, `exp`, `add 1`, `1/x`), then the lane computes `up * gate * sigmoid(gate)` and quantizes to int8.
+- `ftlpu::VxmLane`: one scalar VXM lane with 16 ALUs and one instruction queue per ALU. Each ALU instruction chooses operands from lane input streams or registered outputs from other ALUs. The first lane program is SwiGLU for an FFN-style path: streams 0-3 form the raw int32 `gate`, streams 4-7 form the raw int32 `up`, cast instructions convert raw stream operands to fp32, multiply instructions apply dequant scales, sigmoid is built from primitive ALU instructions (`neg`, `exp`, `add 1`, `1/x`), then the lane computes `up * gate * sigmoid(gate)`, multiplies by the reciprocal output scale, adds the output zero point, and casts to int8.
+- `ftlpu::VxmSuperlane`: 16 `VxmLane` instances running in lockstep. Each cycle accepts one 16-lane gate vector and one 16-lane up vector, then emits a 16-byte int8 vector when all lanes produce aligned outputs.
+- `ftlpu::VxmSlice`: 20 south-to-north superlanes/tiles. VXM instructions enter at the south edge and advance one tile per cycle; data for tile rows is supplied with the same south-to-north one-cycle skew. The slice test runs a 320x320 SwiGLU matrix path over 20 tiles x 16 lanes.
+- `ftlpu::TspSliceSystem`: fixed local topology with VXM attached to the west side of MEM and MXM attached to the east side. VXM can consume any of the 64 lane streams selected by its instruction operands, and ALU instructions can optionally emit an output stream selected by the instruction. The MEM/VXM integration test uses west streams 32-39 for gate/up input and east stream 0 for the result, but those stream IDs are instruction choices rather than hardwired system behavior.
 - `ftlpu::topology`: TSP-style grid constants and address helpers for 20 tile rows, 44 slice columns, 4-slice groups, 12 stream register columns, and the modeled half of MEM.
 
 ## Hardware Parameters
@@ -39,7 +42,7 @@ The topology model uses these parameters:
 - MEM can load at most 16 bytes per tile per cycle from SRAM into the same stream across 16 lanes.
 - MEM activity is driven by instructions as they arrive at each tile; tests do not directly request a MEM action on an arbitrary tile.
 - MXM is modeled as a 320x320 MAC array made from a 20x20 grid of 16x16 supercells.
-- VXM starts with a 16-lane ALU/lane model. Public TSP descriptions identify VXM as 16 ALUs for pointwise arithmetic such as add, multiply, and tanh, with 1-8 inputs and 1-4 outputs; this cmodel implements the public arithmetic/nonlinear/quantization subset first.
+- VXM starts with a single-lane experiment: 16 ALUs, 16 issue queues, 8 byte input streams, and registered ALU-to-ALU dependencies. Public TSP descriptions identify VXM as 16 ALUs for pointwise arithmetic such as add, multiply, and tanh, with 1-8 inputs and 1-4 outputs; this cmodel implements the public arithmetic/nonlinear/quantization subset first.
 - The current `TileArrayModel` SRAM is byte-addressable for simplicity: each modeled tile/slice SRAM has 8192 one-byte entries.
 - 88 public SRAM blocks across both hemispheres.
 - 44 modeled SRAM blocks for the current single-hemisphere model.
@@ -82,6 +85,12 @@ To generate the full GEMM trace with separate MEM and MXM logs:
 ```
 
 The GEMM trace runs `A[320,320] x B[320,320] -> C[320,320]` with int8 inputs and int32 accumulation. The demo first stores the full activation matrix and the full weight matrix in MEM, then loads weights from MEM into MXM, then streams activations from MEM into MXM.
+
+To generate a VXM lane trace that prints every ALU state each cycle. The demo feeds one SwiGLU token per cycle, uses cast plus multiply instructions for quantization/dequantization, drains the pipeline, and logs operand sources and values:
+
+```powershell
+.\build-vs2019\Debug\vxm_lane_trace_demo.exe vxm_lane_trace.log
+```
 
 ## GEMM Data Layout
 
