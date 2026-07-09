@@ -25,17 +25,9 @@ enum class VxmAluOpcode {
     Clamp,
     Square,
     Sqrt,
-    Rsqrt,
     Exp,
     Log,
-    Tanh,
     Relu,
-    Gelu,
-    Equal,
-    LessThan,
-    LessEqual,
-    Select,
-    Accumulate,
     Cast,
 };
 
@@ -109,46 +101,15 @@ public:
         case VxmAluOpcode::Sqrt:
             apply_unary(out, a, [](float x) { return std::sqrt(x); });
             return out;
-        case VxmAluOpcode::Rsqrt:
-            apply_unary(out, a, [](float x) { return 1.0f / std::sqrt(x); });
-            return out;
         case VxmAluOpcode::Exp:
             apply_unary(out, a, [](float x) { return std::exp(x); });
             return out;
         case VxmAluOpcode::Log:
             apply_unary(out, a, [](float x) { return std::log(x); });
             return out;
-        case VxmAluOpcode::Tanh:
-            apply_unary(out, a, [](float x) { return std::tanh(x); });
-            return out;
         case VxmAluOpcode::Relu:
             apply_unary(out, a, [](float x) { return std::max(0.0f, x); });
             return out;
-        case VxmAluOpcode::Gelu:
-            apply_unary(out, a, [](float x) {
-                constexpr float kSqrtTwoOverPi = 0.7978845608028654f;
-                return 0.5f * x * (1.0f + std::tanh(kSqrtTwoOverPi * (x + 0.044715f * x * x * x)));
-            });
-            return out;
-        case VxmAluOpcode::Equal:
-            apply_binary(out, a, b, [](float x, float y) { return x == y ? 1.0f : 0.0f; });
-            return out;
-        case VxmAluOpcode::LessThan:
-            apply_binary(out, a, b, [](float x, float y) { return x < y ? 1.0f : 0.0f; });
-            return out;
-        case VxmAluOpcode::LessEqual:
-            apply_binary(out, a, b, [](float x, float y) { return x <= y ? 1.0f : 0.0f; });
-            return out;
-        case VxmAluOpcode::Select:
-            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                out[lane] = a[lane] != 0.0f ? b[lane] : c[lane];
-            }
-            return out;
-        case VxmAluOpcode::Accumulate: {
-            const auto sum = lane_sum(a);
-            out.fill(sum);
-            return out;
-        }
         case VxmAluOpcode::Cast:
             return cast_to_float(a, instruction.cast_target);
         }

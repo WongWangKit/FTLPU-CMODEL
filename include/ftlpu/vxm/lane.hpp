@@ -480,28 +480,12 @@ public:
             return "square";
         case VxmAluOpcode::Sqrt:
             return "sqrt";
-        case VxmAluOpcode::Rsqrt:
-            return "rsqrt";
         case VxmAluOpcode::Exp:
             return "exp";
         case VxmAluOpcode::Log:
             return "log";
-        case VxmAluOpcode::Tanh:
-            return "tanh";
         case VxmAluOpcode::Relu:
             return "relu";
-        case VxmAluOpcode::Gelu:
-            return "gelu";
-        case VxmAluOpcode::Equal:
-            return "eq";
-        case VxmAluOpcode::LessThan:
-            return "lt";
-        case VxmAluOpcode::LessEqual:
-            return "le";
-        case VxmAluOpcode::Select:
-            return "select";
-        case VxmAluOpcode::Accumulate:
-            return "acc";
         case VxmAluOpcode::Cast:
             return "cast";
         }
