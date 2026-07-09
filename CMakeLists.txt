@@ -40,9 +40,14 @@ ftlpu_add_test(mem_mxm_integration_test tests/integration/mem_mxm_test.cpp)
 ftlpu_add_test(vxm_alu_test tests/vxm/alu_test.cpp)
 ftlpu_add_test(vxm_lane_test tests/vxm/lane_test.cpp)
 
+ftlpu_add_test(sxm_test tests/sxm/sxm_test.cpp)
+
+ftlpu_add_test(icu_test tests/icu/icu_test.cpp)
+
 ftlpu_add_demo(northbound_pipeline_demo examples/core/northbound_pipeline_demo.cpp)
 ftlpu_add_demo(tile_array_trace_demo examples/mem/tile_array_trace_demo.cpp)
 ftlpu_add_demo(vector_roundtrip_demo examples/mem/vector_roundtrip_demo.cpp)
 ftlpu_add_demo(mxm_control_trace_demo examples/mxm/control_trace_demo.cpp)
 ftlpu_add_demo(mem_mxm_trace_demo examples/mxm/mem_mxm_trace_demo.cpp)
 ftlpu_add_demo(gemm_320_trace_demo examples/mxm/gemm_320_trace_demo.cpp)
+ftlpu_add_demo(icu_mem_demo examples/icu/icu_mem_demo.cpp)

@@ -1,0 +1,292 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\core\\hardware_params.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:include\\ftlpu\\core\\hardware_params.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\tests\\mxm\\gemm_320_test.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:tests\\mxm\\gemm_320_test.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mem\\tile_array.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:include\\ftlpu\\mem\\tile_array.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\tests\\core\\stream_register_test.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:tests\\core\\stream_register_test.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\tests\\core\\topology_test.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:tests\\core\\topology_test.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\tests\\core\\instruction_pipeline_test.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:tests\\core\\instruction_pipeline_test.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\vxm\\lane.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:include\\ftlpu\\vxm\\lane.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\vxm\\alu.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:include\\ftlpu\\vxm\\alu.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mxm\\supercell.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:include\\ftlpu\\mxm\\supercell.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mxm\\gemm_engine.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:include\\ftlpu\\mxm\\gemm_engine.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\core\\topology.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:include\\ftlpu\\core\\topology.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\core\\stream.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:include\\ftlpu\\core\\stream.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mxm\\array.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:include\\ftlpu\\mxm\\array.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mxm\\control_slice.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:include\\ftlpu\\mxm\\control_slice.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\core\\instruction_pipeline.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:include\\ftlpu\\core\\instruction_pipeline.hpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|CMake \u6982\u8FF0\u9875||{B1CAA5B0-FEB1-4350-8AB9-F895876842F2}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 15,
+          "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 4,
+              "Title": "topology_test.cpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\tests\\core\\topology_test.cpp",
+              "RelativeDocumentMoniker": "tests\\core\\topology_test.cpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\tests\\core\\topology_test.cpp",
+              "RelativeToolTip": "tests\\core\\topology_test.cpp",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000677|",
+              "WhenOpened": "2026-07-07T10:06:26.469Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 3,
+              "Title": "stream_register_test.cpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\tests\\core\\stream_register_test.cpp",
+              "RelativeDocumentMoniker": "tests\\core\\stream_register_test.cpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\tests\\core\\stream_register_test.cpp",
+              "RelativeToolTip": "tests\\core\\stream_register_test.cpp",
+              "ViewState": "AgIAAAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000677|",
+              "WhenOpened": "2026-07-07T10:06:24.892Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 5,
+              "Title": "instruction_pipeline_test.cpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\tests\\core\\instruction_pipeline_test.cpp",
+              "RelativeDocumentMoniker": "tests\\core\\instruction_pipeline_test.cpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\tests\\core\\instruction_pipeline_test.cpp",
+              "RelativeToolTip": "tests\\core\\instruction_pipeline_test.cpp",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000677|",
+              "WhenOpened": "2026-07-07T10:06:24.137Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 6,
+              "Title": "lane.hpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\vxm\\lane.hpp",
+              "RelativeDocumentMoniker": "include\\ftlpu\\vxm\\lane.hpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\vxm\\lane.hpp",
+              "RelativeToolTip": "include\\ftlpu\\vxm\\lane.hpp",
+              "ViewState": "AgIAAFQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2026-07-07T10:06:20.94Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 7,
+              "Title": "alu.hpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\vxm\\alu.hpp",
+              "RelativeDocumentMoniker": "include\\ftlpu\\vxm\\alu.hpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\vxm\\alu.hpp",
+              "RelativeToolTip": "include\\ftlpu\\vxm\\alu.hpp",
+              "ViewState": "AgIAAL0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2026-07-07T10:06:17.321Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "tile_array.hpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mem\\tile_array.hpp",
+              "RelativeDocumentMoniker": "include\\ftlpu\\mem\\tile_array.hpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mem\\tile_array.hpp",
+              "RelativeToolTip": "include\\ftlpu\\mem\\tile_array.hpp",
+              "ViewState": "AgIAAFAAAAAAAAAAAADwv1YAAAAtAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2026-07-07T09:55:03.08Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "gemm_320_test.cpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\tests\\mxm\\gemm_320_test.cpp",
+              "RelativeDocumentMoniker": "tests\\mxm\\gemm_320_test.cpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\tests\\mxm\\gemm_320_test.cpp",
+              "RelativeToolTip": "tests\\mxm\\gemm_320_test.cpp",
+              "ViewState": "AgIAAAsAAAAAAAAAAAArwGgAAAApAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000677|",
+              "WhenOpened": "2026-07-07T09:54:28.956Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{cce594b6-0c39-4442-ba28-10c64ac7e89f}"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 13,
+              "Title": "control_slice.hpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mxm\\control_slice.hpp",
+              "RelativeDocumentMoniker": "include\\ftlpu\\mxm\\control_slice.hpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mxm\\control_slice.hpp",
+              "RelativeToolTip": "include\\ftlpu\\mxm\\control_slice.hpp",
+              "ViewState": "AgIAAC0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2026-07-07T09:30:36.958Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 9,
+              "Title": "gemm_engine.hpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mxm\\gemm_engine.hpp",
+              "RelativeDocumentMoniker": "include\\ftlpu\\mxm\\gemm_engine.hpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mxm\\gemm_engine.hpp",
+              "RelativeToolTip": "include\\ftlpu\\mxm\\gemm_engine.hpp",
+              "ViewState": "AgIAAGwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2026-07-07T09:28:34.186Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 8,
+              "Title": "supercell.hpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mxm\\supercell.hpp",
+              "RelativeDocumentMoniker": "include\\ftlpu\\mxm\\supercell.hpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mxm\\supercell.hpp",
+              "RelativeToolTip": "include\\ftlpu\\mxm\\supercell.hpp",
+              "ViewState": "AgIAAOwAAAAAAAAAAAD4vy8AAAAUAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2026-07-07T08:05:21.766Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 12,
+              "Title": "array.hpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mxm\\array.hpp",
+              "RelativeDocumentMoniker": "include\\ftlpu\\mxm\\array.hpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\mxm\\array.hpp",
+              "RelativeToolTip": "include\\ftlpu\\mxm\\array.hpp",
+              "ViewState": "AgIAAFoAAAAAAAAAAAAAAGUAAAAJAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2026-07-07T08:04:35.792Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 10,
+              "Title": "topology.hpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\core\\topology.hpp",
+              "RelativeDocumentMoniker": "include\\ftlpu\\core\\topology.hpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\core\\topology.hpp",
+              "RelativeToolTip": "include\\ftlpu\\core\\topology.hpp",
+              "ViewState": "AgIAAEsAAAAAAAAAAAAAAFMAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2026-07-07T07:55:38.75Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 11,
+              "Title": "stream.hpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\core\\stream.hpp",
+              "RelativeDocumentMoniker": "include\\ftlpu\\core\\stream.hpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\core\\stream.hpp",
+              "RelativeToolTip": "include\\ftlpu\\core\\stream.hpp",
+              "ViewState": "AgIAACcAAAAAAAAAAAAAAA4AAAAPAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2026-07-07T07:52:42.887Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 14,
+              "Title": "instruction_pipeline.hpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\core\\instruction_pipeline.hpp",
+              "RelativeDocumentMoniker": "include\\ftlpu\\core\\instruction_pipeline.hpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\core\\instruction_pipeline.hpp",
+              "RelativeToolTip": "include\\ftlpu\\core\\instruction_pipeline.hpp",
+              "ViewState": "AgIAADYAAAAAAAAAAAAAADsAAAAsAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2026-07-07T07:51:11.093Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "hardware_params.hpp",
+              "DocumentMoniker": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\core\\hardware_params.hpp",
+              "RelativeDocumentMoniker": "include\\ftlpu\\core\\hardware_params.hpp",
+              "ToolTip": "E:\\Fudan_University\\internship\\\u65F6\u64CE\u79D1\u6280\\LPU\\\u5EFA\u6A21\\LPU_cmodel\\FTLPU-CMODEL\\include\\ftlpu\\core\\hardware_params.hpp",
+              "RelativeToolTip": "include\\ftlpu\\core\\hardware_params.hpp",
+              "ViewState": "AgIAABQAAAAAAAAAAAD4vxoAAAAuAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2026-07-07T06:48:53.144Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 15,
+              "Title": "CMake \u6982\u8FF0\u9875",
+              "DocumentMoniker": "CMake \u6982\u8FF0\u9875",
+              "ToolTip": "CMake \u6982\u8FF0\u9875",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
+              "WhenOpened": "2026-07-07T06:09:31.673Z",
+              "EditorCaption": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
