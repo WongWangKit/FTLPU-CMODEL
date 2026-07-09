@@ -77,6 +77,23 @@ int main()
     assert(nearly_equal(dequantized[0], 1.0f));
     assert(nearly_equal(dequantized[15], 16.0f));
 
+    auto cast_fp32 = ftlpu::VxmAlu::execute(
+        {ftlpu::VxmAluOpcode::Cast, 0.0f, 0.0f, 0, 1.0f, ftlpu::VxmCastTarget::Float32},
+        b);
+    assert(nearly_equal(cast_fp32[0], 1.0f));
+    assert(nearly_equal(cast_fp32[15], 16.0f));
+
+    ftlpu::VxmAlu::Vector int8_cast_input {};
+    int8_cast_input[0] = -129.0f;
+    int8_cast_input[1] = -2.4f;
+    int8_cast_input[2] = 127.6f;
+    const auto cast_int8 = ftlpu::VxmAlu::execute(
+        {ftlpu::VxmAluOpcode::Cast, 0.0f, 0.0f, 0, 1.0f, ftlpu::VxmCastTarget::Int8},
+        int8_cast_input);
+    assert(cast_int8[0] == -128.0f);
+    assert(cast_int8[1] == -2.0f);
+    assert(cast_int8[2] == 127.0f);
+
     ftlpu::VxmAlu::Vector large{};
     large.fill(1000.0f);
     auto saturated = ftlpu::VxmAlu::quantize(large, 1.0f, 0);

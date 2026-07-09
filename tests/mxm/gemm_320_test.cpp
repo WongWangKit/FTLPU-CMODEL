@@ -124,12 +124,12 @@ void load_weight_column_through_mem(
     }
 }
 
-ftlpu::MxmGemmEngine::ActivationVector activation_vector(std::size_t tile, std::size_t k)
+ftlpu::MxmGemmEngine::ActivationVector activation_vector(std::size_t row, std::size_t tile)
 {
     ftlpu::MxmGemmEngine::ActivationVector input{};
     for (std::size_t lane = 0; lane < kLanes; ++lane) {
         input[lane] = ftlpu::MxmGemmEngine::ActivationWord {
-            activation_value(tile * kLanes + lane, k),
+            activation_value(row, tile * kLanes + lane),
             lane + 1 == kLanes,
         };
     }
@@ -178,9 +178,9 @@ int main()
 
     ftlpu::MxmControlSlice control(*array);
     std::ostringstream control_log;
-    control.issue_south(ftlpu::MxmControlInstruction::Compute(kComputeCycles));
+    control.issue_south(ftlpu::MxmControlInstruction::Compute());
     control.tick(control_log);
-    if (!require(control.compute_active(0), "compute window did not start on tile 0")) {
+    if (!require(control.compute_active(0), "compute pulse did not reach tile 0")) {
         return 1;
     }
 
@@ -191,7 +191,7 @@ int main()
     for (std::size_t cycle = 0; cycle <= kComputeCycles + kComputeFlushCycles; ++cycle) {
         for (std::size_t tile = 0; tile < kBlocks; ++tile) {
             if (cycle >= tile && cycle - tile < kComputeCycles) {
-                gemm->set_activation_input(tile, activation_vector(tile, cycle - tile));
+                gemm->set_activation_input(tile, activation_vector(cycle - tile, tile));
             }
         }
         gemm->tick(gemm_log);
@@ -207,19 +207,19 @@ int main()
     }
 
     const auto text = gemm_log.str();
-    if (!require(text.find("consume activation tile=0 k=0") != std::string::npos, "missing activation consume log")) {
+    if (!require(text.find("consume activation tile=0 row=0") != std::string::npos, "missing activation consume log")) {
         return 1;
     }
-    if (!require(text.find("valid tile=0 k=0 col_block=0 16MAC") != std::string::npos, "missing valid MAC log")) {
+    if (!require(text.find("valid tile=0 row=0 col_block=0 16MAC") != std::string::npos, "missing valid MAC log")) {
         return 1;
     }
-    if (!require(text.find("north_output row_block=19") != std::string::npos, "missing final north output log")) {
+    if (!require(text.find("north_output row=319") != std::string::npos, "missing final north output log")) {
         return 1;
     }
     if (!require(text.find("row 19: ....................") != std::string::npos, "missing final idle row state")) {
         return 1;
     }
-    if (!require(control_log.str().find("Compute cycles=320") != std::string::npos, "missing control compute log")) {
+    if (!require(control_log.str().find("Compute") != std::string::npos, "missing control compute log")) {
         return 1;
     }
 

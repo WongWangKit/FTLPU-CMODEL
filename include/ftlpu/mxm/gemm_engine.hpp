@@ -34,6 +34,12 @@ public:
         std::array<std::int32_t, hw::kMxmSupercellColumns> values{};
     };
 
+    struct CompletedColumnOutput {
+        std::size_t row{0};
+        std::size_t column_block{0};
+        std::array<std::int32_t, hw::kMxmSupercellColumns> values{};
+    };
+
     explicit MxmGemmEngine(const MxmArray& array)
         : array_(array)
     {
@@ -62,9 +68,13 @@ public:
         for (auto& row : last_computing_) {
             row.fill(false);
         }
-        row_block_completed_columns_.fill(0);
+        row_completed_columns_.fill(0);
         completed_row_blocks_.clear();
         column_outputs_.clear();
+        completed_column_outputs_.clear();
+        for (auto& row : completed_column_output_done_) {
+            row.fill(false);
+        }
     }
 
     void start_compute(std::size_t cycles)
@@ -99,6 +109,11 @@ public:
         return column_outputs_;
     }
 
+    const std::vector<CompletedColumnOutput>& completed_column_outputs() const
+    {
+        return completed_column_outputs_;
+    }
+
     const ResultRow& accumulator_row(std::size_t row) const
     {
         if (row >= hw::kMxmRows) {
@@ -127,8 +142,7 @@ public:
         if (column_block >= hw::kMxmSupercellsPerPlane) {
             throw std::out_of_range("GEMM column block is outside the 20-column MXM array");
         }
-        const auto global_column = column_block * hw::kMxmSupercellColumns;
-        return compute_cycles_ != 0 && contribution_counts_[tile][global_column] >= compute_cycles_;
+        return compute_cycles_ != 0 && last_computing_[tile][column_block];
     }
 
     void tick(std::ostream& os, bool print_cycle_header = true, bool print_array_state = true)
@@ -138,6 +152,7 @@ public:
         }
         completed_row_blocks_.clear();
         column_outputs_.clear();
+        completed_column_outputs_.clear();
         std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane> computing{};
 
         for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
@@ -148,9 +163,9 @@ public:
                 throw std::logic_error("GEMM activation valid arrived outside the compute window");
             }
 
-            const auto k = cycle_ - tile;
-            east_pipeline_[0][tile].push_back(ActivationEvent {tile, k, *pending_inputs_[tile]});
-            os << "  consume activation tile=" << tile << " k=" << k << '\n';
+            const auto row = cycle_ - tile;
+            east_pipeline_[0][tile].push_back(ActivationEvent {tile, row, *pending_inputs_[tile]});
+            os << "  consume activation tile=" << tile << " row=" << row << '\n';
             pending_inputs_[tile].reset();
         }
 
@@ -178,7 +193,7 @@ public:
 private:
     struct ActivationEvent {
         std::size_t tile{0};
-        std::size_t k{0};
+        std::size_t row{0};
         ActivationData data{};
     };
 
@@ -203,12 +218,10 @@ private:
 
     void compute_column_block(const ActivationEvent& event, std::size_t column_block, std::ostream& os)
     {
-        const auto k_block = event.k / hw::kLanesPerTile;
-        const auto k_lane = event.k % hw::kLanesPerTile;
         auto& column_output = output_for_column(column_block);
 
         os << "  valid tile=" << event.tile
-           << " k=" << event.k
+           << " row=" << event.row
            << " col_block=" << column_block
            << " 16MAC";
 
@@ -216,32 +229,54 @@ private:
             const auto global_column = column_block * hw::kMxmSupercellColumns + local_column;
             std::int32_t column_dot = 0;
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                const auto row = event.tile * hw::kLanesPerTile + lane;
                 const auto partial = static_cast<std::int32_t>(event.data[lane])
-                    * static_cast<std::int32_t>(array_.weight(k_block, column_block, k_lane, local_column));
+                    * static_cast<std::int32_t>(array_.weight(event.tile, column_block, lane, local_column));
                 column_dot += partial;
-                accumulators_[row][global_column] += partial;
+                accumulators_[event.row][global_column] += partial;
                 if (lane == 0 && local_column == 0) {
                     os << " psum0+=" << partial;
                 }
             }
             column_output.values[local_column] += column_dot;
 
-            auto& count = contribution_counts_[event.tile][global_column];
+            auto& count = contribution_counts_[event.row][global_column];
             ++count;
-            if (count == compute_cycles_) {
-                ++row_block_completed_columns_[event.tile];
-                if (row_block_completed_columns_[event.tile] == hw::kMxmColumns) {
-                    CompletedRowBlock block {event.tile, {}};
+            if (count == hw::kMxmSupercellsPerPlane) {
+                ++row_completed_columns_[event.row];
+                if (row_completed_columns_[event.row] == hw::kMxmColumns) {
+                    CompletedRowBlock block {event.row / hw::kLanesPerTile, {}};
+                    const auto row_base = (event.row / hw::kLanesPerTile) * hw::kLanesPerTile;
                     for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                        block.rows[lane] = accumulators_[event.tile * hw::kLanesPerTile + lane];
+                        block.rows[lane] = accumulators_[row_base + lane];
                     }
                     completed_row_blocks_.push_back(block);
-                    os << "  north_output row_block=" << event.tile << '\n';
+                    os << "  north_output row=" << event.row << '\n';
                 }
             }
         }
+        maybe_emit_completed_column(event.row, column_block);
         os << " -> east/north\n";
+    }
+
+    void maybe_emit_completed_column(std::size_t row, std::size_t column_block)
+    {
+        if (completed_column_output_done_[row][column_block]) {
+            return;
+        }
+
+        const auto global_column_base = column_block * hw::kMxmSupercellColumns;
+        for (std::size_t local_column = 0; local_column < hw::kMxmSupercellColumns; ++local_column) {
+            if (contribution_counts_[row][global_column_base + local_column] < hw::kMxmSupercellsPerPlane) {
+                return;
+            }
+        }
+
+        CompletedColumnOutput output {row, column_block, {}};
+        for (std::size_t local_column = 0; local_column < hw::kMxmSupercellColumns; ++local_column) {
+            output.values[local_column] = accumulators_[row][global_column_base + local_column];
+        }
+        completed_column_outputs_.push_back(output);
+        completed_column_output_done_[row][column_block] = true;
     }
 
     ColumnOutput& output_for_column(std::size_t column_block)
@@ -265,7 +300,7 @@ private:
             for (std::size_t column_block = 0; column_block < hw::kMxmSupercellsPerPlane; ++column_block) {
                 if (computing[tile][column_block]) {
                     os << 'C';
-                } else if (compute_cycles_ != 0 && contribution_counts_[tile][column_block] >= compute_cycles_) {
+                } else if (compute_cycles_ != 0 && contribution_counts_[tile][column_block] >= hw::kMxmSupercellsPerPlane) {
                     os << '.';
                 } else {
                     os << 'L';
@@ -283,11 +318,13 @@ private:
     std::array<std::array<std::deque<ActivationEvent>, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>
         east_pipeline_{};
     std::array<ResultRow, hw::kMxmRows> accumulators_{};
-    std::array<std::array<std::size_t, hw::kMxmColumns>, hw::kMxmSupercellsPerPlane> contribution_counts_{};
+    std::array<std::array<std::size_t, hw::kMxmColumns>, hw::kMxmRows> contribution_counts_{};
     std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane> last_computing_{};
-    std::array<std::size_t, hw::kMxmSupercellsPerPlane> row_block_completed_columns_{};
+    std::array<std::size_t, hw::kMxmRows> row_completed_columns_{};
+    std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmRows> completed_column_output_done_{};
     std::vector<CompletedRowBlock> completed_row_blocks_{};
     std::vector<ColumnOutput> column_outputs_{};
+    std::vector<CompletedColumnOutput> completed_column_outputs_{};
 };
 
 } // namespace ftlpu

@@ -25,19 +25,15 @@ enum class VxmAluOpcode {
     Clamp,
     Square,
     Sqrt,
-    Rsqrt,
     Exp,
     Log,
-    Tanh,
     Relu,
-    Gelu,
-    Equal,
-    LessThan,
-    LessEqual,
-    Select,
-    Accumulate,
-    QuantizeInt8,
-    DequantizeInt8,
+    Cast,
+};
+
+enum class VxmCastTarget {
+    Float32,
+    Int8,
 };
 
 struct VxmAluInstruction {
@@ -46,6 +42,7 @@ struct VxmAluInstruction {
     float immediate1{0.0f};
     std::int32_t output_zero_point{0};
     float scale{1.0f};
+    VxmCastTarget cast_target{VxmCastTarget::Float32};
 };
 
 class VxmAlu {
@@ -104,50 +101,17 @@ public:
         case VxmAluOpcode::Sqrt:
             apply_unary(out, a, [](float x) { return std::sqrt(x); });
             return out;
-        case VxmAluOpcode::Rsqrt:
-            apply_unary(out, a, [](float x) { return 1.0f / std::sqrt(x); });
-            return out;
         case VxmAluOpcode::Exp:
             apply_unary(out, a, [](float x) { return std::exp(x); });
             return out;
         case VxmAluOpcode::Log:
             apply_unary(out, a, [](float x) { return std::log(x); });
             return out;
-        case VxmAluOpcode::Tanh:
-            apply_unary(out, a, [](float x) { return std::tanh(x); });
-            return out;
         case VxmAluOpcode::Relu:
             apply_unary(out, a, [](float x) { return std::max(0.0f, x); });
             return out;
-        case VxmAluOpcode::Gelu:
-            apply_unary(out, a, [](float x) {
-                constexpr float kSqrtTwoOverPi = 0.7978845608028654f;
-                return 0.5f * x * (1.0f + std::tanh(kSqrtTwoOverPi * (x + 0.044715f * x * x * x)));
-            });
-            return out;
-        case VxmAluOpcode::Equal:
-            apply_binary(out, a, b, [](float x, float y) { return x == y ? 1.0f : 0.0f; });
-            return out;
-        case VxmAluOpcode::LessThan:
-            apply_binary(out, a, b, [](float x, float y) { return x < y ? 1.0f : 0.0f; });
-            return out;
-        case VxmAluOpcode::LessEqual:
-            apply_binary(out, a, b, [](float x, float y) { return x <= y ? 1.0f : 0.0f; });
-            return out;
-        case VxmAluOpcode::Select:
-            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                out[lane] = a[lane] != 0.0f ? b[lane] : c[lane];
-            }
-            return out;
-        case VxmAluOpcode::Accumulate: {
-            const auto sum = lane_sum(a);
-            out.fill(sum);
-            return out;
-        }
-        case VxmAluOpcode::QuantizeInt8:
-            return quantize_to_float(a, instruction.scale, instruction.output_zero_point);
-        case VxmAluOpcode::DequantizeInt8:
-            return dequantize_from_float(a, instruction.scale, instruction.output_zero_point);
+        case VxmAluOpcode::Cast:
+            return cast_to_float(a, instruction.cast_target);
         }
         throw std::logic_error("unsupported VXM ALU opcode");
     }
@@ -169,7 +133,12 @@ public:
         if (scale == 0.0f) {
             throw std::invalid_argument("VXM quantize scale must be non-zero");
         }
-        const auto rounded = static_cast<std::int32_t>(std::nearbyint(input / scale)) + output_zero_point;
+        return cast_scalar_to_int8(input / scale + static_cast<float>(output_zero_point));
+    }
+
+    static std::int8_t cast_scalar_to_int8(float input)
+    {
+        const auto rounded = static_cast<std::int32_t>(std::nearbyint(input));
         return saturate_int8(rounded);
     }
 
@@ -214,23 +183,19 @@ private:
         return sum;
     }
 
-    static Vector quantize_to_float(const Vector& input, float scale, std::int32_t output_zero_point)
-    {
-        const auto quantized = quantize(input, scale, output_zero_point);
-        Vector out{};
-        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            out[lane] = static_cast<float>(quantized[lane]);
-        }
-        return out;
-    }
-
-    static Vector dequantize_from_float(const Vector& input, float scale, std::int32_t input_zero_point)
+    static Vector cast_to_float(const Vector& input, VxmCastTarget target)
     {
         Vector out{};
-        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            out[lane] = (input[lane] - static_cast<float>(input_zero_point)) * scale;
+        switch (target) {
+        case VxmCastTarget::Float32:
+            return input;
+        case VxmCastTarget::Int8:
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                out[lane] = static_cast<float>(cast_scalar_to_int8(input[lane]));
+            }
+            return out;
         }
-        return out;
+        throw std::logic_error("unsupported VXM cast target");
     }
 
     static std::int8_t saturate_int8(std::int32_t value)
