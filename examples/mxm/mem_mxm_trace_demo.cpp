@@ -103,10 +103,9 @@ int main(int argc, char** argv)
         << "read slices by source sreg at cycles 6..9; "
         << "streams continue east through the full MEM and reach MXM at sreg "
         << kTargetSreg << "; IW starts at cycle " << kMxmHandoffBaseCycle
-        << " and moves north one tile per cycle; LW starts at cycle "
-        << (kMxmHandoffBaseCycle + kTileRows) << '\n';
+        << " and writes buffer0 while moving north one tile per cycle\n";
 
-    for (std::size_t cycle = 0; cycle < kMxmHandoffBaseCycle + 2 * kTileRows; ++cycle) {
+    for (std::size_t cycle = 0; cycle < kMxmHandoffBaseCycle + kTileRows; ++cycle) {
         log << "global cycle " << cycle << '\n';
 
         if (cycle < kTileRows) {
@@ -118,10 +117,7 @@ int main(int argc, char** argv)
         mem->tick(log);
 
         if (cycle == kMxmHandoffBaseCycle) {
-            control.issue_south(ftlpu::MxmControlInstruction::IW(kMxmColumn));
-        }
-        if (cycle == kMxmHandoffBaseCycle + kTileRows) {
-            control.issue_south(ftlpu::MxmControlInstruction::LW(1u << kMxmColumn));
+            control.issue_south(ftlpu::MxmControlInstruction::IW(kMxmColumn, 0));
         }
 
         if (cycle >= kMxmHandoffBaseCycle && cycle < kMxmHandoffBaseCycle + kTileRows) {
@@ -136,7 +132,7 @@ int main(int argc, char** argv)
 
     std::cout << "wrote MEM to MXM trace log: " << log_path << '\n';
     std::cout << "IW starts at cycle " << kMxmHandoffBaseCycle
-              << ", LW starts at cycle " << (kMxmHandoffBaseCycle + kTileRows)
+              << ", writes buffer0"
               << ", target_sreg=" << kTargetSreg
               << ", mxm_column=" << kMxmColumn << '\n';
     return 0;

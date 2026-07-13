@@ -17,8 +17,9 @@ The repository currently models:
 - `MEM`: 44 slice columns, 20 tile rows, 16 lanes per tile, 32 east streams and
   32 west streams per lane. Each stream register is one byte wide.
 - `MXM`: two east-side MXM units. Each unit is a 20 x 20 array of 16 x 16
-  supercells, with explicit `IW` weight-buffer fill and `LW` active-weight load
-  steps for a 320 x 320 int8 GEMM datapath with int32 accumulation.
+  supercells. Each supercell has two peer weight buffers; `IW` selects which
+  buffer to fill and `Compute` selects which buffer to use for a 320 x 320 int8
+  GEMM datapath with int32 accumulation.
 - `VXM`: one west-side VXM slice with 20 superlanes/tiles. Each superlane has
   16 lanes, and each lane has 16 ALU issue queues.
 - `ICU`: per-queue instruction dispatch with `NOP N` and `Repeat n,d`, including
@@ -49,8 +50,8 @@ data. This is the shape intended for a future compiler backend.
 - `include/ftlpu/core/`: hardware parameters, stream words, topology helpers,
   instruction pipeline primitives, and instruction encoding.
 - `include/ftlpu/mem/`: MEM slice and full tile-array model.
-- `include/ftlpu/mxm/`: MXM supercell, array, control slice, wrapper, and GEMM
-  execution model.
+- `include/ftlpu/mxm/`: MXM supercell, array, control slice, wrapper, and
+  system-owned datapath state.
 - `include/ftlpu/vxm/`: VXM ALU, lane, superlane, and slice models.
 - `include/ftlpu/system/`: ICU and whole-slice system integration.
 - `tests/core/`, `tests/mem/`, `tests/mxm/`, `tests/vxm/`: subsystem tests.
@@ -96,6 +97,7 @@ Integration tests write logs under the build directory:
 
 - `build-vs2019/logs/mem_mxm/`
 - `build-vs2019/logs/mem_dual_mxm_swiglu_offline_icu/`
+- `build-vs2019/logs/mem_dual_mxm_swiglu_early_compute_icu/`
 
 The FFN tests generate four functional-unit logs:
 
@@ -109,9 +111,9 @@ They also generate a pipeline diagram:
 - `build-vs2019/logs/mem_dual_mxm_swiglu_offline_icu/pipeline.svg`
 
 The diagram separates `MEM W read`, `MEM A read`, `MEM write`, `MXM0 load`,
-`MXM0 compute`, `MXM1 load`, `MXM1 compute`, and `VXM` rows. `LW(mask20)` is a
-one-cycle active weight commit, so it is folded into the compute transition
-instead of being drawn as a long load block.
+`MXM0 compute`, `MXM1 load`, `MXM1 compute`, and `VXM` rows. There is no
+separate `LW` phase; `IW` fills a selected buffer and `Compute` names the buffer
+to consume.
 
 ## Demo Executables
 
@@ -121,7 +123,7 @@ After building, demos are available under the build output directory. Examples:
 .\build-vs2019\Debug\tile_array_trace_demo.exe tile_array_trace.log
 .\build-vs2019\Debug\vector_roundtrip_demo.exe vector_roundtrip.log
 .\build-vs2019\Debug\mxm_control_trace_demo.exe mxm_control_trace.log
-.\build-vs2019\Debug\gemm_320_trace_demo.exe gemm_320_mem.log gemm_320_mxm.log
+.\build-vs2019\Debug\mem_mxm_trace_demo.exe mem_mxm_mem.log mem_mxm_mxm.log
 .\build-vs2019\Debug\vxm_lane_trace_demo.exe vxm_lane_trace.log
 ```
 

@@ -19,40 +19,47 @@ namespace ftlpu {
 
 enum class MxmControlOpcode {
     IW = 0,
-    LW = 1,
-    Compute = 2,
-    Output = 3,
+    Compute = 1,
+    Output = 2,
 };
 
 struct MxmControlInstruction {
-    static constexpr std::uint32_t kColumnMaskBits = (1u << hw::kMxmSupercellsPerPlane) - 1u;
-
     MxmControlOpcode opcode{MxmControlOpcode::IW};
     std::size_t supercell_column{0};
-    std::uint32_t column_mask{0};
+    std::size_t weight_buffer{0};
     std::size_t stream_base{0};
+    std::size_t activation_stream_base{0};
 
-    static MxmControlInstruction IW(std::size_t supercell_column)
+    static MxmControlInstruction IW(std::size_t supercell_column, std::size_t weight_buffer = 0)
     {
-        return MxmControlInstruction {MxmControlOpcode::IW, supercell_column, 0, 0};
+        check_weight_buffer(weight_buffer);
+        return MxmControlInstruction {MxmControlOpcode::IW, supercell_column, weight_buffer, 0, 0};
     }
 
-    static MxmControlInstruction LW(std::uint32_t column_mask)
+    static MxmControlInstruction Compute(std::size_t weight_buffer = 0, std::size_t activation_stream_base = 0)
     {
-        if (column_mask == 0 || (column_mask & ~kColumnMaskBits) != 0) {
-            throw std::out_of_range("MXM LW column mask is outside the 20-column array");
-        }
-        return MxmControlInstruction {MxmControlOpcode::LW, 0, column_mask, 0};
-    }
-
-    static MxmControlInstruction Compute()
-    {
-        return MxmControlInstruction {MxmControlOpcode::Compute, 0, 0, 0};
+        check_weight_buffer(weight_buffer);
+        check_activation_stream_base(activation_stream_base);
+        return MxmControlInstruction {MxmControlOpcode::Compute, 0, weight_buffer, 0, activation_stream_base};
     }
 
     static MxmControlInstruction Output(std::size_t stream_base)
     {
-        return MxmControlInstruction {MxmControlOpcode::Output, 0, 0, stream_base};
+        return MxmControlInstruction {MxmControlOpcode::Output, 0, 0, stream_base, 0};
+    }
+
+    static void check_weight_buffer(std::size_t weight_buffer)
+    {
+        if (weight_buffer >= MxmSupercell::kWeightBuffers) {
+            throw std::out_of_range("MXM weight buffer is outside the two-buffer set");
+        }
+    }
+
+    static void check_activation_stream_base(std::size_t activation_stream_base)
+    {
+        if (activation_stream_base >= hw::kStreams) {
+            throw std::out_of_range("MXM activation stream base is outside the stream set");
+        }
     }
 };
 
@@ -86,9 +93,13 @@ public:
             slot.reset();
         }
         compute_pulses_.fill(false);
+        compute_weight_buffers_.fill(std::nullopt);
+        compute_activation_stream_bases_.fill(std::nullopt);
         output_stream_bases_.fill(std::nullopt);
-        for (auto& row : loaded_cells_) {
-            row.fill(false);
+        for (auto& buffer : loaded_cells_) {
+            for (auto& row : buffer) {
+                row.fill(false);
+            }
         }
         cycle_ = 0;
     }
@@ -151,9 +162,27 @@ public:
 
     bool loaded_cell(std::size_t tile, std::size_t column) const
     {
+        return loaded_cell(0, tile, column);
+    }
+
+    bool loaded_cell(std::size_t weight_buffer, std::size_t tile, std::size_t column) const
+    {
         check_tile(tile);
         check_column(column);
-        return loaded_cells_[tile][column];
+        MxmControlInstruction::check_weight_buffer(weight_buffer);
+        return loaded_cells_[weight_buffer][tile][column];
+    }
+
+    std::optional<std::size_t> compute_weight_buffer(std::size_t tile) const
+    {
+        check_tile(tile);
+        return compute_weight_buffers_[tile];
+    }
+
+    std::optional<std::size_t> compute_activation_stream_base(std::size_t tile) const
+    {
+        check_tile(tile);
+        return compute_activation_stream_bases_[tile];
     }
 
     void tick(std::ostream& os, bool print_matrix = true, std::optional<std::size_t> log_tile = std::nullopt)
@@ -195,22 +224,14 @@ private:
         }
     }
 
-    static void check_column_mask(std::uint32_t column_mask)
-    {
-        if (column_mask == 0) {
-            throw std::out_of_range("MXM LW column mask must select at least one column");
-        }
-        if ((column_mask & ~MxmControlInstruction::kColumnMaskBits) != 0) {
-            throw std::out_of_range("MXM LW column mask has bits outside the 20-column array");
-        }
-    }
-
     static void check_instruction(const MxmControlInstruction& instruction)
     {
         if (instruction.opcode == MxmControlOpcode::IW) {
             check_column(instruction.supercell_column);
-        } else if (instruction.opcode == MxmControlOpcode::LW) {
-            check_column_mask(instruction.column_mask);
+        }
+        MxmControlInstruction::check_weight_buffer(instruction.weight_buffer);
+        if (instruction.opcode == MxmControlOpcode::Compute) {
+            MxmControlInstruction::check_activation_stream_base(instruction.activation_stream_base);
         }
     }
 
@@ -281,6 +302,8 @@ private:
     void execute(std::ostream& os, bool print_matrix, std::optional<std::size_t> log_tile)
     {
         compute_pulses_.fill(false);
+        compute_weight_buffers_.fill(std::nullopt);
+        compute_activation_stream_bases_.fill(std::nullopt);
         output_stream_bases_.fill(std::nullopt);
         bool any = false;
         bool any_logged = false;
@@ -299,23 +322,24 @@ private:
                     }
 
                     if (should_log) {
-                        os << "IW col=" << instruction->supercell_column << " ";
-                        array_.tick_cell_iw_load(tile, instruction->supercell_column, *weight_inputs_[tile], os);
+                        os << "IW b" << instruction->weight_buffer << " col=" << instruction->supercell_column << " ";
+                        array_.tick_cell_iw_load(
+                            tile,
+                            instruction->supercell_column,
+                            instruction->weight_buffer,
+                            *weight_inputs_[tile],
+                            os);
                     } else {
                         static NullStream null_stream;
                         array_.tick_cell_iw_load(
                             tile,
                             instruction->supercell_column,
+                            instruction->weight_buffer,
                             *weight_inputs_[tile],
                             null_stream.stream());
                     }
+                    loaded_cells_[instruction->weight_buffer][tile][instruction->supercell_column] = true;
                     weight_inputs_[tile].reset();
-                } else if (instruction->opcode == MxmControlOpcode::LW) {
-                    if (should_log) {
-                        os << "LW mask=0x" << std::hex << std::setw(5) << std::setfill('0')
-                           << instruction->column_mask << std::dec << std::setfill(' ') << '\n';
-                    }
-                    execute_lw(tile, instruction->column_mask, should_log ? &os : nullptr);
                 }
             }
 
@@ -324,9 +348,12 @@ private:
                 any = true;
                 if (!log_tile.has_value() || tile == *log_tile) {
                     any_logged = true;
-                    os << "  tile " << tile << " Compute\n";
+                    os << "  tile " << tile << " Compute b" << compute_instruction->weight_buffer
+                       << " stream=" << compute_instruction->activation_stream_base << '\n';
                 }
                 compute_pulses_[tile] = true;
+                compute_weight_buffers_[tile] = compute_instruction->weight_buffer;
+                compute_activation_stream_bases_[tile] = compute_instruction->activation_stream_base;
             }
 
             const auto& output_instruction = output_instruction_rows_[tile];
@@ -348,37 +375,25 @@ private:
         }
     }
 
-    void execute_lw(std::size_t tile, std::uint32_t column_mask, std::ostream* os)
-    {
-        for (std::size_t column = 0; column < hw::kMxmSupercellsPerPlane; ++column) {
-            if ((column_mask & (1u << column)) == 0) {
-                continue;
-            }
-            if (os != nullptr) {
-                *os << "    col " << column << " ";
-                array_.tick_cell_lw(tile, column, *os);
-            } else {
-                static NullStream null_stream;
-                array_.tick_cell_lw(tile, column, null_stream.stream());
-            }
-            loaded_cells_[tile][column] = true;
-        }
-    }
-
     static void print_load_matrix(
         std::ostream& os,
-        const std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>& loaded,
+        const std::array<
+            std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>,
+            MxmSupercell::kWeightBuffers>& loaded,
         std::optional<std::size_t> log_tile)
     {
         os << "  load_matrix:\n";
         const auto first_tile = log_tile.value_or(0);
         const auto end_tile = log_tile.has_value() ? first_tile + 1 : hw::kMxmSupercellsPerPlane;
-        for (std::size_t tile = first_tile; tile < end_tile; ++tile) {
-            os << "    row " << tile << ": ";
-            for (std::size_t column = 0; column < hw::kMxmSupercellsPerPlane; ++column) {
-                os << (loaded[tile][column] ? 'L' : '.');
+        for (std::size_t buffer = 0; buffer < MxmSupercell::kWeightBuffers; ++buffer) {
+            os << "    buffer " << buffer << ":\n";
+            for (std::size_t tile = first_tile; tile < end_tile; ++tile) {
+                os << "      row " << tile << ": ";
+                for (std::size_t column = 0; column < hw::kMxmSupercellsPerPlane; ++column) {
+                    os << (loaded[buffer][tile][column] ? 'L' : '.');
+                }
+                os << '\n';
             }
-            os << '\n';
         }
     }
 
@@ -403,8 +418,12 @@ private:
     std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> output_instruction_rows_{};
     std::array<WeightInputSlot, hw::kMxmSupercellsPerPlane> weight_inputs_{};
     std::array<bool, hw::kMxmSupercellsPerPlane> compute_pulses_{};
+    std::array<std::optional<std::size_t>, hw::kMxmSupercellsPerPlane> compute_weight_buffers_{};
+    std::array<std::optional<std::size_t>, hw::kMxmSupercellsPerPlane> compute_activation_stream_bases_{};
     std::array<std::optional<std::size_t>, hw::kMxmSupercellsPerPlane> output_stream_bases_{};
-    std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane> loaded_cells_{};
+    std::array<
+        std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>,
+        MxmSupercell::kWeightBuffers> loaded_cells_{};
     std::size_t cycle_{0};
 };
 

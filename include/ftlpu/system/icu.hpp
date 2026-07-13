@@ -507,11 +507,10 @@ private:
     {
         std::ostringstream os;
         if (instruction.opcode == MxmControlOpcode::IW) {
-            os << "IW col=" << instruction.supercell_column;
-        } else if (instruction.opcode == MxmControlOpcode::LW) {
-            os << "LW mask=0x" << std::hex << instruction.column_mask << std::dec;
+            os << "IW b" << instruction.weight_buffer << " col=" << instruction.supercell_column;
         } else if (instruction.opcode == MxmControlOpcode::Compute) {
-            os << "Compute";
+            os << "Compute b" << instruction.weight_buffer
+               << " stream=" << instruction.activation_stream_base;
         } else {
             os << "Output stream_base=" << instruction.stream_base;
         }

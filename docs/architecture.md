@@ -63,6 +63,9 @@ Important behavior:
 
 - There are 44 independent MEM instruction queues, one per slice column.
 - Instructions enter at tile 0 and move north one tile per cycle.
+- Each MEM slice column is modeled as a single instruction port. A slice cannot
+  issue a `Read` and a `Write` in the same cycle; schedules that need both must
+  place them on different cycles.
 - A `Read(address, stream)` reads 16 bytes from the tile SRAM, one byte per lane,
   and writes them into the selected stream at the stream register adjacent to
   that MEM slice.
@@ -82,21 +85,19 @@ Current components:
 
 - `MxmSupercell`: one 16 x 16 int8 weight block.
 - `MxmArray`: a 20 x 20 grid of supercells.
-- `MxmControlSlice`: south-to-north control pipeline for `IW`, `LW`, `Compute`,
-  and `Output`.
-- `MxmGemmEngine`: execution helper for 320 x 320 int8 GEMM with int32
-  accumulation.
-- `Mxm`: wrapper containing an array and its control slice.
+- `MxmControlSlice`: south-to-north control pipeline for `IW`, `Compute`, and
+  `Output`.
+- `Mxm`: wrapper containing the array, its control slice, and the datapath
+  state for activation flow, int32 accumulation, and output stream injection.
 
 The system contains two MXMs on the east side of MEM.
 
 ### Weight Loading
 
-`IW(column_block)` writes one 16 x 16 supercell weight matrix into that
-supercell's weight buffer. `LW(mask20)` carries a 20-bit supercell-column mask;
-each bit set to `1` commits the corresponding buffered matrix into the active
-weights used by compute. This separation is the first step toward a future
-ping-pong weight-buffer model.
+Each supercell has two peer weight buffers. `IW(column_block, buffer)` writes
+one 16 x 16 supercell weight matrix into the selected buffer. There is no
+separate `LW` commit instruction: `Compute(buffer)` directly selects which
+buffer supplies weights for that activation token.
 
 The weight bytes for `IW` arrive from MEM at the east handoff stream register.
 Each MXM uses 16 streams per cycle:
@@ -105,17 +106,17 @@ Each MXM uses 16 streams per cycle:
 - MXM 1 consumes streams `E16..E31`.
 
 For a full 320 x 320 weight matrix, there are 20 column blocks. The current
-tests issue 20 continuous `IW` pulses followed by one full-mask `LW(0xfffff)`
-pulse. Compute can start at tile 0 on the cycle after tile 0 receives the
-full-mask `LW`; later tile rows receive the same instruction one cycle later
-per row.
+tests issue 20 continuous `IW` pulses into one buffer while the other buffer can
+still be used by in-flight compute.
 
 ### Compute
 
-`Compute` is a one-cycle pulse. The ICU emits one `Compute` instruction per cycle
-for the active compute window.
+`Compute(buffer)` is a one-cycle pulse. The ICU emits one `Compute` instruction
+per cycle for the active compute window. The selected buffer id is carried with
+the activation event as it moves across the MXM, so later `IW` commands can
+overwrite the other buffer without changing in-flight work.
 
-The GEMM engine models activation flow:
+The system-owned MXM runtime models activation flow:
 
 - Activations enter from MEM into tile rows with a one-cycle south-to-north skew.
 - Each active supercell consumes one 16-byte activation vector.
@@ -123,10 +124,9 @@ The GEMM engine models activation flow:
 - Activations move east across supercell columns.
 - Partial sums accumulate into int32 result columns.
 
-The engine is currently driven by integration tests rather than being fully
-embedded inside `TspSliceSystem::tick()`. This is a known integration boundary:
-the ICU supplies `Compute` and `Output` pulses, but the test still owns the
-`MxmGemmEngine` object that turns those pulses into numeric results.
+The runtime is owned by `TspSliceSystem`. ICU `Compute` pulses consume MEM east
+handoff streams through the MXM datapath, and ICU `Output` pulses inject int32
+result bytes onto MEM west streams.
 
 ## VXM Model
 
@@ -233,8 +233,8 @@ Important paths:
 - VXM output streams are injected back into MEM and can be written into SRAM.
 
 The system tick handles ICU dispatch, MEM tick, VXM stream bridge, and MXM
-control slices. The current GEMM numeric engine is still test-driven, as noted
-above.
+control slices. MXM compute and output are owned by the `Mxm` datapath inside
+`TspSliceSystem`; tests no longer use a separate software GEMM engine.
 
 ## FFN Integration Tests
 
@@ -285,31 +285,35 @@ This is the intended shape for a future compiler:
 high-level workload -> compiler/scheduler -> OfflineIcuProgram -> ICU queues
 ```
 
-The current offline test still has a small runtime bridge for the standalone
-`MxmGemmEngine`, because numeric GEMM execution is not yet fully embedded in the
-system tick.
+The current offline test only loads the ICU queues, initializes external MEM
+contents, ticks the system datapaths, and checks final MEM contents.
 
-The test also exercises the MXM weight-buffer path. `IW` fills each
-supercell's weight buffer, then a single `LW(mask20)` commits all selected
-columns into the active weights. MXM control has separate load and compute
-queues, so `IW` can fill the next weight buffer while `Compute` continues to use
-the current active weights. The second gate/up pass and the down pass use this
-ping-pong schedule:
+The test also exercises the MXM two-buffer path. `IW` fills one selected buffer
+while `Compute(buffer)` continues to use the other. MXM control has separate
+load and compute queues, so the scheduler can overlap next-weight transfer with
+current compute. The second gate/up pass and the down pass use this ping-pong
+schedule:
 
 - MXM0 starts `IW` immediately when the previous GEMM starts. Shared activation
   traffic uses alternate stream IDs during the first few rows so it does not
   collide with `E0..E15`.
 - MXM1 starts `IW` immediately after MXM0's 20-cycle `IW` window. The current
-  FFN schedule uses `MXM0: cycles 39..58` and `MXM1: cycles 59..78` for the
+  FFN schedule uses `MXM0: cycles 38..57` and `MXM1: cycles 58..77` for the
   second gate/up pass.
-- Both MXMs issue one-cycle `LW(mask20)` commands only after the current GEMM
-  compute window has ended and both weight buffers are ready.
+- In the early-compute variant, the second gate/up GEMM starts as soon as the
+  compute queue is free. The down weights are loaded in two segments: MXM1 can
+  start early after stream conflicts clear, while MXM0 waits until the `E0`
+  activation stream is no longer needed. Because MEM is single-port, the down
+  GEMM still waits until the second SwiGLU writeback has finished before reading
+  hidden activations from the same MEM slice.
+- `Compute` names the buffer to consume; no `LW` or active-weight commit is
+  issued.
 
 `mxm.log` includes per-phase and total MXM performance counters:
 
 ```text
 offline_gate_up_p0_mxm0 perf cycles=160 active_cycles=160 ...
-offline_total_mxm0 perf cycles=613 active_cycles=480 ...
+offline_total_mxm0 perf cycles=614 active_cycles=480 ...
 ```
 
 The per-phase utilization uses the tile0 compute window. The total utilization
@@ -339,7 +343,16 @@ The offline ICU log prints the key phase starts, for example:
 
 ```text
 offline ICU FFN program loaded before cycle 0
-  load0.mxm0_iw=18 load0.mxm1_iw=18 load0.lw=38 gemm0=39 load1.mxm1_iw=59 load1.mxm0_iw=39 load1.lw=239 gemm1=240 down_load.mxm1_iw=260 down_load.mxm0_iw=240 down_load.lw=440 down_gemm=453
+  schedule=baseline p1 compute waits for the previous MXM output queue window
+  load0.mxm0_iw=18 load0.mxm1_iw=18 load0.done=38 gemm0=38 gemm0_output=38 load1.mxm1_iw=58 load1.mxm0_iw=38 load1.done=78 gemm1=236 gemm1_output=236 down_load.mxm1_iw=454 down_load.mxm0_iw=405 down_load.done=474 down_gemm=474 down_output=474
+```
+
+The early-compute variant currently prints:
+
+```text
+offline ICU FFN program loaded before cycle 0
+  schedule=early_mxm_compute p1 compute starts as soon as the compute queue is free
+  load0.mxm0_iw=18 load0.mxm1_iw=18 load0.done=38 gemm0=38 gemm0_output=38 load1.mxm1_iw=58 load1.mxm0_iw=38 load1.done=78 gemm1=198 gemm1_output=236 down_load.mxm1_iw=256 down_load.mxm0_iw=367 down_load.done=387 down_gemm=450 down_output=450
 ```
 
 ## Data Layout Summary
@@ -373,8 +386,6 @@ Final output:
 
 - The model is not bit-accurate to any private Groq ISA.
 - `Gather` and `Scatter` are not the focus of current tests.
-- `MxmGemmEngine` is still owned by tests rather than fully integrated into
-  `TspSliceSystem::tick()`.
 - The current VXM op list is intentionally small and contains only the ops needed
   for the current FFN/SwiGLU experiments plus simple scalar primitives.
 - The compiler does not exist yet. `OfflineIcuProgram` is a prototype container
@@ -384,7 +395,8 @@ Final output:
 
 Near-term engineering work:
 
-- Move MXM GEMM execution fully into `TspSliceSystem`.
+- Tighten the MXM runtime timing against more detailed hardware pipeline
+  assumptions.
 - Turn `OfflineIcuProgram` into a reusable module instead of a test-local helper.
 - Add a textual or binary program dump/load format using the ISA codec.
 - Add a simple compiler pass that emits MEM Read/Write, MXM IW/Compute/Output,

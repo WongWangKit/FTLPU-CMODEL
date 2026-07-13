@@ -101,6 +101,7 @@ public:
         }
         icu_.dispatch(mem_, vxm_, mxms_, sinks.icu);
         tick_mxm_controls(sinks);
+        tick_mxm_datapaths(sinks);
         vxm_.prepare_cycle();
         transfer_mem_west_to_vxm(sinks);
         vxm_.tick(sinks.vxm, sinks.vxm_log_tile);
@@ -119,6 +120,11 @@ public:
     void tick_mxm_controls_only(LogSinks sinks)
     {
         tick_mxm_controls(sinks);
+    }
+
+    void tick_mxm_datapaths_only(LogSinks sinks)
+    {
+        tick_mxm_datapaths(sinks);
     }
 
     void tick_vxm_stream_bridge(LogSinks sinks, std::optional<std::size_t> log_tile = std::nullopt)
@@ -175,6 +181,13 @@ private:
                 static NullStream null_stream;
                 mxms_[mxm].control().tick(null_stream.stream(), provider, false);
             }
+        }
+    }
+
+    void tick_mxm_datapaths(LogSinks sinks)
+    {
+        for (std::size_t mxm = 0; mxm < kMxmCount; ++mxm) {
+            mxms_[mxm].tick_datapath(mem_, mxm, sinks.mxm, sinks.mxm_log_tile);
         }
     }
 

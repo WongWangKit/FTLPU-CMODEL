@@ -54,23 +54,20 @@ int main()
     std::ostringstream log;
 
     supercell.set_input(full_input());
-    supercell.issue(ftlpu::MxmInstruction::IW());
+    supercell.issue(ftlpu::MxmInstruction::IW(1));
     supercell.tick(log);
-    assert(supercell.weight_buffer_valid());
-    assert(supercell.weight(15, 15) == 0);
-    assert(supercell.buffered_weight(15, 15) == static_cast<std::int8_t>(15 * 16 + 15));
-
-    supercell.issue(ftlpu::MxmInstruction::LW());
-    supercell.tick(log);
-    assert(supercell.weight_buffer_valid());
+    assert(supercell.weight_buffer_valid(1));
+    assert(!supercell.weight_buffer_valid(0));
+    assert(supercell.weight(0, 15, 15) == 0);
+    assert(supercell.weight(1, 15, 15) == static_cast<std::int8_t>(15 * 16 + 15));
 
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
         for (std::size_t stream = 0; stream < ftlpu::hw::kMxmLoadStreamsPerCycle; ++stream) {
-            assert(supercell.weight(lane, stream) == static_cast<std::int8_t>(lane * 16 + stream));
+            assert(supercell.weight(1, lane, stream) == static_cast<std::int8_t>(lane * 16 + stream));
         }
     }
 
-    supercell.set_activation_input(activation_input());
+    supercell.set_activation_input(activation_input(), 1);
     for (std::size_t column = 0; column < ftlpu::hw::kMxmSupercellColumns; ++column) {
         supercell.tick(log);
         const auto& outputs = supercell.outputs();
@@ -84,7 +81,7 @@ int main()
 
     for (std::size_t cycle = 0; cycle < ftlpu::hw::kMxmSupercellColumns; ++cycle) {
         const auto base = static_cast<std::int8_t>(cycle + 1);
-        supercell.set_activation_input(activation_input(base));
+        supercell.set_activation_input(activation_input(base), 1);
         supercell.tick(log);
 
         const auto& outputs = supercell.outputs();
@@ -102,7 +99,7 @@ int main()
     supercell.reset();
     bool caught = false;
     try {
-        supercell.issue(ftlpu::MxmInstruction::LW());
+        supercell.set_activation_input(activation_input(), 0);
         supercell.tick(log);
     } catch (const std::logic_error&) {
         caught = true;
@@ -115,7 +112,7 @@ int main()
     caught = false;
     try {
         supercell.set_input(missing);
-        supercell.issue(ftlpu::MxmInstruction::IW());
+        supercell.issue(ftlpu::MxmInstruction::IW(0));
         supercell.tick(log);
     } catch (const std::logic_error&) {
         caught = true;
@@ -123,8 +120,7 @@ int main()
     assert(caught);
 
     const auto text = log.str();
-    assert(text.find("IW buffer=0x000102030405060708090a0b0c0d0e0f") != std::string::npos);
-    assert(text.find("LW matrix=0x000102030405060708090a0b0c0d0e0f") != std::string::npos);
+    assert(text.find("IW buffer1=0x000102030405060708090a0b0c0d0e0f") != std::string::npos);
     assert(text.find("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff") != std::string::npos);
     assert(text.find("MAC col=0 result=" + std::to_string(expected_dot(1, 0))) != std::string::npos);
     assert(text.find("MAC col=15 result=" + std::to_string(expected_dot(1, 15))) != std::string::npos);

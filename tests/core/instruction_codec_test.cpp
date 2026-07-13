@@ -20,8 +20,9 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
 {
     return lhs.opcode == rhs.opcode
         && lhs.supercell_column == rhs.supercell_column
-        && lhs.column_mask == rhs.column_mask
-        && lhs.stream_base == rhs.stream_base;
+        && lhs.weight_buffer == rhs.weight_buffer
+        && lhs.stream_base == rhs.stream_base
+        && lhs.activation_stream_base == rhs.activation_stream_base;
 }
 
 bool same_operand(const ftlpu::VxmLaneOperand& lhs, const ftlpu::VxmLaneOperand& rhs)
@@ -92,9 +93,8 @@ bool verify_mem_codec()
 bool verify_mxm_codec()
 {
     const ftlpu::MxmControlInstruction instructions[] {
-        ftlpu::MxmControlInstruction::IW(19),
-        ftlpu::MxmControlInstruction::LW(0x54321u),
-        ftlpu::MxmControlInstruction::Compute(),
+        ftlpu::MxmControlInstruction::IW(19, 1),
+        ftlpu::MxmControlInstruction::Compute(1, 31),
         ftlpu::MxmControlInstruction::Output(36),
     };
 

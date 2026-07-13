@@ -1,7 +1,6 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
-#include "ftlpu/mxm/gemm_engine.hpp"
 
 #include <cstddef>
 #include <iomanip>
@@ -12,12 +11,13 @@ namespace ftlpu {
 
 class MxmPerformanceMonitor {
 public:
-    void sample(const MxmGemmEngine& gemm)
+    template <typename MxmDatapath>
+    void sample(const MxmDatapath& datapath)
     {
         std::size_t active = 0;
         for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
             for (std::size_t column = 0; column < hw::kMxmSupercellsPerPlane; ++column) {
-                if (gemm.computing_cell(tile, column)) {
+                if (datapath.computing_cell(tile, column)) {
                     ++active;
                 }
             }
