@@ -70,7 +70,7 @@ bool verify_mem_codec()
 {
     const ftlpu::MemInstruction instructions[] {
         ftlpu::MemInstruction::Read(4096, 45),
-        ftlpu::MemInstruction::Write(8191, 63),
+        ftlpu::MemInstruction::Write((ftlpu::hw::kSramDepthWords - 1) << 4, 63),
         ftlpu::MemInstruction::Gather(7, 55),
         ftlpu::MemInstruction::Scatter(36, 12),
     };
@@ -85,9 +85,9 @@ bool verify_mem_codec()
 
     return require_throws(
         [] {
-            ftlpu::isa::encode_mem_instruction(ftlpu::MemInstruction::Read(8192, 0));
+            ftlpu::isa::encode_mem_instruction(ftlpu::MemInstruction::Read(17, 0));
         },
-        "MEM codec should reject addresses outside the 13-bit SRAM word range");
+        "MEM codec should reject unaligned SRAM byte addresses");
 }
 
 bool verify_mxm_codec()

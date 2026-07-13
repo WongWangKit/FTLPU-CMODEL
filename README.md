@@ -15,7 +15,8 @@ handoffs can be tested cycle by cycle.
 The repository currently models:
 
 - `MEM`: 44 slice columns, 20 tile rows, 16 lanes per tile, 32 east streams and
-  32 west streams per lane. Each stream register is one byte wide.
+  32 west streams per lane. Each stream register is one byte wide. Each
+  tile-local SRAM has two banks, and each bank is 4096 x 16 bytes.
 - `MXM`: two east-side MXM units. Each unit is a 20 x 20 array of 16 x 16
   supercells. Each supercell has two peer weight buffers; `IW` selects which
   buffer to fill and `Compute` selects which buffer to use for a 320 x 320 int8

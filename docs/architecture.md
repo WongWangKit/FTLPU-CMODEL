@@ -33,14 +33,30 @@ Current topology:
 - 16 lanes per tile/superlane.
 - 64 streams per lane: 32 eastward and 32 westward.
 - 1 byte per stream register.
-- One modeled SRAM block per MEM slice column.
-- One modeled hemisphere: 44 SRAM blocks.
-- Public two-hemisphere total: 88 SRAM blocks.
-- 320-byte physical vector width.
-- 8192 vector words per SRAM block.
+- One modeled hemisphere: 44 MEM/SRAM slice columns.
+- Public two-hemisphere total: 88 MEM/SRAM slices.
+- Each slice column has 20 tile-local SRAM blocks.
+- Each tile-local SRAM block has two banks.
+- Each bank is 4096 words x 16 bytes.
+- A complete slice is 20 x 2 x 4096 x 16 bytes = 2.5 MiB.
 
-The SRAM arrays in `TileArrayModel` are byte-addressable for simplicity, while
-the public SRAM block math is still tracked in the hardware parameters.
+Software-visible MEM addresses follow the public-style layout:
+
+```text
+[39:24] TSP chip
+[23]    hemisphere, East=1 and West=0
+[22:17] slice number 0..43
+[16]    bank
+[15:4]  4096-word offset within the selected bank
+[3:0]   byte offset within the 16-byte SRAM word
+```
+
+The current model instantiates one hemisphere. A MEM slice receives one
+instruction stream; for `Read` and `Write`, the encoded hardware address field
+is the 13-bit slice-local word address copied from software address bits
+`[16:4]`. `set_sram_byte` and `sram_byte` keep byte-level access for tests and
+initialization, while MEM `Read` and `Write` require 16-byte alignment and move
+one full SRAM word per cycle.
 
 ## Stream Direction Conventions
 
@@ -66,11 +82,12 @@ Important behavior:
 - Each MEM slice column is modeled as a single instruction port. A slice cannot
   issue a `Read` and a `Write` in the same cycle; schedules that need both must
   place them on different cycles.
-- A `Read(address, stream)` reads 16 bytes from the tile SRAM, one byte per lane,
-  and writes them into the selected stream at the stream register adjacent to
-  that MEM slice.
+- A `Read(address, stream)` reads one aligned 16-byte SRAM word from the bank
+  selected by address bit 16, one byte per lane, and writes those bytes into the
+  selected stream at the stream register adjacent to that MEM slice.
 - A `Write(address, stream)` consumes 16 bytes from the selected stream, one byte
-  per lane, and writes them into SRAM.
+  per lane, and writes one aligned SRAM word into the bank selected by address
+  bit 16.
 - `Gather` and `Scatter` are represented in the instruction enum, but the current
   tests focus on `Read` and `Write`.
 
@@ -209,6 +226,10 @@ Current encoding:
 - MXM control instruction: 32 bits.
 - VXM ALU instruction: 3 x 32-bit words.
 - ICU queue command: 32 bits.
+
+The MEM instruction address field is not the full software address. It encodes
+only the slice-local SRAM word address: bit 12 is the bank and bits 11:0 are the
+4096-word offset. The low software byte offset must be zero for `Read`/`Write`.
 
 This is a compact FTLPU CModel encoding, not a Groq hardware binary encoding.
 It deliberately rejects model-only metadata such as VXM operand scale and output

@@ -4,6 +4,7 @@
 #include "ftlpu/mem/slice.hpp"
 #include "ftlpu/core/stream.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -67,11 +68,7 @@ public:
         executed_mem_.clear();
         executed_instructions_.clear();
         pending_stream_writes_.clear();
-        for (auto& column : sram_) {
-            for (auto& tile : column) {
-                tile.fill(0);
-            }
-        }
+        std::fill(sram_.begin(), sram_.end(), 0);
     }
 
     std::size_t cycle() const
@@ -105,8 +102,7 @@ public:
     {
         check_column(column);
         check_tile(tile);
-        check_sram_address(address);
-        sram_[column][tile][address] = value;
+        sram_[sram_index(column, tile, address)] = value;
     }
 
     const StreamSlot& east_register(std::size_t tile, std::size_t lane, std::size_t register_file, std::size_t stream) const
@@ -142,8 +138,7 @@ public:
     {
         check_column(column);
         check_tile(tile);
-        check_sram_address(address);
-        return sram_[column][tile][address];
+        return sram_[sram_index(column, tile, address)];
     }
 
     const InstructionSlot& instruction_at(std::size_t column, std::size_t tile) const
@@ -172,11 +167,15 @@ public:
     }
 
 private:
-    static constexpr std::size_t kModeledTileSramBytes = 8192;
-
     struct DecodedStream {
         StreamDirection direction{StreamDirection::East};
         std::size_t stream{0};
+    };
+
+    struct DecodedSramAddress {
+        std::size_t bank{0};
+        std::size_t word{0};
+        std::size_t byte{0};
     };
 
     struct PendingStreamWrite {
@@ -230,11 +229,30 @@ private:
         }
     }
 
-    static void check_sram_address(std::size_t address)
+    static DecodedSramAddress decode_sram_address(std::size_t address)
     {
-        if (address >= kModeledTileSramBytes) {
-            throw std::out_of_range("modeled tile SRAM address is outside local storage");
+        return DecodedSramAddress {
+            (address >> 16) & (hw::kSramBanksPerTile - 1),
+            (address >> 4) & (hw::kSramBankDepthWords - 1),
+            address & (hw::kSramWordBytes - 1),
+        };
+    }
+
+    static void check_sram_word_aligned(std::size_t address)
+    {
+        if ((address & (hw::kSramWordBytes - 1)) != 0) {
+            throw std::out_of_range("MEM SRAM Read/Write address must be 16-byte word aligned");
         }
+    }
+
+    static std::size_t sram_index(std::size_t column, std::size_t tile, std::size_t address)
+    {
+        const auto decoded = decode_sram_address(address);
+        return (((column * hw::kTileRows + tile) * hw::kSramBanksPerTile + decoded.bank)
+                   * hw::kSramBankDepthWords
+                   + decoded.word)
+                * hw::kSramWordBytes
+            + decoded.byte;
     }
 
     static DecodedStream decode_stream(std::size_t stream)
@@ -398,7 +416,7 @@ private:
     void execute_read(std::size_t column, std::size_t tile, const MemInstruction& instruction)
     {
         const auto decoded = decode_stream(instruction.stream);
-        check_sram_address(instruction.address + hw::kLanesPerTile - 1);
+        check_sram_word_aligned(instruction.address);
 
         MemTransfer transfer {
             MemTransfer::Kind::LoadSramToStream,
@@ -411,7 +429,7 @@ private:
         };
 
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            const auto value = sram_[column][tile][instruction.address + lane];
+            const auto value = sram_[sram_index(column, tile, instruction.address + lane)];
             const auto source_register = decoded.direction == StreamDirection::East
                 ? stream_register_before_column(column)
                 : stream_register_after_column(column);
@@ -435,7 +453,7 @@ private:
     void execute_write(std::size_t column, std::size_t tile, const MemInstruction& instruction)
     {
         const auto decoded = decode_stream(instruction.stream);
-        check_sram_address(instruction.address + hw::kLanesPerTile - 1);
+        check_sram_word_aligned(instruction.address);
 
         MemTransfer transfer {
             MemTransfer::Kind::StoreStreamToSram,
@@ -450,7 +468,7 @@ private:
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             auto& slot = stream_slot(decoded.direction, tile, lane, column, decoded.stream);
             const auto value = slot.has_value() ? slot->data : 0;
-            sram_[column][tile][instruction.address + lane] = value;
+            sram_[sram_index(column, tile, instruction.address + lane)] = value;
             transfer.bytes[lane] = value;
             slot.reset();
         }
@@ -689,7 +707,7 @@ private:
         pending_east_inputs_{};
     std::array<std::array<std::array<StreamSlot, hw::kWestStreams>, hw::kLanesPerTile>, hw::kTileRows>
         pending_west_inputs_{};
-    std::array<std::array<std::array<Data, kModeledTileSramBytes>, hw::kTileRows>, hw::kSliceColumns> sram_{};
+    std::vector<Data> sram_ = std::vector<Data>(hw::kSliceColumns * hw::kTileRows * hw::kSramBytesPerTile);
     std::vector<MemTransfer> executed_mem_{};
     std::vector<InstructionTrace> executed_instructions_{};
     std::vector<PendingStreamWrite> pending_stream_writes_{};

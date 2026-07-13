@@ -20,7 +20,8 @@ namespace isa {
 // FTLPU hardware ISA encoding for the modeled slice.
 //
 // MEM 32b:
-//   [1:0] opcode, [7:2] stream, [13:8] map stream, [26:14] SRAM address.
+//   [1:0] opcode, [7:2] stream, [13:8] map stream,
+//   [26:14] slice-local SRAM word address, copied from software address bits [16:4].
 // MXM control 32b:
 //   IW     [1:0] opcode, [6:2] supercell column, [7] weight buffer.
 //   Compute [1:0] opcode, [2] weight buffer.
@@ -136,6 +137,7 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
     constexpr std::uint64_t kOpcodeMask = 0x3;
     constexpr std::uint64_t kStreamMask = 0x3f;
     constexpr std::uint64_t kAddressMask = hw::kSramDepthWords - 1;
+    constexpr std::uint64_t kByteOffsetMask = hw::kSramWordBytes - 1;
 
     detail::require_unsigned_fit(
         static_cast<std::uint64_t>(instruction.opcode),
@@ -149,16 +151,16 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
         static_cast<std::uint64_t>(instruction.map_stream),
         kStreamMask,
         "MEM map stream does not fit encoded instruction");
-    detail::require_unsigned_fit(
-        static_cast<std::uint64_t>(instruction.address),
-        kAddressMask,
-        "MEM address does not fit encoded instruction");
+    if ((instruction.address & kByteOffsetMask) != 0) {
+        throw std::out_of_range("MEM address must be 16-byte aligned for encoded instruction");
+    }
+    const auto local_word_address = (static_cast<std::uint64_t>(instruction.address) >> 4) & kAddressMask;
 
     return static_cast<std::uint32_t>(
         static_cast<std::uint64_t>(instruction.opcode)
         | (static_cast<std::uint64_t>(instruction.stream) << 2)
         | (static_cast<std::uint64_t>(instruction.map_stream) << 8)
-        | (static_cast<std::uint64_t>(instruction.address) << 14));
+        | (local_word_address << 14));
 }
 
 inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
@@ -168,7 +170,7 @@ inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
     const auto opcode = static_cast<MemOpcode>(detail::low_bits(word, 0, 0x3));
     const auto stream = static_cast<std::size_t>(detail::low_bits(word, 2, 0x3f));
     const auto map_stream = static_cast<std::size_t>(detail::low_bits(word, 8, 0x3f));
-    const auto address = static_cast<std::size_t>(detail::low_bits(word, 14, 0x1fff));
+    const auto address = static_cast<std::size_t>(detail::low_bits(word, 14, 0x1fff) << 4);
 
     switch (opcode) {
     case MemOpcode::Read:
