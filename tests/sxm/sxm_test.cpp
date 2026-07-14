@@ -98,18 +98,28 @@ int main()
     }
     assert(caught);
 
-    ftlpu::SxmUnitGroup<std::int32_t> sxm;
+    using IntUnitGroup = ftlpu::SxmUnitGroup<std::int32_t>;
+    auto set_input = [](IntUnitGroup::StreamState& state, std::size_t stream, const TileVector& values) {
+        for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+            state[stream][lane] = IntUnitGroup::Word {
+                values[lane],
+                lane + 1 == ftlpu::hw::kLanesPerTile,
+            };
+        }
+    };
+
+    IntUnitGroup sxm;
+    IntUnitGroup::StreamState inputs{};
     for (std::size_t stream = 0; stream < ftlpu::hw::kLanesPerTile; ++stream) {
-        sxm.set_stream_input(
-            ftlpu::SxmStreamId {stream},
-            lane_vector(static_cast<std::int32_t>(stream * 100)));
+        set_input(inputs, stream, lane_vector(static_cast<std::int32_t>(stream * 100)));
     }
 
     sxm.issue(ftlpu::SxmInstruction::Transpose(stream_range(0, 16), stream_range(16, 16)));
-    sxm.tick();
-    assert(sxm.stream_available(ftlpu::SxmStreamId {16}));
-    assert(sxm.stream(ftlpu::SxmStreamId {16})[3]->data == 300);
-    assert(sxm.stream(ftlpu::SxmStreamId {23})[3]->data == 307);
+    auto evaluation = sxm.evaluate(inputs);
+    sxm.complete_cycle();
+    assert(evaluation.produced[16]);
+    assert(evaluation.outputs[16][3]->data == 300);
+    assert(evaluation.outputs[23][3]->data == 307);
 
     auto chained_map = ftlpu::Distribute16::identity_map();
     chained_map[0] = 3;
@@ -117,20 +127,23 @@ int main()
         ftlpu::SxmStreamId {16},
         ftlpu::SxmStreamId {40},
         chained_map));
-    sxm.tick();
-    assert(sxm.stream_available(ftlpu::SxmStreamId {40}));
+    evaluation = sxm.evaluate(evaluation.outputs);
+    sxm.complete_cycle();
+    assert(evaluation.produced[40]);
 
     sxm.issue(ftlpu::SxmInstruction::Distribute(
         ftlpu::SxmStreamId {40},
         ftlpu::SxmStreamId {41},
         ftlpu::Distribute16::identity_map()));
-    sxm.tick();
-    assert(!sxm.stream_occupied(ftlpu::SxmStreamId {40}));
-    assert(sxm.stream_available(ftlpu::SxmStreamId {41}));
-    assert(sxm.stream(ftlpu::SxmStreamId {41})[0]->data == 300);
+    evaluation = sxm.evaluate(evaluation.outputs);
+    sxm.complete_cycle();
+    assert(evaluation.consumed[40]);
+    assert(evaluation.produced[41]);
+    assert(evaluation.outputs[41][0]->data == 300);
 
-    ftlpu::SxmUnitGroup<std::int32_t> same_cycle_dependency_sxm;
-    same_cycle_dependency_sxm.set_stream_input(ftlpu::SxmStreamId {0}, lane_vector(0));
+    IntUnitGroup same_cycle_dependency_sxm;
+    IntUnitGroup::StreamState dependency_inputs{};
+    set_input(dependency_inputs, 0, lane_vector(0));
     same_cycle_dependency_sxm.issue(ftlpu::SxmInstruction::Distribute(
         ftlpu::SxmStreamId {0},
         ftlpu::SxmStreamId {1},
@@ -141,14 +154,14 @@ int main()
         ftlpu::Distribute16::identity_map()));
     caught = false;
     try {
-        same_cycle_dependency_sxm.tick();
+        static_cast<void>(same_cycle_dependency_sxm.evaluate(dependency_inputs));
     }
     catch (const std::logic_error&) {
         caught = true;
     }
     assert(caught);
 
-    ftlpu::SxmUnitGroup<std::int32_t> width_limited_sxm;
+    IntUnitGroup width_limited_sxm;
     for (std::size_t op = 0; op < ftlpu::hw::kSxmConcurrentStreamOps; ++op) {
         width_limited_sxm.issue(ftlpu::SxmInstruction::Distribute(
             ftlpu::SxmStreamId {0},
@@ -166,6 +179,42 @@ int main()
         caught = true;
     }
     assert(caught);
+
+    // The SR-facing slice consumes from the global fabric and stages its
+    // output without retaining a second copy of either stream.
+    ftlpu::StreamRegisterFabric fabric(2);
+    const auto east0 = ftlpu::StreamId::East(0);
+    const auto east1 = ftlpu::StreamId::East(1);
+    for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+        for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+            fabric.initialize_cell(
+                0,
+                tile,
+                lane,
+                east0,
+                ftlpu::StreamCell::Valid(
+                    static_cast<std::uint8_t>(tile * ftlpu::hw::kLanesPerTile + lane),
+                    lane + 1 == ftlpu::hw::kLanesPerTile,
+                    77));
+        }
+    }
+
+    auto sr_map = ftlpu::Distribute16::identity_map();
+    sr_map[0] = 15;
+    ftlpu::SxmSlice sr_sxm(ftlpu::SxmStreamPortMap::SameDirection(0, 1));
+    sr_sxm.issue(ftlpu::SxmInstruction::Distribute(
+        ftlpu::SxmStreamId {east0.packed()},
+        ftlpu::SxmStreamId {east1.packed()},
+        sr_map));
+
+    fabric.begin_cycle();
+    sr_sxm.evaluate(fabric);
+    fabric.commit_cycle();
+    assert(sr_sxm.cycle() == 1);
+    assert(!fabric.cell(0, 0, 0, east0).valid);
+    assert(fabric.cell(1, 0, 0, east1).valid);
+    assert(fabric.cell(1, 0, 0, east1).data == 15);
+    assert(fabric.cell(1, 19, 0, east1).data == 63);
 
     return 0;
 }
