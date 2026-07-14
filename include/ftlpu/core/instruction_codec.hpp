@@ -23,13 +23,13 @@ namespace isa {
 //   [1:0] opcode, [7:2] stream, [13:8] map stream,
 //   [26:14] slice-local SRAM word address, copied from software address bits [16:4].
 // MXM control 32b:
-//   IW     [1:0] opcode, [6:2] supercell column, [7] weight buffer.
-//   Compute [1:0] opcode, [2] weight buffer.
-//   Output [1:0] opcode, [12:7] stream base.
+//   IW      [1:0] opcode, [2] weight buffer.
+//   Compute [1:0] opcode, [2] weight buffer, [8:3] activation stream base,
+//           [14:9] output stream base.
 // VXM ALU 3x32b:
 //   word0 [4:0] opcode, [6:5] lhs kind, [12:7] lhs index,
-//         [14:13] rhs kind, [20:15] rhs index, [21] cast target,
-//         [22] output valid, [28:23] output stream.
+//         [14:13] rhs kind, [20:15] rhs index, [22:21] cast target,
+//         [23] output valid, [29:24] output stream.
 //   word1 lhs immediate literal, word2 rhs immediate literal.
 // ICU queue command 32b:
 //   NOP    [1:0] opcode, [31:2] cycle count.
@@ -188,7 +188,6 @@ inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
 inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction& instruction)
 {
     constexpr std::uint32_t kOpcodeMask = 0x3;
-    constexpr std::uint32_t kSupercellColumnMask = 0x1f;
     constexpr std::uint32_t kWeightBufferMask = 0x1;
     constexpr std::uint32_t kStreamBaseMask = 0x3f;
     constexpr std::uint32_t kActivationStreamMask = 0x3f;
@@ -201,16 +200,10 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
     switch (instruction.opcode) {
     case MxmControlOpcode::IW:
         detail::require_unsigned_fit(
-            static_cast<std::uint64_t>(instruction.supercell_column),
-            kSupercellColumnMask,
-            "MXM supercell column does not fit encoded instruction");
-        detail::require_unsigned_fit(
             static_cast<std::uint64_t>(instruction.weight_buffer),
             kWeightBufferMask,
             "MXM weight buffer does not fit encoded instruction");
-        return opcode
-            | (static_cast<std::uint32_t>(instruction.supercell_column) << 2)
-            | (static_cast<std::uint32_t>(instruction.weight_buffer) << 7);
+        return opcode | (static_cast<std::uint32_t>(instruction.weight_buffer) << 2);
     case MxmControlOpcode::Compute:
         detail::require_unsigned_fit(
             static_cast<std::uint64_t>(instruction.weight_buffer),
@@ -220,15 +213,14 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
             static_cast<std::uint64_t>(instruction.activation_stream_base),
             kActivationStreamMask,
             "MXM activation stream base does not fit encoded instruction");
-        return opcode
-            | (static_cast<std::uint32_t>(instruction.weight_buffer) << 2)
-            | (static_cast<std::uint32_t>(instruction.activation_stream_base) << 3);
-    case MxmControlOpcode::Output:
         detail::require_unsigned_fit(
             static_cast<std::uint64_t>(instruction.stream_base),
             kStreamBaseMask,
-            "MXM stream base does not fit encoded instruction");
-        return opcode | (static_cast<std::uint32_t>(instruction.stream_base) << 7);
+            "MXM output stream base does not fit encoded instruction");
+        return opcode
+            | (static_cast<std::uint32_t>(instruction.weight_buffer) << 2)
+            | (static_cast<std::uint32_t>(instruction.activation_stream_base) << 3)
+            | (static_cast<std::uint32_t>(instruction.stream_base) << 9);
     }
     throw std::logic_error("unknown MXM opcode");
 }
@@ -236,22 +228,18 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
 inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
 {
     const auto opcode = static_cast<MxmControlOpcode>(word & 0x3u);
-    const auto supercell_column = static_cast<std::size_t>((word >> 2) & 0x1fu);
-    const auto iw_weight_buffer = static_cast<std::size_t>((word >> 7) & 0x1u);
+    const auto iw_weight_buffer = static_cast<std::size_t>((word >> 2) & 0x1u);
     const auto compute_weight_buffer = static_cast<std::size_t>((word >> 2) & 0x1u);
     const auto compute_activation_stream_base = static_cast<std::size_t>((word >> 3) & 0x3fu);
-    const auto stream_base = static_cast<std::size_t>((word >> 7) & 0x3fu);
+    const auto stream_base = static_cast<std::size_t>((word >> 9) & 0x3fu);
 
     switch (opcode) {
     case MxmControlOpcode::IW:
-        detail::require_reserved_zero(word, 0x000000ffu, "encoded MXM IW instruction has non-zero reserved bits");
-        return MxmControlInstruction::IW(supercell_column, iw_weight_buffer);
+        detail::require_reserved_zero(word, 0x00000007u, "encoded MXM IW instruction has non-zero reserved bits");
+        return MxmControlInstruction::IW(iw_weight_buffer);
     case MxmControlOpcode::Compute:
-        detail::require_reserved_zero(word, 0x000001ffu, "encoded MXM Compute instruction has non-zero reserved bits");
-        return MxmControlInstruction::Compute(compute_weight_buffer, compute_activation_stream_base);
-    case MxmControlOpcode::Output:
-        detail::require_reserved_zero(word, 0x00001f83u, "encoded MXM Output instruction has non-zero reserved bits");
-        return MxmControlInstruction::Output(stream_base);
+        detail::require_reserved_zero(word, 0x00007fffu, "encoded MXM Compute instruction has non-zero reserved bits");
+        return MxmControlInstruction::Compute(compute_weight_buffer, compute_activation_stream_base, stream_base);
     }
     throw std::logic_error("unknown encoded MXM opcode");
 }
@@ -260,6 +248,7 @@ inline EncodedVxmInstruction encode_vxm_instruction(const VxmLaneAluInstruction&
 {
     constexpr std::uint32_t kOpcodeMask = 0x1f;
     constexpr std::uint32_t kOperandKindMask = 0x3;
+    constexpr std::uint32_t kCastTargetMask = 0x3;
     constexpr std::uint32_t kOutputStreamMask = 0x3f;
 
     detail::require_default_float(instruction.scale, "VXM instruction scale is model metadata, not a hardware ISA field");
@@ -280,6 +269,10 @@ inline EncodedVxmInstruction encode_vxm_instruction(const VxmLaneAluInstruction&
         static_cast<std::uint64_t>(instruction.rhs.kind),
         kOperandKindMask,
         "VXM rhs operand kind does not fit encoded instruction");
+    detail::require_unsigned_fit(
+        static_cast<std::uint64_t>(instruction.cast_target),
+        kCastTargetMask,
+        "VXM cast target does not fit encoded instruction");
     if (instruction.output_stream.has_value()) {
         detail::require_unsigned_fit(
             *instruction.output_stream,
@@ -294,8 +287,8 @@ inline EncodedVxmInstruction encode_vxm_instruction(const VxmLaneAluInstruction&
         | (static_cast<std::uint32_t>(instruction.rhs.index) << 15)
         | (static_cast<std::uint32_t>(instruction.cast_target) << 21);
     if (instruction.output_stream.has_value()) {
-        control |= 1u << 22;
-        control |= static_cast<std::uint32_t>(*instruction.output_stream) << 23;
+        control |= 1u << 23;
+        control |= static_cast<std::uint32_t>(*instruction.output_stream) << 24;
     }
 
     return EncodedVxmInstruction {
@@ -310,7 +303,7 @@ inline EncodedVxmInstruction encode_vxm_instruction(const VxmLaneAluInstruction&
 inline VxmLaneAluInstruction decode_vxm_instruction(const EncodedVxmInstruction& encoded)
 {
     const auto control = encoded.words[0];
-    constexpr std::uint32_t kUsedMask = 0x1fffffffu;
+    constexpr std::uint32_t kUsedMask = 0x3fffffffu;
     detail::require_reserved_zero(control, kUsedMask, "encoded VXM control word has non-zero reserved bits");
     auto instruction = VxmLaneAluInstruction {};
     instruction.opcode = static_cast<VxmAluOpcode>(control & 0x1fu);
@@ -318,9 +311,9 @@ inline VxmLaneAluInstruction decode_vxm_instruction(const EncodedVxmInstruction&
     instruction.lhs.index = static_cast<std::size_t>((control >> 7) & 0x3fu);
     instruction.rhs.kind = static_cast<VxmLaneOperandKind>((control >> 13) & 0x3u);
     instruction.rhs.index = static_cast<std::size_t>((control >> 15) & 0x3fu);
-    instruction.cast_target = static_cast<VxmCastTarget>((control >> 21) & 0x1u);
-    if (((control >> 22) & 0x1u) != 0u) {
-        instruction.output_stream = static_cast<std::size_t>((control >> 23) & 0x3fu);
+    instruction.cast_target = static_cast<VxmCastTarget>((control >> 21) & 0x3u);
+    if (((control >> 23) & 0x1u) != 0u) {
+        instruction.output_stream = static_cast<std::size_t>((control >> 24) & 0x3fu);
     } else {
         instruction.output_stream.reset();
     }

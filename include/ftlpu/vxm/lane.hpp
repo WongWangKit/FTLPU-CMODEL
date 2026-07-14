@@ -13,6 +13,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace ftlpu {
 
@@ -103,6 +104,8 @@ public:
     struct Output {
         std::int8_t value{0};
         std::size_t stream{0};
+        std::array<std::uint8_t, 2> bytes{};
+        std::size_t byte_count{1};
     };
 
     void reset()
@@ -116,6 +119,7 @@ public:
         pending_streams_.reset();
         streams_.reset();
         output_.reset();
+        outputs_.clear();
         reset_trace();
         cycle_ = 0;
     }
@@ -321,6 +325,7 @@ public:
     void tick()
     {
         output_.reset();
+        outputs_.clear();
         reset_trace();
         last_trace_cycle_ = cycle_;
         if (pending_streams_.has_value()) {
@@ -352,7 +357,16 @@ public:
             trace.value = result->value;
             next_outputs[alu] = result->value;
             if (result->output_valid && instruction.output_stream.has_value()) {
-                output_ = Output {result->output, *instruction.output_stream};
+                auto output = Output {
+                    result->output,
+                    *instruction.output_stream,
+                    result->output_bytes,
+                    result->output_byte_count,
+                };
+                if (!output_.has_value()) {
+                    output_ = output;
+                }
+                outputs_.push_back(output);
                 trace.output = result->output;
             }
             queues_[alu].pop_front();
@@ -366,6 +380,11 @@ public:
     const std::optional<Output>& output() const
     {
         return output_;
+    }
+
+    const std::vector<Output>& outputs() const
+    {
+        return outputs_;
     }
 
     const std::optional<Output>& last_output() const
@@ -520,6 +539,8 @@ private:
     struct AluResult {
         float value{0.0f};
         std::int8_t output{0};
+        std::array<std::uint8_t, 2> output_bytes{};
+        std::size_t output_byte_count{1};
         bool output_valid{false};
     };
 
@@ -623,7 +644,19 @@ private:
         case VxmAluOpcode::Cast:
             if (instruction.cast_target == VxmCastTarget::Int8) {
                 result.output = VxmAlu::cast_scalar_to_int8(*lhs);
+                result.output_bytes[0] = static_cast<std::uint8_t>(result.output);
+                result.output_byte_count = 1;
                 result.value = static_cast<float>(result.output);
+                result.output_valid = true;
+                return result;
+            }
+            if (instruction.cast_target == VxmCastTarget::Float16) {
+                const auto bits = VxmAlu::cast_scalar_to_float16_bits(*lhs);
+                result.output = static_cast<std::int8_t>(bits & 0xffu);
+                result.output_bytes[0] = static_cast<std::uint8_t>(bits & 0xffu);
+                result.output_bytes[1] = static_cast<std::uint8_t>((bits >> 8) & 0xffu);
+                result.output_byte_count = 2;
+                result.value = *lhs;
                 result.output_valid = true;
                 return result;
             }
@@ -640,6 +673,7 @@ private:
     std::optional<StreamBytes> pending_streams_{};
     std::optional<StreamBytes> streams_{};
     std::optional<Output> output_{};
+    std::vector<Output> outputs_{};
     std::array<VxmLaneAluTrace, kAluCount> last_trace_{};
     std::size_t last_trace_cycle_{0};
     std::size_t cycle_{0};

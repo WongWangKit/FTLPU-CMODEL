@@ -36,12 +36,18 @@ int main(int argc, char** argv)
 
     auto array = std::make_unique<ftlpu::MxmArray>();
     ftlpu::MxmControlSlice control(*array);
-    constexpr std::size_t kColumn = 7;
+    constexpr std::size_t kBuffer = 0;
 
-    control.issue_south(ftlpu::MxmControlInstruction::IW(kColumn, 0));
-    for (std::size_t cycle = 0; cycle < ftlpu::hw::kMxmSupercellsPerPlane; ++cycle) {
-        control.set_weight_input(cycle, row_input(cycle, kColumn));
-        control.tick(log);
+    for (std::size_t column = 0; column < ftlpu::hw::kMxmSupercellsPerPlane; ++column) {
+        control.issue_south(ftlpu::MxmControlInstruction::IW(kBuffer));
+    }
+    auto provider = [&control](std::size_t tile) {
+        const auto token = control.cycle() - tile;
+        const auto target_column = ftlpu::hw::kMxmSupercellsPerPlane - 1 - token;
+        return row_input(tile, target_column);
+    };
+    for (std::size_t cycle = 0; cycle < 2 * ftlpu::hw::kMxmSupercellsPerPlane - 1; ++cycle) {
+        control.tick(log, provider);
     }
 
     std::cout << "wrote MXM control trace log: " << log_path << '\n';

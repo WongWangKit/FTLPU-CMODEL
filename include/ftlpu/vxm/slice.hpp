@@ -10,6 +10,7 @@
 #include <optional>
 #include <ostream>
 #include <stdexcept>
+#include <vector>
 
 namespace ftlpu {
 
@@ -50,6 +51,9 @@ public:
         }
         for (auto& output : output_slots_) {
             output.reset();
+        }
+        for (auto& outputs : output_slots_multi_) {
+            outputs.clear();
         }
         for (auto& required : required_streams_) {
             required.reset();
@@ -137,6 +141,12 @@ public:
     {
         check_tile(tile);
         return output_slots_[tile];
+    }
+
+    const std::vector<Superlane::Output>& outputs_at(std::size_t tile) const
+    {
+        check_tile(tile);
+        return output_slots_multi_[tile];
     }
 
     const std::optional<RequiredStreams>& required_streams_at(std::size_t tile) const
@@ -242,6 +252,7 @@ private:
     {
         for (std::size_t tile = 0; tile < kTileCount; ++tile) {
             output_slots_[tile].reset();
+            output_slots_multi_[tile].clear();
             if (input_slots_[tile].has_value()) {
                 superlanes_[tile].set_stream_inputs(input_slots_[tile]->streams);
                 if (os != nullptr && (!log_tile.has_value() || tile == *log_tile)) {
@@ -250,14 +261,17 @@ private:
             }
 
             superlanes_[tile].tick();
-            if (superlanes_[tile].output().has_value()) {
-                output_slots_[tile] = *superlanes_[tile].output();
+            output_slots_multi_[tile] = superlanes_[tile].outputs();
+            if (!output_slots_multi_[tile].empty()) {
+                output_slots_[tile] = output_slots_multi_[tile].front();
                 if (os != nullptr && (!log_tile.has_value() || tile == *log_tile)) {
-                    *os << "  tile " << tile << " output s" << output_slots_[tile]->stream;
-                    for (const auto value : output_slots_[tile]->values) {
-                        *os << ' ' << static_cast<int>(value);
+                    for (const auto& output : output_slots_multi_[tile]) {
+                        *os << "  tile " << tile << " output s" << output.stream;
+                        for (const auto value : output.values) {
+                            *os << ' ' << static_cast<int>(value);
+                        }
+                        *os << '\n';
                     }
-                    *os << '\n';
                 }
             }
         }
@@ -325,6 +339,7 @@ private:
     std::array<Superlane, kTileCount> superlanes_{};
     std::array<std::optional<InputSlot>, kTileCount> input_slots_{};
     std::array<OutputSlot, kTileCount> output_slots_{};
+    std::array<std::vector<Superlane::Output>, kTileCount> output_slots_multi_{};
     std::array<std::optional<RequiredStreams>, kTileCount> required_streams_{};
     std::size_t cycle_{0};
     bool prepared_{false};

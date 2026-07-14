@@ -102,8 +102,7 @@ Current components:
 
 - `MxmSupercell`: one 16 x 16 int8 weight block.
 - `MxmArray`: a 20 x 20 grid of supercells.
-- `MxmControlSlice`: south-to-north control pipeline for `IW`, `Compute`, and
-  `Output`.
+- `MxmControlSlice`: south-to-north control pipeline for `IW` and `Compute`.
 - `Mxm`: wrapper containing the array, its control slice, and the datapath
   state for activation flow, int32 accumulation, and output stream injection.
 
@@ -111,9 +110,13 @@ The system contains two MXMs on the east side of MEM.
 
 ### Weight Loading
 
-Each supercell has two peer weight buffers. `IW(column_block, buffer)` writes
-one 16 x 16 supercell weight matrix into the selected buffer. There is no
-separate `LW` commit instruction: `Compute(buffer)` directly selects which
+Each supercell has two peer weight buffers. `IW(buffer)` injects one 16 x 16
+weight block into the west side of the selected row buffer. On every valid `IW`
+cycle for that row, the selected buffer shifts one column to the east and the
+new block enters column 0. To end with column 0..19 in the expected order, MEM
+reads weight column blocks in reverse order: column block 19 first, then 18,
+down to 0. There is no separate `LW` commit instruction:
+`Compute(buffer, activation_stream, output_stream)` directly selects which
 buffer supplies weights for that activation token.
 
 The weight bytes for `IW` arrive from MEM at the east handoff stream register.
@@ -124,14 +127,16 @@ Each MXM uses 16 streams per cycle:
 
 For a full 320 x 320 weight matrix, there are 20 column blocks. The current
 tests issue 20 continuous `IW` pulses into one buffer while the other buffer can
-still be used by in-flight compute.
+still be used by in-flight compute. The two weight buffers have independent row
+shift state, so loading one buffer does not disturb the other.
 
 ### Compute
 
-`Compute(buffer)` is a one-cycle pulse. The ICU emits one `Compute` instruction
-per cycle for the active compute window. The selected buffer id is carried with
-the activation event as it moves across the MXM, so later `IW` commands can
-overwrite the other buffer without changing in-flight work.
+`Compute(buffer, activation_stream, output_stream)` is a one-cycle pulse. The
+ICU emits one `Compute` instruction per cycle for the active compute window.
+The selected buffer id and output stream base are carried with the activation
+event as it moves across the MXM, so later `IW` commands can overwrite the
+other buffer without changing in-flight work.
 
 The system-owned MXM runtime models activation flow:
 
@@ -142,8 +147,9 @@ The system-owned MXM runtime models activation flow:
 - Partial sums accumulate into int32 result columns.
 
 The runtime is owned by `TspSliceSystem`. ICU `Compute` pulses consume MEM east
-handoff streams through the MXM datapath, and ICU `Output` pulses inject int32
-result bytes onto MEM west streams.
+handoff streams through the MXM datapath. When the contribution from tile row 19
+completes a result column block, the MXM automatically injects the int32 result
+bytes onto the MEM west streams named by the `Compute` instruction.
 
 ## VXM Model
 
@@ -184,6 +190,10 @@ with primitive ALU operations:
 - Add zero point if needed.
 - Cast to int8.
 
+VXM can also cast fp32 values to fp16 stream output. The fp16 path writes the
+IEEE half-precision bit pattern as two little-endian byte streams, while the
+legacy int8 path still writes one byte stream.
+
 SwiGLU is built from primitive ops:
 
 ```text
@@ -201,8 +211,8 @@ The ICU is implemented in `include/ftlpu/system/icu.hpp`.
 Queue counts:
 
 - 44 MEM queues, one per MEM slice column.
-- 2 MXM queues, one per MXM.
-- 2 MXM output queues, one per MXM output-control path.
+- 2 MXM load queues, one per MXM.
+- 2 MXM compute queues, one per MXM.
 - 16 VXM queues, one per ALU.
 
 The ICU supports per-queue commands:
@@ -297,8 +307,9 @@ data computed in the test.
 `FTLPU_OFFLINE_ICU_FFN_TEST` enabled.
 
 This test builds an `OfflineIcuProgram` before cycle 0. The program contains all
-MEM, MXM, MXM output, and VXM ALU instructions. It then loads those instructions
-into the ICU queues once and starts ticking.
+MEM, MXM, and VXM ALU instructions. MXM result stream placement is encoded in
+the `Compute` instructions. It then loads those instructions into the ICU queues
+once and starts ticking.
 
 This is the intended shape for a future compiler:
 
@@ -309,11 +320,12 @@ high-level workload -> compiler/scheduler -> OfflineIcuProgram -> ICU queues
 The current offline test only loads the ICU queues, initializes external MEM
 contents, ticks the system datapaths, and checks final MEM contents.
 
-The test also exercises the MXM two-buffer path. `IW` fills one selected buffer
-while `Compute(buffer)` continues to use the other. MXM control has separate
-load and compute queues, so the scheduler can overlap next-weight transfer with
-current compute. The second gate/up pass and the down pass use this ping-pong
-schedule:
+The test also exercises the MXM two-buffer path. `IW(buffer)` fills one selected
+buffer through the per-row right-shift path while
+`Compute(buffer, activation_stream, output_stream)` continues to use the other.
+MXM control has separate load and compute queues, so the scheduler can overlap
+next-weight transfer with current compute. The second gate/up pass and the down
+pass use this ping-pong schedule:
 
 - MXM0 starts `IW` immediately when the previous GEMM starts. Shared activation
   traffic uses alternate stream IDs during the first few rows so it does not
@@ -327,8 +339,9 @@ schedule:
   activation stream is no longer needed. Because MEM is single-port, the down
   GEMM still waits until the second SwiGLU writeback has finished before reading
   hidden activations from the same MEM slice.
-- `Compute` names the buffer to consume; no `LW` or active-weight commit is
-  issued.
+- `Compute` names the buffer to consume and the MEM west stream base for int32
+  result output; no `LW`, active-weight commit, or separate MXM output
+  instruction is issued.
 
 `mxm.log` includes per-phase and total MXM performance counters:
 
@@ -343,7 +356,9 @@ cycles, so it is the number to watch when changing the scheduler.
 
 ## Logs
 
-The integration tests write logs under the build directory.
+The FFN integration tests skip log generation by default. Set
+`FTLPU_FFN_LOG=1` when trace files or the pipeline diagram are needed.
+When enabled, the integration tests write logs under the build directory.
 
 Offline ICU FFN:
 
@@ -364,8 +379,8 @@ The offline ICU log prints the key phase starts, for example:
 
 ```text
 offline ICU FFN program loaded before cycle 0
-  schedule=baseline p1 compute waits for the previous MXM output queue window
-  load0.mxm0_iw=18 load0.mxm1_iw=18 load0.done=38 gemm0=38 gemm0_output=38 load1.mxm1_iw=58 load1.mxm0_iw=38 load1.done=78 gemm1=236 gemm1_output=236 down_load.mxm1_iw=454 down_load.mxm0_iw=405 down_load.done=474 down_gemm=474 down_output=474
+  schedule=baseline ...
+  load0.mxm0_iw=... gemm0=... gemm0_output=...
 ```
 
 The early-compute variant currently prints:
@@ -392,7 +407,8 @@ Weights:
 - Staged across MEM columns `0..31`.
 - MXM0 reads weight streams from columns `0..15`.
 - MXM1 reads weight streams from columns `16..31`.
-- Each pass reads 20 column blocks.
+- Each pass reads 20 column blocks in reverse order, because `IW` shifts each
+  row's selected weight buffer eastward.
 
 SwiGLU hidden output:
 
@@ -420,6 +436,6 @@ Near-term engineering work:
   assumptions.
 - Turn `OfflineIcuProgram` into a reusable module instead of a test-local helper.
 - Add a textual or binary program dump/load format using the ISA codec.
-- Add a simple compiler pass that emits MEM Read/Write, MXM IW/Compute/Output,
-  and VXM ALU timelines for the FFN workload.
+- Add a simple compiler pass that emits MEM Read/Write, MXM IW/Compute, and VXM
+  ALU timelines for the FFN workload.
 - Add resource-conflict diagnostics for stream-register and queue collisions.

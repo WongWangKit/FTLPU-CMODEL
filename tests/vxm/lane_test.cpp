@@ -121,6 +121,25 @@ int main()
     assert(source_select.alu_output(4).has_value());
     assert(nearly_equal(*source_select.alu_output(4), 5.0f));
 
+    auto fp16_output = ftlpu::VxmLane {};
+    fp16_output.enqueue_instruction(0, ftlpu::VxmLaneAluInstruction {
+        ftlpu::VxmAluOpcode::Cast,
+        ftlpu::VxmLaneOperand::StreamInt32(0),
+        ftlpu::VxmLaneOperand::Imm(0.0f),
+        1.0f,
+        0,
+        ftlpu::VxmCastTarget::Float16,
+        9,
+    });
+    fp16_output.set_swiglu_input(ftlpu::VxmLane::pack_int32(3), ftlpu::VxmLane::pack_int32(0));
+    fp16_output.tick();
+    assert(fp16_output.output().has_value());
+    assert(fp16_output.output()->stream == 9);
+    assert(fp16_output.output()->byte_count == 2);
+    const auto half_three = ftlpu::VxmAlu::cast_scalar_to_float16_bits(3.0f);
+    assert(fp16_output.output()->bytes[0] == static_cast<std::uint8_t>(half_three & 0xffu));
+    assert(fp16_output.output()->bytes[1] == static_cast<std::uint8_t>((half_three >> 8) & 0xffu));
+
     auto trace_lane = ftlpu::VxmLane {};
     trace_lane.load_swiglu_program(params);
     trace_lane.set_swiglu_input(ftlpu::VxmLane::pack_int32(2), ftlpu::VxmLane::pack_int32(1));

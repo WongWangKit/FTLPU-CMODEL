@@ -19,10 +19,12 @@ The repository currently models:
   tile-local SRAM has two banks, and each bank is 4096 x 16 bytes.
 - `MXM`: two east-side MXM units. Each unit is a 20 x 20 array of 16 x 16
   supercells. Each supercell has two peer weight buffers; `IW` selects which
-  buffer to fill and `Compute` selects which buffer to use for a 320 x 320 int8
-  GEMM datapath with int32 accumulation.
+  buffer receives the right-shifting weight stream and `Compute` selects both
+  the weight buffer and output stream base for a 320 x 320 int8 GEMM datapath
+  with int32 accumulation.
 - `VXM`: one west-side VXM slice with 20 superlanes/tiles. Each superlane has
-  16 lanes, and each lane has 16 ALU issue queues.
+  16 lanes, and each lane has 16 ALU issue queues. ALU outputs can write int8
+  or fp16 bytes onto streams.
 - `ICU`: per-queue instruction dispatch with `NOP N` and `Repeat n,d`, including
   MEM address stride support.
 - `TspSliceSystem`: fixed local topology with VXM on the west side of MEM and
@@ -42,9 +44,16 @@ The largest integration test models an FFN-like path:
 9. Store the final int8 result back to MEM and compare against golden data.
 
 `mem_dual_mxm_swiglu_offline_icu_test` is the canonical FFN integration test.
-All MEM, MXM, MXM-output, and VXM instructions are generated offline and loaded
-into the ICU before cycle 0. The runtime loop only advances clocks and bridges
-data. This is the shape intended for a future compiler backend.
+All MEM, MXM, and VXM instructions are generated offline and loaded into the ICU
+before cycle 0. MXM output is controlled by the `Compute` instruction stream.
+The runtime loop only advances clocks and bridges data. This is the shape
+intended for a future compiler backend.
+
+`attention_projection_test` is the first single-head attention-oriented test. It
+initializes `seq_len=160`, `hidden=320` input and Wq/Wk matrices in MEM, loads
+Wq and Wk into the two MXMs, streams X through both MXMs, sends Q/K int32 results
+to VXM, dequantizes to fp16, stores fp16 bytes back to MEM, and checks sampled
+results against golden data.
 
 ## Repository Layout
 
@@ -92,9 +101,24 @@ Run the VXM tests:
 ctest --test-dir build-vs2019 -C Debug -R "vxm_alu|vxm_lane|vxm_superlane|vxm_slice" --output-on-failure
 ```
 
+Run the attention projection test:
+
+```powershell
+ctest --test-dir build-vs2019 -C Debug -R attention_projection_test --output-on-failure
+```
+
 ## Logs and Diagrams
 
-Integration tests write logs under the build directory:
+FFN integration tests skip log generation by default so the long-running
+workloads are not dominated by file I/O. Enable logs when debugging:
+
+```powershell
+$env:FTLPU_FFN_LOG = "1"
+ctest --test-dir build-vs2019 -C Debug -R mem_dual_mxm_swiglu_offline_icu --output-on-failure
+Remove-Item Env:\FTLPU_FFN_LOG
+```
+
+When enabled, integration tests write logs under the build directory:
 
 - `build-vs2019/logs/mem_mxm/`
 - `build-vs2019/logs/mem_dual_mxm_swiglu_offline_icu/`
@@ -114,7 +138,7 @@ They also generate a pipeline diagram:
 The diagram separates `MEM W read`, `MEM A read`, `MEM write`, `MXM0 load`,
 `MXM0 compute`, `MXM1 load`, `MXM1 compute`, and `VXM` rows. There is no
 separate `LW` phase; `IW` fills a selected buffer and `Compute` names the buffer
-to consume.
+to consume plus the output stream base.
 
 ## Demo Executables
 

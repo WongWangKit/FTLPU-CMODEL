@@ -88,9 +88,6 @@ public:
         for (auto& cursor : next_row_for_tile_) {
             cursor.fill(0);
         }
-        for (auto& cursor : next_output_row_) {
-            cursor.fill(0);
-        }
         compute_active_by_buffer_.fill(false);
         last_outputs_.clear();
         active_ = false;
@@ -115,6 +112,7 @@ public:
             }
             const auto weight_buffer = control_.compute_weight_buffer(tile).value_or(0);
             const auto stream_base = control_.compute_activation_stream_base(tile).value_or(0);
+            const auto output_stream_base = control_.output_stream_base(tile).value_or(0);
             check_weight_buffer(weight_buffer);
             current_compute_active_by_buffer[weight_buffer] = true;
             if (tile == 0 && !compute_active_by_buffer_[weight_buffer]) {
@@ -122,12 +120,13 @@ public:
             }
             const auto data = collect_activation(mem, tile, stream_base);
             const auto row = next_row_for_tile_[weight_buffer][tile]++;
-            east_pipeline_[0][tile].push_back(ActivationEvent {tile, row, weight_buffer, data});
+            east_pipeline_[0][tile].push_back(ActivationEvent {tile, row, weight_buffer, output_stream_base, data});
             if (os != nullptr && (!log_tile.has_value() || *log_tile == tile)) {
                 *os << "  MXM" << mxm_id << " consume activation tile=" << tile
                     << " row=" << row
                     << " buffer=" << weight_buffer
-                    << " stream=" << stream_base << '\n';
+                    << " stream=" << stream_base
+                    << " out=" << output_stream_base << '\n';
             }
         }
 
@@ -139,6 +138,9 @@ public:
                 for (const auto& event : east_pipeline_[column_block][tile]) {
                     computing[tile][column_block] = true;
                     compute_column_block(event, column_block);
+                    if (event.tile + 1 == hw::kMxmSupercellsPerPlane) {
+                        emit_column_output(mem, column_block, event);
+                    }
                     if (column_block + 1 < hw::kMxmSupercellsPerPlane) {
                         next_pipeline[column_block + 1][tile].push_back(event);
                     }
@@ -147,13 +149,6 @@ public:
         }
         east_pipeline_ = std::move(next_pipeline);
         last_computing_ = computing;
-
-        for (std::size_t column_block = 0; column_block < hw::kMxmSupercellsPerPlane; ++column_block) {
-            const auto stream_base = control_.output_stream_base(column_block);
-            if (stream_base.has_value()) {
-                emit_column_output(mem, column_block, *stream_base, current_compute_active_by_buffer);
-            }
-        }
 
         if (active_ && pipelines_empty()) {
             active_ = false;
@@ -180,6 +175,7 @@ private:
         std::size_t tile{0};
         std::size_t row{0};
         std::size_t weight_buffer{0};
+        std::size_t output_stream_base{0};
         ActivationData data{};
     };
 
@@ -201,7 +197,6 @@ private:
     {
         check_weight_buffer(weight_buffer);
         next_row_for_tile_[weight_buffer].fill(0);
-        next_output_row_[weight_buffer].fill(0);
         for (auto& row : accumulators_[weight_buffer]) {
             row.fill(0);
         }
@@ -253,53 +248,24 @@ private:
         return true;
     }
 
-    void emit_column_output(
-        TileArrayModel& mem,
-        std::size_t column_block,
-        std::size_t stream_base,
-        const std::array<bool, kWeightBuffers>& preferred_buffers)
+    void emit_column_output(TileArrayModel& mem, std::size_t column_block, const ActivationEvent& event)
     {
-        (void)preferred_buffers;
-        auto selected_buffer = std::optional<std::size_t> {};
-        auto row = std::size_t {0};
-
-        auto try_select = [&](std::size_t weight_buffer) {
-            const auto candidate_row = next_output_row_[weight_buffer][column_block];
-            if (candidate_row < hw::kMxmRows && column_output_ready(weight_buffer, candidate_row, column_block)) {
-                selected_buffer = weight_buffer;
-                row = candidate_row;
-                return true;
-            }
-            return false;
-        };
-
-        for (std::size_t weight_buffer = 0; weight_buffer < kWeightBuffers; ++weight_buffer) {
-            if (try_select(weight_buffer)) {
-                break;
-            }
-        }
-
-        if (!selected_buffer.has_value()) {
+        if (!column_output_ready(event.weight_buffer, event.row, column_block)) {
             std::string detail;
             const auto global_column_base = column_block * hw::kMxmSupercellColumns;
-            for (std::size_t weight_buffer = 0; weight_buffer < kWeightBuffers; ++weight_buffer) {
-                const auto candidate_row = next_output_row_[weight_buffer][column_block];
-                detail += " b" + std::to_string(weight_buffer)
-                    + ":row=" + std::to_string(candidate_row);
-                if (candidate_row < hw::kMxmRows) {
-                    detail += ":count0="
-                        + std::to_string(contribution_counts_[weight_buffer][candidate_row][global_column_base]);
-                }
-            }
+            detail += " b" + std::to_string(event.weight_buffer)
+                + ":row=" + std::to_string(event.row)
+                + ":count0="
+                + std::to_string(contribution_counts_[event.weight_buffer][event.row][global_column_base]);
             throw std::logic_error(
-                "MXM output instruction reached column block " + std::to_string(column_block)
+                "MXM automatic output reached column block " + std::to_string(column_block)
                 + " before a complete result row was ready;" + detail);
         }
 
-        ColumnOutput output {row, column_block, {}};
+        ColumnOutput output {event.row, column_block, {}};
         const auto global_column_base = column_block * hw::kMxmSupercellColumns;
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            const auto value = accumulators_[*selected_buffer][row][global_column_base + lane];
+            const auto value = accumulators_[event.weight_buffer][event.row][global_column_base + lane];
             output.values[lane] = value;
             const auto raw = static_cast<std::uint32_t>(value);
             const std::array<std::uint8_t, 4> bytes {
@@ -312,7 +278,7 @@ private:
                 mem.set_west_stream_input(
                     column_block,
                     lane,
-                    stream_base + byte,
+                    event.output_stream_base + byte,
                     TileArrayModel::DataWord {
                         bytes[byte],
                         lane + 1 == hw::kLanesPerTile,
@@ -320,7 +286,6 @@ private:
             }
         }
         last_outputs_.push_back(output);
-        ++next_output_row_[*selected_buffer][column_block];
     }
 
     bool pipelines_empty() const
@@ -342,7 +307,6 @@ private:
         east_pipeline_{};
     std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane> last_computing_{};
     std::array<std::array<std::size_t, hw::kMxmSupercellsPerPlane>, kWeightBuffers> next_row_for_tile_{};
-    std::array<std::array<std::size_t, hw::kMxmSupercellsPerPlane>, kWeightBuffers> next_output_row_{};
     std::array<bool, kWeightBuffers> compute_active_by_buffer_{};
     std::array<std::array<std::array<std::int32_t, hw::kMxmColumns>, hw::kMxmRows>, kWeightBuffers> accumulators_{};
     std::array<std::array<std::array<std::size_t, hw::kMxmColumns>, hw::kMxmRows>, kWeightBuffers>

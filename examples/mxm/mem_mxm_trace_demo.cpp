@@ -117,7 +117,7 @@ int main(int argc, char** argv)
         mem->tick(log);
 
         if (cycle == kMxmHandoffBaseCycle) {
-            control.issue_south(ftlpu::MxmControlInstruction::IW(kMxmColumn, 0));
+            control.issue_south(ftlpu::MxmControlInstruction::IW(0));
         }
 
         if (cycle >= kMxmHandoffBaseCycle && cycle < kMxmHandoffBaseCycle + kTileRows) {

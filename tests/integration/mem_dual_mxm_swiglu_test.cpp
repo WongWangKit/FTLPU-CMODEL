@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -76,24 +77,70 @@ public:
 };
 
 struct TestLogs {
-    explicit TestLogs(const std::filesystem::path& directory)
-        : icu(directory / "icu.log")
-        , mem(directory / "mem.log")
-        , mxm(directory / "mxm.log")
-        , vxm(directory / "vxm.log")
+    explicit TestLogs(const std::filesystem::path& directory, bool enable)
+        : enabled(enable)
+        , null_stream(&null_buffer)
+        , icu(enabled ? static_cast<std::ostream&>(icu_file) : null_stream)
+        , mem(enabled ? static_cast<std::ostream&>(mem_file) : null_stream)
+        , mxm(enabled ? static_cast<std::ostream&>(mxm_file) : null_stream)
+        , vxm(enabled ? static_cast<std::ostream&>(vxm_file) : null_stream)
     {
+        if (!enabled) {
+            return;
+        }
+        icu_file.open(directory / "icu.log");
+        mem_file.open(directory / "mem.log");
+        mxm_file.open(directory / "mxm.log");
+        vxm_file.open(directory / "vxm.log");
     }
 
     bool good() const
     {
-        return icu.good() && mem.good() && mxm.good() && vxm.good();
+        return !enabled || (icu_file.good() && mem_file.good() && mxm_file.good() && vxm_file.good());
     }
 
-    std::ofstream icu;
-    std::ofstream mem;
-    std::ofstream mxm;
-    std::ofstream vxm;
+    std::ostream* icu_ptr()
+    {
+        return enabled ? &icu : nullptr;
+    }
+
+    std::ostream* mem_ptr()
+    {
+        return enabled ? &mem : nullptr;
+    }
+
+    std::ostream* mxm_ptr()
+    {
+        return enabled ? &mxm : nullptr;
+    }
+
+    std::ostream* vxm_ptr()
+    {
+        return enabled ? &vxm : nullptr;
+    }
+
+    bool enabled{false};
+    NullBuffer null_buffer;
+    std::ostream null_stream;
+    std::ofstream icu_file;
+    std::ofstream mem_file;
+    std::ofstream mxm_file;
+    std::ofstream vxm_file;
+    std::ostream& icu;
+    std::ostream& mem;
+    std::ostream& mxm;
+    std::ostream& vxm;
 };
+
+bool ffn_logs_enabled()
+{
+    const auto* value = std::getenv("FTLPU_FFN_LOG");
+    if (value == nullptr) {
+        return false;
+    }
+    const auto text = std::string(value);
+    return !(text.empty() || text == "0" || text == "false" || text == "FALSE" || text == "off" || text == "OFF");
+}
 
 struct MxmArrayStateSummary {
     bool in_all_compute{false};
@@ -547,21 +594,6 @@ void enqueue_mxm_sequence(
     icu.enqueue_mxm_repeat(mxm, count - 1);
 }
 
-void enqueue_mxm_output_sequence(
-    ftlpu::InstructionControlUnit& icu,
-    std::size_t mxm,
-    std::size_t first_cycle,
-    ftlpu::MxmControlInstruction instruction,
-    std::size_t count)
-{
-    if (count == 0) {
-        return;
-    }
-    icu.enqueue_mxm_output_nop(mxm, first_cycle);
-    icu.enqueue_mxm(mxm, instruction);
-    icu.enqueue_mxm_output_repeat(mxm, count - 1);
-}
-
 void load_dual_mxm_from_mem(
     ftlpu::TspSliceSystem& system,
     std::size_t matrix0,
@@ -572,10 +604,10 @@ void load_dual_mxm_from_mem(
     const ActivationReadConfig* activation_prefetch = nullptr)
 {
     const auto sinks = ftlpu::TspSliceSystem::LogSinks {
-        &logs.icu,
-        &logs.mem,
-        &logs.mxm,
-        &logs.vxm,
+        logs.icu_ptr(),
+        logs.mem_ptr(),
+        logs.mxm_ptr(),
+        logs.vxm_ptr(),
         nullptr,
         kLogTile,
         kLogTile,
@@ -592,18 +624,18 @@ void load_dual_mxm_from_mem(
             system.icu(),
             mxm0_column,
             mxm0_first,
-            weight_address(matrix0, pass0, 0),
+            weight_address(matrix0, pass0, kBlocks - 1),
             stream,
             kBlocks,
-            kLanes);
+            -static_cast<std::int64_t>(kLanes));
         enqueue_mem_read_sequence(
             system.icu(),
             mxm1_column,
             mxm1_first,
-            weight_address(matrix1, pass1, 0),
+            weight_address(matrix1, pass1, kBlocks - 1),
             kLoadStreams + stream,
             kBlocks,
-            kLanes);
+            -static_cast<std::int64_t>(kLanes));
     }
 
     if (activation_prefetch != nullptr) {
@@ -637,15 +669,17 @@ void load_dual_mxm_from_mem(
     }
 
     for (std::size_t cycle = 0; cycle < kTotalCycles; ++cycle) {
-        logs.mxm << "dual_mxm_load cycle " << cycle << '\n'
-                 << "  mxm0 matrix=" << matrix0 << " pass=" << pass0 << " streams=E0..E15\n"
-                 << "  mxm1 matrix=" << matrix1 << " pass=" << pass1 << " streams=E16..E31\n";
+        if (logs.enabled) {
+            logs.mxm << "dual_mxm_load cycle " << cycle << '\n'
+                     << "  mxm0 matrix=" << matrix0 << " pass=" << pass0 << " streams=E0..E15\n"
+                     << "  mxm1 matrix=" << matrix1 << " pass=" << pass1 << " streams=E16..E31\n";
+        }
 
         for (std::size_t column_block = 0; column_block < kBlocks; ++column_block) {
             const auto handoff_cycle = kWeightHandoffBaseCycle + column_block;
             if (cycle == handoff_cycle) {
-                system.icu().enqueue_mxm(0, ftlpu::MxmControlInstruction::IW(column_block));
-                system.icu().enqueue_mxm(1, ftlpu::MxmControlInstruction::IW(column_block));
+                system.icu().enqueue_mxm(0, ftlpu::MxmControlInstruction::IW());
+                system.icu().enqueue_mxm(1, ftlpu::MxmControlInstruction::IW());
             }
         }
         system.tick(sinks);
@@ -740,26 +774,14 @@ std::array<MatrixI32, kMxmCount> run_dual_mxm_gemm(
         system.icu(),
         0,
         activation_handoff_base,
-        ftlpu::MxmControlInstruction::Compute(),
+        ftlpu::MxmControlInstruction::Compute(0, kActivationStream, kGateWestStreamBase),
         kActivationRows);
     enqueue_mxm_sequence(
         system.icu(),
         1,
         activation_handoff_base,
-        ftlpu::MxmControlInstruction::Compute(),
+        ftlpu::MxmControlInstruction::Compute(0, kActivationStream1, kUpWestStreamBase),
         kActivationRows);
-    enqueue_mxm_output_sequence(
-        system.icu(),
-        0,
-        activation_handoff_base + kBlocks - 1,
-        ftlpu::MxmControlInstruction::Output(kGateWestStreamBase),
-        kActivationRows + 2 * (kBlocks - 1));
-    enqueue_mxm_output_sequence(
-        system.icu(),
-        1,
-        activation_handoff_base + kBlocks - 1,
-        ftlpu::MxmControlInstruction::Output(kUpWestStreamBase),
-        kActivationRows + 2 * (kBlocks - 1));
 
     for (std::size_t cycle = 0; cycle < total_cycles; ++cycle) {
         if ((swiglu_stream != nullptr || add_quant_stream != nullptr) && cycle < vxm_issue_stages.size()) {
@@ -800,7 +822,7 @@ std::array<MatrixI32, kMxmCount> run_dual_mxm_gemm(
             }
         }
 
-        system.dispatch_icu_only(&logs.icu);
+        system.dispatch_icu_only(logs.icu_ptr());
         const auto mxm_control_sinks = ftlpu::TspSliceSystem::LogSinks {
             nullptr,
             nullptr,
@@ -812,11 +834,15 @@ std::array<MatrixI32, kMxmCount> run_dual_mxm_gemm(
             std::nullopt,
         };
         system.tick_mxm_controls_only(mxm_control_sinks);
-        system.mem().tick(logs.mem, kLogTile);
+        if (logs.enabled) {
+            system.mem().tick(logs.mem, kLogTile);
+        } else {
+            system.mem().tick();
+        }
         system.tick_mxm_datapaths_only(ftlpu::TspSliceSystem::LogSinks {
             nullptr,
             nullptr,
-            &logs.mxm,
+            logs.mxm_ptr(),
             nullptr,
             nullptr,
             std::nullopt,
@@ -851,20 +877,22 @@ std::array<MatrixI32, kMxmCount> run_dual_mxm_gemm(
                     }
                 }
             }
-            log_mxm_array_state(
-                logs.mxm,
-                "mxm0",
-                compute_cycle,
-                system.mxm_unit(0).control(),
-                system.mxm_unit(0),
-                mxm0_summary);
-            log_mxm_array_state(
-                logs.mxm,
-                "mxm1",
-                compute_cycle,
-                system.mxm_unit(1).control(),
-                system.mxm_unit(1),
-                mxm1_summary);
+            if (logs.enabled) {
+                log_mxm_array_state(
+                    logs.mxm,
+                    "mxm0",
+                    compute_cycle,
+                    system.mxm_unit(0).control(),
+                    system.mxm_unit(0),
+                    mxm0_summary);
+                log_mxm_array_state(
+                    logs.mxm,
+                    "mxm1",
+                    compute_cycle,
+                    system.mxm_unit(1).control(),
+                    system.mxm_unit(1),
+                    mxm1_summary);
+            }
         }
 
         if (swiglu_stream != nullptr || add_quant_stream != nullptr) {
@@ -884,9 +912,9 @@ std::array<MatrixI32, kMxmCount> run_dual_mxm_gemm(
 
             const auto bridge_sinks = ftlpu::TspSliceSystem::LogSinks {
                 nullptr,
-                &logs.mem,
+                logs.mem_ptr(),
                 nullptr,
-                &logs.vxm,
+                logs.vxm_ptr(),
                 nullptr,
                 kLogTile,
                 std::nullopt,
@@ -917,12 +945,16 @@ std::array<MatrixI32, kMxmCount> run_dual_mxm_gemm(
             }
         }
     }
-    flush_all_compute_summary(logs.mxm, "mxm0", mxm0_summary);
-    flush_all_compute_summary(logs.mxm, "mxm1", mxm1_summary);
-    mxm0_perf.print(logs.mxm, "mxm0");
-    mxm1_perf.print(logs.mxm, "mxm1");
+    if (logs.enabled) {
+        flush_all_compute_summary(logs.mxm, "mxm0", mxm0_summary);
+        flush_all_compute_summary(logs.mxm, "mxm1", mxm1_summary);
+        mxm0_perf.print(logs.mxm, "mxm0");
+        mxm1_perf.print(logs.mxm, "mxm1");
+    }
 
-    logs.mxm << "dual_mxm_compute shared_activation_streams=E0..E15 rows=160 k=320\n";
+    if (logs.enabled) {
+        logs.mxm << "dual_mxm_compute shared_activation_streams=E0..E15 rows=160 k=320\n";
+    }
     if (swiglu_stream != nullptr) {
         logs.vxm << "vxm_swiglu source=MEM west edge gate_streams=W0..W3 up_streams=W4..W7 out=E"
                  << swiglu_stream->output_stream << '\n';
@@ -1102,12 +1134,6 @@ public:
         last_cycle_ = std::max(last_cycle_, cycle);
     }
 
-    void emit_mxm_output(std::size_t cycle, std::size_t mxm, ftlpu::MxmControlInstruction instruction)
-    {
-        mxm_output_[mxm].push_back(ScheduledInstruction<ftlpu::MxmControlInstruction> {cycle, instruction});
-        last_cycle_ = std::max(last_cycle_, cycle);
-    }
-
     void emit_vxm(std::size_t cycle, std::size_t alu, ftlpu::VxmLaneAluInstruction instruction)
     {
         vxm_[alu].push_back(ScheduledInstruction<ftlpu::VxmLaneAluInstruction> {cycle, instruction});
@@ -1131,11 +1157,6 @@ public:
                 mxm_compute_[mxm],
                 "mxm" + std::to_string(mxm) + ".compute",
                 [&](std::size_t nop) { icu.enqueue_mxm_compute_nop(mxm, nop); },
-                [&](auto instruction) { icu.enqueue_mxm(mxm, instruction); });
-            load_queue(
-                mxm_output_[mxm],
-                "mxm" + std::to_string(mxm) + ".output",
-                [&](std::size_t nop) { icu.enqueue_mxm_output_nop(mxm, nop); },
                 [&](auto instruction) { icu.enqueue_mxm(mxm, instruction); });
         }
         for (std::size_t alu = 0; alu < vxm_.size(); ++alu) {
@@ -1176,7 +1197,6 @@ private:
     std::array<std::vector<ScheduledInstruction<ftlpu::MemInstruction>>, ftlpu::InstructionControlUnit::kMemQueues> mem_{};
     std::array<std::vector<ScheduledInstruction<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmQueues> mxm_load_{};
     std::array<std::vector<ScheduledInstruction<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmQueues> mxm_compute_{};
-    std::array<std::vector<ScheduledInstruction<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmQueues> mxm_output_{};
     std::array<std::vector<ScheduledInstruction<ftlpu::VxmLaneAluInstruction>>, ftlpu::InstructionControlUnit::kVxmQueues> vxm_{};
     std::size_t last_cycle_{0};
 };
@@ -1232,13 +1252,14 @@ void emit_offline_mem_read_sequence(
     std::size_t address,
     std::size_t stream,
     std::size_t count,
-    std::size_t address_stride)
+    std::int64_t address_stride)
 {
     for (std::size_t index = 0; index < count; ++index) {
+        const auto offset = address_stride * static_cast<std::int64_t>(index);
         program.emit_mem(
             cycle + index,
             column,
-            ftlpu::MemInstruction::Read(address + index * address_stride, stream));
+            ftlpu::MemInstruction::Read(static_cast<std::size_t>(static_cast<std::int64_t>(address) + offset), stream));
     }
 }
 
@@ -1273,15 +1294,15 @@ void emit_offline_weight_iw_mxm(
             program,
             iw_start - east_stream_cycles_to_sreg11(column) - 1,
             column,
-            weight_address(matrix, pass, 0),
+            weight_address(matrix, pass, kBlocks - 1),
             stream_base + stream,
             kBlocks,
-            kLanes);
+            -static_cast<std::int64_t>(kLanes));
     }
 
     for (std::size_t column_block = 0; column_block < kBlocks; ++column_block) {
         const auto handoff_cycle = iw_start + column_block;
-        program.emit_mxm(handoff_cycle, mxm, ftlpu::MxmControlInstruction::IW(column_block, weight_buffer));
+        program.emit_mxm(handoff_cycle, mxm, ftlpu::MxmControlInstruction::IW(weight_buffer));
     }
 }
 
@@ -1332,16 +1353,11 @@ void emit_offline_compute_phase(
         program.emit_mxm(
             compute_cycle,
             0,
-            ftlpu::MxmControlInstruction::Compute(phase.weight_buffer, mxm0_stream));
+            ftlpu::MxmControlInstruction::Compute(phase.weight_buffer, mxm0_stream, kGateWestStreamBase));
         program.emit_mxm(
             compute_cycle,
             1,
-            ftlpu::MxmControlInstruction::Compute(phase.weight_buffer, mxm1_stream));
-    }
-    for (std::size_t output = 0; output < kActivationRows; ++output) {
-        const auto output_cycle = phase.output_start + kBlocks + output;
-        program.emit_mxm_output(output_cycle, 0, ftlpu::MxmControlInstruction::Output(kGateWestStreamBase));
-        program.emit_mxm_output(output_cycle, 1, ftlpu::MxmControlInstruction::Output(kUpWestStreamBase));
+            ftlpu::MxmControlInstruction::Compute(phase.weight_buffer, mxm1_stream, kUpWestStreamBase));
     }
 
     for (std::size_t row = 0; row < kActivationRows; ++row) {
@@ -1399,7 +1415,7 @@ std::size_t compute_engine_ticks()
 
 std::size_t mxm_output_cycles()
 {
-    return kActivationRows + 2 * (kBlocks - 1);
+    return kActivationRows + kBlocks - 1;
 }
 
 std::size_t iw_issue_window_end(std::size_t iw_start)
@@ -1555,7 +1571,7 @@ std::size_t post_op_gemm_phase_cycles(std::size_t vxm_latency, std::size_t vxm_m
 
 std::size_t vxm_post_op_start_offset()
 {
-    return kBlocks + ftlpu::hw::kStreamRegisterColumns;
+    return ftlpu::hw::kStreamRegisterColumns;
 }
 
 std::size_t phase_vxm_post_op_start_offset(const OfflineComputePhase& phase)
@@ -1578,22 +1594,14 @@ std::size_t compute_queues_ready(std::size_t compute_start)
     return compute_start + compute_issue_cycles();
 }
 
-std::size_t mxm_output_queues_ready(std::size_t output_start)
-{
-    return output_start + mxm_output_cycles();
-}
-
 std::size_t scheduled_gemm1_compute_start(
     const DualMxmLoadSchedule& load1,
     std::size_t gemm0_start,
     std::size_t gemm0_output_start)
 {
+    (void)gemm0_output_start;
     const auto data_ready = std::max(load1.done(), compute_queues_ready(gemm0_start));
-#ifdef FTLPU_EARLY_MXM_COMPUTE_TEST
     return data_ready;
-#else
-    return std::max(data_ready, mxm_output_queues_ready(gemm0_output_start));
-#endif
 }
 
 std::size_t post_op_write_start(std::size_t output_start, std::size_t vxm_latency, std::size_t vxm_mem_column)
@@ -1717,13 +1725,13 @@ PipelineDiagram build_mem_dual_mxm_swiglu_diagram()
     PipelineDiagram diagram {};
     const auto load0 = initial_weight_load_schedule(0);
     const auto gemm0_start = load0.done();
-    const auto gemm0_output_start = gemm0_start;
+    const auto gemm0_output_start = gemm0_start + kBlocks - 1;
     const auto load1 = pingpong_buffer_load_after_gemm_start(gemm0_start);
     const auto gemm1_start = scheduled_gemm1_compute_start(load1, gemm0_start, gemm0_output_start);
-    const auto gemm1_output_start = std::max(gemm1_start, mxm_output_queues_ready(gemm0_output_start));
+    const auto gemm1_output_start = gemm1_start + kBlocks - 1;
     const auto down_load = down_weight_load_after_gemm_start(gemm0_output_start, gemm1_start, gemm1_output_start);
     const auto down_gemm_start = std::max(down_load.done(), swiglu_outputs_ready_for_down_gemm(gemm1_output_start));
-    const auto down_output_start = std::max(down_gemm_start, mxm_output_queues_ready(gemm1_output_start));
+    const auto down_output_start = down_gemm_start + kBlocks - 1;
 
     add_load_phase(diagram, load0, "p0");
     add_gemm_phase(diagram, gemm0_start, gemm0_output_start, "GEMM p0", "SwiGLU p0", kSwigluLatency, kSwigluMemColumn);
@@ -1871,14 +1879,17 @@ int run_offline_icu_ffn_test()
     };
 
     auto system = std::make_unique<ftlpu::TspSliceSystem>();
+    const auto enable_logs = ffn_logs_enabled();
     const auto log_dir = std::filesystem::path("logs")
 #ifdef FTLPU_EARLY_MXM_COMPUTE_TEST
         / "mem_dual_mxm_swiglu_early_compute_icu";
 #else
         / "mem_dual_mxm_swiglu_offline_icu";
 #endif
-    std::filesystem::create_directories(log_dir);
-    auto logs = TestLogs(log_dir);
+    if (enable_logs) {
+        std::filesystem::create_directories(log_dir);
+    }
+    auto logs = TestLogs(log_dir, enable_logs);
     if (!logs.good()) {
         std::cerr << "failed to open " << log_dir.string() << " log files\n";
         return 1;
@@ -1889,13 +1900,13 @@ int run_offline_icu_ffn_test()
 
     const auto load0 = initial_weight_load_schedule(0);
     const auto gemm0_start = load0.done();
-    const auto gemm0_output_start = gemm0_start;
+    const auto gemm0_output_start = gemm0_start + kBlocks - 1;
     const auto load1 = pingpong_buffer_load_after_gemm_start(gemm0_start);
     const auto gemm1_start = scheduled_gemm1_compute_start(load1, gemm0_start, gemm0_output_start);
-    const auto gemm1_output_start = std::max(gemm1_start, mxm_output_queues_ready(gemm0_output_start));
+    const auto gemm1_output_start = gemm1_start + kBlocks - 1;
     const auto down_load = down_weight_load_after_gemm_start(gemm0_output_start, gemm1_start, gemm1_output_start);
     const auto down_gemm_start = std::max(down_load.done(), swiglu_outputs_ready_for_down_gemm(gemm1_output_start));
-    const auto down_output_start = std::max(down_gemm_start, mxm_output_queues_ready(gemm1_output_start));
+    const auto down_output_start = down_gemm_start + kBlocks - 1;
 
     auto swiglu = MatrixI8(kActivationRows * kHiddenColumns, 0);
     auto swiglu_chunk0 = MatrixI8(kActivationRows * kColumns, 0);
@@ -1983,29 +1994,31 @@ int run_offline_icu_ffn_test()
     emit_offline_compute_phase(program, phases[2], swiglu_params, down_params);
     program.load_into(system->icu());
 
-    logs.icu << "offline ICU FFN program loaded before cycle 0\n";
+    if (logs.enabled) {
+        logs.icu << "offline ICU FFN program loaded before cycle 0\n";
 #ifdef FTLPU_EARLY_MXM_COMPUTE_TEST
-    logs.icu << "  schedule=early_mxm_compute p1 compute starts as soon as the compute queue is free\n";
+        logs.icu << "  schedule=early_mxm_compute p1 compute starts as soon as the compute queue is free\n";
 #else
-    logs.icu << "  schedule=baseline p1 compute waits for the previous MXM output queue window\n";
+        logs.icu << "  schedule=baseline p1 compute uses conservative post-p0 spacing\n";
 #endif
-    logs.icu << "  load0.mxm0_iw=" << load0.mxm0_iw_start << " load0.mxm1_iw=" << load0.mxm1_iw_start
-             << " load0.done=" << load0.done()
-             << " gemm0=" << gemm0_start
-             << " gemm0_output=" << gemm0_output_start
-             << " load1.mxm1_iw=" << load1.mxm1_iw_start << " load1.mxm0_iw=" << load1.mxm0_iw_start
-             << " load1.done=" << load1.done()
-             << " gemm1=" << gemm1_start
-             << " gemm1_output=" << gemm1_output_start
-             << " down_load.mxm1_iw=" << down_load.mxm1_iw_start
-             << " down_load.mxm0_iw=" << down_load.mxm0_iw_start
-             << " down_load.done=" << down_load.done()
-             << " down_gemm=" << down_gemm_start
-             << " down_output=" << down_output_start << '\n';
-    logs.icu << "  pingpong_candidate load1=" << pingpong_candidate_load_start(gemm0_start)
-             << " down_load=" << pingpong_candidate_load_start(gemm1_start)
-             << " dual_weight_buffers: IW fills one buffer while Compute consumes the other;"
-             << " VXM E" << kSwigluOutputStream << " writeback stream pressure can still delay MXM1 IW\n";
+        logs.icu << "  load0.mxm0_iw=" << load0.mxm0_iw_start << " load0.mxm1_iw=" << load0.mxm1_iw_start
+                 << " load0.done=" << load0.done()
+                 << " gemm0=" << gemm0_start
+                 << " gemm0_output=" << gemm0_output_start
+                 << " load1.mxm1_iw=" << load1.mxm1_iw_start << " load1.mxm0_iw=" << load1.mxm0_iw_start
+                 << " load1.done=" << load1.done()
+                 << " gemm1=" << gemm1_start
+                 << " gemm1_output=" << gemm1_output_start
+                 << " down_load.mxm1_iw=" << down_load.mxm1_iw_start
+                 << " down_load.mxm0_iw=" << down_load.mxm0_iw_start
+                 << " down_load.done=" << down_load.done()
+                 << " down_gemm=" << down_gemm_start
+                 << " down_output=" << down_output_start << '\n';
+        logs.icu << "  pingpong_candidate load1=" << pingpong_candidate_load_start(gemm0_start)
+                 << " down_load=" << pingpong_candidate_load_start(gemm1_start)
+                 << " dual_weight_buffers: IW fills one buffer while Compute consumes the other;"
+                 << " VXM E" << kSwigluOutputStream << " writeback stream pressure can still delay MXM1 IW\n";
+    }
 
     struct RuntimePhase {
         const OfflineComputePhase* config{nullptr};
@@ -2044,7 +2057,7 @@ int run_offline_icu_ffn_test()
             }
         }
 
-        system->dispatch_icu_only(&logs.icu);
+        system->dispatch_icu_only(logs.icu_ptr());
         const auto mxm_control_sinks = ftlpu::TspSliceSystem::LogSinks {
             nullptr,
             nullptr,
@@ -2056,11 +2069,15 @@ int run_offline_icu_ffn_test()
             std::nullopt,
         };
         system->tick_mxm_controls_only(mxm_control_sinks);
-        system->mem().tick(logs.mem, kLogTile);
+        if (logs.enabled) {
+            system->mem().tick(logs.mem, kLogTile);
+        } else {
+            system->mem().tick();
+        }
         system->tick_mxm_datapaths_only(ftlpu::TspSliceSystem::LogSinks {
             nullptr,
             nullptr,
-            &logs.mxm,
+            logs.mxm_ptr(),
             nullptr,
             nullptr,
             std::nullopt,
@@ -2091,20 +2108,22 @@ int run_offline_icu_ffn_test()
                 capture_mxm_outputs(system->mxm_unit(0), *phase.config->mxm0_output);
                 capture_mxm_outputs(system->mxm_unit(1), *phase.config->mxm1_output);
             }
-            log_mxm_array_state(
-                logs.mxm,
-                "offline_mxm0",
-                compute_cycle,
-                system->mxm_unit(0).control(),
-                system->mxm_unit(0),
-                phase.mxm0_summary);
-            log_mxm_array_state(
-                logs.mxm,
-                "offline_mxm1",
-                compute_cycle,
-                system->mxm_unit(1).control(),
-                system->mxm_unit(1),
-                phase.mxm1_summary);
+            if (logs.enabled) {
+                log_mxm_array_state(
+                    logs.mxm,
+                    "offline_mxm0",
+                    compute_cycle,
+                    system->mxm_unit(0).control(),
+                    system->mxm_unit(0),
+                    phase.mxm0_summary);
+                log_mxm_array_state(
+                    logs.mxm,
+                    "offline_mxm1",
+                    compute_cycle,
+                    system->mxm_unit(1).control(),
+                    system->mxm_unit(1),
+                    phase.mxm1_summary);
+            }
         }
         if (cycle < perf_total_cycles && !mxm0_sampled) {
             total_mxm0_perf.sample_idle();
@@ -2115,9 +2134,9 @@ int run_offline_icu_ffn_test()
 
         const auto bridge_sinks = ftlpu::TspSliceSystem::LogSinks {
             nullptr,
-            &logs.mem,
+            logs.mem_ptr(),
             nullptr,
-            &logs.vxm,
+            logs.vxm_ptr(),
             nullptr,
             kLogTile,
             std::nullopt,
@@ -2146,16 +2165,18 @@ int run_offline_icu_ffn_test()
         }
     }
 
-    for (auto& phase : runtime_phases) {
-        const auto mxm0_label = std::string("offline_") + phase.name + "_mxm0";
-        const auto mxm1_label = std::string("offline_") + phase.name + "_mxm1";
-        flush_all_compute_summary(logs.mxm, mxm0_label.c_str(), phase.mxm0_summary);
-        flush_all_compute_summary(logs.mxm, mxm1_label.c_str(), phase.mxm1_summary);
-        phase.mxm0_perf.print(logs.mxm, mxm0_label);
-        phase.mxm1_perf.print(logs.mxm, mxm1_label);
+    if (logs.enabled) {
+        for (auto& phase : runtime_phases) {
+            const auto mxm0_label = std::string("offline_") + phase.name + "_mxm0";
+            const auto mxm1_label = std::string("offline_") + phase.name + "_mxm1";
+            flush_all_compute_summary(logs.mxm, mxm0_label.c_str(), phase.mxm0_summary);
+            flush_all_compute_summary(logs.mxm, mxm1_label.c_str(), phase.mxm1_summary);
+            phase.mxm0_perf.print(logs.mxm, mxm0_label);
+            phase.mxm1_perf.print(logs.mxm, mxm1_label);
+        }
+        total_mxm0_perf.print(logs.mxm, "offline_total_mxm0");
+        total_mxm1_perf.print(logs.mxm, "offline_total_mxm1");
     }
-    total_mxm0_perf.print(logs.mxm, "offline_total_mxm0");
-    total_mxm1_perf.print(logs.mxm, "offline_total_mxm1");
 
     if (!verify_loaded_weights(*system, 0, phases[1].weight_buffer, kGateMatrix, 1, "gate_p1")) {
         return 1;
@@ -2230,8 +2251,10 @@ int run_offline_icu_ffn_test()
         return 1;
     }
 
-    write_pipeline_svg(log_dir / "pipeline.svg");
-    logs.icu << "pipeline diagram: " << (log_dir / "pipeline.svg").string() << '\n';
+    if (logs.enabled) {
+        write_pipeline_svg(log_dir / "pipeline.svg");
+        logs.icu << "pipeline diagram: " << (log_dir / "pipeline.svg").string() << '\n';
+    }
     return 0;
 }
 
@@ -2255,9 +2278,12 @@ try
     };
 
     auto system = std::make_unique<ftlpu::TspSliceSystem>();
+    const auto enable_logs = ffn_logs_enabled();
     const auto log_dir = std::filesystem::path("logs") / "mem_dual_mxm_swiglu";
-    std::filesystem::create_directories(log_dir);
-    auto logs = TestLogs(log_dir);
+    if (enable_logs) {
+        std::filesystem::create_directories(log_dir);
+    }
+    auto logs = TestLogs(log_dir, enable_logs);
     if (!logs.good()) {
         std::cerr << "failed to open mem_dual_mxm_swiglu log files\n";
         return 1;
@@ -2265,12 +2291,14 @@ try
 
     stage_weight_matrices(system->mem());
     stage_activation_matrix(system->mem());
-    logs.mem << "mem initialized activation=160x320 gate/up/down weights=640x320\n";
-    logs.mem << "  activation matrix column=" << kActivationMemColumn << '\n';
-    logs.mem << "  swiglu output column=" << kSwigluMemColumn << '\n';
-    logs.mem << "  final output column=" << kFinalMemColumn << '\n';
-    logs.mem << "  weight matrices staged across MEM columns 0..31\n";
-    logs.mem << "  external initialization writes SRAM directly; all movement between MEM/MXM/VXM uses ICU MEM Read/Write\n";
+    if (logs.enabled) {
+        logs.mem << "mem initialized activation=160x320 gate/up/down weights=640x320\n";
+        logs.mem << "  activation matrix column=" << kActivationMemColumn << '\n';
+        logs.mem << "  swiglu output column=" << kSwigluMemColumn << '\n';
+        logs.mem << "  final output column=" << kFinalMemColumn << '\n';
+        logs.mem << "  weight matrices staged across MEM columns 0..31\n";
+        logs.mem << "  external initialization writes SRAM directly; all movement between MEM/MXM/VXM uses ICU MEM Read/Write\n";
+    }
 
     MatrixI8 swiglu(kActivationRows * kHiddenColumns, 0);
 
@@ -2401,10 +2429,12 @@ try
 
     const auto swiglu_nonzero = count_nonzero(reference_swiglu);
     const auto final_nonzero = count_nonzero(final);
-    logs.vxm << "symmetric_quant swiglu_scale=" << swiglu_params.output_scale
-             << " final_scale=" << down_params.output_scale
-             << " swiglu_nonzero=" << swiglu_nonzero << "/" << reference_swiglu.size()
-             << " final_nonzero=" << final_nonzero << "/" << final.size() << '\n';
+    if (logs.enabled) {
+        logs.vxm << "symmetric_quant swiglu_scale=" << swiglu_params.output_scale
+                 << " final_scale=" << down_params.output_scale
+                 << " swiglu_nonzero=" << swiglu_nonzero << "/" << reference_swiglu.size()
+                 << " final_nonzero=" << final_nonzero << "/" << final.size() << '\n';
+    }
     if (swiglu_nonzero < reference_swiglu.size() / 20) {
         std::cerr << "SwiGLU output is too sparse after symmetric quantization: "
                   << swiglu_nonzero << "/" << reference_swiglu.size() << " nonzero\n";
@@ -2416,8 +2446,10 @@ try
         return 1;
     }
 
-    write_pipeline_svg(log_dir / "pipeline.svg");
-    logs.icu << "pipeline diagram: " << (log_dir / "pipeline.svg").string() << '\n';
+    if (logs.enabled) {
+        write_pipeline_svg(log_dir / "pipeline.svg");
+        logs.icu << "pipeline diagram: " << (log_dir / "pipeline.svg").string() << '\n';
+    }
 
     return 0;
 }

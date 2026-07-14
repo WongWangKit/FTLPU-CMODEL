@@ -148,7 +148,18 @@ public:
         return instruction_rows_[column][tile];
     }
 
+    void tick()
+    {
+        tick_impl(nullptr, std::nullopt);
+    }
+
     void tick(std::ostream& os, std::optional<std::size_t> log_tile = std::nullopt)
+    {
+        tick_impl(&os, log_tile);
+    }
+
+private:
+    void tick_impl(std::ostream* os, std::optional<std::size_t> log_tile)
     {
         if (log_tile.has_value()) {
             check_tile(*log_tile);
@@ -159,14 +170,15 @@ public:
         advance_streams();
         apply_pending_stream_writes();
         apply_pending_inputs();
-        log_cycle(os, log_tile);
+        if (os != nullptr) {
+            log_cycle(*os, log_tile);
+        }
         executed_mem_.clear();
         executed_instructions_.clear();
         pending_stream_writes_.clear();
         ++cycle_;
     }
 
-private:
     struct DecodedStream {
         StreamDirection direction{StreamDirection::East};
         std::size_t stream{0};

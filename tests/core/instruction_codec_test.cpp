@@ -19,7 +19,6 @@ bool same_mem(const ftlpu::MemInstruction& lhs, const ftlpu::MemInstruction& rhs
 bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlInstruction& rhs)
 {
     return lhs.opcode == rhs.opcode
-        && lhs.supercell_column == rhs.supercell_column
         && lhs.weight_buffer == rhs.weight_buffer
         && lhs.stream_base == rhs.stream_base
         && lhs.activation_stream_base == rhs.activation_stream_base;
@@ -93,9 +92,8 @@ bool verify_mem_codec()
 bool verify_mxm_codec()
 {
     const ftlpu::MxmControlInstruction instructions[] {
-        ftlpu::MxmControlInstruction::IW(19, 1),
-        ftlpu::MxmControlInstruction::Compute(1, 31),
-        ftlpu::MxmControlInstruction::Output(36),
+        ftlpu::MxmControlInstruction::IW(1),
+        ftlpu::MxmControlInstruction::Compute(1, 31, 36),
     };
 
     for (const auto& instruction : instructions) {
@@ -110,7 +108,7 @@ bool verify_mxm_codec()
         [] {
             ftlpu::isa::encode_mxm_instruction(ftlpu::MxmControlInstruction::IW(32));
         },
-        "MXM codec should reject supercell columns wider than 5 bits");
+        "MXM codec should reject weight buffers outside the two-buffer set");
 }
 
 bool verify_vxm_codec()

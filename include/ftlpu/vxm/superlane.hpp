@@ -9,6 +9,7 @@
 #include <optional>
 #include <ostream>
 #include <stdexcept>
+#include <vector>
 
 namespace ftlpu {
 
@@ -23,7 +24,9 @@ public:
 
     struct Output {
         Int8Vector values{};
+        std::array<std::array<std::uint8_t, 2>, kLaneCount> byte_values{};
         std::size_t stream{0};
+        std::size_t byte_count{1};
     };
 
     void reset()
@@ -32,6 +35,7 @@ public:
             lane.reset();
         }
         output_.reset();
+        outputs_.clear();
         cycle_ = 0;
     }
 
@@ -102,31 +106,39 @@ public:
     void tick()
     {
         output_.reset();
+        outputs_.clear();
 
-        auto values = Int8Vector {};
-        std::size_t output_stream = 0;
-        bool all_valid = true;
-        bool any_valid = false;
         for (std::size_t lane = 0; lane < kLaneCount; ++lane) {
             lanes_[lane].tick();
-            const auto& lane_output = lanes_[lane].output();
-            if (lane_output.has_value()) {
-                values[lane] = lane_output->value;
-                if (any_valid && lane_output->stream != output_stream) {
-                    throw std::logic_error("VXM superlane lanes produced outputs on different streams");
-                }
-                output_stream = lane_output->stream;
-                any_valid = true;
-            } else {
-                all_valid = false;
+        }
+
+        const auto output_count = lanes_[0].outputs().size();
+        for (std::size_t lane = 1; lane < kLaneCount; ++lane) {
+            if (lanes_[lane].outputs().size() != output_count) {
+                throw std::logic_error("VXM superlane lanes produced different output counts");
             }
         }
 
-        if (any_valid && !all_valid) {
-            throw std::logic_error("VXM superlane lanes produced misaligned outputs");
+        for (std::size_t output_index = 0; output_index < output_count; ++output_index) {
+            auto values = Int8Vector {};
+            auto byte_values = std::array<std::array<std::uint8_t, 2>, kLaneCount> {};
+            const auto stream = lanes_[0].outputs()[output_index].stream;
+            const auto byte_count = lanes_[0].outputs()[output_index].byte_count;
+            for (std::size_t lane = 0; lane < kLaneCount; ++lane) {
+                const auto& lane_output = lanes_[lane].outputs()[output_index];
+                if (lane_output.stream != stream) {
+                    throw std::logic_error("VXM superlane lanes produced outputs on different streams");
+                }
+                if (lane_output.byte_count != byte_count) {
+                    throw std::logic_error("VXM superlane lanes produced outputs with different byte widths");
+                }
+                values[lane] = lane_output.value;
+                byte_values[lane] = lane_output.bytes;
+            }
+            outputs_.push_back(Output {values, byte_values, stream, byte_count});
         }
-        if (all_valid) {
-            output_ = Output {values, output_stream};
+        if (!outputs_.empty()) {
+            output_ = outputs_.front();
         }
 
         ++cycle_;
@@ -135,6 +147,11 @@ public:
     const std::optional<Output>& output() const
     {
         return output_;
+    }
+
+    const std::vector<Output>& outputs() const
+    {
+        return outputs_;
     }
 
     const VxmLane& lane(std::size_t index) const
@@ -169,6 +186,7 @@ private:
 
     std::array<VxmLane, kLaneCount> lanes_{};
     std::optional<Output> output_{};
+    std::vector<Output> outputs_{};
     std::size_t cycle_{0};
 };
 

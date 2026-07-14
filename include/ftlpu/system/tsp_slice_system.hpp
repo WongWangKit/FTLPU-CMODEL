@@ -108,6 +108,8 @@ public:
         transfer_vxm_to_mem_east(sinks);
         if (sinks.mem != nullptr) {
             mem_.tick(*sinks.mem, sinks.mem_log_tile);
+        } else {
+            mem_.tick();
         }
         ++cycle_;
     }
@@ -255,27 +257,28 @@ private:
     void transfer_vxm_to_mem_east(LogSinks sinks)
     {
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-            const auto& output = vxm_.output_at(tile);
-            if (!output.has_value()) {
-                continue;
-            }
-
-            if (output->stream >= hw::kStreams) {
-                throw std::out_of_range("VXM output stream is outside the 64-stream lane");
-            }
-            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                const auto word = TileArrayModel::DataWord {
-                    static_cast<std::uint8_t>(output->values[lane]),
-                    lane + 1 == hw::kLanesPerTile,
-                };
-                if (output->stream < hw::kEastStreams) {
-                    mem_.set_east_stream_input(tile, lane, output->stream, word);
-                } else {
-                    mem_.set_west_stream_input(tile, lane, output->stream - hw::kEastStreams, word);
+            for (const auto& output : vxm_.outputs_at(tile)) {
+                if (output.stream + output.byte_count > hw::kStreams) {
+                    throw std::out_of_range("VXM output stream is outside the 64-stream lane");
                 }
-            }
-            if (sinks.mem != nullptr && (!sinks.mem_log_tile.has_value() || tile == *sinks.mem_log_tile)) {
-                *sinks.mem << "  VXM -> MEM tile " << tile << " stream " << output->stream << '\n';
+                for (std::size_t byte = 0; byte < output.byte_count; ++byte) {
+                    const auto stream = output.stream + byte;
+                    for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                        const auto word = TileArrayModel::DataWord {
+                            output.byte_values[lane][byte],
+                            lane + 1 == hw::kLanesPerTile,
+                        };
+                        if (stream < hw::kEastStreams) {
+                            mem_.set_east_stream_input(tile, lane, stream, word);
+                        } else {
+                            mem_.set_west_stream_input(tile, lane, stream - hw::kEastStreams, word);
+                        }
+                    }
+                }
+                if (sinks.mem != nullptr && (!sinks.mem_log_tile.has_value() || tile == *sinks.mem_log_tile)) {
+                    *sinks.mem << "  VXM -> MEM tile " << tile << " stream " << output.stream
+                               << " bytes=" << output.byte_count << '\n';
+                }
             }
         }
     }
