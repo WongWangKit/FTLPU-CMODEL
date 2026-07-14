@@ -156,8 +156,8 @@ void initialize_mem_inputs(ftlpu::TspSliceSystem& system)
             const auto gate_bytes = ftlpu::VxmLane::pack_int32(gate_value(tile, lane));
             const auto up_bytes = ftlpu::VxmLane::pack_int32(up_value(tile, lane));
             for (std::size_t byte = 0; byte < 4; ++byte) {
-                system.mem().set_sram_byte(kGateColumnBase + byte, tile, kGateAddress + lane, gate_bytes[byte]);
-                system.mem().set_sram_byte(kUpColumnBase + byte, tile, kUpAddress + lane, up_bytes[byte]);
+                system.mem().set_sram_lane_byte(kGateColumnBase + byte, tile, kGateAddress, lane, gate_bytes[byte]);
+                system.mem().set_sram_lane_byte(kUpColumnBase + byte, tile, kUpAddress, lane, up_bytes[byte]);
             }
         }
     }
@@ -237,7 +237,7 @@ try
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
             const auto expected = expected_swiglu(gate_value(tile, lane), up_value(tile, lane), params);
             const auto actual = static_cast<std::int8_t>(
-                system->mem().sram_byte(kOutputColumn, tile, kOutputAddress + lane));
+                system->mem().sram_lane_byte(kOutputColumn, tile, kOutputAddress, lane));
             if (!require(
                     actual == expected,
                     "output mismatch tile=" + std::to_string(tile)
@@ -253,7 +253,7 @@ try
         const auto tile = sample_tiles[index];
         const auto lane = sample_lanes[index];
         const auto actual = static_cast<std::int8_t>(
-            system->mem().sram_byte(kOutputColumn, tile, kOutputAddress + lane));
+            system->mem().sram_lane_byte(kOutputColumn, tile, kOutputAddress, lane));
         const auto expected = expected_swiglu(gate_value(tile, lane), up_value(tile, lane), params);
         std::cout << "    tile=" << tile << " lane=" << lane
                   << " gate=" << gate_value(tile, lane)

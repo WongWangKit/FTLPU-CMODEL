@@ -49,7 +49,7 @@ void initialize_mem(ftlpu::TspSliceSystem& system)
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
             const auto bytes = ftlpu::VxmLane::pack_int32(input_value(tile, lane));
             for (std::size_t byte = 0; byte < bytes.size(); ++byte) {
-                system.mem().set_sram_byte(byte, tile, kInputAddress + lane, bytes[byte]);
+                system.mem().set_sram_lane_byte(byte, tile, kInputAddress, lane, bytes[byte]);
             }
         }
     }
@@ -166,7 +166,7 @@ try
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
             const auto expected = ftlpu::VxmAlu::cast_scalar_to_int8(static_cast<float>(input_value(tile, lane)));
             const auto actual = static_cast<std::int8_t>(
-                system->mem().sram_byte(0, tile, kOutputAddress + lane));
+                system->mem().sram_lane_byte(0, tile, kOutputAddress, lane));
             if (actual != expected) {
                 std::cerr << "ICU scheduled stream result mismatch"
                           << " tile=" << tile

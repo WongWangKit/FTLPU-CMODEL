@@ -5,16 +5,35 @@
 namespace ftlpu::hw {
 
 constexpr std::size_t kTileRows = 20;
-constexpr std::size_t kSliceColumns = 44;
-constexpr std::size_t kSlicesPerGroup = 4;
-constexpr std::size_t kSliceGroups = kSliceColumns / kSlicesPerGroup;
-
-constexpr std::size_t kStreamRegisterColumns = kSliceGroups + 1;
 constexpr std::size_t kLanesPerTile = 16;
-constexpr std::size_t kStreams = 64;
-constexpr std::size_t kEastStreams = 32;
-constexpr std::size_t kWestStreams = 32;
+constexpr std::size_t kPhysicalVectorBytes = kTileRows * kLanesPerTile;
+
+// Stream identity is 0..31 plus a direction.  kStreams is retained as the
+// packed ISA selector count (E0..E31, W0..W31).
+constexpr std::size_t kStreamsPerDirection = 32;
+constexpr std::size_t kEastStreams = kStreamsPerDirection;
+constexpr std::size_t kWestStreams = kStreamsPerDirection;
+constexpr std::size_t kStreams = kEastStreams + kWestStreams;
 constexpr std::size_t kStreamRegisterBytes = 1;
+
+// MEM/SRAM geometry for one modeled hemisphere.
+constexpr std::size_t kMemSliceColumns = 44;
+constexpr std::size_t kMemSlicesPerGroup = 4;
+constexpr std::size_t kMemGroups = kMemSliceColumns / kMemSlicesPerGroup;
+constexpr std::size_t kMemBoundaryStreamRegisterColumns = kMemGroups + 1;
+
+// Compatibility names used by the existing code.  New code should use the
+// MEM-specific names above instead of assuming that the whole chip has only
+// twelve SR columns.
+constexpr std::size_t kSliceColumns = kMemSliceColumns;
+constexpr std::size_t kSlicesPerGroup = kMemSlicesPerGroup;
+constexpr std::size_t kSliceGroups = kMemGroups;
+constexpr std::size_t kStreamRegisterColumns = kMemBoundaryStreamRegisterColumns;
+
+// Figure-4 eastward path count supplied by the architecture study.  The MEM
+// region uses a mapped subset of these physical columns; it does not own them.
+constexpr std::size_t kEastPathStreamRegisterColumns = 21;
+
 constexpr std::size_t kMemLanesPerCycle = kLanesPerTile;
 constexpr std::size_t kMemReadBytesPerCycle = kMemLanesPerCycle * kStreamRegisterBytes;
 constexpr std::size_t kMemWriteBytesPerCycle = kMemLanesPerCycle * kStreamRegisterBytes;
@@ -34,15 +53,18 @@ constexpr std::size_t kPublicSramBlocks = 88;
 constexpr std::size_t kModeledSramBlocks = kPublicSramBlocks / kHemispheres;
 constexpr std::size_t kSramBlocksPerSlice = 1;
 constexpr std::size_t kSramBlocks = kModeledSramBlocks;
-constexpr std::size_t kPhysicalVectorBytes = 320;
-constexpr std::size_t kSramDepthWords = 8192;
-constexpr std::size_t kSramBlockBytes = kPhysicalVectorBytes * kSramDepthWords;
+constexpr std::size_t kSramRowBytes = kPhysicalVectorBytes;
+constexpr std::size_t kSramDepthRows = 8192;
+// Compatibility alias for code that historically called a 320-byte row a word.
+constexpr std::size_t kSramDepthWords = kSramDepthRows;
+constexpr std::size_t kSramBlockBytes = kSramRowBytes * kSramDepthRows;
 constexpr std::size_t kTotalSramBytes = kSramBlocks * kSramBlockBytes;
 constexpr std::size_t kPublicTotalSramBytes = kPublicSramBlocks * kSramBlockBytes;
 
-static_assert(kSliceColumns % kSlicesPerGroup == 0);
-static_assert(kStreamRegisterColumns == 12);
-static_assert(kModeledSramBlocks == kSliceColumns);
+static_assert(kPhysicalVectorBytes == 320);
+static_assert(kMemSliceColumns % kMemSlicesPerGroup == 0);
+static_assert(kMemBoundaryStreamRegisterColumns == 12);
+static_assert(kModeledSramBlocks == kMemSliceColumns);
 static_assert(kPublicSramBlocks == 88);
 static_assert(kSramBlocks == 44);
 static_assert(kEastStreams + kWestStreams == kStreams);

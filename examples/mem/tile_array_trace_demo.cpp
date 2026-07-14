@@ -19,7 +19,7 @@ int main(int argc, char** argv)
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
         model->set_east_stream_input(0, lane, 0, {static_cast<std::uint8_t>(100 + lane), lane == 15});
         model->set_west_stream_input(0, lane, 0, {static_cast<std::uint8_t>(200 + lane), lane == 15});
-        model->set_sram_byte(43, 0, 16 + lane, static_cast<std::uint8_t>(210 + lane));
+        model->set_sram_lane_byte(43, 0, 16, lane, static_cast<std::uint8_t>(210 + lane));
     }
 
     model->enqueue_instruction(0, ftlpu::MemInstruction::Write(0, 0));

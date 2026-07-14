@@ -36,11 +36,12 @@ Current topology:
 - One modeled SRAM block per MEM slice column.
 - One modeled hemisphere: 44 SRAM blocks.
 - Public two-hemisphere total: 88 SRAM blocks.
-- 320-byte physical vector width.
-- 8192 vector words per SRAM block.
+- 320-byte physical row width.
+- 8192 rows per SRAM bank (2.5 MiB per bank).
 
-The SRAM arrays in `TileArrayModel` are byte-addressable for simplicity, while
-the public SRAM block math is still tracked in the hardware parameters.
+Each of the 44 MEM slices owns one full SRAM bank.  A row is divided into 20
+tile segments of 16 bytes, so byte `(tile * 16 + lane)` selects the byte served
+by that tile/lane.  The modeled hemisphere therefore contains 110 MiB of SRAM.
 
 ## Stream Direction Conventions
 
@@ -63,11 +64,12 @@ Important behavior:
 
 - There are 44 independent MEM instruction queues, one per slice column.
 - Instructions enter at tile 0 and move north one tile per cycle.
-- A `Read(address, stream)` reads 16 bytes from the tile SRAM, one byte per lane,
+- A `Read(address, stream)` selects one SRAM row and reads the current tile's
+  16-byte segment, one byte per lane,
   and writes them into the selected stream at the stream register adjacent to
   that MEM slice.
 - A `Write(address, stream)` consumes 16 bytes from the selected stream, one byte
-  per lane, and writes them into SRAM.
+  per lane, and writes them into the current tile's segment of that SRAM row.
 - `Gather` and `Scatter` are represented in the instruction enum, but the current
   tests focus on `Read` and `Write`.
 

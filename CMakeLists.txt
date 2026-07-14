@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(FTLPU_CMODEL LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -27,9 +27,15 @@ ftlpu_add_test(topology_test tests/core/topology_test.cpp)
 ftlpu_add_test(instruction_pipeline_test tests/core/instruction_pipeline_test.cpp)
 ftlpu_add_test(instruction_codec_test tests/core/instruction_codec_test.cpp)
 
+ftlpu_add_test(stream_fabric_test tests/stream/stream_fabric_test.cpp)
+ftlpu_add_test(stream_port_test tests/stream/stream_port_test.cpp)
+
 ftlpu_add_test(mem_slice_test tests/mem/slice_test.cpp)
+ftlpu_add_test(mem_array_separated_test tests/mem/mem_array_separated_test.cpp)
 ftlpu_add_test(tile_array_test tests/mem/tile_array_test.cpp)
 ftlpu_add_test(vector_roundtrip_test tests/mem/vector_roundtrip_test.cpp)
+
+ftlpu_add_test(stream_topology_test tests/system/stream_topology_test.cpp)
 
 ftlpu_add_test(mxm_supercell_test tests/mxm/supercell_test.cpp)
 ftlpu_add_test(mxm_array_test tests/mxm/array_test.cpp)
@@ -61,3 +67,4 @@ ftlpu_add_demo(gemm_320_trace_demo examples/mxm/gemm_320_trace_demo.cpp)
 ftlpu_add_demo(icu_mem_demo examples/icu/icu_mem_demo.cpp)
 ftlpu_add_demo(sxm_chain_demo examples/sxm/chain_demo.cpp)
 ftlpu_add_demo(vxm_lane_trace_demo examples/vxm/lane_trace_demo.cpp)
+ftlpu_add_demo(stream_topology_api_demo examples/system/stream_topology_api_demo.cpp)

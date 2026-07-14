@@ -118,7 +118,7 @@ try
             for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
                 const auto expected = pattern(tile, stream, lane);
                 if (!require(
-                        system->mem().sram_byte(stream, tile, kSramAddress + lane) == expected,
+                        system->mem().sram_lane_byte(stream, tile, kSramAddress, lane) == expected,
                         "MEM SRAM byte mismatch")) {
                     return 1;
                 }

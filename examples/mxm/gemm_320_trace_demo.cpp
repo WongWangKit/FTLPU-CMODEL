@@ -299,7 +299,7 @@ namespace {
                         lane,
                         kResultStreamBase + byte,
                         ftlpu::TileArrayModel::DataWord{ value, lane + 1 == kLanes });
-                    result_mem.set_sram_byte(kResultSliceBase + byte, tile, address + lane, value);
+                    result_mem.set_sram_lane_byte(kResultSliceBase + byte, tile, address, lane, value);
                 }
             }
             mem_log.flags(old_flags);
