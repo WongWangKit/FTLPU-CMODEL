@@ -4,12 +4,14 @@
 #include "ftlpu/core/stream_fabric.hpp"
 #include "ftlpu/mem/mem_array.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <iomanip>
 #include <optional>
 #include <ostream>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -44,6 +46,7 @@ public:
         mem_.reset();
         streams_.reset();
         pending_inputs_.clear();
+        pending_consumptions_.clear();
     }
 
     std::size_t cycle() const noexcept
@@ -143,6 +146,21 @@ public:
         return streams_.cell(register_file, tile, lane, StreamId::West(stream));
     }
 
+    StreamSlot consume_east_register(
+        std::size_t tile,
+        std::size_t lane,
+        std::size_t register_file,
+        std::size_t stream)
+    {
+        const auto id = StreamId::East(stream);
+        const auto cell = streams_.cell(register_file, tile, lane, id);
+        if (cell.valid) {
+            pending_consumptions_.push_back(
+                PendingConsumption {register_file, tile, lane, id});
+        }
+        return cell;
+    }
+
     Data sram_byte(std::size_t column, std::size_t row, std::size_t byte_offset) const
     {
         return mem_.sram_byte(column, row, byte_offset);
@@ -162,9 +180,32 @@ public:
         return mem_.instruction_at(column, tile);
     }
 
+    void tick()
+    {
+        tick_impl(nullptr, std::nullopt);
+    }
+
     void tick(std::ostream& os, std::optional<std::size_t> log_tile = std::nullopt)
     {
+        tick_impl(&os, log_tile);
+    }
+
+private:
+    void tick_impl(std::ostream* os, std::optional<std::size_t> log_tile)
+    {
         streams_.begin_cycle();
+
+        // Legacy MXM/VXM bridges run before TileArrayModel::tick().  Defer
+        // their consume requests until the shared fabric cycle is open.
+        for (const auto& consumption : pending_consumptions_) {
+            streams_.consume(
+                consumption.column,
+                consumption.tile,
+                consumption.lane,
+                consumption.stream,
+                "legacy TileArray consumer");
+        }
+        pending_consumptions_.clear();
 
         // Functional slices read current SR state, consume operands and stage
         // results into next state.  No functional slice can see another
@@ -189,18 +230,26 @@ public:
         streams_.commit_cycle();
         pending_inputs_.clear();
 
-        mem_.log_cycle(os, log_tile);
-        log_streams(os, log_tile);
+        if (os != nullptr) {
+            mem_.log_cycle(*os, log_tile);
+            log_streams(*os, log_tile);
+        }
         ++cycle_;
     }
 
-private:
     struct PendingInput {
         std::size_t column{0};
         std::size_t tile{0};
         std::size_t lane{0};
         StreamId stream{StreamId::East(0)};
         StreamCell cell{};
+    };
+
+    struct PendingConsumption {
+        std::size_t column{0};
+        std::size_t tile{0};
+        std::size_t lane{0};
+        StreamId stream{StreamId::East(0)};
     };
 
     static void print_hex_bytes(std::ostream& os, const StreamPayloadSegment16& bytes)
@@ -270,6 +319,7 @@ private:
     MemArrayModel mem_;
     StreamRegisterFabric streams_;
     std::vector<PendingInput> pending_inputs_{};
+    std::vector<PendingConsumption> pending_consumptions_{};
     std::size_t cycle_{0};
 };
 

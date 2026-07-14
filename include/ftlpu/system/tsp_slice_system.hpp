@@ -101,12 +101,15 @@ public:
         }
         icu_.dispatch(mem_, vxm_, mxms_, sinks.icu);
         tick_mxm_controls(sinks);
+        tick_mxm_datapaths(sinks);
         vxm_.prepare_cycle();
         transfer_mem_west_to_vxm(sinks);
         vxm_.tick(sinks.vxm, sinks.vxm_log_tile);
         transfer_vxm_to_mem_east(sinks);
         if (sinks.mem != nullptr) {
             mem_.tick(*sinks.mem, sinks.mem_log_tile);
+        } else {
+            mem_.tick();
         }
         ++cycle_;
     }
@@ -119,6 +122,11 @@ public:
     void tick_mxm_controls_only(LogSinks sinks)
     {
         tick_mxm_controls(sinks);
+    }
+
+    void tick_mxm_datapaths_only(LogSinks sinks)
+    {
+        tick_mxm_datapaths(sinks);
     }
 
     void tick_vxm_stream_bridge(LogSinks sinks, std::optional<std::size_t> log_tile = std::nullopt)
@@ -178,14 +186,21 @@ private:
         }
     }
 
-    MxmControlSlice::WeightInput collect_mxm_weight_input_from_streams(std::size_t mxm, std::size_t tile) const
+    void tick_mxm_datapaths(LogSinks sinks)
+    {
+        for (std::size_t mxm = 0; mxm < kMxmCount; ++mxm) {
+            mxms_[mxm].tick_datapath(mem_, mxm, sinks.mxm, sinks.mxm_log_tile);
+        }
+    }
+
+    MxmControlSlice::WeightInput collect_mxm_weight_input_from_streams(std::size_t mxm, std::size_t tile)
     {
         constexpr auto kTargetSreg = hw::kStreamRegisterColumns - 1;
         auto input = MxmControlSlice::WeightInput {};
         const auto stream_base = mxm * hw::kMxmLoadStreamsPerCycle;
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             for (std::size_t stream = 0; stream < hw::kMxmLoadStreamsPerCycle; ++stream) {
-                const auto& slot = mem_.east_register(tile, lane, kTargetSreg, stream_base + stream);
+                const auto slot = mem_.consume_east_register(tile, lane, kTargetSreg, stream_base + stream);
                 if (!slot.has_value()) {
                     throw std::logic_error("MXM IW reached tile before MEM east stream arrived at sreg11");
                 }
@@ -242,27 +257,28 @@ private:
     void transfer_vxm_to_mem_east(LogSinks sinks)
     {
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-            const auto& output = vxm_.output_at(tile);
-            if (!output.has_value()) {
-                continue;
-            }
-
-            if (output->stream >= hw::kStreams) {
-                throw std::out_of_range("VXM output stream is outside the 64-stream lane");
-            }
-            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                const auto word = TileArrayModel::DataWord {
-                    static_cast<std::uint8_t>(output->values[lane]),
-                    lane + 1 == hw::kLanesPerTile,
-                };
-                if (output->stream < hw::kEastStreams) {
-                    mem_.set_east_stream_input(tile, lane, output->stream, word);
-                } else {
-                    mem_.set_west_stream_input(tile, lane, output->stream - hw::kEastStreams, word);
+            for (const auto& output : vxm_.outputs_at(tile)) {
+                if (output.stream + output.byte_count > hw::kStreams) {
+                    throw std::out_of_range("VXM output stream is outside the 64-stream lane");
                 }
-            }
-            if (sinks.mem != nullptr && (!sinks.mem_log_tile.has_value() || tile == *sinks.mem_log_tile)) {
-                *sinks.mem << "  VXM -> MEM tile " << tile << " stream " << output->stream << '\n';
+                for (std::size_t byte = 0; byte < output.byte_count; ++byte) {
+                    const auto stream = output.stream + byte;
+                    for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                        const auto word = TileArrayModel::DataWord {
+                            output.byte_values[lane][byte],
+                            lane + 1 == hw::kLanesPerTile,
+                        };
+                        if (stream < hw::kEastStreams) {
+                            mem_.set_east_stream_input(tile, lane, stream, word);
+                        } else {
+                            mem_.set_west_stream_input(tile, lane, stream - hw::kEastStreams, word);
+                        }
+                    }
+                }
+                if (sinks.mem != nullptr && (!sinks.mem_log_tile.has_value() || tile == *sinks.mem_log_tile)) {
+                    *sinks.mem << "  VXM -> MEM tile " << tile << " stream " << output.stream
+                               << " bytes=" << output.byte_count << '\n';
+                }
             }
         }
     }

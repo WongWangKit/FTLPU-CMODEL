@@ -33,6 +33,7 @@ enum class VxmAluOpcode {
 
 enum class VxmCastTarget {
     Float32,
+    Float16,
     Int8,
 };
 
@@ -142,6 +143,50 @@ public:
         return saturate_int8(rounded);
     }
 
+    static std::uint16_t cast_scalar_to_float16_bits(float input)
+    {
+        if (std::isnan(input)) {
+            return 0x7e00u;
+        }
+
+        const auto sign = std::signbit(input) ? std::uint16_t {0x8000u} : std::uint16_t {0};
+        auto value = std::fabs(input);
+        if (std::isinf(value)) {
+            return static_cast<std::uint16_t>(sign | 0x7c00u);
+        }
+        if (value == 0.0f) {
+            return sign;
+        }
+
+        int exponent = 0;
+        const auto mantissa = std::frexp(value, &exponent);
+        auto half_exponent = exponent + 14;
+        if (half_exponent >= 31) {
+            return static_cast<std::uint16_t>(sign | 0x7c00u);
+        }
+        if (half_exponent <= 0) {
+            const auto scaled = std::ldexp(value, 24);
+            auto subnormal = static_cast<std::uint32_t>(std::nearbyint(scaled));
+            if (subnormal == 0) {
+                return sign;
+            }
+            if (subnormal >= 0x400u) {
+                return static_cast<std::uint16_t>(sign | 0x0400u);
+            }
+            return static_cast<std::uint16_t>(sign | subnormal);
+        }
+
+        auto fraction = static_cast<std::uint32_t>(std::nearbyint((mantissa * 2.0f - 1.0f) * 1024.0f));
+        if (fraction == 1024u) {
+            fraction = 0;
+            ++half_exponent;
+            if (half_exponent >= 31) {
+                return static_cast<std::uint16_t>(sign | 0x7c00u);
+            }
+        }
+        return static_cast<std::uint16_t>(sign | (static_cast<std::uint16_t>(half_exponent) << 10) | fraction);
+    }
+
     static Vector dequantize(const Int8Vector& input, float scale, std::int32_t input_zero_point = 0)
     {
         Vector out{};
@@ -189,6 +234,11 @@ private:
         switch (target) {
         case VxmCastTarget::Float32:
             return input;
+        case VxmCastTarget::Float16:
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                out[lane] = input[lane];
+            }
+            return out;
         case VxmCastTarget::Int8:
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                 out[lane] = static_cast<float>(cast_scalar_to_int8(input[lane]));

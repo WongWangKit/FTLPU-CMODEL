@@ -37,10 +37,10 @@ public:
         for (auto& queue : mem_queues_) {
             queue.reset();
         }
-        for (auto& queue : mxm_queues_) {
+        for (auto& queue : mxm_load_queues_) {
             queue.reset();
         }
-        for (auto& queue : mxm_output_queues_) {
+        for (auto& queue : mxm_compute_queues_) {
             queue.reset();
         }
         cycle_ = 0;
@@ -54,10 +54,10 @@ public:
         for (auto& queue : mem_queues_) {
             queue.push_nop(cycles);
         }
-        for (auto& queue : mxm_queues_) {
+        for (auto& queue : mxm_load_queues_) {
             queue.push_nop(cycles);
         }
-        for (auto& queue : mxm_output_queues_) {
+        for (auto& queue : mxm_compute_queues_) {
             queue.push_nop(cycles);
         }
     }
@@ -105,35 +105,48 @@ public:
     void enqueue_mxm(std::size_t mxm, MxmControlInstruction instruction)
     {
         check_mxm_queue(mxm);
-        if (instruction.opcode == MxmControlOpcode::Output) {
-            mxm_output_queues_[mxm].push_instruction(instruction);
+        if (instruction.opcode == MxmControlOpcode::Compute) {
+            mxm_compute_queues_[mxm].push_instruction(instruction);
         } else {
-            mxm_queues_[mxm].push_instruction(instruction);
+            mxm_load_queues_[mxm].push_instruction(instruction);
         }
     }
 
     void enqueue_mxm_nop(std::size_t mxm, std::size_t cycles)
     {
         check_mxm_queue(mxm);
-        mxm_queues_[mxm].push_nop(cycles);
+        mxm_load_queues_[mxm].push_nop(cycles);
+        mxm_compute_queues_[mxm].push_nop(cycles);
+    }
+
+    void enqueue_mxm_load_nop(std::size_t mxm, std::size_t cycles)
+    {
+        check_mxm_queue(mxm);
+        mxm_load_queues_[mxm].push_nop(cycles);
+    }
+
+    void enqueue_mxm_compute_nop(std::size_t mxm, std::size_t cycles)
+    {
+        check_mxm_queue(mxm);
+        mxm_compute_queues_[mxm].push_nop(cycles);
     }
 
     void enqueue_mxm_repeat(std::size_t mxm, std::size_t count, std::size_t interval = 1)
     {
         check_mxm_queue(mxm);
-        mxm_queues_[mxm].push_repeat(Repeat {count, interval, 0});
+        mxm_compute_queues_[mxm].push_repeat(Repeat {count, interval, 0});
     }
 
-    void enqueue_mxm_output_nop(std::size_t mxm, std::size_t cycles)
+    void enqueue_mxm_load_repeat(std::size_t mxm, std::size_t count, std::size_t interval = 1)
     {
         check_mxm_queue(mxm);
-        mxm_output_queues_[mxm].push_nop(cycles);
+        mxm_load_queues_[mxm].push_repeat(Repeat {count, interval, 0});
     }
 
-    void enqueue_mxm_output_repeat(std::size_t mxm, std::size_t count, std::size_t interval = 1)
+    void enqueue_mxm_compute_repeat(std::size_t mxm, std::size_t count, std::size_t interval = 1)
     {
         check_mxm_queue(mxm);
-        mxm_output_queues_[mxm].push_repeat(Repeat {count, interval, 0});
+        mxm_compute_queues_[mxm].push_repeat(Repeat {count, interval, 0});
     }
 
     void dispatch_vxm(VxmSlice& vxm, std::ostream* os = nullptr)
@@ -189,26 +202,26 @@ public:
         }
 
         for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
-            const auto instruction = mxm_queues_[mxm].dispatch_next();
+            const auto instruction = mxm_load_queues_[mxm].dispatch_next();
             if (!instruction.has_value()) {
                 continue;
             }
             mxms[mxm].control().issue_south(*instruction);
             any = true;
             if (os != nullptr) {
-                *os << "  ICU -> MXM q" << mxm << ' ' << describe_mxm(*instruction) << '\n';
+                *os << "  ICU -> MXM" << mxm << ".load " << describe_mxm(*instruction) << '\n';
             }
         }
 
         for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
-            const auto instruction = mxm_output_queues_[mxm].dispatch_next();
+            const auto instruction = mxm_compute_queues_[mxm].dispatch_next();
             if (!instruction.has_value()) {
                 continue;
             }
             mxms[mxm].control().issue_south(*instruction);
             any = true;
             if (os != nullptr) {
-                *os << "  ICU -> MXM q" << mxm << ' ' << describe_mxm(*instruction) << '\n';
+                *os << "  ICU -> MXM" << mxm << ".compute " << describe_mxm(*instruction) << '\n';
             }
         }
 
@@ -418,7 +431,8 @@ private:
         *os << "  queues:"
             << " vxm=" << queued_instruction_count(vxm_queues_)
             << " mem=" << queued_instruction_count(mem_queues_)
-            << " mxm=" << (queued_instruction_count(mxm_queues_) + queued_instruction_count(mxm_output_queues_))
+            << " mxm_load=" << queued_instruction_count(mxm_load_queues_)
+            << " mxm_compute=" << queued_instruction_count(mxm_compute_queues_)
             << '\n';
     }
 
@@ -460,11 +474,11 @@ private:
     {
         std::ostringstream os;
         if (instruction.opcode == MxmControlOpcode::IW) {
-            os << "IW col=" << instruction.supercell_column;
-        } else if (instruction.opcode == MxmControlOpcode::Compute) {
-            os << "Compute";
+            os << "IW b" << instruction.weight_buffer;
         } else {
-            os << "Output stream_base=" << instruction.stream_base;
+            os << "Compute b" << instruction.weight_buffer
+               << " stream=" << instruction.activation_stream_base
+               << " out=" << instruction.stream_base;
         }
         return os.str();
     }
@@ -488,12 +502,24 @@ private:
 
     static std::string describe_vxm(const VxmLaneAluInstruction& instruction)
     {
+        auto cast_target_name = [](VxmCastTarget target) {
+            switch (target) {
+            case VxmCastTarget::Float32:
+                return "fp32";
+            case VxmCastTarget::Float16:
+                return "fp16";
+            case VxmCastTarget::Int8:
+                return "int8";
+            }
+            return "?";
+        };
+
         std::ostringstream os;
         os << VxmLane::opcode_name(instruction.opcode)
            << " lhs=" << describe_operand(instruction.lhs)
            << " rhs=" << describe_operand(instruction.rhs);
         if (instruction.opcode == VxmAluOpcode::Cast) {
-            os << " cast=" << (instruction.cast_target == VxmCastTarget::Float32 ? "fp32" : "int8");
+            os << " cast=" << cast_target_name(instruction.cast_target);
         }
         os << " scale=" << instruction.scale
            << " zp=" << instruction.output_zero_point;
@@ -505,8 +531,8 @@ private:
 
     std::array<DispatchQueue<VxmLaneAluInstruction>, kVxmQueues> vxm_queues_{};
     std::array<DispatchQueue<MemInstruction>, kMemQueues> mem_queues_{};
-    std::array<DispatchQueue<MxmControlInstruction>, kMxmQueues> mxm_queues_{};
-    std::array<DispatchQueue<MxmControlInstruction>, kMxmQueues> mxm_output_queues_{};
+    std::array<DispatchQueue<MxmControlInstruction>, kMxmQueues> mxm_load_queues_{};
+    std::array<DispatchQueue<MxmControlInstruction>, kMxmQueues> mxm_compute_queues_{};
     std::size_t cycle_{0};
 };
 

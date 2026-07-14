@@ -38,57 +38,69 @@ public:
     }
 
     Weight weight(
+        std::size_t buffer,
         std::size_t supercell_row,
         std::size_t supercell_column,
         std::size_t row,
         std::size_t column) const
     {
-        return cell(supercell_row, supercell_column).weight(row, column);
+        return cell(supercell_row, supercell_column).weight(buffer, row, column);
     }
 
-    void issue_iw(std::size_t row, std::size_t column, std::ostream& os)
+    Weight weight(
+        std::size_t supercell_row,
+        std::size_t supercell_column,
+        std::size_t row,
+        std::size_t column) const
+    {
+        return weight(0, supercell_row, supercell_column, row, column);
+    }
+
+    Weight buffered_weight(
+        std::size_t supercell_row,
+        std::size_t supercell_column,
+        std::size_t row,
+        std::size_t column) const
+    {
+        return cell(supercell_row, supercell_column).weight(0, row, column);
+    }
+
+    Weight buffered_weight(
+        std::size_t buffer,
+        std::size_t supercell_row,
+        std::size_t supercell_column,
+        std::size_t row,
+        std::size_t column) const
+    {
+        return cell(supercell_row, supercell_column).weight(buffer, row, column);
+    }
+
+    void issue_iw(std::size_t row, std::size_t column, std::size_t buffer, InputVector input, std::ostream& os)
     {
         auto& target = cell(row, column);
         os << "mxm_array cell(" << row << "," << column << ") ";
-        target.issue(MxmInstruction::IW());
+        target.set_input(input);
+        target.issue(MxmInstruction::IW(buffer));
         target.tick(os);
     }
 
     void load_weights(std::size_t row, std::size_t column, InputVector input, std::ostream& os)
     {
-        auto& target = cell(row, column);
-        os << "mxm_array cell(" << row << "," << column << ") ";
-        target.issue(MxmInstruction::IW());
-        target.tick(os);
-
-        os << "mxm_array cell(" << row << "," << column << ") ";
-        target.set_input(input);
-        target.issue(MxmInstruction::LW());
-        target.tick(os);
-    }
-
-    void tick_cell_iw(std::size_t row, std::size_t column, std::ostream& os)
-    {
-        auto& target = cell(row, column);
-        os << "mxm_array cell(" << row << "," << column << ") ";
-        target.issue(MxmInstruction::IW());
-        target.tick(os);
-    }
-
-    void tick_cell_lw(std::size_t row, std::size_t column, InputVector input, std::ostream& os)
-    {
-        auto& target = cell(row, column);
-        os << "mxm_array cell(" << row << "," << column << ") ";
-        target.set_input(input);
-        target.issue(MxmInstruction::LW());
-        target.tick(os);
+        tick_cell_iw_load(row, column, 0, input, os);
     }
 
     void tick_cell_iw_load(std::size_t row, std::size_t column, InputVector input, std::ostream& os)
     {
+        tick_cell_iw_load(row, column, 0, input, os);
+    }
+
+    void tick_cell_iw_load(std::size_t row, std::size_t column, std::size_t buffer, InputVector input, std::ostream& os)
+    {
         auto& target = cell(row, column);
         os << "mxm_array cell(" << row << "," << column << ") ";
-        target.load_weights_with_iw(input, os);
+        target.set_input(input);
+        target.issue(MxmInstruction::IW(buffer));
+        target.tick(os);
     }
 
 private:

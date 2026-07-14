@@ -51,6 +51,7 @@ constexpr std::size_t kSxmConcurrentStreamOps = 16;
 constexpr std::size_t kHemispheres = 2;
 constexpr std::size_t kPublicSramBlocks = 88;
 constexpr std::size_t kModeledSramBlocks = kPublicSramBlocks / kHemispheres;
+// One 2.5-MiB SRAM bank is owned by each MEM slice.
 constexpr std::size_t kSramBlocksPerSlice = 1;
 constexpr std::size_t kSramBlocks = kModeledSramBlocks;
 constexpr std::size_t kSramRowBytes = kPhysicalVectorBytes;
@@ -67,6 +68,7 @@ static_assert(kMemBoundaryStreamRegisterColumns == 12);
 static_assert(kModeledSramBlocks == kMemSliceColumns);
 static_assert(kPublicSramBlocks == 88);
 static_assert(kSramBlocks == 44);
+static_assert(kSramBlocksPerSlice == 1);
 static_assert(kEastStreams + kWestStreams == kStreams);
 static_assert(kLanesPerTile == 16);
 static_assert(kMemReadBytesPerCycle == 16);

@@ -6,39 +6,65 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <functional>
+#include <iomanip>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
 #include <streambuf>
+#include <vector>
 
 namespace ftlpu {
 
 enum class MxmControlOpcode {
-    IW,
-    Compute,
-    Output,
+    IW = 0,
+    Compute = 1,
 };
 
 struct MxmControlInstruction {
     MxmControlOpcode opcode{MxmControlOpcode::IW};
-    std::size_t supercell_column{0};
+    std::size_t weight_buffer{0};
     std::size_t stream_base{0};
+    std::size_t activation_stream_base{0};
 
-    static MxmControlInstruction IW(std::size_t supercell_column)
+    static MxmControlInstruction IW(std::size_t weight_buffer = 0)
     {
-        return MxmControlInstruction {MxmControlOpcode::IW, supercell_column, 0};
+        check_weight_buffer(weight_buffer);
+        return MxmControlInstruction {MxmControlOpcode::IW, weight_buffer, 0, 0};
     }
 
-    static MxmControlInstruction Compute()
+    static MxmControlInstruction Compute(
+        std::size_t weight_buffer = 0,
+        std::size_t activation_stream_base = 0,
+        std::size_t stream_base = 0)
     {
-        return MxmControlInstruction {MxmControlOpcode::Compute, 0, 0};
+        check_weight_buffer(weight_buffer);
+        check_activation_stream_base(activation_stream_base);
+        check_stream_base(stream_base);
+        return MxmControlInstruction {MxmControlOpcode::Compute, weight_buffer, stream_base, activation_stream_base};
     }
 
-    static MxmControlInstruction Output(std::size_t stream_base)
+    static void check_weight_buffer(std::size_t weight_buffer)
     {
-        return MxmControlInstruction {MxmControlOpcode::Output, 0, stream_base};
+        if (weight_buffer >= MxmSupercell::kWeightBuffers) {
+            throw std::out_of_range("MXM weight buffer is outside the two-buffer set");
+        }
+    }
+
+    static void check_activation_stream_base(std::size_t activation_stream_base)
+    {
+        if (activation_stream_base >= hw::kStreams) {
+            throw std::out_of_range("MXM activation stream base is outside the stream set");
+        }
+    }
+
+    static void check_stream_base(std::size_t stream_base)
+    {
+        if (stream_base + 3 >= hw::kStreams) {
+            throw std::out_of_range("MXM output stream base must leave room for four int32 byte streams");
+        }
     }
 };
 
@@ -49,6 +75,12 @@ public:
     using WeightInputSlot = std::optional<WeightInput>;
     using WeightInputProvider = std::function<WeightInput(std::size_t)>;
 
+    struct ComputePulse {
+        std::size_t weight_buffer{0};
+        std::size_t activation_stream_base{0};
+        std::size_t stream_base{0};
+    };
+
     explicit MxmControlSlice(MxmArray& array)
         : array_(array)
     {
@@ -56,21 +88,28 @@ public:
 
     void reset()
     {
-        instruction_queue_.clear();
-        output_instruction_queue_.clear();
-        for (auto& slot : instruction_rows_) {
+        load_instruction_queue_.clear();
+        compute_instruction_queue_.clear();
+        for (auto& slot : load_instruction_rows_) {
             slot.reset();
         }
-        for (auto& slot : output_instruction_rows_) {
+        for (auto& slot : compute_instruction_rows_) {
             slot.reset();
         }
         for (auto& slot : weight_inputs_) {
             slot.reset();
         }
+        for (auto& slot : weight_pipeline_) {
+            slot.reset();
+        }
         compute_pulses_.fill(false);
-        output_stream_bases_.fill(std::nullopt);
-        for (auto& row : loaded_cells_) {
-            row.fill(false);
+        for (auto& pulse : compute_pulse_details_) {
+            pulse.reset();
+        }
+        for (auto& buffer : loaded_cells_) {
+            for (auto& row : buffer) {
+                row.fill(false);
+            }
         }
         cycle_ = 0;
     }
@@ -82,11 +121,11 @@ public:
 
     void issue_south(MxmControlInstruction instruction)
     {
-        check_column(instruction.supercell_column);
-        if (instruction.opcode == MxmControlOpcode::Output) {
-            output_instruction_queue_.push_back(instruction);
+        check_instruction(instruction);
+        if (instruction.opcode == MxmControlOpcode::Compute) {
+            compute_instruction_queue_.push_back(instruction);
         } else {
-            instruction_queue_.push_back(instruction);
+            load_instruction_queue_.push_back(instruction);
         }
     }
 
@@ -102,7 +141,13 @@ public:
     const InstructionSlot& instruction_at(std::size_t tile) const
     {
         check_tile(tile);
-        return instruction_rows_[tile];
+        return load_instruction_rows_[tile];
+    }
+
+    const InstructionSlot& compute_instruction_at(std::size_t tile) const
+    {
+        check_tile(tile);
+        return compute_instruction_rows_[tile];
     }
 
     const WeightInputSlot& weight_input_at(std::size_t tile) const
@@ -120,14 +165,38 @@ public:
     std::optional<std::size_t> output_stream_base(std::size_t tile) const
     {
         check_tile(tile);
-        return output_stream_bases_[tile];
+        return compute_pulse_details_[tile].has_value()
+            ? std::optional<std::size_t> {compute_pulse_details_[tile]->stream_base}
+            : std::nullopt;
     }
 
     bool loaded_cell(std::size_t tile, std::size_t column) const
     {
+        return loaded_cell(0, tile, column);
+    }
+
+    bool loaded_cell(std::size_t weight_buffer, std::size_t tile, std::size_t column) const
+    {
         check_tile(tile);
         check_column(column);
-        return loaded_cells_[tile][column];
+        MxmControlInstruction::check_weight_buffer(weight_buffer);
+        return loaded_cells_[weight_buffer][tile][column];
+    }
+
+    std::optional<std::size_t> compute_weight_buffer(std::size_t tile) const
+    {
+        check_tile(tile);
+        return compute_pulse_details_[tile].has_value()
+            ? std::optional<std::size_t> {compute_pulse_details_[tile]->weight_buffer}
+            : std::nullopt;
+    }
+
+    std::optional<std::size_t> compute_activation_stream_base(std::size_t tile) const
+    {
+        check_tile(tile);
+        return compute_pulse_details_[tile].has_value()
+            ? std::optional<std::size_t> {compute_pulse_details_[tile]->activation_stream_base}
+            : std::nullopt;
     }
 
     void tick(std::ostream& os, bool print_matrix = true, std::optional<std::size_t> log_tile = std::nullopt)
@@ -144,8 +213,8 @@ public:
         if (log_tile.has_value()) {
             check_tile(*log_tile);
         }
-        dispatch_instruction();
-        dispatch_output_instruction();
+        dispatch_load_instruction();
+        dispatch_compute_instruction();
         fill_missing_weight_inputs(weight_provider);
         os << "mxm_control cycle " << cycle_ << '\n';
         execute(os, print_matrix, log_tile);
@@ -154,6 +223,13 @@ public:
     }
 
 private:
+    struct WeightToken {
+        std::size_t weight_buffer{0};
+        WeightInput input{};
+    };
+
+    using WeightTokenSlot = std::optional<WeightToken>;
+
     static void check_tile(std::size_t tile)
     {
         if (tile >= hw::kMxmSupercellsPerPlane) {
@@ -165,6 +241,15 @@ private:
     {
         if (column >= hw::kMxmSupercellsPerPlane) {
             throw std::out_of_range("MXM control supercell column is outside the 20-column array");
+        }
+    }
+
+    static void check_instruction(const MxmControlInstruction& instruction)
+    {
+        MxmControlInstruction::check_weight_buffer(instruction.weight_buffer);
+        if (instruction.opcode == MxmControlOpcode::Compute) {
+            MxmControlInstruction::check_activation_stream_base(instruction.activation_stream_base);
+            MxmControlInstruction::check_stream_base(instruction.stream_base);
         }
     }
 
@@ -188,22 +273,22 @@ private:
         std::ostream stream_{&buffer_};
     };
 
-    void dispatch_instruction()
+    void dispatch_load_instruction()
     {
-        if (instruction_rows_[0].has_value() || instruction_queue_.empty()) {
+        if (load_instruction_rows_[0].has_value() || load_instruction_queue_.empty()) {
             return;
         }
-        instruction_rows_[0] = instruction_queue_.front();
-        instruction_queue_.pop_front();
+        load_instruction_rows_[0] = load_instruction_queue_.front();
+        load_instruction_queue_.pop_front();
     }
 
-    void dispatch_output_instruction()
+    void dispatch_compute_instruction()
     {
-        if (output_instruction_rows_[0].has_value() || output_instruction_queue_.empty()) {
+        if (compute_instruction_rows_[0].has_value() || compute_instruction_queue_.empty()) {
             return;
         }
-        output_instruction_rows_[0] = output_instruction_queue_.front();
-        output_instruction_queue_.pop_front();
+        compute_instruction_rows_[0] = compute_instruction_queue_.front();
+        compute_instruction_queue_.pop_front();
     }
 
     void fill_missing_weight_inputs(const WeightInputProvider& weight_provider)
@@ -213,7 +298,7 @@ private:
         }
 
         for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
-            const auto& instruction = instruction_rows_[tile];
+            const auto& instruction = load_instruction_rows_[tile];
             if (!instruction.has_value()
                 || instruction->opcode != MxmControlOpcode::IW
                 || weight_inputs_[tile].has_value()) {
@@ -226,11 +311,13 @@ private:
     void execute(std::ostream& os, bool print_matrix, std::optional<std::size_t> log_tile)
     {
         compute_pulses_.fill(false);
-        output_stream_bases_.fill(std::nullopt);
+        for (auto& pulse : compute_pulse_details_) {
+            pulse.reset();
+        }
         bool any = false;
         bool any_logged = false;
         for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
-            const auto& instruction = instruction_rows_[tile];
+            const auto& instruction = load_instruction_rows_[tile];
             if (instruction.has_value()) {
                 any = true;
                 const auto should_log = !log_tile.has_value() || tile == *log_tile;
@@ -244,34 +331,55 @@ private:
                     }
 
                     if (should_log) {
-                        os << "IW col=" << instruction->supercell_column << " ";
-                        array_.tick_cell_iw_load(tile, instruction->supercell_column, *weight_inputs_[tile], os);
-                    } else {
-                        static NullStream null_stream;
-                        array_.tick_cell_iw_load(
-                            tile,
-                            instruction->supercell_column,
-                            *weight_inputs_[tile],
-                            null_stream.stream());
+                        os << "IW b" << instruction->weight_buffer << " inject ";
                     }
-                    loaded_cells_[tile][instruction->supercell_column] = true;
+                    for (std::size_t column = hw::kMxmSupercellsPerPlane - 1; column > 0; --column) {
+                        weight_token(instruction->weight_buffer, tile, column)
+                            = weight_token(instruction->weight_buffer, tile, column - 1);
+                    }
+                    weight_token(instruction->weight_buffer, tile, 0)
+                        = WeightToken {instruction->weight_buffer, *weight_inputs_[tile]};
                     weight_inputs_[tile].reset();
-                } else if (instruction->opcode == MxmControlOpcode::Compute) {
-                    if (should_log) {
-                        os << "Compute\n";
+
+                    for (std::size_t column = 0; column < hw::kMxmSupercellsPerPlane; ++column) {
+                        const auto& token = weight_token(instruction->weight_buffer, tile, column);
+                        if (!token.has_value()) {
+                            continue;
+                        }
+                        any = true;
+                        if (should_log) {
+                            any_logged = true;
+                            os << "  tile " << tile << " weight b" << token->weight_buffer << " col=" << column << " ";
+                            array_.tick_cell_iw_load(tile, column, token->weight_buffer, token->input, os);
+                        } else {
+                            static NullStream null_stream;
+                            array_.tick_cell_iw_load(
+                                tile,
+                                column,
+                                token->weight_buffer,
+                                token->input,
+                                null_stream.stream());
+                        }
+                        loaded_cells_[token->weight_buffer][tile][column] = true;
                     }
-                    compute_pulses_[tile] = true;
                 }
             }
 
-            const auto& output_instruction = output_instruction_rows_[tile];
-            if (output_instruction.has_value()) {
+            const auto& compute_instruction = compute_instruction_rows_[tile];
+            if (compute_instruction.has_value()) {
                 any = true;
                 if (!log_tile.has_value() || tile == *log_tile) {
                     any_logged = true;
-                    os << "  tile " << tile << " Output stream_base=" << output_instruction->stream_base << '\n';
+                    os << "  tile " << tile << " Compute b" << compute_instruction->weight_buffer
+                       << " stream=" << compute_instruction->activation_stream_base
+                       << " out=" << compute_instruction->stream_base << '\n';
                 }
-                output_stream_bases_[tile] = output_instruction->stream_base;
+                compute_pulses_[tile] = true;
+                compute_pulse_details_[tile] = ComputePulse {
+                    compute_instruction->weight_buffer,
+                    compute_instruction->activation_stream_base,
+                    compute_instruction->stream_base,
+                };
             }
         }
 
@@ -283,42 +391,63 @@ private:
         }
     }
 
+    WeightTokenSlot& weight_token(std::size_t weight_buffer, std::size_t tile, std::size_t column)
+    {
+        return weight_pipeline_[
+            (weight_buffer * hw::kMxmSupercellsPerPlane + tile) * hw::kMxmSupercellsPerPlane + column];
+    }
+
+    const WeightTokenSlot& weight_token(std::size_t weight_buffer, std::size_t tile, std::size_t column) const
+    {
+        return weight_pipeline_[
+            (weight_buffer * hw::kMxmSupercellsPerPlane + tile) * hw::kMxmSupercellsPerPlane + column];
+    }
+
     static void print_load_matrix(
         std::ostream& os,
-        const std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>& loaded,
+        const std::array<
+            std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>,
+            MxmSupercell::kWeightBuffers>& loaded,
         std::optional<std::size_t> log_tile)
     {
         os << "  load_matrix:\n";
         const auto first_tile = log_tile.value_or(0);
         const auto end_tile = log_tile.has_value() ? first_tile + 1 : hw::kMxmSupercellsPerPlane;
-        for (std::size_t tile = first_tile; tile < end_tile; ++tile) {
-            os << "    row " << tile << ": ";
-            for (std::size_t column = 0; column < hw::kMxmSupercellsPerPlane; ++column) {
-                os << (loaded[tile][column] ? 'L' : '.');
+        for (std::size_t buffer = 0; buffer < MxmSupercell::kWeightBuffers; ++buffer) {
+            os << "    buffer " << buffer << ":\n";
+            for (std::size_t tile = first_tile; tile < end_tile; ++tile) {
+                os << "      row " << tile << ": ";
+                for (std::size_t column = 0; column < hw::kMxmSupercellsPerPlane; ++column) {
+                    os << (loaded[buffer][tile][column] ? 'L' : '.');
+                }
+                os << '\n';
             }
-            os << '\n';
         }
     }
 
     void advance()
     {
         for (std::size_t tile = hw::kMxmSupercellsPerPlane - 1; tile > 0; --tile) {
-            instruction_rows_[tile] = instruction_rows_[tile - 1];
-            output_instruction_rows_[tile] = output_instruction_rows_[tile - 1];
+            load_instruction_rows_[tile] = load_instruction_rows_[tile - 1];
+            compute_instruction_rows_[tile] = compute_instruction_rows_[tile - 1];
         }
-        instruction_rows_[0].reset();
-        output_instruction_rows_[0].reset();
+        load_instruction_rows_[0].reset();
+        compute_instruction_rows_[0].reset();
     }
 
     MxmArray& array_;
-    std::deque<MxmControlInstruction> instruction_queue_{};
-    std::deque<MxmControlInstruction> output_instruction_queue_{};
-    std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> instruction_rows_{};
-    std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> output_instruction_rows_{};
+    std::deque<MxmControlInstruction> load_instruction_queue_{};
+    std::deque<MxmControlInstruction> compute_instruction_queue_{};
+    std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> load_instruction_rows_{};
+    std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> compute_instruction_rows_{};
     std::array<WeightInputSlot, hw::kMxmSupercellsPerPlane> weight_inputs_{};
+    std::vector<WeightTokenSlot> weight_pipeline_ = std::vector<WeightTokenSlot>(
+        MxmSupercell::kWeightBuffers * hw::kMxmSupercellsPerPlane * hw::kMxmSupercellsPerPlane);
     std::array<bool, hw::kMxmSupercellsPerPlane> compute_pulses_{};
-    std::array<std::optional<std::size_t>, hw::kMxmSupercellsPerPlane> output_stream_bases_{};
-    std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane> loaded_cells_{};
+    std::array<std::optional<ComputePulse>, hw::kMxmSupercellsPerPlane> compute_pulse_details_{};
+    std::array<
+        std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>,
+        MxmSupercell::kWeightBuffers> loaded_cells_{};
     std::size_t cycle_{0};
 };
 
