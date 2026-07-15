@@ -140,6 +140,24 @@ int main()
     assert(fp16_output.output()->bytes[0] == static_cast<std::uint8_t>(half_three & 0xffu));
     assert(fp16_output.output()->bytes[1] == static_cast<std::uint8_t>((half_three >> 8) & 0xffu));
 
+    auto direct_alu_output = ftlpu::VxmLane {};
+    direct_alu_output.enqueue_instruction(0, ftlpu::VxmLaneAluInstruction {
+        ftlpu::VxmAluOpcode::Multiply,
+        ftlpu::VxmLaneOperand::Imm(1.5f),
+        ftlpu::VxmLaneOperand::Imm(2.0f),
+        1.0f,
+        0,
+        ftlpu::VxmCastTarget::Float32,
+        7,
+    });
+    direct_alu_output.tick();
+    assert(direct_alu_output.output().has_value());
+    assert(direct_alu_output.output()->stream == 7);
+    assert(direct_alu_output.output()->byte_count == 4);
+    assert(nearly_equal(
+        ftlpu::VxmLane::unpack_float32(direct_alu_output.output()->bytes),
+        3.0f));
+
     auto trace_lane = ftlpu::VxmLane {};
     trace_lane.load_swiglu_program(params);
     trace_lane.set_swiglu_input(ftlpu::VxmLane::pack_int32(2), ftlpu::VxmLane::pack_int32(1));

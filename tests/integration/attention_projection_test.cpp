@@ -42,11 +42,13 @@ constexpr std::size_t kXMemColumn = 32;
 constexpr std::size_t kQInt8ColumnBase = 16;
 constexpr std::size_t kQInt8Columns = kLoadStreams;
 constexpr std::size_t kKInt8Column = 41;
-constexpr std::size_t kScaledScoreByteColumnBase = 36;
-constexpr std::size_t kExpScoreByteColumnBase = 0;
-constexpr std::size_t kRowMaxByteColumnBase = 4;
-constexpr std::size_t kRowSumByteColumnBase = 8;
-constexpr std::size_t kSoftmaxInt8Column = 42;
+constexpr std::size_t kSoftmaxParallelRows = 4;
+constexpr std::array<std::size_t, kSoftmaxParallelRows> kScaledScoreByteColumnBases {16, 20, 24, 28};
+constexpr std::array<std::size_t, kSoftmaxParallelRows> kExpScoreByteColumnBases {0, 4, 8, 12};
+constexpr std::size_t kRowMaxByteColumnBase = 32;
+constexpr std::size_t kRowSumByteColumnBase = 36;
+constexpr std::size_t kSoftmaxInt8ColumnBase = 40;
+constexpr std::size_t kSoftmaxScratchAddressBase = 4096;
 
 constexpr std::size_t kQWestStreamBase = 0;
 constexpr std::size_t kKWestStreamBase = 4;
@@ -54,8 +56,8 @@ constexpr std::size_t kActivationStream = 8;
 constexpr std::size_t kQkOutputWestStreamBase = 12;
 constexpr std::size_t kSoftmaxWestStreamBase = ftlpu::hw::kEastStreams;
 constexpr std::size_t kSoftmaxEastStreamBase = 0;
-constexpr std::size_t kReductionWestStreamBase = kSoftmaxWestStreamBase + 4;
-constexpr std::size_t kReductionEastStreamBase = kSoftmaxEastStreamBase + 4;
+constexpr std::size_t kReductionWestStreamBase = kSoftmaxWestStreamBase + 16;
+constexpr std::size_t kReductionEastStreamBase = kSoftmaxEastStreamBase + 16;
 constexpr std::size_t kQStreamOperand = ftlpu::hw::kEastStreams + kQWestStreamBase;
 constexpr std::size_t kKStreamOperand = ftlpu::hw::kEastStreams + kKWestStreamBase;
 constexpr std::size_t kQInt8OutputStream = 0;
@@ -73,6 +75,8 @@ constexpr std::size_t kDirectScoreVxmStart = kQkOutputStart + ftlpu::hw::kStream
 constexpr float kProjectionScale = 1.0f / 256.0f;
 constexpr float kScoreScale = 1.0f / 17.88854381999832f; // 1 / sqrt(320)
 constexpr float kSoftmaxInt8Scale = 127.0f;
+
+static_assert(kSeqLen % kSoftmaxParallelRows == 0);
 
 constexpr std::size_t west_stream_read_latency(std::size_t column)
 {
@@ -104,6 +108,11 @@ std::size_t weight_address(std::size_t matrix, std::size_t column_block)
 std::size_t projection_output_address(std::size_t row)
 {
     return row * kLanes;
+}
+
+std::size_t softmax_scratch_address(std::size_t batch)
+{
+    return kSoftmaxScratchAddressBase + batch * kLanes;
 }
 
 std::size_t q_column(std::size_t row)
@@ -416,8 +425,12 @@ SoftmaxSchedule emit_direct_score_softmax(Program& program)
 {
     // MXM emits one key per cycle.  VXM lanes are queries, so feedback along
     // time reduces the 160 keys independently for every query lane.
+    auto pass1_last_scaled_write = std::size_t {0};
     for (std::size_t key = 0; key < kSeqLen; ++key) {
         const auto issue_cycle = kDirectScoreVxmStart + key;
+        const auto group = key % kSoftmaxParallelRows;
+        const auto batch = key / kSoftmaxParallelRows;
+        const auto stream_base = group * 4;
         program.vxm(issue_cycle, 0, ftlpu::VxmLaneAluInstruction {
             ftlpu::VxmAluOpcode::Cast,
             ftlpu::VxmLaneOperand::StreamInt32(kSoftmaxWestStreamBase + kQkOutputWestStreamBase),
@@ -430,45 +443,36 @@ SoftmaxSchedule emit_direct_score_softmax(Program& program)
             ftlpu::VxmAluOpcode::Multiply,
             ftlpu::VxmLaneOperand::Alu(0),
             ftlpu::VxmLaneOperand::Imm(kScoreScale),
+            1.0f,
+            0,
+            ftlpu::VxmCastTarget::Float32,
+            stream_base,
         });
-        program.vxm(issue_cycle + 2, 2, ftlpu::VxmLaneAluInstruction {
+        auto max_instruction = ftlpu::VxmLaneAluInstruction {
             ftlpu::VxmAluOpcode::Max,
             ftlpu::VxmLaneOperand::Alu(1),
             key == 0
                 ? ftlpu::VxmLaneOperand::Imm(-std::numeric_limits<float>::infinity())
                 : ftlpu::VxmLaneOperand::Alu(2),
-        });
-        program.vxm(issue_cycle + 2, 3, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Cast,
-            ftlpu::VxmLaneOperand::Alu(1),
-            ftlpu::VxmLaneOperand::Imm(0.0f),
-            1.0f,
-            0,
-            ftlpu::VxmCastTarget::Float32,
-            kSoftmaxEastStreamBase,
-        });
+        };
+        if (key + 1 == kSeqLen) {
+            max_instruction.output_stream = kReductionEastStreamBase;
+        }
+        program.vxm(issue_cycle + 2, 2, max_instruction);
 
-        const auto write_cycle = issue_cycle + 2 + east_stream_write_latency(kScaledScoreByteColumnBase);
+        const auto column_base = kScaledScoreByteColumnBases[group];
+        const auto write_cycle = issue_cycle + 1 + east_stream_write_latency(column_base);
         emit_fp32_mem_write(
             program,
             write_cycle,
-            kScaledScoreByteColumnBase,
-            projection_output_address(key),
-            kSoftmaxEastStreamBase);
+            column_base,
+            softmax_scratch_address(batch),
+            stream_base);
+        pass1_last_scaled_write = std::max(pass1_last_scaled_write, write_cycle);
     }
 
     const auto pass1_last_reduce = kDirectScoreVxmStart + kSeqLen + 1;
-    const auto pass1_max_cast = pass1_last_reduce + 1;
-    program.vxm(pass1_max_cast, 4, ftlpu::VxmLaneAluInstruction {
-        ftlpu::VxmAluOpcode::Cast,
-        ftlpu::VxmLaneOperand::Alu(2),
-        ftlpu::VxmLaneOperand::Imm(0.0f),
-        1.0f,
-        0,
-        ftlpu::VxmCastTarget::Float32,
-        kReductionEastStreamBase,
-    });
-    const auto pass1_max_write = pass1_max_cast + east_stream_write_latency(kRowMaxByteColumnBase);
+    const auto pass1_max_write = pass1_last_reduce + east_stream_write_latency(kRowMaxByteColumnBase);
     emit_fp32_mem_write(
         program,
         pass1_max_write,
@@ -476,8 +480,6 @@ SoftmaxSchedule emit_direct_score_softmax(Program& program)
         0,
         kReductionEastStreamBase);
 
-    const auto pass1_last_scaled_write = kDirectScoreVxmStart + kSeqLen + 1
-        + east_stream_write_latency(kScaledScoreByteColumnBase);
     const auto pass2_start = std::max(pass1_max_write, pass1_last_scaled_write) + 1;
 
     emit_fp32_mem_read(
@@ -487,68 +489,85 @@ SoftmaxSchedule emit_direct_score_softmax(Program& program)
         0,
         kReductionWestStreamBase);
     const auto pass2_max_arrival = pass2_start + west_stream_read_latency(kRowMaxByteColumnBase);
-    program.vxm(pass2_max_arrival, 4, ftlpu::VxmLaneAluInstruction {
+    program.vxm(pass2_max_arrival, 15, ftlpu::VxmLaneAluInstruction {
         ftlpu::VxmAluOpcode::Pass,
         ftlpu::VxmLaneOperand::StreamFloat32(kReductionWestStreamBase),
         ftlpu::VxmLaneOperand::Imm(0.0f),
     });
 
-    const auto pass2_score_arrival = pass2_start + west_stream_read_latency(kScaledScoreByteColumnBase);
-    for (std::size_t key = 0; key < kSeqLen; ++key) {
-        emit_fp32_mem_read(
-            program,
-            pass2_start + key,
-            kScaledScoreByteColumnBase,
-            projection_output_address(key),
-            kSoftmaxWestStreamBase);
+    const auto pass2_score_arrival = pass2_max_arrival + 1;
+    auto pass2_last_exp_write = std::size_t {0};
+    constexpr auto kSoftmaxBatches = kSeqLen / kSoftmaxParallelRows;
+    for (std::size_t batch = 0; batch < kSoftmaxBatches; ++batch) {
+        const auto sub_cycle = pass2_score_arrival + batch;
+        for (std::size_t group = 0; group < kSoftmaxParallelRows; ++group) {
+            const auto scaled_column_base = kScaledScoreByteColumnBases[group];
+            const auto exp_column_base = kExpScoreByteColumnBases[group];
+            const auto stream_base = group * 4;
+            const auto alu_base = group * 4;
+            emit_fp32_mem_read(
+                program,
+                sub_cycle - west_stream_read_latency(scaled_column_base),
+                scaled_column_base,
+                softmax_scratch_address(batch),
+                kSoftmaxWestStreamBase + stream_base);
 
-        const auto sub_cycle = pass2_score_arrival + key;
-        program.vxm(sub_cycle, 5, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Subtract,
-            ftlpu::VxmLaneOperand::StreamFloat32(kSoftmaxWestStreamBase),
-            ftlpu::VxmLaneOperand::Alu(4),
-        });
-        program.vxm(sub_cycle + 1, 6, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Exp,
-            ftlpu::VxmLaneOperand::Alu(5),
-            ftlpu::VxmLaneOperand::Imm(0.0f),
-        });
-        program.vxm(sub_cycle + 2, 7, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Add,
-            ftlpu::VxmLaneOperand::Alu(6),
-            key == 0
-                ? ftlpu::VxmLaneOperand::Imm(0.0f)
-                : ftlpu::VxmLaneOperand::Alu(7),
-        });
-        program.vxm(sub_cycle + 2, 8, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Cast,
-            ftlpu::VxmLaneOperand::Alu(6),
-            ftlpu::VxmLaneOperand::Imm(0.0f),
-            1.0f,
-            0,
-            ftlpu::VxmCastTarget::Float32,
-            kSoftmaxEastStreamBase,
-        });
-        emit_fp32_mem_write(
-            program,
-            sub_cycle + 2 + east_stream_write_latency(kExpScoreByteColumnBase),
-            kExpScoreByteColumnBase,
-            projection_output_address(key),
-            kSoftmaxEastStreamBase);
+            program.vxm(sub_cycle, alu_base, ftlpu::VxmLaneAluInstruction {
+                ftlpu::VxmAluOpcode::Subtract,
+                ftlpu::VxmLaneOperand::StreamFloat32(kSoftmaxWestStreamBase + stream_base),
+                ftlpu::VxmLaneOperand::Alu(15),
+            });
+            program.vxm(sub_cycle + 1, alu_base + 1, ftlpu::VxmLaneAluInstruction {
+                ftlpu::VxmAluOpcode::Exp,
+                ftlpu::VxmLaneOperand::Alu(alu_base),
+                ftlpu::VxmLaneOperand::Imm(0.0f),
+                1.0f,
+                0,
+                ftlpu::VxmCastTarget::Float32,
+                stream_base,
+            });
+            program.vxm(sub_cycle + 2, alu_base + 2, ftlpu::VxmLaneAluInstruction {
+                ftlpu::VxmAluOpcode::Add,
+                ftlpu::VxmLaneOperand::Alu(alu_base + 1),
+                batch == 0
+                    ? ftlpu::VxmLaneOperand::Imm(0.0f)
+                    : ftlpu::VxmLaneOperand::Alu(alu_base + 2),
+            });
+
+            const auto exp_write = sub_cycle + 1 + east_stream_write_latency(exp_column_base);
+            emit_fp32_mem_write(
+                program,
+                exp_write,
+                exp_column_base,
+                softmax_scratch_address(batch),
+                stream_base);
+            pass2_last_exp_write = std::max(pass2_last_exp_write, exp_write);
+        }
     }
 
-    const auto pass2_last_sum = pass2_score_arrival + kSeqLen + 1;
-    const auto pass2_sum_cast = pass2_last_sum + 1;
-    program.vxm(pass2_sum_cast, 9, ftlpu::VxmLaneAluInstruction {
-        ftlpu::VxmAluOpcode::Cast,
+    const auto pass2_last_partial_sum = pass2_score_arrival + kSoftmaxBatches + 1;
+    const auto pass2_pair_sum = pass2_last_partial_sum + 1;
+    program.vxm(pass2_pair_sum, 3, ftlpu::VxmLaneAluInstruction {
+        ftlpu::VxmAluOpcode::Add,
+        ftlpu::VxmLaneOperand::Alu(2),
+        ftlpu::VxmLaneOperand::Alu(6),
+    });
+    program.vxm(pass2_pair_sum, 7, ftlpu::VxmLaneAluInstruction {
+        ftlpu::VxmAluOpcode::Add,
+        ftlpu::VxmLaneOperand::Alu(10),
+        ftlpu::VxmLaneOperand::Alu(14),
+    });
+    const auto pass2_final_sum = pass2_pair_sum + 1;
+    program.vxm(pass2_final_sum, 11, ftlpu::VxmLaneAluInstruction {
+        ftlpu::VxmAluOpcode::Add,
+        ftlpu::VxmLaneOperand::Alu(3),
         ftlpu::VxmLaneOperand::Alu(7),
-        ftlpu::VxmLaneOperand::Imm(0.0f),
         1.0f,
         0,
         ftlpu::VxmCastTarget::Float32,
         kReductionEastStreamBase,
     });
-    const auto pass2_sum_write = pass2_sum_cast + east_stream_write_latency(kRowSumByteColumnBase);
+    const auto pass2_sum_write = pass2_final_sum + east_stream_write_latency(kRowSumByteColumnBase);
     emit_fp32_mem_write(
         program,
         pass2_sum_write,
@@ -556,8 +575,6 @@ SoftmaxSchedule emit_direct_score_softmax(Program& program)
         0,
         kReductionEastStreamBase);
 
-    const auto pass2_last_exp_write = pass2_score_arrival + kSeqLen + 1
-        + east_stream_write_latency(kExpScoreByteColumnBase);
     const auto pass3_start = std::max(pass2_sum_write, pass2_last_exp_write) + 1;
     emit_fp32_mem_read(
         program,
@@ -566,50 +583,57 @@ SoftmaxSchedule emit_direct_score_softmax(Program& program)
         0,
         kReductionWestStreamBase);
     const auto pass3_sum_arrival = pass3_start + west_stream_read_latency(kRowSumByteColumnBase);
-    program.vxm(pass3_sum_arrival, 10, ftlpu::VxmLaneAluInstruction {
+    program.vxm(pass3_sum_arrival, 15, ftlpu::VxmLaneAluInstruction {
         ftlpu::VxmAluOpcode::Pass,
         ftlpu::VxmLaneOperand::StreamFloat32(kReductionWestStreamBase),
         ftlpu::VxmLaneOperand::Imm(0.0f),
     });
 
-    const auto pass3_exp_read_start = pass3_sum_arrival;
-    const auto pass3_exp_arrival = pass3_exp_read_start + west_stream_read_latency(kExpScoreByteColumnBase);
-    for (std::size_t key = 0; key < kSeqLen; ++key) {
-        emit_fp32_mem_read(
-            program,
-            pass3_exp_read_start + key,
-            kExpScoreByteColumnBase,
-            projection_output_address(key),
-            kSoftmaxWestStreamBase);
+    const auto pass3_exp_arrival = pass3_sum_arrival + 1;
+    auto pass3_last_write = std::size_t {0};
+    for (std::size_t batch = 0; batch < kSoftmaxBatches; ++batch) {
+        const auto div_cycle = pass3_exp_arrival + batch;
+        for (std::size_t group = 0; group < kSoftmaxParallelRows; ++group) {
+            const auto exp_column_base = kExpScoreByteColumnBases[group];
+            const auto final_column = kSoftmaxInt8ColumnBase + group;
+            const auto input_stream_base = group * 4;
+            const auto alu_base = group * 4;
+            emit_fp32_mem_read(
+                program,
+                div_cycle - west_stream_read_latency(exp_column_base),
+                exp_column_base,
+                softmax_scratch_address(batch),
+                kSoftmaxWestStreamBase + input_stream_base);
 
-        const auto div_cycle = pass3_exp_arrival + key;
-        program.vxm(div_cycle, 11, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Divide,
-            ftlpu::VxmLaneOperand::StreamFloat32(kSoftmaxWestStreamBase),
-            ftlpu::VxmLaneOperand::Alu(10),
-        });
-        program.vxm(div_cycle + 1, 12, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Multiply,
-            ftlpu::VxmLaneOperand::Alu(11),
-            ftlpu::VxmLaneOperand::Imm(kSoftmaxInt8Scale),
-        });
-        program.vxm(div_cycle + 2, 13, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Cast,
-            ftlpu::VxmLaneOperand::Alu(12),
-            ftlpu::VxmLaneOperand::Imm(0.0f),
-            1.0f,
-            0,
-            ftlpu::VxmCastTarget::Int8,
-            kSoftmaxEastStreamBase,
-        });
-        program.mem(
-            div_cycle + 2 + east_stream_write_latency(kSoftmaxInt8Column),
-            kSoftmaxInt8Column,
-            ftlpu::MemInstruction::Write(projection_output_address(key), kSoftmaxEastStreamBase));
+            program.vxm(div_cycle, alu_base, ftlpu::VxmLaneAluInstruction {
+                ftlpu::VxmAluOpcode::Divide,
+                ftlpu::VxmLaneOperand::StreamFloat32(kSoftmaxWestStreamBase + input_stream_base),
+                ftlpu::VxmLaneOperand::Alu(15),
+            });
+            program.vxm(div_cycle + 1, alu_base + 1, ftlpu::VxmLaneAluInstruction {
+                ftlpu::VxmAluOpcode::Multiply,
+                ftlpu::VxmLaneOperand::Alu(alu_base),
+                ftlpu::VxmLaneOperand::Imm(kSoftmaxInt8Scale),
+            });
+            program.vxm(div_cycle + 2, alu_base + 2, ftlpu::VxmLaneAluInstruction {
+                ftlpu::VxmAluOpcode::Cast,
+                ftlpu::VxmLaneOperand::Alu(alu_base + 1),
+                ftlpu::VxmLaneOperand::Imm(0.0f),
+                1.0f,
+                0,
+                ftlpu::VxmCastTarget::Int8,
+                group,
+            });
+            const auto write_cycle = div_cycle + 2 + east_stream_write_latency(final_column);
+            program.mem(
+                write_cycle,
+                final_column,
+                ftlpu::MemInstruction::Write(softmax_scratch_address(batch), group));
+            pass3_last_write = std::max(pass3_last_write, write_cycle);
+        }
     }
 
-    const auto done = pass3_exp_arrival + kSeqLen + 1
-        + east_stream_write_latency(kSoftmaxInt8Column) + 8;
+    const auto done = pass3_last_write + 8;
     return SoftmaxSchedule {pass1_max_write, pass2_start, pass2_sum_write, pass3_start, done};
 }
 
@@ -655,8 +679,14 @@ std::vector<std::int8_t> read_softmax_output(const ftlpu::TileArrayModel& mem)
         const auto tile = query / kLanes;
         const auto lane = query % kLanes;
         for (std::size_t key = 0; key < kSeqLen; ++key) {
+            const auto group = key % kSoftmaxParallelRows;
+            const auto batch = key / kSoftmaxParallelRows;
             output[score_index(query, key)] = static_cast<std::int8_t>(
-                mem.sram_lane_byte(kSoftmaxInt8Column, tile, projection_output_address(key), lane));
+                mem.sram_lane_byte(
+                    kSoftmaxInt8ColumnBase + group,
+                    tile,
+                    softmax_scratch_address(batch),
+                    lane));
         }
     }
     return output;
@@ -724,11 +754,12 @@ try
     icu_log << "attention_projection direct_score_softmax\n"
             << "  qk_output_start=" << kQkOutputStart
             << " direct_score_vxm_start=" << kDirectScoreVxmStart
-            << " scaled_score_columns=" << kScaledScoreByteColumnBase << ".." << (kScaledScoreByteColumnBase + 3)
+            << " scaled_score_columns=16..31 (4 striped fp32 groups)"
             << " max_columns=" << kRowMaxByteColumnBase << ".." << (kRowMaxByteColumnBase + 3)
-            << " exp_columns=" << kExpScoreByteColumnBase << ".." << (kExpScoreByteColumnBase + 3)
+            << " exp_columns=0..15 (4 striped fp32 groups)"
             << " sum_columns=" << kRowSumByteColumnBase << ".." << (kRowSumByteColumnBase + 3)
-            << " softmax_column=" << kSoftmaxInt8Column
+            << " softmax_columns=" << kSoftmaxInt8ColumnBase << ".."
+            << (kSoftmaxInt8ColumnBase + kSoftmaxParallelRows - 1)
             << " pass2_start=" << softmax_schedule.pass2_start
             << " pass3_start=" << softmax_schedule.pass3_start << '\n';
 

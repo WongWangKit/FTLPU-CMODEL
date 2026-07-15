@@ -668,60 +668,65 @@ private:
         switch (instruction.opcode) {
         case VxmAluOpcode::Pass:
             result.value = *lhs;
-            return result;
+            break;
         case VxmAluOpcode::Add:
             result.value = *lhs + *rhs;
-            return result;
+            break;
         case VxmAluOpcode::Subtract:
             result.value = *lhs - *rhs;
-            return result;
+            break;
         case VxmAluOpcode::Multiply:
             result.value = *lhs * *rhs;
-            return result;
+            break;
         case VxmAluOpcode::Divide:
             result.value = *lhs / *rhs;
-            return result;
+            break;
         case VxmAluOpcode::Max:
             result.value = std::max(*lhs, *rhs);
-            return result;
+            break;
         case VxmAluOpcode::Negate:
             result.value = -*lhs;
-            return result;
+            break;
         case VxmAluOpcode::Exp:
             result.value = std::exp(*lhs);
-            return result;
+            break;
         case VxmAluOpcode::Cast:
             if (instruction.cast_target == VxmCastTarget::Int8) {
-                result.output = VxmAlu::cast_scalar_to_int8(*lhs);
-                result.output_bytes[0] = static_cast<std::uint8_t>(result.output);
-                result.output_byte_count = 1;
-                result.value = static_cast<float>(result.output);
-                result.output_valid = true;
-                return result;
-            }
-            if (instruction.cast_target == VxmCastTarget::Float16) {
-                const auto bits = VxmAlu::cast_scalar_to_float16_bits(*lhs);
-                result.output = static_cast<std::int8_t>(bits & 0xffu);
-                result.output_bytes[0] = static_cast<std::uint8_t>(bits & 0xffu);
-                result.output_bytes[1] = static_cast<std::uint8_t>((bits >> 8) & 0xffu);
-                result.output_byte_count = 2;
+                result.value = static_cast<float>(VxmAlu::cast_scalar_to_int8(*lhs));
+            } else {
                 result.value = *lhs;
-                result.output_valid = true;
-                return result;
             }
-            if (instruction.cast_target == VxmCastTarget::Float32 && instruction.output_stream.has_value()) {
-                result.output = 0;
-                result.output_bytes = pack_float32(*lhs);
-                result.output_byte_count = 4;
-                result.value = *lhs;
-                result.output_valid = true;
-                return result;
-            }
-            result.value = *lhs;
-            return result;
+            break;
         default:
             throw std::logic_error("VXM lane ALU opcode is not implemented in the issue-queue lane");
         }
+
+        if (!instruction.output_stream.has_value()) {
+            return result;
+        }
+
+        switch (instruction.cast_target) {
+        case VxmCastTarget::Int8:
+            result.output = VxmAlu::cast_scalar_to_int8(result.value);
+            result.output_bytes[0] = static_cast<std::uint8_t>(result.output);
+            result.output_byte_count = 1;
+            break;
+        case VxmCastTarget::Float16: {
+            const auto bits = VxmAlu::cast_scalar_to_float16_bits(result.value);
+            result.output = static_cast<std::int8_t>(bits & 0xffu);
+            result.output_bytes[0] = static_cast<std::uint8_t>(bits & 0xffu);
+            result.output_bytes[1] = static_cast<std::uint8_t>((bits >> 8) & 0xffu);
+            result.output_byte_count = 2;
+            break;
+        }
+        case VxmCastTarget::Float32:
+            result.output = 0;
+            result.output_bytes = pack_float32(result.value);
+            result.output_byte_count = 4;
+            break;
+        }
+        result.output_valid = true;
+        return result;
     }
 
     SwigluParams swiglu_params_{};

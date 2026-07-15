@@ -59,10 +59,15 @@ west-stream score output feeds VXM directly for softmax pass 1, which scales to
 fp32, stores that intermediate in MEM, and computes each query row maximum with
 an ALU self-feedback `Max`. Pass 2 reloads scaled scores and saved maxima,
 computes `exp(x - max)`, and accumulates each row sum with a self-feedback
-`Add`. Pass 3 reloads exponentials and saved sums, divides, scales,
+`Add`. Passes 2 and 3 stripe key positions across four independent MEM groups
+and use four VXM ALU pipelines in parallel. Pass 2 combines four 40-element
+partial sums into the final 160-element row sum. Pass 3 reloads exponentials
+and saved sums, divides, scales,
 `Cast(Int8)`, and stores the final attention probabilities in MEM. MXM emits one
 key position per cycle while VXM lanes represent queries, so both reductions
-run across 160 cycles without a physical transpose or host-side reduction.
+run without a physical transpose or host-side reduction. Pass 1 still takes
+160 data cycles for the full-row maximum; the striped Pass 2 and Pass 3 each
+take 40 data cycles.
 The test writes an ICU dispatch trace to
 `build-vs2019/logs/attention_projection/icu.log`.
 

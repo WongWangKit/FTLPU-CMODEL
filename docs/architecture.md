@@ -194,6 +194,11 @@ VXM can also cast fp32 values to fp16 stream output. The fp16 path writes the
 IEEE half-precision bit pattern as two little-endian byte streams, while the
 legacy int8 path still writes one byte stream.
 
+Stream output is independent of the opcode. Any ALU instruction can name an
+output stream and serialize its result as int8, fp16, or fp32 according to its
+cast target. A separate `Cast(Float32)` is therefore unnecessary when an
+arithmetic result is already fp32 and only needs to enter a stream.
+
 SwiGLU is built from primitive ops:
 
 ```text
@@ -326,16 +331,20 @@ one query and consecutive cycles represent key positions, so reductions happen
 over time without a physical transpose:
 
 ```text
-pass 1: Cast -> Multiply -> Max(self feedback)
-pass 2: Subtract(max) -> Exp -> Add(self feedback)
-pass 3: Divide(sum) -> Multiply(127) -> Cast(Int8)
+pass 1: Cast -> Multiply(output fp32) -> Max(self feedback, output final max)
+pass 2: 4 x [Subtract(max) -> Exp(output fp32) -> Add(self feedback)]
+pass 3: 4 x [Divide(sum) -> Multiply(127) -> Cast(Int8)]
 ```
 
 The first `Max` instruction uses negative infinity as its seed and the first
-`Add` uses zero. Their remaining 159 instructions read the same ALU's previous
-cycle output. Scaled scores, exponentials, final maxima, and final sums are
-moved through MEM by ICU `Read`/`Write` instructions. Test-side code only reads
-the completed SRAM state and computes post-run golden values; it does not feed
+`Add` in each parallel group uses zero. Pass 1 reduces all 160 key positions.
+Passes 2 and 3 stripe keys by `key % 4` across four disjoint four-slice MEM
+groups and four VXM pipelines. Each pass-2 feedback `Add` reduces 40 values;
+three additional `Add` instructions combine the four partial sums. The saved
+row maximum and row sum are read once per pass and held in an ALU output for
+reuse. Scaled scores, exponentials, final maxima, and final sums are moved
+through MEM by ICU `Read`/`Write` instructions. Test-side code only reads the
+completed SRAM state and computes post-run golden values; it does not feed
 maxima or sums into VXM.
 
 The current offline test only loads the ICU queues, initializes external MEM
