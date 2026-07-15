@@ -317,6 +317,27 @@ This is the intended shape for a future compiler:
 high-level workload -> compiler/scheduler -> OfflineIcuProgram -> ICU queues
 ```
 
+### Attention Softmax
+
+`attention_projection_test` implements stable softmax as three ICU-scheduled
+VXM passes. MXM score output flows directly west through the MEM stream
+registers into VXM; it is not first written to SRAM. Each VXM lane represents
+one query and consecutive cycles represent key positions, so reductions happen
+over time without a physical transpose:
+
+```text
+pass 1: Cast -> Multiply -> Max(self feedback)
+pass 2: Subtract(max) -> Exp -> Add(self feedback)
+pass 3: Divide(sum) -> Multiply(127) -> Cast(Int8)
+```
+
+The first `Max` instruction uses negative infinity as its seed and the first
+`Add` uses zero. Their remaining 159 instructions read the same ALU's previous
+cycle output. Scaled scores, exponentials, final maxima, and final sums are
+moved through MEM by ICU `Read`/`Write` instructions. Test-side code only reads
+the completed SRAM state and computes post-run golden values; it does not feed
+maxima or sums into VXM.
+
 The current offline test only loads the ICU queues, initializes external MEM
 contents, ticks the system datapaths, and checks final MEM contents.
 

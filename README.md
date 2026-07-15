@@ -56,9 +56,13 @@ to VXM, requantizes to int8 with ALU `Multiply` + `Cast(Int8)`, stores Q/K int8
 streams back to MEM, then loads Q into MXM0 and streams K to compute sampled
 `K * Q^T` scores against golden data. Raw scores are not staged to MEM: the MXM
 west-stream score output feeds VXM directly for softmax pass 1, which scales to
-fp32 and stores that intermediate in MEM. Passes 2 and 3 reload fp32
-intermediates through MEM streams to compute `exp(x - max)`, divide by the row
-sum, scale, `Cast(Int8)`, and store the final attention probabilities in MEM.
+fp32, stores that intermediate in MEM, and computes each query row maximum with
+an ALU self-feedback `Max`. Pass 2 reloads scaled scores and saved maxima,
+computes `exp(x - max)`, and accumulates each row sum with a self-feedback
+`Add`. Pass 3 reloads exponentials and saved sums, divides, scales,
+`Cast(Int8)`, and stores the final attention probabilities in MEM. MXM emits one
+key position per cycle while VXM lanes represent queries, so both reductions
+run across 160 cycles without a physical transpose or host-side reduction.
 The test writes an ICU dispatch trace to
 `build-vs2019/logs/attention_projection/icu.log`.
 
