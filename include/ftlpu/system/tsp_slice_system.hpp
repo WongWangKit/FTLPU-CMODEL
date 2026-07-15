@@ -12,13 +12,22 @@
 #include <optional>
 #include <ostream>
 #include <stdexcept>
-#include <streambuf>
 
 namespace ftlpu {
 
 class TspSliceSystem {
 public:
     static constexpr std::size_t kMxmCount = 2;
+
+    TspSliceSystem()
+    {
+        constexpr auto kMxmBoundary = hw::kMemBoundaryStreamRegisterColumns - 1;
+        for (std::size_t mxm = 0; mxm < kMxmCount; ++mxm) {
+            mxms_[mxm].set_stream_ports(MxmStreamPortMap::AtBoundary(
+                kMxmBoundary,
+                mxm * hw::kMxmLoadStreamsPerCycle));
+        }
+    }
 
     struct LogSinks {
         std::ostream* icu{nullptr};
@@ -100,6 +109,7 @@ public:
             *sinks.system << "system cycle " << cycle_ << '\n';
         }
         icu_.dispatch(mem_, vxm_, mxms_, sinks.icu);
+        mem_.begin_cycle();
         tick_mxm_controls(sinks);
         tick_mxm_datapaths(sinks);
         vxm_.prepare_cycle();
@@ -121,11 +131,13 @@ public:
 
     void tick_mxm_controls_only(LogSinks sinks)
     {
+        mem_.begin_cycle();
         tick_mxm_controls(sinks);
     }
 
     void tick_mxm_datapaths_only(LogSinks sinks)
     {
+        mem_.begin_cycle();
         tick_mxm_datapaths(sinks);
     }
 
@@ -171,46 +183,23 @@ private:
             if (sinks.mxm != nullptr) {
                 *sinks.mxm << "mxm" << mxm << " cycle " << cycle_ << '\n';
             }
-            auto provider = [this, mxm, sinks](std::size_t tile) {
-                if (sinks.mxm != nullptr && (!sinks.mxm_log_tile.has_value() || tile == *sinks.mxm_log_tile)) {
-                    *sinks.mxm << "  MEM.sreg11 -> MXM" << mxm << " tile " << tile << '\n';
-                }
-                return collect_mxm_weight_input_from_streams(mxm, tile);
-            };
-            if (sinks.mxm != nullptr) {
-                mxms_[mxm].control().tick(*sinks.mxm, provider, false, sinks.mxm_log_tile);
-            } else {
-                static NullStream null_stream;
-                mxms_[mxm].control().tick(null_stream.stream(), provider, false);
-            }
+            mxms_[mxm].evaluate_control(
+                mem_.stream_fabric(),
+                mxm,
+                sinks.mxm,
+                sinks.mxm_log_tile);
         }
     }
 
     void tick_mxm_datapaths(LogSinks sinks)
     {
         for (std::size_t mxm = 0; mxm < kMxmCount; ++mxm) {
-            mxms_[mxm].tick_datapath(mem_, mxm, sinks.mxm, sinks.mxm_log_tile);
+            mxms_[mxm].evaluate_datapath(
+                mem_.stream_fabric(),
+                mxm,
+                sinks.mxm,
+                sinks.mxm_log_tile);
         }
-    }
-
-    MxmControlSlice::WeightInput collect_mxm_weight_input_from_streams(std::size_t mxm, std::size_t tile)
-    {
-        constexpr auto kTargetSreg = hw::kStreamRegisterColumns - 1;
-        auto input = MxmControlSlice::WeightInput {};
-        const auto stream_base = mxm * hw::kMxmLoadStreamsPerCycle;
-        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            for (std::size_t stream = 0; stream < hw::kMxmLoadStreamsPerCycle; ++stream) {
-                const auto slot = mem_.consume_east_register(tile, lane, kTargetSreg, stream_base + stream);
-                if (!slot.has_value()) {
-                    throw std::logic_error("MXM IW reached tile before MEM east stream arrived at sreg11");
-                }
-                input[lane][stream] = MxmArray::Supercell::InputWord {
-                    static_cast<std::int8_t>(slot->data),
-                    stream + 1 == hw::kMxmLoadStreamsPerCycle,
-                };
-            }
-        }
-        return input;
     }
 
     bool has_complete_vxm_input(std::size_t tile) const
@@ -282,26 +271,6 @@ private:
             }
         }
     }
-
-    class NullStream {
-    public:
-        std::ostream& stream()
-        {
-            return stream_;
-        }
-
-    private:
-        class Buffer : public std::streambuf {
-        public:
-            int overflow(int c) override
-            {
-                return c;
-            }
-        };
-
-        Buffer buffer_{};
-        std::ostream stream_{&buffer_};
-    };
 
     TileArrayModel mem_{};
     VxmSlice vxm_{};

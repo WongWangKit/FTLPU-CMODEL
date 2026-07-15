@@ -180,6 +180,27 @@ public:
         return mem_.instruction_at(column, tile);
     }
 
+    // Compatibility-system hook: opens the shared fabric cycle so other
+    // refactored functional slices can evaluate before MEM performs the one
+    // global link staging and commit in tick().
+    void begin_cycle()
+    {
+        if (streams_.cycle_open()) {
+            return;
+        }
+        streams_.begin_cycle();
+
+        for (const auto& consumption : pending_consumptions_) {
+            streams_.consume(
+                consumption.column,
+                consumption.tile,
+                consumption.lane,
+                consumption.stream,
+                "legacy TileArray consumer");
+        }
+        pending_consumptions_.clear();
+    }
+
     void tick()
     {
         tick_impl(nullptr, std::nullopt);
@@ -193,19 +214,7 @@ public:
 private:
     void tick_impl(std::ostream* os, std::optional<std::size_t> log_tile)
     {
-        streams_.begin_cycle();
-
-        // Legacy MXM/VXM bridges run before TileArrayModel::tick().  Defer
-        // their consume requests until the shared fabric cycle is open.
-        for (const auto& consumption : pending_consumptions_) {
-            streams_.consume(
-                consumption.column,
-                consumption.tile,
-                consumption.lane,
-                consumption.stream,
-                "legacy TileArray consumer");
-        }
-        pending_consumptions_.clear();
+        begin_cycle();
 
         // Functional slices read current SR state, consume operands and stage
         // results into next state.  No functional slice can see another

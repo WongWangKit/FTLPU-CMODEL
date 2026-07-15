@@ -6,6 +6,39 @@
 
 int main()
 {
+    // Explicit multicast permits multiple readers, but it cannot be mixed
+    // with exclusive consumption in either evaluation order.
+    {
+        ftlpu::StreamRegisterFabric multicast(1);
+        const auto shared_stream = ftlpu::StreamId::East(0);
+        multicast.initialize_cell(
+            0, 0, 0, shared_stream, ftlpu::StreamCell::Valid(7));
+        multicast.begin_cycle();
+        multicast.consume_shared(0, 0, 0, shared_stream, "reader A");
+        multicast.consume_shared(0, 0, 0, shared_stream, "reader B");
+        bool rejected = false;
+        try {
+            multicast.consume(0, 0, 0, shared_stream, "exclusive reader");
+        } catch (const std::logic_error&) {
+            rejected = true;
+        }
+        assert(rejected);
+        multicast.commit_cycle();
+
+        multicast.initialize_cell(
+            0, 0, 0, shared_stream, ftlpu::StreamCell::Valid(8));
+        multicast.begin_cycle();
+        multicast.consume(0, 0, 0, shared_stream, "exclusive reader");
+        rejected = false;
+        try {
+            multicast.consume_shared(0, 0, 0, shared_stream, "reader A");
+        } catch (const std::logic_error&) {
+            rejected = true;
+        }
+        assert(rejected);
+        multicast.commit_cycle();
+    }
+
     ftlpu::StreamRegisterFabric fabric(3);
     const auto stream = ftlpu::StreamId::East(7);
 

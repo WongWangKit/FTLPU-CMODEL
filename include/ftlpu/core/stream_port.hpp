@@ -72,6 +72,16 @@ public:
         return result;
     }
 
+    StreamSegment16 consume_shared_segment(
+        std::size_t tile,
+        std::size_t stream_index)
+    {
+        const auto id = stream_id(stream_index);
+        auto result = fabric_.segment(column_, tile, id);
+        fabric_.consume_shared_segment(column_, tile, id, consumer_.c_str());
+        return result;
+    }
+
 private:
     StreamId stream_id(std::size_t stream_index) const
     {

@@ -35,6 +35,7 @@ public:
         : current_(column_count)
         , next_(column_count)
         , consumed_(column_count)
+        , shared_consumed_(column_count)
     {
         if (column_count == 0) {
             throw std::invalid_argument("stream-register fabric must contain at least one column");
@@ -195,6 +196,7 @@ public:
             throw std::logic_error("stream cell was consumed more than once in the same cycle");
         }
         flag = true;
+        select(shared_consumed_[column].lanes[tile][lane], stream) = false;
     }
 
     void consume_segment(
@@ -205,6 +207,43 @@ public:
     {
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             consume(column, tile, lane, stream, consumer);
+        }
+    }
+
+    // Explicit multicast consumption.  Every consumer observes the same
+    // current-cycle value, while the global consumed bit is set only once so
+    // the source cannot continue through a passive link.
+    void consume_shared(
+        std::size_t column,
+        std::size_t tile,
+        std::size_t lane,
+        StreamId stream,
+        const char* consumer = "multicast functional slice")
+    {
+        require_open_cycle();
+        check_location(column, tile, lane, stream);
+        if (!cell(column, tile, lane, stream).valid) {
+            throw std::logic_error(
+                std::string("read of invalid multicast stream cell by ") + consumer);
+        }
+        auto& consumed = select(consumed_[column].lanes[tile][lane], stream);
+        auto& shared = select(shared_consumed_[column].lanes[tile][lane], stream);
+        if (consumed && !shared) {
+            throw std::logic_error(
+                "stream cell cannot be consumed as both exclusive and multicast in the same cycle");
+        }
+        consumed = true;
+        shared = true;
+    }
+
+    void consume_shared_segment(
+        std::size_t column,
+        std::size_t tile,
+        StreamId stream,
+        const char* consumer = "multicast functional slice")
+    {
+        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+            consume_shared(column, tile, lane, stream, consumer);
         }
     }
 
@@ -343,14 +382,18 @@ private:
 
     void clear_consumed()
     {
-        for (auto& column : consumed_) {
-            for (auto& tile : column.lanes) {
-                for (auto& lane : tile) {
-                    lane.east.fill(false);
-                    lane.west.fill(false);
+        const auto clear_masks = [](auto& masks) {
+            for (auto& column : masks) {
+                for (auto& tile : column.lanes) {
+                    for (auto& lane : tile) {
+                        lane.east.fill(false);
+                        lane.west.fill(false);
+                    }
                 }
             }
-        }
+        };
+        clear_masks(consumed_);
+        clear_masks(shared_consumed_);
     }
 
     bool is_consumed(
@@ -412,6 +455,7 @@ private:
     std::vector<StreamRegisterColumn> current_{};
     std::vector<StreamRegisterColumn> next_{};
     std::vector<ColumnConsumeMask> consumed_{};
+    std::vector<ColumnConsumeMask> shared_consumed_{};
     std::size_t cycle_{0};
     bool cycle_open_{false};
 };

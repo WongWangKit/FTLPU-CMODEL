@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
-#include "ftlpu/mem/tile_array.hpp"
+#include "ftlpu/core/stream_port.hpp"
 #include "ftlpu/mxm/array.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
 
@@ -12,10 +12,83 @@
 #include <optional>
 #include <ostream>
 #include <stdexcept>
+#include <streambuf>
 #include <string>
 #include <vector>
 
 namespace ftlpu {
+
+class MxmStreamPortMap {
+public:
+    struct InputEndpoint {
+        std::size_t column{0};
+        StreamDirection direction{StreamDirection::East};
+        bool multicast{false};
+    };
+
+    struct WeightEndpoint : InputEndpoint {
+        std::size_t stream_base{0};
+    };
+
+    struct OutputEndpoint {
+        std::size_t column{0};
+        StreamDirection direction{StreamDirection::West};
+    };
+
+    static MxmStreamPortMap AtBoundary(
+        std::size_t column,
+        std::size_t weight_stream_base = 0)
+    {
+        return MxmStreamPortMap {
+            WeightEndpoint {{column, StreamDirection::East, false}, weight_stream_base},
+            InputEndpoint {column, StreamDirection::East, true},
+            OutputEndpoint {column, StreamDirection::West},
+        };
+    }
+
+    MxmStreamPortMap(
+        WeightEndpoint weight_input,
+        InputEndpoint activation_input,
+        OutputEndpoint result_output)
+        : weight_input_(weight_input)
+        , activation_input_(activation_input)
+        , result_output_(result_output)
+    {
+        if (weight_input_.stream_base + hw::kMxmLoadStreamsPerCycle
+            > hw::kStreamsPerDirection) {
+            throw std::out_of_range("MXM weight stream range exceeds one stream direction");
+        }
+    }
+
+    const WeightEndpoint& weight_input() const noexcept
+    {
+        return weight_input_;
+    }
+
+    const InputEndpoint& activation_input() const noexcept
+    {
+        return activation_input_;
+    }
+
+    const OutputEndpoint& result_output() const noexcept
+    {
+        return result_output_;
+    }
+
+    void validate_for(const StreamRegisterFabric& fabric) const
+    {
+        if (weight_input_.column >= fabric.column_count()
+            || activation_input_.column >= fabric.column_count()
+            || result_output_.column >= fabric.column_count()) {
+            throw std::out_of_range("MXM port maps outside stream-register fabric");
+        }
+    }
+
+private:
+    WeightEndpoint weight_input_{};
+    InputEndpoint activation_input_{};
+    OutputEndpoint result_output_{};
+};
 
 class Mxm {
 public:
@@ -30,7 +103,14 @@ public:
     };
 
     Mxm()
+        : Mxm(MxmStreamPortMap::AtBoundary(
+            hw::kMemBoundaryStreamRegisterColumns - 1))
+    {
+    }
+
+    explicit Mxm(MxmStreamPortMap ports)
         : control_(array_)
+        , ports_(std::move(ports))
     {
         reset_datapath();
     }
@@ -65,6 +145,16 @@ public:
         return control_;
     }
 
+    const MxmStreamPortMap& ports() const noexcept
+    {
+        return ports_;
+    }
+
+    void set_stream_ports(MxmStreamPortMap ports)
+    {
+        ports_ = std::move(ports);
+    }
+
     void reset_datapath()
     {
         for (auto& column : east_pipeline_) {
@@ -93,12 +183,44 @@ public:
         active_ = false;
     }
 
-    void tick_datapath(
-        TileArrayModel& mem,
+    void evaluate(
+        StreamRegisterFabric& fabric,
         std::size_t mxm_id,
         std::ostream* os = nullptr,
         std::optional<std::size_t> log_tile = std::nullopt)
     {
+        evaluate_control(fabric, mxm_id, os, log_tile);
+        evaluate_datapath(fabric, mxm_id, os, log_tile);
+    }
+
+    void evaluate_control(
+        StreamRegisterFabric& fabric,
+        std::size_t mxm_id,
+        std::ostream* os = nullptr,
+        std::optional<std::size_t> log_tile = std::nullopt)
+    {
+        require_open_fabric(fabric);
+        auto provider = [this, &fabric, mxm_id, os, log_tile](std::size_t tile) {
+            if (os != nullptr && (!log_tile.has_value() || tile == *log_tile)) {
+                *os << "  SR -> MXM" << mxm_id << " weights tile " << tile << '\n';
+            }
+            return collect_weight_input(fabric, tile);
+        };
+        if (os != nullptr) {
+            control_.tick(*os, provider, false, log_tile);
+        } else {
+            static NullStream null_stream;
+            control_.tick(null_stream.stream(), provider, false, log_tile);
+        }
+    }
+
+    void evaluate_datapath(
+        StreamRegisterFabric& fabric,
+        std::size_t mxm_id,
+        std::ostream* os = nullptr,
+        std::optional<std::size_t> log_tile = std::nullopt)
+    {
+        require_open_fabric(fabric);
         last_outputs_.clear();
 
         if (!active_ && control_.compute_active(0)) {
@@ -118,7 +240,7 @@ public:
             if (tile == 0 && !compute_active_by_buffer_[weight_buffer]) {
                 reset_buffer_state(weight_buffer);
             }
-            const auto data = collect_activation(mem, tile, stream_base);
+            const auto data = collect_activation(fabric, tile, stream_base);
             const auto row = next_row_for_tile_[weight_buffer][tile]++;
             east_pipeline_[0][tile].push_back(ActivationEvent {tile, row, weight_buffer, output_stream_base, data});
             if (os != nullptr && (!log_tile.has_value() || *log_tile == tile)) {
@@ -139,7 +261,7 @@ public:
                     computing[tile][column_block] = true;
                     compute_column_block(event, column_block);
                     if (event.tile + 1 == hw::kMxmSupercellsPerPlane) {
-                        emit_column_output(mem, column_block, event);
+                        emit_column_output(fabric, column_block, event);
                     }
                     if (column_block + 1 < hw::kMxmSupercellsPerPlane) {
                         next_pipeline[column_block + 1][tile].push_back(event);
@@ -193,6 +315,39 @@ private:
         }
     }
 
+    void require_open_fabric(StreamRegisterFabric& fabric) const
+    {
+        ports_.validate_for(fabric);
+        if (!fabric.cycle_open()) {
+            throw std::logic_error("MXM evaluate requires an open SR cycle");
+        }
+    }
+
+    MxmControlSlice::WeightInput collect_weight_input(
+        StreamRegisterFabric& fabric,
+        std::size_t tile) const
+    {
+        const auto& endpoint = ports_.weight_input();
+        StreamInputPort input(fabric, endpoint.column, endpoint.direction, "MXM IW");
+        for (std::size_t stream = 0; stream < hw::kMxmLoadStreamsPerCycle; ++stream) {
+            if (!input.segment_valid(tile, endpoint.stream_base + stream)) {
+                throw std::logic_error("MXM IW reached tile before all weight streams arrived");
+            }
+        }
+
+        auto result = MxmControlSlice::WeightInput {};
+        for (std::size_t stream = 0; stream < hw::kMxmLoadStreamsPerCycle; ++stream) {
+            const auto segment = input.consume_segment(tile, endpoint.stream_base + stream);
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                result[lane][stream] = MxmArray::Supercell::InputWord {
+                    static_cast<std::int8_t>(segment[lane].data),
+                    stream + 1 == hw::kMxmLoadStreamsPerCycle,
+                };
+            }
+        }
+        return result;
+    }
+
     void reset_buffer_state(std::size_t weight_buffer)
     {
         check_weight_buffer(weight_buffer);
@@ -205,19 +360,25 @@ private:
         }
     }
 
-    static ActivationData collect_activation(const TileArrayModel& mem, std::size_t tile, std::size_t stream_base)
+    ActivationData collect_activation(
+        StreamRegisterFabric& fabric,
+        std::size_t tile,
+        std::size_t stream_base) const
     {
-        constexpr auto kTargetSreg = hw::kStreamRegisterColumns - 1;
-        if (stream_base >= hw::kStreams) {
-            throw std::out_of_range("MXM activation stream is outside the stream set");
+        if (stream_base >= hw::kStreamsPerDirection) {
+            throw std::out_of_range("MXM activation stream is outside its configured direction");
         }
+        const auto& endpoint = ports_.activation_input();
+        StreamInputPort input(fabric, endpoint.column, endpoint.direction, "MXM Compute");
+        if (!input.segment_valid(tile, stream_base)) {
+            throw std::logic_error("MXM Compute reached tile before activation stream arrived");
+        }
+        const auto segment = endpoint.multicast
+            ? input.consume_shared_segment(tile, stream_base)
+            : input.consume_segment(tile, stream_base);
         ActivationData data {};
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            const auto& slot = mem.east_register(tile, lane, kTargetSreg, stream_base);
-            if (!slot.has_value()) {
-                throw std::logic_error("MXM Compute reached tile before activation stream arrived at sreg11");
-            }
-            data[lane] = static_cast<std::int8_t>(slot->data);
+            data[lane] = static_cast<std::int8_t>(segment[lane].data);
         }
         return data;
     }
@@ -248,7 +409,10 @@ private:
         return true;
     }
 
-    void emit_column_output(TileArrayModel& mem, std::size_t column_block, const ActivationEvent& event)
+    void emit_column_output(
+        StreamRegisterFabric& fabric,
+        std::size_t column_block,
+        const ActivationEvent& event)
     {
         if (!column_output_ready(event.weight_buffer, event.row, column_block)) {
             std::string detail;
@@ -264,6 +428,7 @@ private:
 
         ColumnOutput output {event.row, column_block, {}};
         const auto global_column_base = column_block * hw::kMxmSupercellColumns;
+        std::array<StreamSegment16, 4> output_segments{};
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             const auto value = accumulators_[event.weight_buffer][event.row][global_column_base + lane];
             output.values[lane] = value;
@@ -275,18 +440,48 @@ private:
                 static_cast<std::uint8_t>((raw >> 24) & 0xffu),
             };
             for (std::size_t byte = 0; byte < bytes.size(); ++byte) {
-                mem.set_west_stream_input(
-                    column_block,
-                    lane,
-                    event.output_stream_base + byte,
-                    TileArrayModel::DataWord {
-                        bytes[byte],
-                        lane + 1 == hw::kLanesPerTile,
-                    });
+                output_segments[byte][lane] = StreamCell::Valid(
+                    bytes[byte],
+                    lane + 1 == hw::kLanesPerTile);
             }
+        }
+        if (event.output_stream_base + output_segments.size() > hw::kStreamsPerDirection) {
+            throw std::out_of_range("MXM result stream range exceeds its configured direction");
+        }
+        const auto& endpoint = ports_.result_output();
+        StreamOutputPort output_port(
+            fabric,
+            endpoint.column,
+            endpoint.direction,
+            "MXM result");
+        for (std::size_t byte = 0; byte < output_segments.size(); ++byte) {
+            output_port.write_segment(
+                column_block,
+                event.output_stream_base + byte,
+                output_segments[byte]);
         }
         last_outputs_.push_back(output);
     }
+
+    class NullStream {
+    public:
+        std::ostream& stream()
+        {
+            return stream_;
+        }
+
+    private:
+        class Buffer : public std::streambuf {
+        public:
+            int overflow(int c) override
+            {
+                return c;
+            }
+        };
+
+        Buffer buffer_{};
+        std::ostream stream_{&buffer_};
+    };
 
     bool pipelines_empty() const
     {
@@ -302,6 +497,7 @@ private:
 
     MxmArray array_{};
     MxmControlSlice control_;
+    MxmStreamPortMap ports_;
     bool active_{false};
     std::array<std::array<std::deque<ActivationEvent>, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>
         east_pipeline_{};
