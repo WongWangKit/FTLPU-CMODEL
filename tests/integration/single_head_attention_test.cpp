@@ -705,7 +705,7 @@ SoftmaxSchedule emit_direct_score_softmax(Program& program)
         }
     }
 
-    const auto done = pass3_last_write + 8;
+    const auto done = pass3_last_write + kBlocks + 8;
     return SoftmaxSchedule {pass1_max_write, pass2_start, pass2_sum_write, pass3_start, done};
 }
 
