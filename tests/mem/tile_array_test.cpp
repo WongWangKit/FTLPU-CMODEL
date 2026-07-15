@@ -11,27 +11,22 @@ int main()
 {
     auto model = std::make_unique<ftlpu::TileArrayModel>();
     std::ostringstream log;
-    constexpr std::size_t kBank1Base = 1u << 16;
-
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
         model->set_east_stream_input(2, lane, 3, {static_cast<std::uint8_t>(10 + lane), lane == 15});
-        model->set_sram_byte(43, 2, 32 + lane, static_cast<std::uint8_t>(40 + lane));
+        model->set_sram_lane_byte(43, 2, 32, lane, static_cast<std::uint8_t>(40 + lane));
     }
-    model->set_sram_byte(8, 2, kBank1Base + 16, 0xaa);
-    assert(model->sram_byte(8, 2, 16) == 0);
-    assert(model->sram_byte(8, 2, kBank1Base + 16) == 0xaa);
 
     model->tick(log);
     assert(!model->instruction_at(8, 1).has_value());
     assert(model->east_register(2, 0, 0, 3).has_value());
-    assert(model->sram_byte(8, 2, 16) == 0);
+    assert(model->sram_lane_byte(8, 2, 16, 0) == 0);
     assert(!model->west_register(2, 0, 11, 4).has_value());
 
     model->enqueue_instruction(8, ftlpu::MemInstruction::Write(16, 3));
     model->enqueue_instruction(43, ftlpu::MemInstruction::Read(32, 32 + 4));
     model->tick(log);
     assert(model->instruction_at(8, 1).has_value());
-    assert(model->sram_byte(8, 2, 16) == 0);
+    assert(model->sram_lane_byte(8, 2, 16, 0) == 0);
     assert(!model->west_register(2, 0, 11, 4).has_value());
 
     model->tick(log);
@@ -41,17 +36,26 @@ int main()
     assert(model->instruction_at(8, 3).has_value());
 
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-        assert(model->sram_byte(8, 2, 16 + lane) == 10 + lane);
+        assert(model->sram_lane_byte(8, 2, 16, lane) == 10 + lane);
         assert(model->west_register(2, lane, 11, 4).has_value());
         assert(model->west_register(2, lane, 11, 4)->data == 40 + lane);
         assert(model->west_register(2, lane, 11, 4)->last == (lane == 15));
     }
-    assert(model->sram_byte(8, 2, kBank1Base + 16) == 0xaa);
-
     bool caught = false;
     try {
         model->enqueue_instruction(0, ftlpu::MemInstruction::Read(0, 64));
         model->tick(log);
+    } catch (const std::out_of_range&) {
+        caught = true;
+    }
+    assert(caught);
+
+    model->set_sram_lane_byte(0, 19, ftlpu::hw::kSramDepthRows - 1, 15, 0xa5);
+    assert(model->sram_lane_byte(0, 19, ftlpu::hw::kSramDepthRows - 1, 15) == 0xa5);
+
+    caught = false;
+    try {
+        model->set_sram_lane_byte(0, 0, ftlpu::hw::kSramDepthRows, 0, 1);
     } catch (const std::out_of_range&) {
         caught = true;
     }

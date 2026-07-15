@@ -140,7 +140,6 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
     constexpr std::uint64_t kOpcodeMask = 0x3;
     constexpr std::uint64_t kStreamMask = 0x3f;
     constexpr std::uint64_t kAddressMask = hw::kSramDepthWords - 1;
-    constexpr std::uint64_t kByteOffsetMask = hw::kSramWordBytes - 1;
 
     detail::require_unsigned_fit(
         static_cast<std::uint64_t>(instruction.opcode),
@@ -154,16 +153,16 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
         static_cast<std::uint64_t>(instruction.map_stream),
         kStreamMask,
         "MEM map stream does not fit encoded instruction");
-    if ((instruction.address & kByteOffsetMask) != 0) {
-        throw std::out_of_range("MEM address must be 16-byte aligned for encoded instruction");
-    }
-    const auto local_word_address = (static_cast<std::uint64_t>(instruction.address) >> 4) & kAddressMask;
+    detail::require_unsigned_fit(
+        static_cast<std::uint64_t>(instruction.address),
+        kAddressMask,
+        "MEM row address does not fit encoded instruction");
 
     return static_cast<std::uint32_t>(
         static_cast<std::uint64_t>(instruction.opcode)
         | (static_cast<std::uint64_t>(instruction.stream) << 2)
         | (static_cast<std::uint64_t>(instruction.map_stream) << 8)
-        | (local_word_address << 14));
+        | (static_cast<std::uint64_t>(instruction.address) << 14));
 }
 
 inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
@@ -173,7 +172,7 @@ inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
     const auto opcode = static_cast<MemOpcode>(detail::low_bits(word, 0, 0x3));
     const auto stream = static_cast<std::size_t>(detail::low_bits(word, 2, 0x3f));
     const auto map_stream = static_cast<std::size_t>(detail::low_bits(word, 8, 0x3f));
-    const auto address = static_cast<std::size_t>(detail::low_bits(word, 14, 0x1fff) << 4);
+    const auto address = static_cast<std::size_t>(detail::low_bits(word, 14, 0x1fff));
 
     switch (opcode) {
     case MemOpcode::Read:

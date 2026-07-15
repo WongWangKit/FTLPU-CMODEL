@@ -142,7 +142,12 @@ void stage_mem(ftlpu::TileArrayModel& mem)
 {
     for (std::size_t row = 0; row < kSeqLen; ++row) {
         for (std::size_t k = 0; k < kHidden; ++k) {
-            mem.set_sram_byte(kXMemColumn, k / kLanes, x_address(row, k % kLanes), static_cast<std::uint8_t>(x_value(row, k)));
+            mem.set_sram_lane_byte(
+                kXMemColumn,
+                k / kLanes,
+                x_address(row, 0),
+                k % kLanes,
+                static_cast<std::uint8_t>(x_value(row, k)));
         }
     }
 
@@ -153,15 +158,17 @@ void stage_mem(ftlpu::TileArrayModel& mem)
                 for (std::size_t stream = 0; stream < kLoadStreams; ++stream) {
                     const auto column = column_block * kLoadStreams + stream;
                     for (std::size_t lane = 0; lane < kLanes; ++lane) {
-                        mem.set_sram_byte(
+                        mem.set_sram_lane_byte(
                             stream,
                             tile,
-                            address + lane,
+                            address,
+                            lane,
                             static_cast<std::uint8_t>(weight_value(matrix, tile * kLanes + lane, column)));
-                        mem.set_sram_byte(
+                        mem.set_sram_lane_byte(
                             kLoadStreams + stream,
                             tile,
-                            address + lane,
+                            address,
+                            lane,
                             static_cast<std::uint8_t>(weight_value(matrix, tile * kLanes + lane, column)));
                     }
                 }
@@ -404,14 +411,14 @@ std::int8_t stored_q_int8(const ftlpu::TileArrayModel& mem, std::size_t row, std
 {
     const auto tile = column / kLanes;
     const auto lane = column % kLanes;
-    return static_cast<std::int8_t>(mem.sram_byte(q_column(row), tile, q_address(row) + lane));
+    return static_cast<std::int8_t>(mem.sram_lane_byte(q_column(row), tile, q_address(row), lane));
 }
 
 std::int8_t stored_k_int8(const ftlpu::TileArrayModel& mem, std::size_t row, std::size_t column)
 {
     const auto tile = column / kLanes;
     const auto lane = column % kLanes;
-    return static_cast<std::int8_t>(mem.sram_byte(kKInt8Column, tile, projection_output_address(row) + lane));
+    return static_cast<std::int8_t>(mem.sram_lane_byte(kKInt8Column, tile, projection_output_address(row), lane));
 }
 
 std::size_t score_index(std::size_t row, std::size_t column)
@@ -423,12 +430,13 @@ float read_float32(
     const ftlpu::TileArrayModel& mem,
     std::size_t column_base,
     std::size_t tile,
-    std::size_t address)
+    std::size_t address,
+    std::size_t lane)
 {
-    const auto raw = static_cast<std::uint32_t>(mem.sram_byte(column_base + 0, tile, address))
-        | (static_cast<std::uint32_t>(mem.sram_byte(column_base + 1, tile, address)) << 8)
-        | (static_cast<std::uint32_t>(mem.sram_byte(column_base + 2, tile, address)) << 16)
-        | (static_cast<std::uint32_t>(mem.sram_byte(column_base + 3, tile, address)) << 24);
+    const auto raw = static_cast<std::uint32_t>(mem.sram_lane_byte(column_base + 0, tile, address, lane))
+        | (static_cast<std::uint32_t>(mem.sram_lane_byte(column_base + 1, tile, address, lane)) << 8)
+        | (static_cast<std::uint32_t>(mem.sram_lane_byte(column_base + 2, tile, address, lane)) << 16)
+        | (static_cast<std::uint32_t>(mem.sram_lane_byte(column_base + 3, tile, address, lane)) << 24);
     float value = 0.0f;
     std::memcpy(&value, &raw, sizeof(value));
     return value;
@@ -468,7 +476,7 @@ std::vector<float> compute_row_max_from_mem(const ftlpu::TileArrayModel& mem)
             const auto lane = column % kLanes;
             row_max[row] = std::max(
                 row_max[row],
-                read_float32(mem, kScaledScoreByteColumnBase, tile, projection_output_address(row) + lane));
+                read_float32(mem, kScaledScoreByteColumnBase, tile, projection_output_address(row), lane));
         }
     }
     return row_max;
@@ -531,7 +539,7 @@ std::vector<float> compute_row_sum_from_mem(const ftlpu::TileArrayModel& mem)
         for (std::size_t column = 0; column < kSeqLen; ++column) {
             const auto tile = column / kLanes;
             const auto lane = column % kLanes;
-            row_sum[row] += read_float32(mem, kExpScoreByteColumnBase, tile, projection_output_address(row) + lane);
+            row_sum[row] += read_float32(mem, kExpScoreByteColumnBase, tile, projection_output_address(row), lane);
         }
     }
     return row_sum;
@@ -608,7 +616,7 @@ std::vector<std::int8_t> run_softmax_stream_program(ftlpu::TspSliceSystem& syste
             const auto tile = column / kLanes;
             const auto lane = column % kLanes;
             output[score_index(row, column)] = static_cast<std::int8_t>(
-                system.mem().sram_byte(kSoftmaxInt8Column, tile, projection_output_address(row) + lane));
+                system.mem().sram_lane_byte(kSoftmaxInt8Column, tile, projection_output_address(row), lane));
         }
     }
     return output;

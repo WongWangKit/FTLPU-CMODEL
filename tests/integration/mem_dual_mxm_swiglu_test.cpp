@@ -507,10 +507,11 @@ void stage_activation_matrix(ftlpu::TileArrayModel& mem)
         for (std::size_t k = 0; k < kKPerPass; ++k) {
             const auto tile = k / kLanes;
             const auto lane = k % kLanes;
-            mem.set_sram_byte(
+            mem.set_sram_lane_byte(
                 kActivationMemColumn,
                 tile,
-                vector_row_address(row, lane),
+                vector_row_address(row, 0),
+                lane,
                 static_cast<std::uint8_t>(activation_value(row, k)));
         }
     }
@@ -531,15 +532,17 @@ void stage_weight_matrices(ftlpu::TileArrayModel& mem)
                             const auto column = matrix_id == kDownMatrix
                                 ? column_block * kLoadStreams + stream
                                 : pass * kColumns + column_block * kLoadStreams + stream;
-                            mem.set_sram_byte(
+                            mem.set_sram_lane_byte(
                                 stream,
                                 tile,
-                                address + lane,
+                                address,
+                                lane,
                                 static_cast<std::uint8_t>(weight_value(matrix_id, global_k, column)));
-                            mem.set_sram_byte(
+                            mem.set_sram_lane_byte(
                                 kLoadStreams + stream,
                                 tile,
-                                address + lane,
+                                address,
+                                lane,
                                 static_cast<std::uint8_t>(weight_value(matrix_id, global_k, column)));
                         }
                     }
@@ -2205,7 +2208,7 @@ int run_offline_icu_ffn_test()
             const auto hidden_lane = column % kLanes;
             const auto hidden_mem_column = hidden_pass == 0 ? kSwigluMemColumn : kSwigluMemColumn1;
             const auto actual_hidden = static_cast<std::int8_t>(
-                system->mem().sram_byte(hidden_mem_column, hidden_tile, swiglu_address(hidden_pass, row, hidden_lane)));
+                system->mem().sram_lane_byte(hidden_mem_column, hidden_tile, swiglu_address(hidden_pass, row, 0), hidden_lane));
             if (actual_hidden != expected_hidden) {
                 std::cerr << "offline SwiGLU MEM output mismatch"
                           << " row=" << row
@@ -2231,7 +2234,7 @@ int run_offline_icu_ffn_test()
                 down_params.output_scale,
                 down_params.output_zero_point);
             const auto actual_final = static_cast<std::int8_t>(
-                system->mem().sram_byte(kFinalMemColumn, column / kLanes, swiglu_address(0, row, column % kLanes)));
+                system->mem().sram_lane_byte(kFinalMemColumn, column / kLanes, swiglu_address(0, row, 0), column % kLanes));
             if (actual_final != expected_final) {
                 std::cerr << "offline down AddQuant MEM output mismatch"
                           << " row=" << row
@@ -2384,7 +2387,7 @@ try
             const auto hidden_lane = column % kLanes;
             const auto hidden_mem_column = hidden_pass == 0 ? kSwigluMemColumn : kSwigluMemColumn1;
             const auto actual_hidden = static_cast<std::int8_t>(
-                system->mem().sram_byte(hidden_mem_column, hidden_tile, swiglu_address(hidden_pass, row, hidden_lane)));
+                system->mem().sram_lane_byte(hidden_mem_column, hidden_tile, swiglu_address(hidden_pass, row, 0), hidden_lane));
             if (actual_hidden != expected_hidden) {
                 std::cerr << "SwiGLU MEM output mismatch"
                           << " row=" << row
@@ -2408,7 +2411,7 @@ try
                 down_params.output_scale,
                 down_params.output_zero_point);
             const auto actual_final = static_cast<std::int8_t>(
-                system->mem().sram_byte(kFinalMemColumn, column / kLanes, swiglu_address(0, row, column % kLanes)));
+                system->mem().sram_lane_byte(kFinalMemColumn, column / kLanes, swiglu_address(0, row, 0), column % kLanes));
             if (actual_final != expected_final) {
                 const auto actual_lhs = down_partials[0][matrix_index(row, column)];
                 const auto actual_rhs = down_partials[1][matrix_index(row, column)];

@@ -24,9 +24,15 @@ endfunction()
 
 ftlpu_add_test(instruction_codec_test tests/core/instruction_codec_test.cpp)
 
+ftlpu_add_test(stream_fabric_test tests/stream/stream_fabric_test.cpp)
+ftlpu_add_test(stream_port_test tests/stream/stream_port_test.cpp)
+
 ftlpu_add_test(mem_slice_test tests/mem/slice_test.cpp)
+ftlpu_add_test(mem_array_separated_test tests/mem/mem_array_separated_test.cpp)
 ftlpu_add_test(tile_array_test tests/mem/tile_array_test.cpp)
 ftlpu_add_test(vector_roundtrip_test tests/mem/vector_roundtrip_test.cpp)
+
+ftlpu_add_test(stream_topology_test tests/system/stream_topology_test.cpp)
 
 ftlpu_add_test(mxm_supercell_test tests/mxm/supercell_test.cpp)
 ftlpu_add_test(mxm_array_test tests/mxm/array_test.cpp)
@@ -43,9 +49,16 @@ ftlpu_add_test(vxm_lane_test tests/vxm/lane_test.cpp)
 ftlpu_add_test(vxm_superlane_test tests/vxm/superlane_test.cpp)
 ftlpu_add_test(vxm_slice_test tests/vxm/slice_test.cpp)
 
+ftlpu_add_test(sxm_test tests/sxm/sxm_test.cpp)
+
+ftlpu_add_test(icu_test tests/icu/icu_test.cpp)
+
 ftlpu_add_demo(northbound_pipeline_demo examples/core/northbound_pipeline_demo.cpp)
 ftlpu_add_demo(tile_array_trace_demo examples/mem/tile_array_trace_demo.cpp)
 ftlpu_add_demo(vector_roundtrip_demo examples/mem/vector_roundtrip_demo.cpp)
 ftlpu_add_demo(mxm_control_trace_demo examples/mxm/control_trace_demo.cpp)
 ftlpu_add_demo(mem_mxm_trace_demo examples/mxm/mem_mxm_trace_demo.cpp)
+ftlpu_add_demo(icu_mem_demo examples/icu/icu_mem_demo.cpp)
+ftlpu_add_demo(sxm_chain_demo examples/sxm/chain_demo.cpp)
 ftlpu_add_demo(vxm_lane_trace_demo examples/vxm/lane_trace_demo.cpp)
+ftlpu_add_demo(stream_topology_api_demo examples/system/stream_topology_api_demo.cpp)
