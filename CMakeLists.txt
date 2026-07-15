@@ -50,6 +50,7 @@ ftlpu_add_test(vxm_superlane_test tests/vxm/superlane_test.cpp)
 ftlpu_add_test(vxm_slice_test tests/vxm/slice_test.cpp)
 
 ftlpu_add_test(sxm_test tests/sxm/sxm_test.cpp)
+ftlpu_add_test(sxm_attention_transpose_test tests/sxm/attention_transpose_test.cpp)
 
 ftlpu_add_test(icu_test tests/icu/icu_test.cpp)
 

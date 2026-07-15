@@ -354,6 +354,20 @@ requantize V to int8 and return it to MEM. The test validates Q, K, V, QK scores
 softmax maxima and sums, and every final softmax byte. The subsequent
 `softmax * V` GEMM remains future work.
 
+`sxm_attention_transpose_test` verifies the block algorithm needed before that
+GEMM. It aligns 16 key columns on 16 streams, executes 100 real
+`Transpose sg16` instructions for the `10 x 10` grid of `16 x 16` blocks,
+stages the resulting row chunks, and applies a non-identity `Permute320` map to
+assemble each 160-element query row in a zero-padded 320-lane MXM activation.
+All 25,600 values and all 160 padding lanes are checked.
+
+This is currently a functional datapath proof, not yet an end-to-end SR
+schedule. The SR-facing `Permute` instruction shape requests 20 stream operands
+while the SXM issue-width model allows 16, and `SxmSlice::evaluate` still handles
+physical tiles independently. Global 320-lane Permute issue and the MEM staging
+schedule must be reconciled before connecting this transpose to the attention
+test.
+
 The current offline test only loads the ICU queues, initializes external MEM
 contents, ticks the system datapaths, and checks final MEM contents.
 
