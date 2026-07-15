@@ -182,7 +182,7 @@ private:
             if (instruction_rows_[alu][0].has_value() || instruction_queues_[alu].empty()) {
                 continue;
             }
-            instruction_rows_[alu][0] = instruction_queues_[alu].front();
+            instruction_rows_[alu].fill(instruction_queues_[alu].front());
             instruction_queues_[alu].pop_front();
         }
     }
@@ -280,10 +280,7 @@ private:
     void advance_instructions()
     {
         for (auto& alu_rows : instruction_rows_) {
-            for (std::size_t tile = kTileCount - 1; tile > 0; --tile) {
-                alu_rows[tile] = alu_rows[tile - 1];
-            }
-            alu_rows[0].reset();
+            alu_rows.fill(std::nullopt);
         }
     }
 

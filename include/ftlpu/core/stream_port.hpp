@@ -72,6 +72,24 @@ public:
         return result;
     }
 
+    StreamVector320 peek_vector(std::size_t stream_index) const
+    {
+        return fabric_.vector(column_, stream_id(stream_index));
+    }
+
+    bool vector_valid(std::size_t stream_index) const
+    {
+        return fabric_.vector_valid(column_, stream_id(stream_index));
+    }
+
+    StreamVector320 consume_vector(std::size_t stream_index)
+    {
+        const auto id = stream_id(stream_index);
+        auto result = fabric_.vector(column_, id);
+        fabric_.consume_vector(column_, id, consumer_.c_str());
+        return result;
+    }
+
 private:
     StreamId stream_id(std::size_t stream_index) const
     {
@@ -135,6 +153,19 @@ public:
         fabric_.stage_payload_segment(
             column_,
             tile,
+            stream_id(stream_index),
+            values,
+            vector_tag,
+            producer_.c_str());
+    }
+
+    void write_payload_vector(
+        std::size_t stream_index,
+        const StreamPayloadVector320& values,
+        std::uint64_t vector_tag = 0)
+    {
+        fabric_.stage_payload_vector(
+            column_,
             stream_id(stream_index),
             values,
             vector_tag,

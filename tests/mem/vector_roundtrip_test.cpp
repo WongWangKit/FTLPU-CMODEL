@@ -48,7 +48,7 @@ int main()
     const auto target_sreg = ftlpu::stream_register_before_slice(mem_slice);
     const auto store_cycle = target_sreg + 1;
     const auto read_cycle = store_cycle + kReadDelayCycles;
-    const auto last_output_cycle = read_cycle + ftlpu::hw::kTileRows + ftlpu::hw::kStreamRegisterColumns - target_sreg;
+    const auto last_output_cycle = read_cycle + ftlpu::hw::kStreamRegisterColumns - target_sreg + 1;
 
     auto model = std::make_unique<ftlpu::TileArrayModel>();
     std::ostringstream log;
@@ -59,10 +59,12 @@ int main()
         << " read_delay=" << kReadDelayCycles << '\n';
 
     for (std::size_t cycle = 0; cycle <= last_output_cycle; ++cycle) {
-        if (cycle < ftlpu::hw::kTileRows) {
-            const auto bytes = tile_vector(cycle);
-            for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-                model->set_east_stream_input(cycle, lane, stream, {bytes[lane], lane == ftlpu::hw::kLanesPerTile - 1});
+        if (cycle == 0) {
+            for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+                const auto bytes = tile_vector(tile);
+                for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+                    model->set_east_stream_input(tile, lane, stream, {bytes[lane], lane == ftlpu::hw::kLanesPerTile - 1});
+                }
             }
         }
 
@@ -86,7 +88,7 @@ int main()
     for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
         const auto bytes = tile_vector(tile);
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-            assert(model->sram_byte(mem_slice, tile, kSramAddress + lane) == bytes[lane]);
+            assert(model->sram_lane_byte(mem_slice, tile, kSramAddress, lane) == bytes[lane]);
         }
     }
 

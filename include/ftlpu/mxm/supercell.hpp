@@ -130,6 +130,20 @@ public:
         return weight_buffer_valid(0);
     }
 
+    void load_weight_buffer(std::size_t buffer, const InputVector& input)
+    {
+        check_buffer(buffer);
+        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+            for (std::size_t stream = 0; stream < hw::kMxmLoadStreamsPerCycle; ++stream) {
+                if (!input[lane][stream].has_value()) {
+                    throw std::logic_error("MXM IW requires 16 streams on all 16 lanes to be valid");
+                }
+                weight_buffers_[buffer][lane][stream] = input[lane][stream]->data;
+            }
+        }
+        weight_buffer_valid_[buffer] = true;
+    }
+
     const std::vector<ComputeResult>& outputs() const
     {
         return outputs_;

@@ -57,18 +57,10 @@ int main()
     }
 
     std::ostringstream log;
-    const auto total_cycles = kColumns + ftlpu::VxmSlice::kTileCount;
+    const auto total_cycles = kColumns;
     for (std::size_t cycle = 0; cycle < total_cycles; ++cycle) {
         for (std::size_t tile = 0; tile < ftlpu::VxmSlice::kTileCount; ++tile) {
-            if (cycle < tile) {
-                continue;
-            }
-
-            const auto column = cycle - tile;
-            if (column >= kColumns) {
-                continue;
-            }
-            slice->set_stream_inputs(tile, stream_matrix_for_column(tile, column));
+            slice->set_stream_inputs(tile, stream_matrix_for_column(tile, cycle));
         }
 
         icu.dispatch_vxm(*slice, &log);
@@ -80,9 +72,7 @@ int main()
                 continue;
             }
 
-            assert(cycle >= tile);
-            const auto column = cycle - tile;
-            assert(column < kColumns);
+            const auto column = cycle;
             for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
                 const auto row = tile * ftlpu::hw::kLanesPerTile + lane;
                 output_matrix[index(row, column)] = output->values[lane];

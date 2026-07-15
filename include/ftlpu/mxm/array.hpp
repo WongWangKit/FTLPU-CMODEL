@@ -103,6 +103,11 @@ public:
         target.tick(os);
     }
 
+    void load_weights_direct(std::size_t row, std::size_t column, std::size_t buffer, const InputVector& input)
+    {
+        cell(row, column).load_weight_buffer(buffer, input);
+    }
+
 private:
     static void check_supercell(std::size_t row, std::size_t column)
     {

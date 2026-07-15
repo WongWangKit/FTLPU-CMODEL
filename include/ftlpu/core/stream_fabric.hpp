@@ -4,6 +4,7 @@
 #include "ftlpu/core/stream.hpp"
 
 #include <array>
+#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -35,6 +36,8 @@ public:
         : current_(column_count)
         , next_(column_count)
         , consumed_(column_count)
+        , current_active_(column_count)
+        , next_active_(column_count)
     {
         if (column_count == 0) {
             throw std::invalid_argument("stream-register fabric must contain at least one column");
@@ -43,8 +46,8 @@ public:
 
     void reset()
     {
-        clear_columns(current_);
-        clear_columns(next_);
+        clear_active_columns(current_, current_active_);
+        clear_active_columns(next_, next_active_);
         clear_consumed();
         cycle_ = 0;
         cycle_open_ = false;
@@ -70,7 +73,7 @@ public:
         if (cycle_open_) {
             throw std::logic_error("stream-register cycle is already open");
         }
-        clear_columns(next_);
+        clear_active_columns(next_, next_active_);
         clear_consumed();
         cycle_open_ = true;
     }
@@ -116,6 +119,16 @@ public:
         return true;
     }
 
+    bool vector_valid(std::size_t column, StreamId stream) const
+    {
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+            if (!segment_valid(column, tile, stream)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     void stage_write(
         std::size_t column,
         std::size_t tile,
@@ -140,6 +153,7 @@ public:
                 + " while staging " + producer);
         }
         destination = value;
+        next_active_[column][stream.packed()] = true;
     }
 
     void stage_segment(
@@ -173,6 +187,18 @@ public:
         }
     }
 
+    void stage_payload_vector(
+        std::size_t column,
+        StreamId stream,
+        const StreamPayloadVector320& values,
+        std::uint64_t vector_tag = 0,
+        const char* producer = "functional slice")
+    {
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+            stage_payload_segment(column, tile, stream, values[tile], vector_tag, producer);
+        }
+    }
+
     void consume(
         std::size_t column,
         std::size_t tile,
@@ -190,11 +216,12 @@ public:
                 + std::to_string(tile) + ", lane " + std::to_string(lane));
         }
 
-        auto& flag = select(consumed_[column].lanes[tile][lane], stream);
-        if (flag) {
+        const auto cell_index = tile * hw::kLanesPerTile + lane;
+        auto& mask = consumed_[column][stream.packed()];
+        if (mask.test(cell_index)) {
             throw std::logic_error("stream cell was consumed more than once in the same cycle");
         }
-        flag = true;
+        mask.set(cell_index);
     }
 
     void consume_segment(
@@ -205,6 +232,16 @@ public:
     {
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             consume(column, tile, lane, stream, consumer);
+        }
+    }
+
+    void consume_vector(
+        std::size_t column,
+        StreamId stream,
+        const char* consumer = "functional slice")
+    {
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+            consume_segment(column, tile, stream, consumer);
         }
     }
 
@@ -220,12 +257,15 @@ public:
         check_column(link.source_column);
         check_column(link.destination_column);
 
-        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                for (std::size_t index = 0; index < hw::kStreamsPerDirection; ++index) {
-                    const auto stream = link.direction == StreamDirection::East
-                        ? StreamId::East(index)
-                        : StreamId::West(index);
+        for (std::size_t index = 0; index < hw::kStreamsPerDirection; ++index) {
+            const auto stream = link.direction == StreamDirection::East
+                ? StreamId::East(index)
+                : StreamId::West(index);
+            if (!current_active_[link.source_column][stream.packed()]) {
+                continue;
+            }
+            for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+                for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                     const auto& source = cell(link.source_column, tile, lane, stream);
                     if (!source.valid || is_consumed(link.source_column, tile, lane, stream)) {
                         continue;
@@ -265,7 +305,8 @@ public:
     {
         require_open_cycle();
         current_.swap(next_);
-        clear_columns(next_);
+        current_active_.swap(next_active_);
+        clear_active_columns(next_, next_active_);
         clear_consumed();
         cycle_open_ = false;
         ++cycle_;
@@ -285,17 +326,13 @@ public:
         }
         check_location(column, tile, lane, stream);
         select(current_[column].lanes[tile][lane], stream) = value;
+        current_active_[column][stream.packed()] = value.valid;
     }
 
 private:
-    struct LaneConsumeMask {
-        std::array<bool, hw::kEastStreams> east{};
-        std::array<bool, hw::kWestStreams> west{};
-    };
-
-    struct ColumnConsumeMask {
-        std::array<std::array<LaneConsumeMask, hw::kLanesPerTile>, hw::kTileRows> lanes{};
-    };
+    using CellConsumeMask = std::bitset<hw::kPhysicalVectorBytes>;
+    using ColumnConsumeMask = std::array<CellConsumeMask, hw::kStreams>;
+    using ColumnActiveMask = std::array<bool, hw::kStreams>;
 
     static StreamCell& select(StreamLaneRegisterFile& lane, StreamId stream)
     {
@@ -311,32 +348,22 @@ private:
             : lane.west[stream.index()];
     }
 
-    static bool& select(LaneConsumeMask& lane, StreamId stream)
+    static void clear_active_columns(
+        std::vector<StreamRegisterColumn>& columns,
+        std::vector<ColumnActiveMask>& active)
     {
-        return stream.direction() == StreamDirection::East
-            ? lane.east[stream.index()]
-            : lane.west[stream.index()];
-    }
-
-    static const bool& select(const LaneConsumeMask& lane, StreamId stream)
-    {
-        return stream.direction() == StreamDirection::East
-            ? lane.east[stream.index()]
-            : lane.west[stream.index()];
-    }
-
-    static void clear_columns(std::vector<StreamRegisterColumn>& columns)
-    {
-        for (auto& column : columns) {
-            for (auto& tile : column.lanes) {
-                for (auto& lane : tile) {
-                    for (auto& cell : lane.east) {
-                        cell.reset();
-                    }
-                    for (auto& cell : lane.west) {
-                        cell.reset();
+        for (std::size_t column = 0; column < columns.size(); ++column) {
+            for (std::size_t packed = 0; packed < hw::kStreams; ++packed) {
+                if (!active[column][packed]) {
+                    continue;
+                }
+                const auto stream = StreamId::from_packed(packed);
+                for (auto& tile : columns[column].lanes) {
+                    for (auto& lane : tile) {
+                        select(lane, stream).reset();
                     }
                 }
+                active[column][packed] = false;
             }
         }
     }
@@ -344,11 +371,8 @@ private:
     void clear_consumed()
     {
         for (auto& column : consumed_) {
-            for (auto& tile : column.lanes) {
-                for (auto& lane : tile) {
-                    lane.east.fill(false);
-                    lane.west.fill(false);
-                }
+            for (auto& stream : column) {
+                stream.reset();
             }
         }
     }
@@ -359,7 +383,7 @@ private:
         std::size_t lane,
         StreamId stream) const
     {
-        return select(consumed_[column].lanes[tile][lane], stream);
+        return consumed_[column][stream.packed()].test(tile * hw::kLanesPerTile + lane);
     }
 
     void require_open_cycle() const
@@ -412,6 +436,8 @@ private:
     std::vector<StreamRegisterColumn> current_{};
     std::vector<StreamRegisterColumn> next_{};
     std::vector<ColumnConsumeMask> consumed_{};
+    std::vector<ColumnActiveMask> current_active_{};
+    std::vector<ColumnActiveMask> next_active_{};
     std::size_t cycle_{0};
     bool cycle_open_{false};
 };

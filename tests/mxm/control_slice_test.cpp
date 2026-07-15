@@ -53,12 +53,11 @@ int main()
     }
 
     auto provider = [&control](std::size_t tile) {
-        const auto token = control.cycle() - tile;
-        const auto target_column = ftlpu::hw::kMxmSupercellsPerPlane - 1 - token;
+        const auto target_column = ftlpu::hw::kMxmSupercellsPerPlane - 1 - control.cycle();
         return row_input(tile, target_column);
     };
 
-    for (std::size_t cycle = 0; cycle < 2 * ftlpu::hw::kMxmSupercellsPerPlane - 1; ++cycle) {
+    for (std::size_t cycle = 0; cycle < ftlpu::hw::kMxmSupercellsPerPlane; ++cycle) {
         control.tick(log, provider);
     }
 
@@ -82,7 +81,9 @@ int main()
     constexpr std::size_t kOutputStream = 36;
     parallel_control.issue_south(ftlpu::MxmControlInstruction::IW(kBuffer));
     parallel_control.issue_south(ftlpu::MxmControlInstruction::Compute(kBuffer, kActivationStream, kOutputStream));
-    parallel_control.set_weight_input(0, row_input(0, 0));
+    for (std::size_t tile = 0; tile < ftlpu::hw::kMxmSupercellsPerPlane; ++tile) {
+        parallel_control.set_weight_input(tile, row_input(tile, 0));
+    }
     parallel_control.tick(log);
     if (!require(parallel_control.compute_active(0), "Compute should issue in parallel with IW")) {
         return 1;

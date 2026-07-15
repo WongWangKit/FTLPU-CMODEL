@@ -13,7 +13,6 @@
 #include <optional>
 #include <ostream>
 #include <stdexcept>
-#include <streambuf>
 #include <vector>
 
 namespace ftlpu {
@@ -253,32 +252,12 @@ private:
         }
     }
 
-    class NullStream {
-    public:
-        std::ostream& stream()
-        {
-            return stream_;
-        }
-
-    private:
-        class Buffer : public std::streambuf {
-        public:
-            int overflow(int c) override
-            {
-                return c;
-            }
-        };
-
-        Buffer buffer_{};
-        std::ostream stream_{&buffer_};
-    };
-
     void dispatch_load_instruction()
     {
         if (load_instruction_rows_[0].has_value() || load_instruction_queue_.empty()) {
             return;
         }
-        load_instruction_rows_[0] = load_instruction_queue_.front();
+        load_instruction_rows_.fill(load_instruction_queue_.front());
         load_instruction_queue_.pop_front();
     }
 
@@ -287,7 +266,7 @@ private:
         if (compute_instruction_rows_[0].has_value() || compute_instruction_queue_.empty()) {
             return;
         }
-        compute_instruction_rows_[0] = compute_instruction_queue_.front();
+        compute_instruction_rows_.fill(compute_instruction_queue_.front());
         compute_instruction_queue_.pop_front();
     }
 
@@ -352,13 +331,7 @@ private:
                             os << "  tile " << tile << " weight b" << token->weight_buffer << " col=" << column << " ";
                             array_.tick_cell_iw_load(tile, column, token->weight_buffer, token->input, os);
                         } else {
-                            static NullStream null_stream;
-                            array_.tick_cell_iw_load(
-                                tile,
-                                column,
-                                token->weight_buffer,
-                                token->input,
-                                null_stream.stream());
+                            array_.load_weights_direct(tile, column, token->weight_buffer, token->input);
                         }
                         loaded_cells_[token->weight_buffer][tile][column] = true;
                     }
@@ -427,12 +400,8 @@ private:
 
     void advance()
     {
-        for (std::size_t tile = hw::kMxmSupercellsPerPlane - 1; tile > 0; --tile) {
-            load_instruction_rows_[tile] = load_instruction_rows_[tile - 1];
-            compute_instruction_rows_[tile] = compute_instruction_rows_[tile - 1];
-        }
-        load_instruction_rows_[0].reset();
-        compute_instruction_rows_[0].reset();
+        load_instruction_rows_.fill(std::nullopt);
+        compute_instruction_rows_.fill(std::nullopt);
     }
 
     MxmArray& array_;

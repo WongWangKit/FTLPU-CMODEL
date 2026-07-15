@@ -14,6 +14,12 @@ handoffs can be tested cycle by cycle.
 
 The repository currently models:
 
+- Lightweight vector timing: one logical stream value is a 320-byte vector
+  spanning 20 tiles x 16 lanes. Instructions execute on all 20 tile rows in
+  the same cycle; the model does not simulate south-to-north instruction
+  propagation or per-tile data skew. East/west stream-register boundaries
+  remain cycle accurate and move a vector by exactly one boundary per cycle.
+
 - `MEM`: 44 slice columns, 20 tile rows, 16 lanes per tile, 32 east streams and
   32 west streams per lane. Each stream register is one byte wide. Each
   tile-local SRAM has two banks, and each bank is 4096 x 16 bytes.
@@ -48,6 +54,10 @@ All MEM, MXM, and VXM instructions are generated offline and loaded into the ICU
 before cycle 0. MXM output is controlled by the `Compute` instruction stream.
 The runtime loop only advances clocks and bridges data. This is the shape
 intended for a future compiler backend.
+
+An MXM activation still traverses 20 supercell columns. A 320-byte activation
+enters on one `Compute` pulse, advances one supercell column per cycle, and
+produces its complete 320-element int32 output on the twentieth pipeline cycle.
 
 `attention_projection_test` is the first single-head attention-oriented test. It
 initializes `seq_len=160`, `hidden=320` input and Wq/Wk matrices in MEM, loads
@@ -99,8 +109,12 @@ ctest --test-dir build --output-on-failure
 Run the offline ICU FFN test:
 
 ```powershell
-ctest --test-dir build-vs2019 -C Debug -R mem_dual_mxm_swiglu_offline_icu --output-on-failure
+cmake --build build-vs2019 --config Release
+ctest --test-dir build-vs2019 -C Release -R mem_dual_mxm_swiglu_offline_icu --output-on-failure
 ```
+
+Debug builds retain assertions and are useful for subsystem tests, but the
+large 320-wide integration workloads should normally be run in Release mode.
 
 Run the VXM tests:
 

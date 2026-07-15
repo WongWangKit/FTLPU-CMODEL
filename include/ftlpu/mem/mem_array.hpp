@@ -352,7 +352,7 @@ private:
                 || instruction_queues_[mem_slice].empty()) {
                 continue;
             }
-            instruction_rows_[mem_slice][0] = instruction_queues_[mem_slice].front();
+            instruction_rows_[mem_slice].fill(instruction_queues_[mem_slice].front());
             instruction_queues_[mem_slice].pop_front();
         }
     }
@@ -360,26 +360,82 @@ private:
     void execute_current_instructions(StreamRegisterFabric& fabric)
     {
         for (std::size_t mem_slice = 0; mem_slice < hw::kMemSliceColumns; ++mem_slice) {
+            const auto& instruction = instruction_rows_[mem_slice][0];
+            if (!instruction.has_value()) {
+                continue;
+            }
             for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-                const auto& instruction = instruction_rows_[mem_slice][tile];
-                if (!instruction.has_value()) {
-                    continue;
-                }
+                executed_instructions_.push_back(InstructionTrace {mem_slice, tile, *instruction});
+            }
+            switch (instruction->opcode) {
+            case MemOpcode::Read:
+                execute_read_vector(fabric, mem_slice, *instruction);
+                break;
+            case MemOpcode::Write:
+                execute_write_vector(fabric, mem_slice, *instruction);
+                break;
+            case MemOpcode::Gather:
+            case MemOpcode::Scatter:
+                throw std::logic_error("Gather/Scatter require a separate address-stream datapath model");
+            }
+        }
+    }
 
-                executed_instructions_.push_back(
-                    InstructionTrace {mem_slice, tile, *instruction});
-                switch (instruction->opcode) {
-                case MemOpcode::Read:
-                    execute_read(fabric, mem_slice, tile, *instruction);
-                    break;
-                case MemOpcode::Write:
-                    execute_write(fabric, mem_slice, tile, *instruction);
-                    break;
-                case MemOpcode::Gather:
-                case MemOpcode::Scatter:
-                    throw std::logic_error("Gather/Scatter require a separate address-stream datapath model");
+    void execute_read_vector(
+        StreamRegisterFabric& fabric,
+        std::size_t mem_slice,
+        const MemInstruction& instruction)
+    {
+        const auto stream = instruction.stream_id();
+        const auto sr_column = ports_.output_column(mem_slice, stream.direction());
+        auto vector = StreamPayloadVector320 {};
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+            vector[tile] = sram_.bank(mem_slice).read_segment(tile, instruction.address);
+            executed_mem_.push_back(MemTransfer {
+                MemTransfer::Kind::LoadSramToStream,
+                mem_slice,
+                tile,
+                sr_column,
+                stream,
+                instruction.address,
+                vector[tile],
+            });
+        }
+        StreamOutputPort(fabric, sr_column, stream.direction(), "MEM Read")
+            .write_payload_vector(stream.index(), vector, static_cast<std::uint64_t>(cycle_));
+    }
+
+    void execute_write_vector(
+        StreamRegisterFabric& fabric,
+        std::size_t mem_slice,
+        const MemInstruction& instruction)
+    {
+        const auto stream = instruction.stream_id();
+        const auto sr_column = ports_.input_column(mem_slice, stream.direction());
+        StreamInputPort input(fabric, sr_column, stream.direction(), "MEM Write");
+        auto vector = StreamPayloadVector320 {};
+        if (input.vector_valid(stream.index())) {
+            const auto cells = input.consume_vector(stream.index());
+            for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+                for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                    vector[tile][lane] = cells[tile][lane].data;
                 }
             }
+        } else if (missing_stream_policy_ == MissingStreamPolicy::Error) {
+            throw std::logic_error("MEM Write reached an invalid 320-byte stream vector");
+        }
+
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+            sram_.bank(mem_slice).write_segment(tile, instruction.address, vector[tile]);
+            executed_mem_.push_back(MemTransfer {
+                MemTransfer::Kind::StoreStreamToSram,
+                mem_slice,
+                tile,
+                sr_column,
+                stream,
+                instruction.address,
+                vector[tile],
+            });
         }
     }
 
@@ -455,10 +511,7 @@ private:
     void advance_instructions()
     {
         for (auto& mem_slice : instruction_rows_) {
-            for (std::size_t tile = hw::kTileRows - 1; tile > 0; --tile) {
-                mem_slice[tile] = mem_slice[tile - 1];
-            }
-            mem_slice[0].reset();
+            mem_slice.fill(std::nullopt);
         }
     }
 

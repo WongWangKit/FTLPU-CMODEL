@@ -40,6 +40,24 @@ Current topology:
 - Each bank is 4096 words x 16 bytes.
 - A complete slice is 20 x 2 x 4096 x 16 bytes = 2.5 MiB.
 
+## Lightweight Vector Timing
+
+This branch keeps the existing MEM, MXM, VXM, ICU, and `TspSliceSystem`
+classes, but executes them at vector granularity:
+
+- One stream value is a complete 320-byte vector organized as 20 tile segments
+  of 16 bytes.
+- A functional-unit instruction is broadcast to all 20 tile rows and executes
+  in the same cycle.
+- There is no south-to-north instruction propagation or one-cycle tile skew.
+- East/west stream-register propagation is unchanged: a live vector advances
+  by one physical stream-register boundary per cycle.
+- MXM retains its 20-stage eastward supercell pipeline.
+
+This trades row-level waveform detail for much faster compiler and schedule
+experiments while preserving the timing of data moving between MEM, MXM, and
+VXM in the east/west direction.
+
 Software-visible MEM addresses follow the public-style layout:
 
 ```text
@@ -78,7 +96,7 @@ The MEM tile-array model is in `include/ftlpu/mem/tile_array.hpp`.
 Important behavior:
 
 - There are 44 independent MEM instruction queues, one per slice column.
-- Instructions enter at tile 0 and move north one tile per cycle.
+- Each dequeued instruction is broadcast to all 20 tile rows in the same cycle.
 - Each MEM slice column is modeled as a single instruction port. A slice cannot
   issue a `Read` and a `Write` in the same cycle; schedules that need both must
   place them on different cycles.
@@ -91,8 +109,8 @@ Important behavior:
 - `Gather` and `Scatter` are represented in the instruction enum, but the current
   tests focus on `Read` and `Write`.
 
-Per cycle and per tile, one MEM instruction can move 16 bytes across the 16 lanes
-for a single stream ID.
+Per cycle, one MEM instruction moves one 320-byte vector across all 20 tiles for
+a single stream ID. The 16-byte SRAM access width inside each tile is unchanged.
 
 ## MXM Model
 
@@ -102,7 +120,8 @@ Current components:
 
 - `MxmSupercell`: one 16 x 16 int8 weight block.
 - `MxmArray`: a 20 x 20 grid of supercells.
-- `MxmControlSlice`: south-to-north control pipeline for `IW` and `Compute`.
+- `MxmControlSlice`: broadcast control for `IW` and `Compute`, with independent
+  load and compute queues.
 - `Mxm`: wrapper containing the array, its control slice, and the datapath
   state for activation flow, int32 accumulation, and output stream injection.
 
@@ -140,16 +159,17 @@ other buffer without changing in-flight work.
 
 The system-owned MXM runtime models activation flow:
 
-- Activations enter from MEM into tile rows with a one-cycle south-to-north skew.
-- Each active supercell consumes one 16-byte activation vector.
-- The supercell computes 16 dot products against its 16 local weight columns.
-- Activations move east across supercell columns.
-- Partial sums accumulate into int32 result columns.
+- One `Compute` pulse consumes a complete 320-byte activation vector from MEM.
+- All 20 supercell rows contribute to 16 dot products for the active column
+  block in the same cycle.
+- The activation event moves east by one of the 20 supercell columns per cycle.
+- After the twentieth stage, the complete 320-element int32 result is injected
+  together onto four west streams across the 20 MEM tiles.
 
 The runtime is owned by `TspSliceSystem`. ICU `Compute` pulses consume MEM east
-handoff streams through the MXM datapath. When the contribution from tile row 19
-completes a result column block, the MXM automatically injects the int32 result
-bytes onto the MEM west streams named by the `Compute` instruction.
+handoff streams through the MXM datapath. The MXM automatically injects the
+completed int32 result bytes onto the MEM west streams named by the `Compute`
+instruction; there is no separate output instruction or output queue.
 
 ## VXM Model
 
@@ -160,7 +180,8 @@ Hierarchy:
 - `VxmAlu`: vector helper for supported ALU ops.
 - `VxmLane`: one lane with 16 ALUs and one instruction queue per ALU.
 - `VxmSuperlane`: 16 lanes.
-- `VxmSlice`: 20 superlanes/tiles with south-to-north instruction flow.
+- `VxmSlice`: 20 superlanes/tiles; each ALU queue instruction is broadcast to
+  all superlanes in the same cycle.
 
 Supported ALU opcodes currently include:
 
