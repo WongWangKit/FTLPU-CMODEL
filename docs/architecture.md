@@ -324,7 +324,7 @@ high-level workload -> compiler/scheduler -> OfflineIcuProgram -> ICU queues
 
 ### Attention Softmax
 
-`attention_projection_test` implements stable softmax as three ICU-scheduled
+`single_head_attention_test` implements stable softmax as three ICU-scheduled
 VXM passes. MXM score output flows directly west through the MEM stream
 registers into VXM; it is not first written to SRAM. Each VXM lane represents
 one query and consecutive cycles represent key positions, so reductions happen
@@ -346,6 +346,13 @@ reuse. Scaled scores, exponentials, final maxima, and final sums are moved
 through MEM by ICU `Read`/`Write` instructions. Test-side code only reads the
 completed SRAM state and computes post-run golden values; it does not feed
 maxima or sums into VXM.
+
+During the MXM0 QK GEMM, MXM1 uses its second weight buffer for Wv and consumes
+X from a separate activation stream. Its V int32 output reaches VXM alongside
+the QK score stream. ALU0..2 execute softmax pass 1 while ALU3..5 independently
+requantize V to int8 and return it to MEM. The test validates Q, K, V, QK scores,
+softmax maxima and sums, and every final softmax byte. The subsequent
+`softmax * V` GEMM remains future work.
 
 The current offline test only loads the ICU queues, initializes external MEM
 contents, ticks the system datapaths, and checks final MEM contents.

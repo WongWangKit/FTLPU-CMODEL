@@ -49,8 +49,8 @@ before cycle 0. MXM output is controlled by the `Compute` instruction stream.
 The runtime loop only advances clocks and bridges data. This is the shape
 intended for a future compiler backend.
 
-`attention_projection_test` is the first single-head attention-oriented test. It
-initializes `seq_len=160`, `hidden=320` input and Wq/Wk matrices in MEM, loads
+`single_head_attention_test` models the front half of single-head attention. It
+initializes `seq_len=160`, `hidden=320` input and Wq/Wk/Wv matrices in MEM, loads
 Wq and Wk into the two MXMs, streams X through both MXMs, sends Q/K int32 results
 to VXM, requantizes to int8 with ALU `Multiply` + `Cast(Int8)`, stores Q/K int8
 streams back to MEM, then loads Q into MXM0 and streams K to compute sampled
@@ -68,8 +68,12 @@ key position per cycle while VXM lanes represent queries, so both reductions
 run without a physical transpose or host-side reduction. Pass 1 still takes
 160 data cycles for the full-row maximum; the striped Pass 2 and Pass 3 each
 take 40 data cycles.
+While MXM0 computes QK, MXM1 loads Wv into its second weight buffer and computes
+V from a separate X stream. ALU3..5 requantize V concurrently with softmax pass
+1 on ALU0..2, then store the verified int8 V matrix in MEM. The final
+`softmax * V` GEMM is not implemented yet.
 The test writes an ICU dispatch trace to
-`build-vs2019/logs/attention_projection/icu.log`.
+`build-vs2019/logs/single_head_attention/icu.log`.
 
 ## Repository Layout
 
@@ -117,10 +121,10 @@ Run the VXM tests:
 ctest --test-dir build-vs2019 -C Debug -R "vxm_alu|vxm_lane|vxm_superlane|vxm_slice" --output-on-failure
 ```
 
-Run the attention projection test:
+Run the single-head attention test:
 
 ```powershell
-ctest --test-dir build-vs2019 -C Debug -R attention_projection_test --output-on-failure
+ctest --test-dir build-vs2019 -C Debug -R single_head_attention_test --output-on-failure
 ```
 
 ## Logs and Diagrams

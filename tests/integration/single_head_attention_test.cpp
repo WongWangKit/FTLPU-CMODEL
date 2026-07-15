@@ -38,10 +38,12 @@ constexpr std::size_t east_stream_write_latency(std::size_t column)
 
 constexpr std::size_t kWqMatrix = 0;
 constexpr std::size_t kWkMatrix = 1;
+constexpr std::size_t kWvMatrix = 2;
 constexpr std::size_t kXMemColumn = 32;
 constexpr std::size_t kQInt8ColumnBase = 16;
 constexpr std::size_t kQInt8Columns = kLoadStreams;
 constexpr std::size_t kKInt8Column = 41;
+constexpr std::size_t kVInt8Column = 42;
 constexpr std::size_t kSoftmaxParallelRows = 4;
 constexpr std::array<std::size_t, kSoftmaxParallelRows> kScaledScoreByteColumnBases {16, 20, 24, 28};
 constexpr std::array<std::size_t, kSoftmaxParallelRows> kExpScoreByteColumnBases {0, 4, 8, 12};
@@ -53,15 +55,19 @@ constexpr std::size_t kSoftmaxScratchAddressBase = 4096;
 constexpr std::size_t kQWestStreamBase = 0;
 constexpr std::size_t kKWestStreamBase = 4;
 constexpr std::size_t kActivationStream = 8;
+constexpr std::size_t kVActivationStream = 9;
 constexpr std::size_t kQkOutputWestStreamBase = 12;
+constexpr std::size_t kVOutputWestStreamBase = 16;
 constexpr std::size_t kSoftmaxWestStreamBase = ftlpu::hw::kEastStreams;
 constexpr std::size_t kSoftmaxEastStreamBase = 0;
 constexpr std::size_t kReductionWestStreamBase = kSoftmaxWestStreamBase + 16;
 constexpr std::size_t kReductionEastStreamBase = kSoftmaxEastStreamBase + 16;
 constexpr std::size_t kQStreamOperand = ftlpu::hw::kEastStreams + kQWestStreamBase;
 constexpr std::size_t kKStreamOperand = ftlpu::hw::kEastStreams + kKWestStreamBase;
+constexpr std::size_t kVStreamOperand = ftlpu::hw::kEastStreams + kVOutputWestStreamBase;
 constexpr std::size_t kQInt8OutputStream = 0;
 constexpr std::size_t kKInt8OutputStream = 1;
+constexpr std::size_t kVInt8OutputStream = 20;
 
 constexpr std::size_t kIwStart = 20;
 constexpr std::size_t kGemmStart = kIwStart + 2 * kBlocks;
@@ -164,7 +170,7 @@ void stage_mem(ftlpu::TileArrayModel& mem)
         }
     }
 
-    for (std::size_t matrix = 0; matrix < 2; ++matrix) {
+    for (std::size_t matrix = 0; matrix < 3; ++matrix) {
         for (std::size_t tile = 0; tile < kBlocks; ++tile) {
             for (std::size_t column_block = 0; column_block < kBlocks; ++column_block) {
                 const auto address = weight_address(matrix, column_block);
@@ -249,7 +255,7 @@ private:
         auto cursor = std::size_t {0};
         for (const auto& event : events) {
             if (event.cycle < cursor) {
-                throw std::logic_error("attention projection program queue collision");
+                throw std::logic_error("single-head attention program queue collision");
             }
             nop(event.cycle - cursor);
             emit(event.instruction);
@@ -263,12 +269,18 @@ private:
     std::array<std::vector<Event<ftlpu::VxmLaneAluInstruction>>, ftlpu::InstructionControlUnit::kVxmQueues> vxm_{};
 };
 
-void emit_weight_load(Program& program, std::size_t mxm, std::size_t matrix)
+void emit_weight_load_at(
+    Program& program,
+    std::size_t mxm,
+    std::size_t matrix,
+    std::size_t start_cycle,
+    std::size_t buffer,
+    std::size_t mem_column_base,
+    std::size_t stream_base)
 {
-    const auto stream_base = mxm * kLoadStreams;
     for (std::size_t stream = 0; stream < kLoadStreams; ++stream) {
-        const auto mem_column = stream_base + stream;
-        const auto first_cycle = kIwStart - east_stream_cycles_to_sreg11(mem_column) - 1;
+        const auto mem_column = mem_column_base + stream;
+        const auto first_cycle = start_cycle - east_stream_cycles_to_sreg11(mem_column) - 1;
         for (std::size_t block = 0; block < kBlocks; ++block) {
             const auto column_block = kBlocks - 1 - block;
             program.mem(
@@ -279,8 +291,21 @@ void emit_weight_load(Program& program, std::size_t mxm, std::size_t matrix)
     }
 
     for (std::size_t block = 0; block < kBlocks; ++block) {
-        program.mxm(kIwStart + block, mxm, ftlpu::MxmControlInstruction::IW(0));
+        program.mxm(start_cycle + block, mxm, ftlpu::MxmControlInstruction::IW(buffer));
     }
+}
+
+void emit_weight_load(Program& program, std::size_t mxm, std::size_t matrix)
+{
+    const auto stream_base = mxm * kLoadStreams;
+    emit_weight_load_at(
+        program,
+        mxm,
+        matrix,
+        kIwStart,
+        0,
+        stream_base,
+        stream_base);
 }
 
 void emit_projection(Program& program)
@@ -370,6 +395,15 @@ void emit_qk_matmul(Program& program)
         program.mxm(kQkIwStart + block, 0, ftlpu::MxmControlInstruction::IW(1));
     }
 
+    emit_weight_load_at(
+        program,
+        1,
+        kWvMatrix,
+        kQkIwStart,
+        1,
+        0,
+        kLoadStreams);
+
     for (std::size_t row = 0; row < kSeqLen; ++row) {
         const auto read_cycle = kQkGemmStart + row - east_stream_cycles_to_sreg11(kKInt8Column);
         program.mem(
@@ -380,6 +414,44 @@ void emit_qk_matmul(Program& program)
             kQkGemmStart + row,
             0,
             ftlpu::MxmControlInstruction::Compute(1, kActivationStream, kQkOutputWestStreamBase));
+
+        const auto v_read_cycle = kQkGemmStart + row - east_stream_cycles_to_sreg11(kXMemColumn);
+        program.mem(
+            v_read_cycle,
+            kXMemColumn,
+            ftlpu::MemInstruction::Read(x_address(row, 0), kVActivationStream));
+        program.mxm(
+            kQkGemmStart + row,
+            1,
+            ftlpu::MxmControlInstruction::Compute(1, kVActivationStream, kVOutputWestStreamBase));
+
+        const auto vxm_cycle = kDirectScoreVxmStart + row;
+        program.vxm(vxm_cycle, 3, ftlpu::VxmLaneAluInstruction {
+            ftlpu::VxmAluOpcode::Cast,
+            ftlpu::VxmLaneOperand::StreamInt32(kVStreamOperand),
+            ftlpu::VxmLaneOperand::Imm(0.0f),
+            1.0f,
+            0,
+            ftlpu::VxmCastTarget::Float32,
+        });
+        program.vxm(vxm_cycle + 1, 4, ftlpu::VxmLaneAluInstruction {
+            ftlpu::VxmAluOpcode::Multiply,
+            ftlpu::VxmLaneOperand::Alu(3),
+            ftlpu::VxmLaneOperand::Imm(kProjectionScale),
+        });
+        program.vxm(vxm_cycle + 2, 5, ftlpu::VxmLaneAluInstruction {
+            ftlpu::VxmAluOpcode::Cast,
+            ftlpu::VxmLaneOperand::Alu(4),
+            ftlpu::VxmLaneOperand::Imm(0.0f),
+            1.0f,
+            0,
+            ftlpu::VxmCastTarget::Int8,
+            kVInt8OutputStream,
+        });
+        program.mem(
+            vxm_cycle + 2 + east_stream_write_latency(kVInt8Column),
+            kVInt8Column,
+            ftlpu::MemInstruction::Write(projection_output_address(row), kVInt8OutputStream));
     }
 }
 
@@ -692,6 +764,13 @@ std::vector<std::int8_t> read_softmax_output(const ftlpu::TileArrayModel& mem)
     return output;
 }
 
+std::int8_t stored_v_int8(const ftlpu::TileArrayModel& mem, std::size_t row, std::size_t column)
+{
+    const auto tile = column / kLanes;
+    const auto lane = column % kLanes;
+    return static_cast<std::int8_t>(mem.sram_lane_byte(kVInt8Column, tile, projection_output_address(row), lane));
+}
+
 float softmax_golden_max(const std::vector<std::int32_t>& scores, std::size_t query)
 {
     auto max_value = -std::numeric_limits<float>::infinity();
@@ -744,14 +823,14 @@ try
     const auto softmax_schedule = emit_direct_score_softmax(program);
     program.load(system->icu());
 
-    const auto log_dir = std::filesystem::path("logs") / "attention_projection";
+    const auto log_dir = std::filesystem::path("logs") / "single_head_attention";
     std::filesystem::create_directories(log_dir);
     auto icu_log = std::ofstream(log_dir / "icu.log");
     if (!icu_log.good()) {
-        std::cerr << "failed to open attention projection ICU log\n";
+        std::cerr << "failed to open single-head attention ICU log\n";
         return 1;
     }
-    icu_log << "attention_projection direct_score_softmax\n"
+    icu_log << "single_head_attention qk_with_parallel_v_projection\n"
             << "  qk_output_start=" << kQkOutputStart
             << " direct_score_vxm_start=" << kDirectScoreVxmStart
             << " scaled_score_columns=16..31 (4 striped fp32 groups)"
@@ -800,15 +879,19 @@ try
         for (const auto column : sample_columns) {
             const auto q_actual = stored_q_int8(system->mem(), row, column);
             const auto k_actual = stored_k_int8(system->mem(), row, column);
+            const auto v_actual = stored_v_int8(system->mem(), row, column);
             const auto q_expected = projection_int8(kWqMatrix, row, column);
             const auto k_expected = projection_int8(kWkMatrix, row, column);
-            if (q_actual != q_expected || k_actual != k_expected) {
-                std::cerr << "attention projection mismatch row=" << row
+            const auto v_expected = projection_int8(kWvMatrix, row, column);
+            if (q_actual != q_expected || k_actual != k_expected || v_actual != v_expected) {
+                std::cerr << "attention Q/K/V projection mismatch row=" << row
                           << " column=" << column
                           << " q_actual=" << static_cast<int>(q_actual)
                           << " q_expected=" << static_cast<int>(q_expected)
                           << " k_actual=" << static_cast<int>(k_actual)
                           << " k_expected=" << static_cast<int>(k_expected)
+                          << " v_actual=" << static_cast<int>(v_actual)
+                          << " v_expected=" << static_cast<int>(v_expected)
                           << '\n';
                 return 1;
             }
@@ -854,6 +937,20 @@ try
         }
     }
 
+    for (std::size_t row = 0; row < kSeqLen; ++row) {
+        for (std::size_t column = 0; column < kHidden; ++column) {
+            const auto actual = stored_v_int8(system->mem(), row, column);
+            const auto expected = projection_int8(kWvMatrix, row, column);
+            if (actual != expected) {
+                std::cerr << "attention V projection mismatch row=" << row
+                          << " column=" << column
+                          << " actual=" << static_cast<int>(actual)
+                          << " expected=" << static_cast<int>(expected) << '\n';
+                return 1;
+            }
+        }
+    }
+
     const auto softmax = read_softmax_output(system->mem());
     for (std::size_t query = 0; query < kSeqLen; ++query) {
         for (std::size_t key = 0; key < kSeqLen; ++key) {
@@ -877,6 +974,6 @@ try
 
     return 0;
 } catch (const std::exception& ex) {
-    std::cerr << "attention_projection_test failed: " << ex.what() << '\n';
+    std::cerr << "single_head_attention_test failed: " << ex.what() << '\n';
     return 1;
 }
