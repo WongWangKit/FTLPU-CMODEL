@@ -70,7 +70,7 @@ fp32 and stores that intermediate in MEM. Passes 2 and 3 reload fp32
 intermediates through MEM streams to compute `exp(x - max)`, divide by the row
 sum, scale, `Cast(Int8)`, and store the final attention probabilities in MEM.
 The test writes an ICU dispatch trace to
-`build-vs2019/logs/attention_projection/icu.log`.
+`build-vs2026/logs/attention_projection/icu.log`.
 
 ## Repository Layout
 
@@ -88,13 +88,18 @@ The test writes an ICU dispatch trace to
 
 ## Build
 
-On Windows with Visual Studio generator:
+On Windows with the Visual Studio 2026 installation used by this repository:
 
 ```powershell
-cmake -S . -B build-vs2019
-cmake --build build-vs2019 --config Debug
-ctest --test-dir build-vs2019 -C Debug --output-on-failure
+$cmake = "D:\Apps\Microsoft Visual Studio\2026\community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+$ctest = "D:\Apps\Microsoft Visual Studio\2026\community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe"
+& $cmake -S . -B build-vs2026 -G "Visual Studio 18 2026" -A x64 -DCMAKE_GENERATOR_INSTANCE="D:/Apps/Microsoft Visual Studio/2026/community"
+& $cmake --build build-vs2026 --config Release
+& $ctest --test-dir build-vs2026 -C Release --output-on-failure
 ```
+
+Use the CMake bundled with Visual Studio 2026. Older standalone CMake versions
+may not recognize the `Visual Studio 18 2026` generator.
 
 With a single-config generator:
 
@@ -109,8 +114,8 @@ ctest --test-dir build --output-on-failure
 Run the offline ICU FFN test:
 
 ```powershell
-cmake --build build-vs2019 --config Release
-ctest --test-dir build-vs2019 -C Release -R mem_dual_mxm_swiglu_offline_icu --output-on-failure
+& $cmake --build build-vs2026 --config Release
+& $ctest --test-dir build-vs2026 -C Release -R mem_dual_mxm_swiglu_offline_icu --output-on-failure
 ```
 
 Debug builds retain assertions and are useful for subsystem tests, but the
@@ -119,13 +124,13 @@ large 320-wide integration workloads should normally be run in Release mode.
 Run the VXM tests:
 
 ```powershell
-ctest --test-dir build-vs2019 -C Debug -R "vxm_alu|vxm_lane|vxm_superlane|vxm_slice" --output-on-failure
+& $ctest --test-dir build-vs2026 -C Debug -R "vxm_alu|vxm_lane|vxm_superlane|vxm_slice" --output-on-failure
 ```
 
 Run the attention projection test:
 
 ```powershell
-ctest --test-dir build-vs2019 -C Debug -R attention_projection_test --output-on-failure
+& $ctest --test-dir build-vs2026 -C Release -R attention_projection_test --output-on-failure
 ```
 
 ## Logs and Diagrams
@@ -135,15 +140,15 @@ workloads are not dominated by file I/O. Enable logs when debugging:
 
 ```powershell
 $env:FTLPU_FFN_LOG = "1"
-ctest --test-dir build-vs2019 -C Debug -R mem_dual_mxm_swiglu_offline_icu --output-on-failure
+& $ctest --test-dir build-vs2026 -C Release -R mem_dual_mxm_swiglu_offline_icu --output-on-failure
 Remove-Item Env:\FTLPU_FFN_LOG
 ```
 
 When enabled, integration tests write logs under the build directory:
 
-- `build-vs2019/logs/mem_mxm/`
-- `build-vs2019/logs/mem_dual_mxm_swiglu_offline_icu/`
-- `build-vs2019/logs/mem_dual_mxm_swiglu_early_compute_icu/`
+- `build-vs2026/logs/mem_mxm/`
+- `build-vs2026/logs/mem_dual_mxm_swiglu_offline_icu/`
+- `build-vs2026/logs/mem_dual_mxm_swiglu_early_compute_icu/`
 
 The FFN tests generate four functional-unit logs:
 
@@ -154,7 +159,7 @@ The FFN tests generate four functional-unit logs:
 
 They also generate a pipeline diagram:
 
-- `build-vs2019/logs/mem_dual_mxm_swiglu_offline_icu/pipeline.svg`
+- `build-vs2026/logs/mem_dual_mxm_swiglu_offline_icu/pipeline.svg`
 
 The diagram separates `MEM W read`, `MEM A read`, `MEM write`, `MXM0 load`,
 `MXM0 compute`, `MXM1 load`, `MXM1 compute`, and `VXM` rows. There is no
@@ -166,11 +171,11 @@ to consume plus the output stream base.
 After building, demos are available under the build output directory. Examples:
 
 ```powershell
-.\build-vs2019\Debug\tile_array_trace_demo.exe tile_array_trace.log
-.\build-vs2019\Debug\vector_roundtrip_demo.exe vector_roundtrip.log
-.\build-vs2019\Debug\mxm_control_trace_demo.exe mxm_control_trace.log
-.\build-vs2019\Debug\mem_mxm_trace_demo.exe mem_mxm_mem.log mem_mxm_mxm.log
-.\build-vs2019\Debug\vxm_lane_trace_demo.exe vxm_lane_trace.log
+.\build-vs2026\Release\tile_array_trace_demo.exe tile_array_trace.log
+.\build-vs2026\Release\vector_roundtrip_demo.exe vector_roundtrip.log
+.\build-vs2026\Release\mxm_control_trace_demo.exe mxm_control_trace.log
+.\build-vs2026\Release\mem_mxm_trace_demo.exe mem_mxm_mem.log mem_mxm_mxm.log
+.\build-vs2026\Release\vxm_lane_trace_demo.exe vxm_lane_trace.log
 ```
 
 ## More Documentation

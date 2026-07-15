@@ -384,7 +384,7 @@ When enabled, the integration tests write logs under the build directory.
 Offline ICU FFN:
 
 ```text
-build-vs2019/logs/mem_dual_mxm_swiglu_offline_icu/
+build-vs2026/logs/mem_dual_mxm_swiglu_offline_icu/
 ```
 
 Each directory contains:
