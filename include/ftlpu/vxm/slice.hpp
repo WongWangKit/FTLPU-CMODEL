@@ -289,7 +289,8 @@ private:
 
     static void mark_operand_streams(RequiredStreams& required, const VxmLaneOperand& operand)
     {
-        if (operand.kind != VxmLaneOperandKind::StreamInt32) {
+        if (operand.kind != VxmLaneOperandKind::StreamInt32
+            && operand.kind != VxmLaneOperandKind::StreamFloat32) {
             return;
         }
         if (operand.index + 3 >= hw::kStreams) {
@@ -302,7 +303,8 @@ private:
 
     static bool operand_uses_stream(const VxmLaneOperand& operand)
     {
-        return operand.kind == VxmLaneOperandKind::StreamInt32;
+        return operand.kind == VxmLaneOperandKind::StreamInt32
+            || operand.kind == VxmLaneOperandKind::StreamFloat32;
     }
 
     static bool instruction_uses_stream(const AluInstruction& instruction)

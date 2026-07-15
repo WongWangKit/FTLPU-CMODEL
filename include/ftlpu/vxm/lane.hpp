@@ -2,12 +2,14 @@
 
 #include "ftlpu/vxm/alu.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <iomanip>
+#include <cstring>
 #include <optional>
 #include <ostream>
 #include <sstream>
@@ -21,6 +23,7 @@ enum class VxmLaneOperandKind {
     AluOutput,
     StreamInt32,
     Immediate,
+    StreamFloat32,
 };
 
 struct VxmLaneOperand {
@@ -37,6 +40,11 @@ struct VxmLaneOperand {
     static VxmLaneOperand StreamInt32(std::size_t base_stream)
     {
         return VxmLaneOperand {VxmLaneOperandKind::StreamInt32, base_stream, 0.0f, 1.0f};
+    }
+
+    static VxmLaneOperand StreamFloat32(std::size_t base_stream)
+    {
+        return VxmLaneOperand {VxmLaneOperandKind::StreamFloat32, base_stream, 0.0f, 1.0f};
     }
 
     static VxmLaneOperand Imm(float value)
@@ -104,7 +112,7 @@ public:
     struct Output {
         std::int8_t value{0};
         std::size_t stream{0};
-        std::array<std::uint8_t, 2> bytes{};
+        std::array<std::uint8_t, 4> bytes{};
         std::size_t byte_count{1};
     };
 
@@ -472,6 +480,29 @@ public:
         };
     }
 
+    static float unpack_float32(Int32Bytes streams)
+    {
+        const auto raw = static_cast<std::uint32_t>(streams[0])
+            | (static_cast<std::uint32_t>(streams[1]) << 8)
+            | (static_cast<std::uint32_t>(streams[2]) << 16)
+            | (static_cast<std::uint32_t>(streams[3]) << 24);
+        float value = 0.0f;
+        std::memcpy(&value, &raw, sizeof(value));
+        return value;
+    }
+
+    static std::array<std::uint8_t, 4> pack_float32(float value)
+    {
+        std::uint32_t raw = 0;
+        std::memcpy(&raw, &value, sizeof(raw));
+        return std::array<std::uint8_t, 4> {
+            static_cast<Byte>(raw & 0xffu),
+            static_cast<Byte>((raw >> 8) & 0xffu),
+            static_cast<Byte>((raw >> 16) & 0xffu),
+            static_cast<Byte>((raw >> 24) & 0xffu),
+        };
+    }
+
     static const char* opcode_name(VxmAluOpcode opcode)
     {
         switch (opcode) {
@@ -539,7 +570,7 @@ private:
     struct AluResult {
         float value{0.0f};
         std::int8_t output{0};
-        std::array<std::uint8_t, 2> output_bytes{};
+        std::array<std::uint8_t, 4> output_bytes{};
         std::size_t output_byte_count{1};
         bool output_valid{false};
     };
@@ -565,6 +596,8 @@ private:
             return "alu" + std::to_string(operand.index);
         case VxmLaneOperandKind::StreamInt32:
             return "stream[" + std::to_string(operand.index) + ".." + std::to_string(operand.index + 3) + "]";
+        case VxmLaneOperandKind::StreamFloat32:
+            return "f32stream[" + std::to_string(operand.index) + ".." + std::to_string(operand.index + 3) + "]";
         case VxmLaneOperandKind::Immediate:
             return "imm(" + std::to_string(operand.immediate) + ")";
         }
@@ -602,6 +635,19 @@ private:
                        (*streams_)[operand.index + 2],
                        (*streams_)[operand.index + 3],
                    }));
+        case VxmLaneOperandKind::StreamFloat32:
+            if (!streams_.has_value()) {
+                return std::nullopt;
+            }
+            if (operand.index + 3 >= kInputStreams) {
+                throw std::out_of_range("VXM lane float32 stream operand needs four streams");
+            }
+            return unpack_float32(Int32Bytes {
+                (*streams_)[operand.index],
+                (*streams_)[operand.index + 1],
+                (*streams_)[operand.index + 2],
+                (*streams_)[operand.index + 3],
+            });
         case VxmLaneOperandKind::Immediate:
             return operand.immediate;
         }
@@ -635,6 +681,9 @@ private:
         case VxmAluOpcode::Divide:
             result.value = *lhs / *rhs;
             return result;
+        case VxmAluOpcode::Max:
+            result.value = std::max(*lhs, *rhs);
+            return result;
         case VxmAluOpcode::Negate:
             result.value = -*lhs;
             return result;
@@ -656,6 +705,14 @@ private:
                 result.output_bytes[0] = static_cast<std::uint8_t>(bits & 0xffu);
                 result.output_bytes[1] = static_cast<std::uint8_t>((bits >> 8) & 0xffu);
                 result.output_byte_count = 2;
+                result.value = *lhs;
+                result.output_valid = true;
+                return result;
+            }
+            if (instruction.cast_target == VxmCastTarget::Float32 && instruction.output_stream.has_value()) {
+                result.output = 0;
+                result.output_bytes = pack_float32(*lhs);
+                result.output_byte_count = 4;
                 result.value = *lhs;
                 result.output_valid = true;
                 return result;

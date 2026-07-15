@@ -24,7 +24,7 @@ public:
 
     struct Output {
         Int8Vector values{};
-        std::array<std::array<std::uint8_t, 2>, kLaneCount> byte_values{};
+        std::array<std::array<std::uint8_t, 4>, kLaneCount> byte_values{};
         std::size_t stream{0};
         std::size_t byte_count{1};
     };
@@ -121,7 +121,7 @@ public:
 
         for (std::size_t output_index = 0; output_index < output_count; ++output_index) {
             auto values = Int8Vector {};
-            auto byte_values = std::array<std::array<std::uint8_t, 2>, kLaneCount> {};
+            auto byte_values = std::array<std::array<std::uint8_t, 4>, kLaneCount> {};
             const auto stream = lanes_[0].outputs()[output_index].stream;
             const auto byte_count = lanes_[0].outputs()[output_index].byte_count;
             for (std::size_t lane = 0; lane < kLaneCount; ++lane) {

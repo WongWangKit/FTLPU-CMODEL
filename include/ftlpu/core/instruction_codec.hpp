@@ -114,6 +114,9 @@ inline void require_operand_index_fits(const VxmLaneOperand& operand, const char
     case VxmLaneOperandKind::StreamInt32:
         require_unsigned_fit(operand.index, hw::kStreams - 4, field);
         return;
+    case VxmLaneOperandKind::StreamFloat32:
+        require_unsigned_fit(operand.index, hw::kStreams - 4, field);
+        return;
     case VxmLaneOperandKind::Immediate:
         require_unsigned_fit(operand.index, 0, field);
         return;
