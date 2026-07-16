@@ -43,6 +43,7 @@ target_compile_definitions(mem_dual_mxm_swiglu_offline_icu_test PRIVATE FTLPU_OF
 ftlpu_add_test(mem_dual_mxm_swiglu_early_compute_icu_test tests/integration/mem_dual_mxm_swiglu_test.cpp)
 target_compile_definitions(mem_dual_mxm_swiglu_early_compute_icu_test PRIVATE FTLPU_OFFLINE_ICU_FFN_TEST FTLPU_EARLY_MXM_COMPUTE_TEST)
 ftlpu_add_test(single_head_attention_test tests/integration/single_head_attention_test.cpp)
+ftlpu_add_test(sxm_softmax_v_test tests/integration/sxm_softmax_v_test.cpp)
 
 ftlpu_add_test(vxm_alu_test tests/vxm/alu_test.cpp)
 ftlpu_add_test(vxm_lane_test tests/vxm/lane_test.cpp)

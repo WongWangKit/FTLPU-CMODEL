@@ -1,5 +1,7 @@
 # FTLPU-CMODEL Architecture Notes
 
+[English](architecture.md) | [简体中文](architecture.zh-CN.md)
+
 This document describes the current C++ model in this repository. It is written
 as an implementation guide for future compiler and scheduler work.
 
@@ -29,7 +31,8 @@ Current topology:
 - 44 MEM slice columns.
 - 4 MEM slices per stream-register group.
 - 11 MEM slice groups.
-- 12 stream-register columns, including both boundaries.
+- 13 system stream-register columns. MEM spans `sreg0..sreg11`; SXM sits
+  between MEM's east boundary `sreg11` and the MXM boundary `sreg12`.
 - 16 lanes per tile/superlane.
 - 64 streams per lane: 32 eastward and 32 westward.
 - 1 byte per stream register.
@@ -218,6 +221,7 @@ Queue counts:
 - 44 MEM queues, one per MEM slice column.
 - 2 MXM load queues, one per MXM.
 - 2 MXM compute queues, one per MXM.
+- 2 SXM queues: one Transpose queue and one Permute queue.
 - 16 VXM queues, one per ALU.
 
 The ICU supports per-queue commands:
@@ -257,20 +261,25 @@ The codec is covered by `tests/core/instruction_codec_test.cpp`.
 `TspSliceSystem` fixes the current local topology:
 
 ```text
-VXM <-> west MEM edge ... 44 MEM slices ... east MEM edge <-> MXM0/MXM1
+VXM <-> sreg0 ... 44 MEM slices ... sreg11 <-> SXM <-> sreg12 <-> MXM0/MXM1
 ```
 
 Important paths:
 
-- MEM east streams feed MXM weight and activation inputs.
-- MXM int32 outputs are written back into MEM west streams near the east edge.
+- MEM east streams cross SXM before feeding MXM weight and activation inputs.
+- SXM accepts only `E0..E31`. With no issued SXM instruction, east data moves
+  from `sreg11` to `sreg12` as an ordinary one-cycle register hop.
+- The symmetric west register hop moves MXM output from `sreg12` to `sreg11`;
+  SXM does not transform west streams.
+- MXM int32 outputs are written into west streams at `sreg12`.
 - Those west streams travel through MEM to the west edge.
 - VXM consumes selected streams according to its ALU operands.
 - VXM output streams are injected back into MEM and can be written into SRAM.
 
-The system tick handles ICU dispatch, MEM tick, VXM stream bridge, and MXM
-control slices. MXM compute and output are owned by the `Mxm` datapath inside
-`TspSliceSystem`; tests no longer use a separate software GEMM engine.
+The system tick handles ICU dispatch, MEM tick, SXM evaluation, VXM stream
+bridge, and MXM control slices. MXM compute and output are owned by the `Mxm`
+datapath inside `TspSliceSystem`; tests no longer use a separate software GEMM
+engine.
 
 ## FFN Integration Tests
 
@@ -347,12 +356,26 @@ through MEM by ICU `Read`/`Write` instructions. Test-side code only reads the
 completed SRAM state and computes post-run golden values; it does not feed
 maxima or sums into VXM.
 
-During the MXM0 QK GEMM, MXM1 uses its second weight buffer for Wv and consumes
-X from a separate activation stream. Its V int32 output reaches VXM alongside
-the QK score stream. ALU0..2 execute softmax pass 1 while ALU3..5 independently
-requantize V to int8 and return it to MEM. The test validates Q, K, V, QK scores,
-softmax maxima and sums, and every final softmax byte. The subsequent
-`softmax * V` GEMM remains future work.
+X is stored row-major but striped by row across 16 MEM slices. MXM1 reads 16 X
+rows per cycle into 16 weight streams, making each original X row an MXM output
+column. The weight buffer is therefore logically `X^T` without a separate SXM
+transpose. Once softmax pass 1 and its streams drain, ICU reads Wv by column on
+`E16..E31`. MXM1 computes `V^T = Wv^T * X^T`, one hidden column per cycle.
+ALU3..5 requantize each 320-byte output vector, whose first 160 lanes are one
+column of V, and stripe the vectors across 16 MEM slices. The test validates Q,
+K, V, QK scores, softmax maxima and sums, and every final softmax byte.
+
+The final attention phase is also ICU scheduled. MEM reads 16 striped `V^T`
+rows in parallel and emits them directly on `E16..E31` for each hidden-column
+block. The blocks are read in reverse hidden-block order because MXM `IW` shifts
+each new block into column 0. MXM1 buffer 0 is therefore fully replaced by V in
+20 cycles without applying SXM Transpose or Permute to V.
+MEM then reads the four striped softmax columns in reverse lane order within
+each 16-key block. SXM Transpose+Permute restores key order and emits one
+zero-padded 320-byte query row per cycle. MXM1 computes 160 rows of
+`softmax * V`; `W0..W3` carry the little-endian int32 output back to four MEM
+slices. The test validates the complete MXM weight buffer, all MXM output
+blocks, and the final `160 x 320` SRAM matrix against golden data.
 
 `sxm_attention_transpose_test` verifies the block algorithm needed before that
 GEMM. It aligns 16 key columns on 16 streams, executes 100 real
@@ -361,12 +384,26 @@ stages the resulting row chunks, and applies a non-identity `Permute320` map to
 assemble each 160-element query row in a zero-padded 320-lane MXM activation.
 All 25,600 values and all 160 padding lanes are checked.
 
-This is currently a functional datapath proof, not yet an end-to-end SR
-schedule. The SR-facing `Permute` instruction shape requests 20 stream operands
-while the SXM issue-width model allows 16, and `SxmSlice::evaluate` still handles
-physical tiles independently. Global 320-lane Permute issue and the MEM staging
-schedule must be reconciled before connecting this transpose to the attention
-test.
+`sxm_softmax_v_test` verifies the complete stream-register path for
+`seq_len=160`. Test code initializes only SRAM and the ICU queues. ICU MEM
+Read instructions move V through `E16..E31` while MXM1 receives 20 continuous
+`IW` pulses. A separate MEM Read queue moves softmax columns on `E1`. Because
+MEM instructions propagate north, SXM independently collects 16 phases for
+each tile; Transpose is issued for `160 + 20 - 1` cycles to cover the complete
+diagonal wavefront. Each local `16 x 16` block still has 16-cycle latency.
+
+Continuous Permute instructions first capture the local Transpose segments and
+assemble the ten key blocks belonging to each query. The MEM reader deliberately
+reads the 16 keys inside each block in reverse order, and a non-identity
+lane-reversal `Permute320` map restores canonical key order. Once the complete
+wavefront has been collected, Permute emits one zero-padded 320-byte query row
+per cycle with the tile skew required by MXM Compute.
+
+MXM1 consumes 160 consecutive transposed rows and emits int32 results on
+`W0..W3`. Four MEM Write queues store the four little-endian result bytes in
+four adjacent MEM slices. The test reconstructs every result from SRAM and
+compares the complete `160 x 320` matrix against a scalar golden model; it also
+checks every MXM output block before writeback.
 
 The current offline test only loads the ICU queues, initializes external MEM
 contents, ticks the system datapaths, and checks final MEM contents.

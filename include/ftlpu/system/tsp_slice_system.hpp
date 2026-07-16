@@ -3,6 +3,7 @@
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/mem/tile_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
+#include "ftlpu/sxm/slice.hpp"
 #include "ftlpu/system/icu.hpp"
 #include "ftlpu/vxm/slice.hpp"
 
@@ -29,7 +30,17 @@ public:
         std::optional<std::size_t> mem_log_tile{};
         std::optional<std::size_t> mxm_log_tile{};
         std::optional<std::size_t> vxm_log_tile{};
+        std::ostream* sxm{nullptr};
     };
+
+    TspSliceSystem()
+        : sxm_(SxmStreamPortMap::BetweenColumns(
+            hw::kMemEastBoundaryStreamRegisterColumn,
+            hw::kMxmBoundaryStreamRegisterColumn,
+            hw::kMxmBoundaryStreamRegisterColumn,
+            hw::kMemEastBoundaryStreamRegisterColumn))
+    {
+    }
 
     TileArrayModel& mem()
     {
@@ -49,6 +60,16 @@ public:
     const VxmSlice& vxm() const
     {
         return vxm_;
+    }
+
+    SxmSlice& sxm()
+    {
+        return sxm_;
+    }
+
+    const SxmSlice& sxm() const
+    {
+        return sxm_;
     }
 
     MxmArray& mxm()
@@ -99,7 +120,7 @@ public:
         if (sinks.system != nullptr) {
             *sinks.system << "system cycle " << cycle_ << '\n';
         }
-        icu_.dispatch(mem_, vxm_, mxms_, sinks.icu);
+        icu_.dispatch(mem_, vxm_, sxm_, mxms_, sinks.icu);
         tick_mxm_controls(sinks);
         tick_mxm_datapaths(sinks);
         vxm_.prepare_cycle();
@@ -107,16 +128,16 @@ public:
         vxm_.tick(sinks.vxm, sinks.vxm_log_tile);
         transfer_vxm_to_mem_east(sinks);
         if (sinks.mem != nullptr) {
-            mem_.tick(*sinks.mem, sinks.mem_log_tile);
+            mem_.tick(sxm_, *sinks.mem, sinks.mem_log_tile);
         } else {
-            mem_.tick();
+            mem_.tick(sxm_);
         }
         ++cycle_;
     }
 
     void dispatch_icu_only(std::ostream* os = nullptr)
     {
-        icu_.dispatch(mem_, vxm_, mxms_, os);
+        icu_.dispatch(mem_, vxm_, sxm_, mxms_, os);
     }
 
     void tick_mxm_controls_only(LogSinks sinks)
@@ -173,7 +194,7 @@ private:
             }
             auto provider = [this, mxm, sinks](std::size_t tile) {
                 if (sinks.mxm != nullptr && (!sinks.mxm_log_tile.has_value() || tile == *sinks.mxm_log_tile)) {
-                    *sinks.mxm << "  MEM.sreg11 -> MXM" << mxm << " tile " << tile << '\n';
+                    *sinks.mxm << "  SXM.sreg12 -> MXM" << mxm << " tile " << tile << '\n';
                 }
                 return collect_mxm_weight_input_from_streams(mxm, tile);
             };
@@ -195,14 +216,14 @@ private:
 
     MxmControlSlice::WeightInput collect_mxm_weight_input_from_streams(std::size_t mxm, std::size_t tile)
     {
-        constexpr auto kTargetSreg = hw::kStreamRegisterColumns - 1;
+        constexpr auto kTargetSreg = hw::kMxmBoundaryStreamRegisterColumn;
         auto input = MxmControlSlice::WeightInput {};
         const auto stream_base = mxm * hw::kMxmLoadStreamsPerCycle;
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             for (std::size_t stream = 0; stream < hw::kMxmLoadStreamsPerCycle; ++stream) {
                 const auto slot = mem_.consume_east_register(tile, lane, kTargetSreg, stream_base + stream);
                 if (!slot.has_value()) {
-                    throw std::logic_error("MXM IW reached tile before MEM east stream arrived at sreg11");
+                    throw std::logic_error("MXM IW reached tile before SXM east stream arrived at sreg12");
                 }
                 input[lane][stream] = MxmArray::Supercell::InputWord {
                     static_cast<std::int8_t>(slot->data),
@@ -305,6 +326,7 @@ private:
 
     TileArrayModel mem_{};
     VxmSlice vxm_{};
+    SxmSlice sxm_;
     std::array<Mxm, kMxmCount> mxms_{};
     InstructionControlUnit icu_{};
     std::size_t cycle_{0};

@@ -3,6 +3,7 @@
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/stream_fabric.hpp"
 #include "ftlpu/mem/mem_array.hpp"
+#include "ftlpu/sxm/slice.hpp"
 
 #include <algorithm>
 #include <array>
@@ -36,7 +37,7 @@ public:
         : mem_(
             MemStreamPortMap::LegacyLocalLinear(),
             MemArrayModel::MissingStreamPolicy::ZeroFill)
-        , streams_(hw::kMemBoundaryStreamRegisterColumns)
+        , streams_(hw::kSystemStreamRegisterColumns)
     {
     }
 
@@ -101,7 +102,7 @@ public:
         DataWord word)
     {
         pending_inputs_.push_back(PendingInput {
-            hw::kMemBoundaryStreamRegisterColumns - 1,
+            hw::kMxmBoundaryStreamRegisterColumn,
             tile,
             lane,
             StreamId::West(stream),
@@ -182,16 +183,26 @@ public:
 
     void tick()
     {
-        tick_impl(nullptr, std::nullopt);
+        tick_impl(nullptr, nullptr, std::nullopt);
     }
 
     void tick(std::ostream& os, std::optional<std::size_t> log_tile = std::nullopt)
     {
-        tick_impl(&os, log_tile);
+        tick_impl(nullptr, &os, log_tile);
+    }
+
+    void tick(SxmSlice& sxm)
+    {
+        tick_impl(&sxm, nullptr, std::nullopt);
+    }
+
+    void tick(SxmSlice& sxm, std::ostream& os, std::optional<std::size_t> log_tile = std::nullopt)
+    {
+        tick_impl(&sxm, &os, log_tile);
     }
 
 private:
-    void tick_impl(std::ostream* os, std::optional<std::size_t> log_tile)
+    void tick_impl(SxmSlice* sxm, std::ostream* os, std::optional<std::size_t> log_tile)
     {
         streams_.begin_cycle();
 
@@ -211,6 +222,9 @@ private:
         // results into next state.  No functional slice can see another
         // slice's same-cycle result through an SR boundary.
         mem_.evaluate(streams_);
+        if (sxm != nullptr) {
+            sxm->evaluate(streams_);
+        }
 
         // Unconsumed streams move one physical SR hop in their direction.
         streams_.stage_linear_links();

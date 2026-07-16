@@ -207,7 +207,7 @@ private:
 
     static ActivationData collect_activation(const TileArrayModel& mem, std::size_t tile, std::size_t stream_base)
     {
-        constexpr auto kTargetSreg = hw::kStreamRegisterColumns - 1;
+        constexpr auto kTargetSreg = hw::kMxmBoundaryStreamRegisterColumn;
         if (stream_base >= hw::kStreams) {
             throw std::out_of_range("MXM activation stream is outside the stream set");
         }
@@ -215,7 +215,7 @@ private:
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             const auto& slot = mem.east_register(tile, lane, kTargetSreg, stream_base);
             if (!slot.has_value()) {
-                throw std::logic_error("MXM Compute reached tile before activation stream arrived at sreg11");
+                throw std::logic_error("MXM Compute reached tile before SXM east stream arrived at sreg12");
             }
             data[lane] = static_cast<std::int8_t>(slot->data);
         }

@@ -16,6 +16,8 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -39,23 +41,27 @@ constexpr std::size_t east_stream_write_latency(std::size_t column)
 constexpr std::size_t kWqMatrix = 0;
 constexpr std::size_t kWkMatrix = 1;
 constexpr std::size_t kWvMatrix = 2;
-constexpr std::size_t kXMemColumn = 32;
+constexpr std::size_t kXMemColumnBase = 0;
+constexpr std::size_t kXMemColumns = kLoadStreams;
 constexpr std::size_t kQInt8ColumnBase = 16;
 constexpr std::size_t kQInt8Columns = kLoadStreams;
 constexpr std::size_t kKInt8Column = 41;
-constexpr std::size_t kVInt8Column = 42;
+constexpr std::size_t kVInt8ColumnBase = 0;
+constexpr std::size_t kVInt8Columns = kLoadStreams;
 constexpr std::size_t kSoftmaxParallelRows = 4;
 constexpr std::array<std::size_t, kSoftmaxParallelRows> kScaledScoreByteColumnBases {16, 20, 24, 28};
 constexpr std::array<std::size_t, kSoftmaxParallelRows> kExpScoreByteColumnBases {0, 4, 8, 12};
 constexpr std::size_t kRowMaxByteColumnBase = 32;
 constexpr std::size_t kRowSumByteColumnBase = 36;
 constexpr std::size_t kSoftmaxInt8ColumnBase = 40;
+constexpr std::size_t kAttentionOutputColumnBase = 4;
 constexpr std::size_t kSoftmaxScratchAddressBase = 4096;
+constexpr std::size_t kXAddressBase = 6144;
 
 constexpr std::size_t kQWestStreamBase = 0;
 constexpr std::size_t kKWestStreamBase = 4;
 constexpr std::size_t kActivationStream = 8;
-constexpr std::size_t kVActivationStream = 9;
+constexpr std::size_t kVActivationStreamBase = 16;
 constexpr std::size_t kQkOutputWestStreamBase = 12;
 constexpr std::size_t kVOutputWestStreamBase = 16;
 constexpr std::size_t kSoftmaxWestStreamBase = ftlpu::hw::kEastStreams;
@@ -68,6 +74,9 @@ constexpr std::size_t kVStreamOperand = ftlpu::hw::kEastStreams + kVOutputWestSt
 constexpr std::size_t kQInt8OutputStream = 0;
 constexpr std::size_t kKInt8OutputStream = 1;
 constexpr std::size_t kVInt8OutputStream = 20;
+constexpr std::size_t kAttentionActivationStream = 1;
+constexpr std::size_t kAttentionWeightStreamBase = 16;
+constexpr std::size_t kAttentionOutputWestStreamBase = 0;
 
 constexpr std::size_t kIwStart = 20;
 constexpr std::size_t kGemmStart = kIwStart + 2 * kBlocks;
@@ -78,6 +87,14 @@ constexpr std::size_t kQkIwStart = kVxmStart + kSeqLen + kVxmLatency + east_stre
 constexpr std::size_t kQkGemmStart = kQkIwStart + kBlocks;
 constexpr std::size_t kQkOutputStart = kQkGemmStart + kBlocks - 1;
 constexpr std::size_t kDirectScoreVxmStart = kQkOutputStart + ftlpu::hw::kStreamRegisterColumns;
+constexpr std::size_t kVProjectionGemmStart =
+    kDirectScoreVxmStart + kSeqLen + east_stream_write_latency(kRowMaxByteColumnBase)
+    + ftlpu::hw::kStreamRegisterColumns + 2;
+constexpr std::size_t kVProjectionOutputStart =
+    kVProjectionGemmStart + kBlocks - 1 + ftlpu::hw::kStreamRegisterColumns;
+constexpr std::size_t kVProjectionLastWrite =
+    kVProjectionOutputStart + kHidden - 1 + 2
+    + east_stream_write_latency(kVInt8ColumnBase + kVInt8Columns - 1);
 constexpr float kProjectionScale = 1.0f / 256.0f;
 constexpr float kScoreScale = 1.0f / 17.88854381999832f; // 1 / sqrt(320)
 constexpr float kSoftmaxInt8Scale = 127.0f;
@@ -87,6 +104,18 @@ static_assert(kSeqLen % kSoftmaxParallelRows == 0);
 constexpr std::size_t west_stream_read_latency(std::size_t column)
 {
     return column / ftlpu::hw::kSlicesPerGroup + 1;
+}
+
+constexpr std::size_t east_stream_cycles_to_sxm(std::size_t column)
+{
+    return ftlpu::hw::kMemEastBoundaryStreamRegisterColumn
+        - column / ftlpu::hw::kSlicesPerGroup;
+}
+
+constexpr std::size_t mxm_west_stream_write_latency(std::size_t column)
+{
+    return ftlpu::hw::kMxmBoundaryStreamRegisterColumn
+        - column / ftlpu::hw::kSlicesPerGroup;
 }
 
 std::int8_t x_value(std::size_t row, std::size_t column)
@@ -101,9 +130,14 @@ std::int8_t weight_value(std::size_t matrix, std::size_t k, std::size_t n)
     return static_cast<std::int8_t>(static_cast<int>(mixed % 15) - 7);
 }
 
-std::size_t x_address(std::size_t row, std::size_t lane)
+std::size_t x_column(std::size_t row)
 {
-    return row * kLanes + lane;
+    return kXMemColumnBase + row % kXMemColumns;
+}
+
+std::size_t x_address(std::size_t row)
+{
+    return kXAddressBase + (row / kXMemColumns) * kLanes;
 }
 
 std::size_t weight_address(std::size_t matrix, std::size_t column_block)
@@ -162,9 +196,9 @@ void stage_mem(ftlpu::TileArrayModel& mem)
     for (std::size_t row = 0; row < kSeqLen; ++row) {
         for (std::size_t k = 0; k < kHidden; ++k) {
             mem.set_sram_lane_byte(
-                kXMemColumn,
+                x_column(row),
                 k / kLanes,
-                x_address(row, 0),
+                x_address(row),
                 k % kLanes,
                 static_cast<std::uint8_t>(x_value(row, k)));
         }
@@ -217,26 +251,42 @@ public:
         vxm_[alu].push_back(Event<ftlpu::VxmLaneAluInstruction> {cycle, instruction});
     }
 
+    void sxm_transpose(std::size_t cycle, ftlpu::SxmInstruction instruction)
+    {
+        sxm_transpose_.push_back(Event<ftlpu::SxmInstruction> {cycle, std::move(instruction)});
+    }
+
+    void sxm_permute(std::size_t cycle, ftlpu::SxmInstruction instruction)
+    {
+        sxm_permute_.push_back(Event<ftlpu::SxmInstruction> {cycle, std::move(instruction)});
+    }
+
     void load(ftlpu::InstructionControlUnit& icu)
     {
         for (std::size_t column = 0; column < mem_.size(); ++column) {
-            load_queue(mem_[column], [&](std::size_t n) { icu.enqueue_mem_nop(column, n); }, [&](auto instruction) {
+            load_queue(mem_[column], "MEM" + std::to_string(column), [&](std::size_t n) { icu.enqueue_mem_nop(column, n); }, [&](auto instruction) {
                 icu.enqueue_mem(column, instruction);
             });
         }
         for (std::size_t mxm = 0; mxm < mxm_load_.size(); ++mxm) {
-            load_queue(mxm_load_[mxm], [&](std::size_t n) { icu.enqueue_mxm_load_nop(mxm, n); }, [&](auto instruction) {
+            load_queue(mxm_load_[mxm], "MXM" + std::to_string(mxm) + " load", [&](std::size_t n) { icu.enqueue_mxm_load_nop(mxm, n); }, [&](auto instruction) {
                 icu.enqueue_mxm(mxm, instruction);
             });
-            load_queue(mxm_compute_[mxm], [&](std::size_t n) { icu.enqueue_mxm_compute_nop(mxm, n); }, [&](auto instruction) {
+            load_queue(mxm_compute_[mxm], "MXM" + std::to_string(mxm) + " compute", [&](std::size_t n) { icu.enqueue_mxm_compute_nop(mxm, n); }, [&](auto instruction) {
                 icu.enqueue_mxm(mxm, instruction);
             });
         }
         for (std::size_t alu = 0; alu < vxm_.size(); ++alu) {
-            load_queue(vxm_[alu], [&](std::size_t n) { icu.enqueue_vxm_nop(alu, n); }, [&](auto instruction) {
+            load_queue(vxm_[alu], "VXM ALU" + std::to_string(alu), [&](std::size_t n) { icu.enqueue_vxm_nop(alu, n); }, [&](auto instruction) {
                 icu.enqueue_vxm(alu, instruction);
             });
         }
+        load_queue(sxm_transpose_, "SXM transpose", [&](std::size_t n) { icu.enqueue_sxm_transpose_nop(n); }, [&](auto instruction) {
+            icu.enqueue_sxm_transpose(std::move(instruction));
+        });
+        load_queue(sxm_permute_, "SXM permute", [&](std::size_t n) { icu.enqueue_sxm_permute_nop(n); }, [&](auto instruction) {
+            icu.enqueue_sxm_permute(std::move(instruction));
+        });
     }
 
 private:
@@ -247,7 +297,7 @@ private:
     };
 
     template <typename T, typename Nop, typename Emit>
-    static void load_queue(std::vector<Event<T>>& events, Nop nop, Emit emit)
+    static void load_queue(std::vector<Event<T>>& events, std::string_view name, Nop nop, Emit emit)
     {
         std::sort(events.begin(), events.end(), [](const auto& lhs, const auto& rhs) {
             return lhs.cycle < rhs.cycle;
@@ -255,7 +305,9 @@ private:
         auto cursor = std::size_t {0};
         for (const auto& event : events) {
             if (event.cycle < cursor) {
-                throw std::logic_error("single-head attention program queue collision");
+                throw std::logic_error(
+                    "single-head attention program queue collision in " + std::string(name)
+                    + " at cycle " + std::to_string(event.cycle));
             }
             nop(event.cycle - cursor);
             emit(event.instruction);
@@ -267,6 +319,8 @@ private:
     std::array<std::vector<Event<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmQueues> mxm_load_{};
     std::array<std::vector<Event<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmQueues> mxm_compute_{};
     std::array<std::vector<Event<ftlpu::VxmLaneAluInstruction>>, ftlpu::InstructionControlUnit::kVxmQueues> vxm_{};
+    std::vector<Event<ftlpu::SxmInstruction>> sxm_transpose_{};
+    std::vector<Event<ftlpu::SxmInstruction>> sxm_permute_{};
 };
 
 void emit_weight_load_at(
@@ -308,11 +362,33 @@ void emit_weight_load(Program& program, std::size_t mxm, std::size_t matrix)
         stream_base);
 }
 
+void emit_x_as_v_weight_load(Program& program)
+{
+    for (std::size_t stream = 0; stream < kLoadStreams; ++stream) {
+        const auto mem_column = kXMemColumnBase + stream;
+        const auto first_cycle = kQkIwStart - east_stream_cycles_to_sreg11(mem_column) - 1;
+        for (std::size_t block = 0; block < kBlocks; ++block) {
+            const auto row_block = kBlocks - 1 - block;
+            program.mem(
+                first_cycle + block,
+                mem_column,
+                ftlpu::MemInstruction::Read(
+                    kXAddressBase + row_block * kLanes,
+                    kLoadStreams + stream));
+        }
+    }
+
+    for (std::size_t block = 0; block < kBlocks; ++block) {
+        program.mxm(kQkIwStart + block, 1, ftlpu::MxmControlInstruction::IW(1));
+    }
+}
+
 void emit_projection(Program& program)
 {
     for (std::size_t row = 0; row < kSeqLen; ++row) {
-        const auto read_cycle = kGemmStart + row - east_stream_cycles_to_sreg11(kXMemColumn);
-        program.mem(read_cycle, kXMemColumn, ftlpu::MemInstruction::Read(x_address(row, 0), kActivationStream));
+        const auto mem_column = x_column(row);
+        const auto read_cycle = kGemmStart + row - east_stream_cycles_to_sreg11(mem_column);
+        program.mem(read_cycle, mem_column, ftlpu::MemInstruction::Read(x_address(row), kActivationStream));
 
         program.mxm(
             kGemmStart + row,
@@ -395,14 +471,7 @@ void emit_qk_matmul(Program& program)
         program.mxm(kQkIwStart + block, 0, ftlpu::MxmControlInstruction::IW(1));
     }
 
-    emit_weight_load_at(
-        program,
-        1,
-        kWvMatrix,
-        kQkIwStart,
-        1,
-        0,
-        kLoadStreams);
+    emit_x_as_v_weight_load(program);
 
     for (std::size_t row = 0; row < kSeqLen; ++row) {
         const auto read_cycle = kQkGemmStart + row - east_stream_cycles_to_sreg11(kKInt8Column);
@@ -415,17 +484,24 @@ void emit_qk_matmul(Program& program)
             0,
             ftlpu::MxmControlInstruction::Compute(1, kActivationStream, kQkOutputWestStreamBase));
 
-        const auto v_read_cycle = kQkGemmStart + row - east_stream_cycles_to_sreg11(kXMemColumn);
+    }
+
+    for (std::size_t hidden = 0; hidden < kHidden; ++hidden) {
+        const auto mem_column = kLoadStreams + hidden % kLoadStreams;
+        const auto activation_stream = kVActivationStreamBase + hidden % kLoadStreams;
+        const auto v_read_cycle = kVProjectionGemmStart + hidden - east_stream_cycles_to_sreg11(mem_column);
         program.mem(
             v_read_cycle,
-            kXMemColumn,
-            ftlpu::MemInstruction::Read(x_address(row, 0), kVActivationStream));
+            mem_column,
+            ftlpu::MemInstruction::Read(
+                weight_address(kWvMatrix, hidden / kLoadStreams),
+                activation_stream));
         program.mxm(
-            kQkGemmStart + row,
+            kVProjectionGemmStart + hidden,
             1,
-            ftlpu::MxmControlInstruction::Compute(1, kVActivationStream, kVOutputWestStreamBase));
+            ftlpu::MxmControlInstruction::Compute(1, activation_stream, kVOutputWestStreamBase));
 
-        const auto vxm_cycle = kDirectScoreVxmStart + row;
+        const auto vxm_cycle = kVProjectionOutputStart + hidden;
         program.vxm(vxm_cycle, 3, ftlpu::VxmLaneAluInstruction {
             ftlpu::VxmAluOpcode::Cast,
             ftlpu::VxmLaneOperand::StreamInt32(kVStreamOperand),
@@ -448,10 +524,13 @@ void emit_qk_matmul(Program& program)
             ftlpu::VxmCastTarget::Int8,
             kVInt8OutputStream,
         });
+        const auto output_column = kVInt8ColumnBase + hidden % kVInt8Columns;
         program.mem(
-            vxm_cycle + 2 + east_stream_write_latency(kVInt8Column),
-            kVInt8Column,
-            ftlpu::MemInstruction::Write(projection_output_address(row), kVInt8OutputStream));
+            vxm_cycle + 2 + east_stream_write_latency(output_column),
+            output_column,
+            ftlpu::MemInstruction::Write(
+                projection_output_address(hidden / kVInt8Columns),
+                kVInt8OutputStream));
     }
 }
 
@@ -552,7 +631,7 @@ SoftmaxSchedule emit_direct_score_softmax(Program& program)
         0,
         kReductionEastStreamBase);
 
-    const auto pass2_start = std::max(pass1_max_write, pass1_last_scaled_write) + 1;
+    const auto pass2_start = std::max({pass1_max_write, pass1_last_scaled_write, kVProjectionLastWrite}) + 1;
 
     emit_fp32_mem_read(
         program,
@@ -709,6 +788,117 @@ SoftmaxSchedule emit_direct_score_softmax(Program& program)
     return SoftmaxSchedule {pass1_max_write, pass2_start, pass2_sum_write, pass3_start, done};
 }
 
+struct AttentionOutputSchedule {
+    std::size_t v_weight_read_start{0};
+    std::size_t v_iw_start{0};
+    std::size_t softmax_transpose_start{0};
+    std::size_t softmax_emit_start{0};
+    std::size_t compute_start{0};
+    std::size_t write_start{0};
+    std::size_t done{0};
+};
+
+ftlpu::Permute320::Map attention_lane_reverse_map()
+{
+    auto map = ftlpu::Permute320::identity_map();
+    for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+        for (std::size_t lane = 0; lane < kLanes; ++lane) {
+            map[tile * kLanes + lane] = tile * kLanes + (kLanes - 1 - lane);
+        }
+    }
+    return map;
+}
+
+AttentionOutputSchedule emit_attention_output(Program& program)
+{
+    constexpr auto kWavefrontCycles = kSeqLen + ftlpu::hw::kTileRows - 1;
+    constexpr auto kVIwStart = std::size_t {16};
+    constexpr auto kSoftmaxTransposeStart = kVIwStart + kBlocks;
+    constexpr auto kSoftmaxPermuteCaptureStart = kSoftmaxTransposeStart + kLanes - 1;
+    constexpr auto kSoftmaxEmitStart = kSoftmaxPermuteCaptureStart + kWavefrontCycles;
+    constexpr auto kComputeStart = kSoftmaxEmitStart + 1;
+    constexpr auto kFirstOutput = kComputeStart + kBlocks - 1;
+    constexpr auto kWriteStart =
+        kFirstOutput + mxm_west_stream_write_latency(kAttentionOutputColumnBase);
+    constexpr auto kDone = kWriteStart + kSeqLen + kBlocks + 8;
+
+    const auto east1 = ftlpu::SxmStreamId {
+        ftlpu::StreamId::East(kAttentionActivationStream).packed()};
+    const auto reverse_map = attention_lane_reverse_map();
+
+    auto first_v_weight_read = std::numeric_limits<std::size_t>::max();
+    for (std::size_t stream = 0; stream < kLoadStreams; ++stream) {
+        const auto mem_column = kVInt8ColumnBase + stream;
+        const auto first_cycle = kVIwStart - east_stream_cycles_to_sreg11(mem_column) - 1;
+        first_v_weight_read = std::min(first_v_weight_read, first_cycle);
+        for (std::size_t block = 0; block < kBlocks; ++block) {
+            const auto hidden_block = kBlocks - 1 - block;
+            program.mem(
+                first_cycle + block,
+                mem_column,
+                ftlpu::MemInstruction::Read(
+                    projection_output_address(hidden_block),
+                    kAttentionWeightStreamBase + stream));
+        }
+    }
+    for (std::size_t block = 0; block < kBlocks; ++block) {
+        program.mxm(kVIwStart + block, 1, ftlpu::MxmControlInstruction::IW(0));
+    }
+
+    const auto first_softmax_read =
+        kSoftmaxTransposeStart - east_stream_cycles_to_sxm(kSoftmaxInt8ColumnBase) - 1;
+    for (std::size_t phase = 0; phase < kSeqLen; ++phase) {
+        const auto block = phase / kLanes;
+        const auto lane = phase % kLanes;
+        const auto key = block * kLanes + (kLanes - 1 - lane);
+        const auto group = key % kSoftmaxParallelRows;
+        const auto batch = key / kSoftmaxParallelRows;
+        program.mem(
+            first_softmax_read + phase,
+            kSoftmaxInt8ColumnBase + group,
+            ftlpu::MemInstruction::Read(
+                softmax_scratch_address(batch),
+                kAttentionActivationStream));
+    }
+    for (std::size_t cycle = 0; cycle < kWavefrontCycles; ++cycle) {
+        program.sxm_transpose(
+            kSoftmaxTransposeStart + cycle,
+            ftlpu::SxmInstruction::TransposeStream(east1, east1));
+    }
+    for (std::size_t cycle = 0; cycle < kWavefrontCycles + kSeqLen; ++cycle) {
+        program.sxm_permute(
+            kSoftmaxPermuteCaptureStart + cycle,
+            ftlpu::SxmInstruction::PermuteStream(east1, east1, reverse_map));
+    }
+    for (std::size_t query = 0; query < kSeqLen; ++query) {
+        program.mxm(
+            kComputeStart + query,
+            1,
+            ftlpu::MxmControlInstruction::Compute(
+                0,
+                kAttentionActivationStream,
+                kAttentionOutputWestStreamBase));
+        for (std::size_t byte = 0; byte < sizeof(std::int32_t); ++byte) {
+            program.mem(
+                kWriteStart + query,
+                kAttentionOutputColumnBase + byte,
+                ftlpu::MemInstruction::Write(
+                    query * kLanes,
+                    ftlpu::hw::kEastStreams + kAttentionOutputWestStreamBase + byte));
+        }
+    }
+
+    return AttentionOutputSchedule {
+        first_v_weight_read,
+        kVIwStart,
+        kSoftmaxTransposeStart,
+        kSoftmaxEmitStart,
+        kComputeStart,
+        kWriteStart,
+        kDone,
+    };
+}
+
 std::int8_t stored_q_int8(const ftlpu::TileArrayModel& mem, std::size_t row, std::size_t column)
 {
     const auto tile = column / kLanes;
@@ -766,9 +956,167 @@ std::vector<std::int8_t> read_softmax_output(const ftlpu::TileArrayModel& mem)
 
 std::int8_t stored_v_int8(const ftlpu::TileArrayModel& mem, std::size_t row, std::size_t column)
 {
-    const auto tile = column / kLanes;
-    const auto lane = column % kLanes;
-    return static_cast<std::int8_t>(mem.sram_lane_byte(kVInt8Column, tile, projection_output_address(row), lane));
+    const auto tile = row / kLanes;
+    const auto lane = row % kLanes;
+    return static_cast<std::int8_t>(mem.sram_lane_byte(
+        kVInt8ColumnBase + column % kVInt8Columns,
+        tile,
+        projection_output_address(column / kVInt8Columns),
+        lane));
+}
+
+std::int32_t stored_attention_output(
+    const ftlpu::TileArrayModel& mem,
+    std::size_t query,
+    std::size_t hidden)
+{
+    const auto tile = hidden / kLanes;
+    const auto lane = hidden % kLanes;
+    auto raw = std::uint32_t {0};
+    for (std::size_t byte = 0; byte < sizeof(std::int32_t); ++byte) {
+        raw |= static_cast<std::uint32_t>(mem.sram_lane_byte(
+                   kAttentionOutputColumnBase + byte,
+                   tile,
+                   query * kLanes,
+                   lane))
+            << (byte * 8);
+    }
+    return static_cast<std::int32_t>(raw);
+}
+
+std::int32_t attention_output_golden(
+    const std::vector<std::int8_t>& softmax,
+    const ftlpu::TileArrayModel& mem,
+    std::size_t query,
+    std::size_t hidden)
+{
+    auto sum = std::int32_t {0};
+    for (std::size_t key = 0; key < kSeqLen; ++key) {
+        sum += static_cast<std::int32_t>(softmax[score_index(query, key)])
+            * static_cast<std::int32_t>(stored_v_int8(mem, key, hidden));
+    }
+    return sum;
+}
+
+struct AttentionPipelineBlock {
+    std::size_t row{0};
+    std::size_t start{0};
+    std::size_t duration{0};
+    std::string label{};
+    const char* fill{"#eeeeee"};
+};
+
+void write_attention_pipeline_svg(
+    const std::filesystem::path& path,
+    const SoftmaxSchedule& softmax,
+    const AttentionOutputSchedule& output)
+{
+    constexpr double kWidth = 1600.0;
+    constexpr double kHeight = 650.0;
+    constexpr double kLeft = 155.0;
+    constexpr double kRight = 40.0;
+    constexpr double kTop = 62.0;
+    constexpr double kRowGap = 54.0;
+    constexpr double kBlockHeight = 34.0;
+    constexpr std::array<const char*, 9> kRows {
+        "MEM read",
+        "MEM write",
+        "MXM0 load",
+        "MXM0 compute",
+        "MXM1 load",
+        "MXM1 compute",
+        "VXM",
+        "SXM transpose",
+        "SXM permute",
+    };
+
+    const auto final_base = softmax.done;
+    const auto total_cycles = final_base + output.done;
+    auto blocks = std::vector<AttentionPipelineBlock> {};
+    const auto add = [&](std::size_t row, std::size_t start, std::size_t duration,
+                         std::string label, const char* fill) {
+        blocks.push_back(AttentionPipelineBlock {row, start, duration, std::move(label), fill});
+    };
+
+    add(0, 7, 33, "Wq/Wk", "#78b957");
+    add(0, kGemmStart - east_stream_cycles_to_sreg11(kXMemColumnBase), kSeqLen + 4, "X rows", "#a8d29a");
+    add(0, kQkGemmStart - east_stream_cycles_to_sreg11(kKInt8Column), kSeqLen, "K", "#a8d29a");
+    add(0, kVProjectionGemmStart - east_stream_cycles_to_sreg11(kLoadStreams), kHidden, "Wv columns", "#78b957");
+    add(0, softmax.pass2_start, softmax.pass3_start - softmax.pass2_start, "softmax P2", "#9bc8b4");
+    add(0, softmax.pass3_start, softmax.done - softmax.pass3_start, "softmax P3", "#9bc8b4");
+    add(0, final_base + output.v_weight_read_start, kBlocks + 4, "V direct", "#78b957");
+    add(0, final_base + output.softmax_transpose_start - 2, kSeqLen, "softmax", "#a8d29a");
+
+    add(1, kVxmStart, kSeqLen + 18, "Q/K", "#f5d28a");
+    add(1, kVProjectionOutputStart, kHidden + 8, "V^T", "#f5d28a");
+    add(1, kDirectScoreVxmStart, softmax.pass2_start - kDirectScoreVxmStart, "P1 scratch", "#f7dfaa");
+    add(1, softmax.pass2_start, softmax.done - softmax.pass2_start, "P2/P3", "#f7dfaa");
+    add(1, final_base + output.write_start, kSeqLen + kBlocks, "attention out", "#f5d28a");
+
+    add(2, kIwStart, kBlocks, "Wq", "#dddddd");
+    add(2, kQkIwStart, kBlocks, "Q", "#dddddd");
+    add(3, kGemmStart, kSeqLen, "Q", "#eeeeee");
+    add(3, kQkGemmStart, kSeqLen, "QK", "#eeeeee");
+
+    add(4, kIwStart, kBlocks, "Wk", "#d9d9d9");
+    add(4, kQkIwStart, kBlocks, "X as columns", "#d9d9d9");
+    add(4, final_base + output.v_iw_start, kBlocks, "V direct", "#d9d9d9");
+    add(5, kGemmStart, kSeqLen, "K", "#eeeeee");
+    add(5, kVProjectionGemmStart, kHidden, "Wv columns -> V^T", "#eeeeee");
+    add(5, final_base + output.compute_start, kSeqLen, "softmax x V", "#eeeeee");
+
+    add(6, kVxmStart, kSeqLen + 3, "Q/K requant", "#6f9fe8");
+    add(6, kDirectScoreVxmStart, kSeqLen + 2, "P1", "#6f9fe8");
+    add(6, softmax.pass2_start, softmax.pass3_start - softmax.pass2_start, "P2", "#7da8e8");
+    add(6, softmax.pass3_start, softmax.done - softmax.pass3_start, "P3", "#7da8e8");
+
+    add(7, final_base + output.softmax_transpose_start, kSeqLen + ftlpu::hw::kTileRows - 1, "softmax", "#e7a35c");
+    add(8, final_base + output.softmax_transpose_start + kLanes - 1,
+        2 * kSeqLen + ftlpu::hw::kTileRows - 1, "softmax -> rows", "#8cc7c0");
+
+    std::ofstream os(path);
+    if (!os.good()) {
+        throw std::runtime_error("failed to write attention pipeline SVG");
+    }
+    const auto scale = (kWidth - kLeft - kRight) / static_cast<double>(total_cycles);
+    os << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << kWidth
+       << "\" height=\"" << kHeight << "\" viewBox=\"0 0 " << kWidth << ' ' << kHeight << "\">\n";
+    os << "<rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n";
+    os << "<defs><marker id=\"arrow\" markerWidth=\"10\" markerHeight=\"8\" refX=\"9\" refY=\"4\" orient=\"auto\">"
+          "<path d=\"M0,0 L10,4 L0,8 Z\" fill=\"#555\"/></marker></defs>\n";
+    os << "<g font-family=\"Arial, Helvetica, sans-serif\" fill=\"#111\">\n";
+    os << "<line x1=\"" << kLeft << "\" y1=\"28\" x2=\"" << (kWidth - kRight - 100)
+       << "\" y2=\"28\" stroke=\"#555\" stroke-width=\"3\" stroke-dasharray=\"12 10\" marker-end=\"url(#arrow)\"/>\n";
+    os << "<text x=\"" << (kWidth - kRight - 82) << "\" y=\"35\" font-size=\"27\">Time</text>\n";
+
+    for (std::size_t cycle = 0; cycle <= total_cycles; cycle += 200) {
+        const auto x = kLeft + static_cast<double>(cycle) * scale;
+        os << "<line x1=\"" << x << "\" y1=\"48\" x2=\"" << x
+           << "\" y2=\"" << (kTop + kRows.size() * kRowGap - 12)
+           << "\" stroke=\"#dddddd\" stroke-width=\"1\"/>\n";
+        os << "<text x=\"" << x << "\" y=\"" << (kHeight - 24)
+           << "\" text-anchor=\"middle\" font-size=\"13\" fill=\"#666\">" << cycle << "</text>\n";
+    }
+    for (std::size_t row = 0; row < kRows.size(); ++row) {
+        const auto y = kTop + static_cast<double>(row) * kRowGap;
+        os << "<text x=\"18\" y=\"" << (y + 23)
+           << "\" font-size=\"17\">" << kRows[row] << "</text>\n";
+    }
+    for (const auto& block : blocks) {
+        const auto x = kLeft + static_cast<double>(block.start) * scale;
+        const auto y = kTop + static_cast<double>(block.row) * kRowGap;
+        const auto width = std::max(2.0, static_cast<double>(block.duration) * scale);
+        os << "<rect x=\"" << x << "\" y=\"" << y << "\" width=\"" << width
+           << "\" height=\"" << kBlockHeight << "\" fill=\"" << block.fill
+           << "\" stroke=\"#222\" stroke-width=\"1.2\"/>\n";
+        if (width >= 42.0) {
+            os << "<text x=\"" << (x + width / 2.0) << "\" y=\"" << (y + 22)
+               << "\" text-anchor=\"middle\" font-size=\"12\">" << block.label << "</text>\n";
+        }
+    }
+    os << "<text x=\"" << kLeft << "\" y=\"" << (kHeight - 52)
+       << "\" font-size=\"14\" fill=\"#555\">total: " << total_cycles << " cycles</text>\n";
+    os << "</g>\n</svg>\n";
 }
 
 float softmax_golden_max(const std::vector<std::int32_t>& scores, std::size_t query)
@@ -830,7 +1178,7 @@ try
         std::cerr << "failed to open single-head attention ICU log\n";
         return 1;
     }
-    icu_log << "single_head_attention qk_with_parallel_v_projection\n"
+    icu_log << "single_head_attention transpose_free_v_projection\n"
             << "  qk_output_start=" << kQkOutputStart
             << " direct_score_vxm_start=" << kDirectScoreVxmStart
             << " scaled_score_columns=16..31 (4 striped fp32 groups)"
@@ -967,6 +1315,101 @@ try
                           << " actual=" << static_cast<int>(actual)
                           << " expected=" << static_cast<int>(expected)
                           << '\n';
+                return 1;
+            }
+        }
+    }
+
+    auto expected_attention = std::vector<std::int32_t>(kSeqLen * kHidden, 0);
+    for (std::size_t query = 0; query < kSeqLen; ++query) {
+        for (std::size_t hidden = 0; hidden < kHidden; ++hidden) {
+            expected_attention[query * kHidden + hidden] =
+                attention_output_golden(softmax, system->mem(), query, hidden);
+        }
+    }
+
+    auto attention_program = Program {};
+    const auto attention_schedule = emit_attention_output(attention_program);
+    attention_program.load(system->icu());
+    icu_log << "attention_output_phase"
+            << " v_weight_read_start=" << attention_schedule.v_weight_read_start
+            << " v_iw_start=" << attention_schedule.v_iw_start
+            << " softmax_transpose_start=" << attention_schedule.softmax_transpose_start
+            << " softmax_emit_start=" << attention_schedule.softmax_emit_start
+            << " compute_start=" << attention_schedule.compute_start
+            << " write_start=" << attention_schedule.write_start << '\n';
+    write_attention_pipeline_svg(
+        log_dir / "pipeline.svg",
+        softmax_schedule,
+        attention_schedule);
+    icu_log << "pipeline diagram: " << (log_dir / "pipeline.svg").string() << '\n';
+
+    auto attention_output_blocks = std::size_t {0};
+    for (std::size_t cycle = 0; cycle < attention_schedule.done; ++cycle) {
+        try {
+            auto sinks = ftlpu::TspSliceSystem::LogSinks {};
+            sinks.icu = &icu_log;
+            system->tick(sinks);
+            if (cycle + 1 == attention_schedule.compute_start) {
+                const auto& weights = system->mxm_unit(1).array();
+                for (std::size_t key = 0; key < kSeqLen; ++key) {
+                    for (std::size_t hidden = 0; hidden < kHidden; ++hidden) {
+                        const auto actual = weights.weight(
+                            0,
+                            key / kLanes,
+                            hidden / kLanes,
+                            key % kLanes,
+                            hidden % kLanes);
+                        const auto expected = stored_v_int8(system->mem(), key, hidden);
+                        if (actual != expected) {
+                            std::cerr << "attention V weight load mismatch key=" << key
+                                      << " hidden=" << hidden
+                                      << " actual=" << static_cast<int>(actual)
+                                      << " expected=" << static_cast<int>(expected) << '\n';
+                            return 1;
+                        }
+                    }
+                }
+            }
+            for (const auto& output : system->mxm_unit(1).last_outputs()) {
+                if (output.row >= kSeqLen) {
+                    continue;
+                }
+                ++attention_output_blocks;
+                for (std::size_t lane = 0; lane < kLanes; ++lane) {
+                    const auto hidden = output.column_block * kLanes + lane;
+                    const auto expected = expected_attention[output.row * kHidden + hidden];
+                    if (output.values[lane] != expected) {
+                        std::cerr << "attention output MXM mismatch phase_cycle=" << cycle
+                                  << " query=" << output.row
+                                  << " hidden=" << hidden
+                                  << " actual=" << output.values[lane]
+                                  << " expected=" << expected << '\n';
+                        return 1;
+                    }
+                }
+            }
+        } catch (const std::exception& ex) {
+            std::ostringstream os;
+            os << "attention output phase cycle " << cycle << ": " << ex.what();
+            throw std::logic_error(os.str());
+        }
+    }
+
+    if (attention_output_blocks != kSeqLen * kBlocks) {
+        std::cerr << "attention output emitted " << attention_output_blocks
+                  << " MXM blocks, expected " << kSeqLen * kBlocks << '\n';
+        return 1;
+    }
+    for (std::size_t query = 0; query < kSeqLen; ++query) {
+        for (std::size_t hidden = 0; hidden < kHidden; ++hidden) {
+            const auto actual = stored_attention_output(system->mem(), query, hidden);
+            const auto expected = expected_attention[query * kHidden + hidden];
+            if (actual != expected) {
+                std::cerr << "attention output SRAM mismatch query=" << query
+                          << " hidden=" << hidden
+                          << " actual=" << actual
+                          << " expected=" << expected << '\n';
                 return 1;
             }
         }

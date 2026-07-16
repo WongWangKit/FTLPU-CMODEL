@@ -71,6 +71,11 @@ struct SxmInstruction {
         return instruction;
     }
 
+    static SxmInstruction TransposeStream(SxmStreamId src, SxmStreamId dst)
+    {
+        return Transpose(StreamList {src}, StreamList {dst});
+    }
+
     static SxmInstruction ShiftSelect(
         StreamList srcs,
         StreamList dsts,
@@ -92,6 +97,24 @@ struct SxmInstruction {
         instruction.opcode = SxmOpcode::Permute;
         instruction.permute_map = map;
         instruction.src_streams = std::move(srcs);
+        instruction.dst_streams = std::move(dsts);
+        return instruction;
+    }
+
+    static SxmInstruction PermuteStream(SxmStreamId src, SxmStreamId dst, PermuteMap map)
+    {
+        return Permute(StreamList {src}, StreamList {dst}, std::move(map));
+    }
+
+    static SxmInstruction PermuteToStreams(
+        SxmStreamId src,
+        StreamList dsts,
+        PermuteMap map)
+    {
+        SxmInstruction instruction{};
+        instruction.opcode = SxmOpcode::Permute;
+        instruction.permute_map = std::move(map);
+        instruction.src_streams = {src};
         instruction.dst_streams = std::move(dsts);
         return instruction;
     }

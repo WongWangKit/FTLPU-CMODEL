@@ -1,9 +1,12 @@
 # FTLPU-CMODEL
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 FTLPU-CMODEL is a cycle-oriented C++17 model for experimenting with an
 FTLPU/TSP-style dataflow: MEM streams move through stream registers, MXM consumes
 streamed int8 vectors for matrix multiply, VXM executes ALU instruction queues,
-and an ICU dispatches instructions into each functional block.
+SXM transposes or permutes eastward vectors, and an ICU dispatches instructions
+into each functional block.
 
 The model is inspired by public Groq TSP/LPU descriptions, but it is not a
 bit-accurate Groq implementation. The current goal is to build a useful compiler
@@ -25,10 +28,16 @@ The repository currently models:
 - `VXM`: one west-side VXM slice with 20 superlanes/tiles. Each superlane has
   16 lanes, and each lane has 16 ALU issue queues. ALU outputs can write int8
   or fp16 bytes onto streams.
+- `SXM`: one east-side data-movement slice between MEM and MXM. It consumes and
+  produces the 32 east streams, supports `Transpose sg16` and 320-lane
+  `Permute`, and passively forwards data when its queues do not issue.
 - `ICU`: per-queue instruction dispatch with `NOP N` and `Repeat n,d`, including
-  MEM address stride support.
+  MEM address stride support. Two SXM queues independently issue Transpose and
+  Permute instructions.
 - `TspSliceSystem`: fixed local topology with VXM on the west side of MEM and
-  two MXMs on the east side of MEM.
+  SXM followed by two MXMs on the east side of MEM. The fabric has 13
+  stream-register columns: MEM occupies boundaries `sreg0..sreg11`, while
+  `sreg12` is the SXM-to-MXM boundary; the west path has the same extra hop.
 - A compact model ISA codec for MEM, MXM, VXM ALU, and ICU queue commands.
 
 The largest integration test models an FFN-like path:
@@ -49,7 +58,7 @@ before cycle 0. MXM output is controlled by the `Compute` instruction stream.
 The runtime loop only advances clocks and bridges data. This is the shape
 intended for a future compiler backend.
 
-`single_head_attention_test` models the front half of single-head attention. It
+`single_head_attention_test` models a complete single-head attention datapath. It
 initializes `seq_len=160`, `hidden=320` input and Wq/Wk/Wv matrices in MEM, loads
 Wq and Wk into the two MXMs, streams X through both MXMs, sends Q/K int32 results
 to VXM, requantizes to int8 with ALU `Multiply` + `Cast(Int8)`, stores Q/K int8
@@ -68,12 +77,18 @@ key position per cycle while VXM lanes represent queries, so both reductions
 run without a physical transpose or host-side reduction. Pass 1 still takes
 160 data cycles for the full-row maximum; the striped Pass 2 and Pass 3 each
 take 40 data cycles.
-While MXM0 computes QK, MXM1 loads Wv into its second weight buffer and computes
-V from a separate X stream. ALU3..5 requantize V concurrently with softmax pass
-1 on ALU0..2, then store the verified int8 V matrix in MEM. The final
-`softmax * V` GEMM is not implemented yet.
+X rows are striped across 16 MEM slices. MXM1 loads 16 original X rows per cycle
+as weight columns, so its buffer is logically `X^T` without materializing a
+transposed matrix. After softmax pass 1 drains, ICU streams the 320 columns of
+Wv on `E16..E31`; MXM1 computes one row of `V^T = Wv^T * X^T` per cycle.
+ALU3..5 requantize those rows and stripe them across 16 MEM slices. The final
+phase reads the striped `V^T` directly on 16 weight streams and loads MXM1 in 20
+cycles, eliminating the former full-matrix V transpose. ICU then reads the
+striped softmax layout, SXM assembles one query row per cycle, and MXM1 computes
+`softmax * V`. The `160 x 320` int32 result returns on `W0..W3`, is stored in
+four MEM slices, and is checked against golden data.
 The test writes an ICU dispatch trace to
-`build-vs2019/logs/single_head_attention/icu.log`.
+`build-vs2026/logs/single_head_attention/icu.log`.
 
 ## Repository Layout
 
@@ -83,6 +98,8 @@ The test writes an ICU dispatch trace to
 - `include/ftlpu/mxm/`: MXM supercell, array, control slice, wrapper, and
   system-owned datapath state.
 - `include/ftlpu/vxm/`: VXM ALU, lane, superlane, and slice models.
+- `include/ftlpu/sxm/`: SXM shift, distribute, permute, transpose, and integrated
+  stream-facing slice models.
 - `include/ftlpu/system/`: ICU and whole-slice system integration.
 - `tests/core/`, `tests/mem/`, `tests/mxm/`, `tests/vxm/`: subsystem tests.
 - `tests/integration/`: cross-unit tests for MEM/MXM/VXM/ICU flows.
@@ -126,6 +143,19 @@ Run the single-head attention test:
 ```powershell
 ctest --test-dir build-vs2019 -C Debug -R single_head_attention_test --output-on-failure
 ```
+
+Run the stream-facing SXM `softmax * V` test:
+
+```powershell
+ctest --test-dir build-vs2019 -C Debug -R sxm_softmax_v_test --output-on-failure
+```
+
+This test initializes softmax and V only in MEM SRAM, then executes ICU-driven
+MEM Read, MXM `IW`, SXM Transpose, non-identity Permute, MXM Compute, and
+four-byte MEM Write queues for `seq_len=160`. The final `160 x 320` int32 matrix
+is reconstructed from four MEM slices and checked against golden data. Its ICU
+trace is written to
+`logs/sxm_softmax_v/icu.log` under the active CTest build directory.
 
 ## Logs and Diagrams
 

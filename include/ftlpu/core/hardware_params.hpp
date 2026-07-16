@@ -21,6 +21,14 @@ constexpr std::size_t kMemSliceColumns = 44;
 constexpr std::size_t kMemSlicesPerGroup = 4;
 constexpr std::size_t kMemGroups = kMemSliceColumns / kMemSlicesPerGroup;
 constexpr std::size_t kMemBoundaryStreamRegisterColumns = kMemGroups + 1;
+constexpr std::size_t kSxmToMxmStreamRegisterColumns = 1;
+constexpr std::size_t kSystemStreamRegisterColumns =
+    kMemBoundaryStreamRegisterColumns + kSxmToMxmStreamRegisterColumns;
+constexpr std::size_t kMemWestBoundaryStreamRegisterColumn = 0;
+constexpr std::size_t kMemEastBoundaryStreamRegisterColumn =
+    kMemBoundaryStreamRegisterColumns - 1;
+constexpr std::size_t kMxmBoundaryStreamRegisterColumn =
+    kSystemStreamRegisterColumns - 1;
 
 // Compatibility names used by the existing code.  New code should use the
 // MEM-specific names above instead of assuming that the whole chip has only
@@ -28,7 +36,7 @@ constexpr std::size_t kMemBoundaryStreamRegisterColumns = kMemGroups + 1;
 constexpr std::size_t kSliceColumns = kMemSliceColumns;
 constexpr std::size_t kSlicesPerGroup = kMemSlicesPerGroup;
 constexpr std::size_t kSliceGroups = kMemGroups;
-constexpr std::size_t kStreamRegisterColumns = kMemBoundaryStreamRegisterColumns;
+constexpr std::size_t kStreamRegisterColumns = kSystemStreamRegisterColumns;
 
 // Figure-4 eastward path count supplied by the architecture study.  The MEM
 // region uses a mapped subset of these physical columns; it does not own them.
@@ -65,6 +73,9 @@ constexpr std::size_t kPublicTotalSramBytes = kPublicSramBlocks * kSramBlockByte
 static_assert(kPhysicalVectorBytes == 320);
 static_assert(kMemSliceColumns % kMemSlicesPerGroup == 0);
 static_assert(kMemBoundaryStreamRegisterColumns == 12);
+static_assert(kSystemStreamRegisterColumns == 13);
+static_assert(kMemEastBoundaryStreamRegisterColumn == 11);
+static_assert(kMxmBoundaryStreamRegisterColumn == 12);
 static_assert(kModeledSramBlocks == kMemSliceColumns);
 static_assert(kPublicSramBlocks == 88);
 static_assert(kSramBlocks == 44);

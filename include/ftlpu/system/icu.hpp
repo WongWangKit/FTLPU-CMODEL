@@ -3,6 +3,7 @@
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/mem/tile_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
+#include "ftlpu/sxm/slice.hpp"
 #include "ftlpu/vxm/slice.hpp"
 
 #include <array>
@@ -22,6 +23,7 @@ public:
     static constexpr std::size_t kVxmQueues = VxmSlice::kAluQueues;
     static constexpr std::size_t kMemQueues = hw::kSliceColumns;
     static constexpr std::size_t kMxmQueues = 2;
+    static constexpr std::size_t kSxmQueues = 2;
 
     struct Repeat {
         std::size_t count{0};
@@ -43,6 +45,8 @@ public:
         for (auto& queue : mxm_compute_queues_) {
             queue.reset();
         }
+        sxm_transpose_queue_.reset();
+        sxm_permute_queue_.reset();
         cycle_ = 0;
     }
 
@@ -60,6 +64,8 @@ public:
         for (auto& queue : mxm_compute_queues_) {
             queue.push_nop(cycles);
         }
+        sxm_transpose_queue_.push_nop(cycles);
+        sxm_permute_queue_.push_nop(cycles);
     }
 
     void enqueue_vxm(std::size_t alu, VxmLaneAluInstruction instruction)
@@ -149,6 +155,42 @@ public:
         mxm_compute_queues_[mxm].push_repeat(Repeat {count, interval, 0});
     }
 
+    void enqueue_sxm_transpose(SxmInstruction instruction)
+    {
+        if (instruction.opcode != SxmOpcode::Transpose) {
+            throw std::invalid_argument("ICU SXM transpose queue requires a Transpose instruction");
+        }
+        sxm_transpose_queue_.push_instruction(std::move(instruction));
+    }
+
+    void enqueue_sxm_permute(SxmInstruction instruction)
+    {
+        if (instruction.opcode != SxmOpcode::Permute) {
+            throw std::invalid_argument("ICU SXM permute queue requires a Permute instruction");
+        }
+        sxm_permute_queue_.push_instruction(std::move(instruction));
+    }
+
+    void enqueue_sxm_transpose_nop(std::size_t cycles)
+    {
+        sxm_transpose_queue_.push_nop(cycles);
+    }
+
+    void enqueue_sxm_permute_nop(std::size_t cycles)
+    {
+        sxm_permute_queue_.push_nop(cycles);
+    }
+
+    void enqueue_sxm_transpose_repeat(std::size_t count, std::size_t interval = 1)
+    {
+        sxm_transpose_queue_.push_repeat(Repeat {count, interval, 0});
+    }
+
+    void enqueue_sxm_permute_repeat(std::size_t count, std::size_t interval = 1)
+    {
+        sxm_permute_queue_.push_repeat(Repeat {count, interval, 0});
+    }
+
     void dispatch_vxm(VxmSlice& vxm, std::ostream* os = nullptr)
     {
         log_cycle_header(os);
@@ -171,6 +213,7 @@ public:
     void dispatch(
         TileArrayModel& mem,
         VxmSlice& vxm,
+        SxmSlice& sxm,
         std::array<Mxm, kMxmQueues>& mxms,
         std::ostream* os = nullptr)
     {
@@ -198,6 +241,24 @@ public:
             any = true;
             if (os != nullptr) {
                 *os << "  ICU -> MEM q" << column << ' ' << describe_mem(*instruction) << '\n';
+            }
+        }
+
+        const auto transpose = sxm_transpose_queue_.dispatch_next();
+        if (transpose.has_value()) {
+            sxm.issue(*transpose);
+            any = true;
+            if (os != nullptr) {
+                *os << "  ICU -> SXM.transpose " << describe_sxm(*transpose) << '\n';
+            }
+        }
+
+        const auto permute = sxm_permute_queue_.dispatch_next();
+        if (permute.has_value()) {
+            sxm.issue(*permute);
+            any = true;
+            if (os != nullptr) {
+                *os << "  ICU -> SXM.permute " << describe_sxm(*permute) << '\n';
             }
         }
 
@@ -433,6 +494,8 @@ private:
             << " mem=" << queued_instruction_count(mem_queues_)
             << " mxm_load=" << queued_instruction_count(mxm_load_queues_)
             << " mxm_compute=" << queued_instruction_count(mxm_compute_queues_)
+            << " sxm_transpose=" << sxm_transpose_queue_.queued_count()
+            << " sxm_permute=" << sxm_permute_queue_.queued_count()
             << '\n';
     }
 
@@ -479,6 +542,19 @@ private:
             os << "Compute b" << instruction.weight_buffer
                << " stream=" << instruction.activation_stream_base
                << " out=" << instruction.stream_base;
+        }
+        return os.str();
+    }
+
+    static std::string describe_sxm(const SxmInstruction& instruction)
+    {
+        std::ostringstream os;
+        os << (instruction.opcode == SxmOpcode::Transpose ? "Transpose" : "Permute");
+        if (!instruction.src_streams.empty()) {
+            os << " src=E" << StreamId::from_packed(instruction.src_streams[0].stream).index();
+        }
+        if (!instruction.dst_streams.empty()) {
+            os << " dst=E" << StreamId::from_packed(instruction.dst_streams[0].stream).index();
         }
         return os.str();
     }
@@ -533,6 +609,8 @@ private:
     std::array<DispatchQueue<MemInstruction>, kMemQueues> mem_queues_{};
     std::array<DispatchQueue<MxmControlInstruction>, kMxmQueues> mxm_load_queues_{};
     std::array<DispatchQueue<MxmControlInstruction>, kMxmQueues> mxm_compute_queues_{};
+    DispatchQueue<SxmInstruction> sxm_transpose_queue_{};
+    DispatchQueue<SxmInstruction> sxm_permute_queue_{};
     std::size_t cycle_{0};
 };
 
