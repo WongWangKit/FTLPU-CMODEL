@@ -107,10 +107,10 @@ private:
     static void check_supercell(std::size_t row, std::size_t column)
     {
         if (row >= hw::kMxmSupercellsPerPlane) {
-            throw std::out_of_range("MXM supercell row is outside the 20x20 array");
+            throw std::out_of_range("MXM supercell row is outside the configured array");
         }
         if (column >= hw::kMxmSupercellsPerPlane) {
-            throw std::out_of_range("MXM supercell column is outside the 20x20 array");
+            throw std::out_of_range("MXM supercell column is outside the configured array");
         }
     }
 

@@ -11,7 +11,7 @@
 
 namespace {
 
-constexpr std::size_t kSeqLen = 160;
+constexpr std::size_t kSeqLen = 32;
 constexpr std::size_t kHidden = ftlpu::hw::kMxmColumns;
 constexpr std::size_t kBlocks = ftlpu::hw::kMxmSupercellsPerPlane;
 constexpr std::size_t kLanes = ftlpu::hw::kLanesPerTile;

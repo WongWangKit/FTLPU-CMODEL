@@ -393,7 +393,7 @@ private:
     static void check_tile(std::size_t tile)
     {
         if (tile >= hw::kTileRows) {
-            throw std::out_of_range("tile is outside the 20-row slice");
+            throw std::out_of_range("tile is outside the configured slice");
         }
     }
 

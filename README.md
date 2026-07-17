@@ -17,19 +17,19 @@ handoffs can be tested cycle by cycle.
 
 The repository currently models:
 
-- `MEM`: 44 slice columns, 20 tile rows, 16 lanes per tile, 32 east streams and
+- `MEM`: 44 slice columns, 4 tile rows, 16 lanes per tile, 32 east streams and
   32 west streams per lane. Each stream register is one byte wide. Each
   tile-local SRAM has two banks, and each bank is 4096 x 16 bytes.
-- `MXM`: two east-side MXM units. Each unit is a 20 x 20 array of 16 x 16
+- `MXM`: two east-side MXM units. Each unit is a 4 x 4 array of 16 x 16
   supercells. Each supercell has two peer weight buffers; `IW` selects which
   buffer receives the right-shifting weight stream and `Compute` selects both
-  the weight buffer and output stream base for a 320 x 320 int8 GEMM datapath
+  the weight buffer and output stream base for a 64 x 64 int8 GEMM datapath
   with int32 accumulation.
-- `VXM`: one west-side VXM slice with 20 superlanes/tiles. Each superlane has
+- `VXM`: one west-side VXM slice with 4 superlanes/tiles. Each superlane has
   16 lanes, and each lane has 16 ALU issue queues. ALU outputs can write int8
   or fp16 bytes onto streams.
 - `SXM`: one east-side data-movement slice between MEM and MXM. It consumes and
-  produces the 32 east streams, supports `Transpose sg16` and 320-lane
+  produces the 32 east streams, supports `Transpose sg16` and 64-lane
   `Permute`, and passively forwards data when its queues do not issue.
 - `ICU`: per-queue instruction dispatch with `NOP N` and `Repeat n,d`, including
   MEM address stride support. Two SXM queues independently issue Transpose and
@@ -59,7 +59,7 @@ The runtime loop only advances clocks and bridges data. This is the shape
 intended for a future compiler backend.
 
 `single_head_attention_test` models a complete single-head attention datapath. It
-initializes `seq_len=160`, `hidden=320` input and Wq/Wk/Wv matrices in MEM, loads
+initializes `seq_len=32`, `hidden=64` input and Wq/Wk/Wv matrices in MEM, loads
 Wq and Wk into the two MXMs, streams X through both MXMs, sends Q/K int32 results
 to VXM, requantizes to int8 with ALU `Multiply` + `Cast(Int8)`, stores Q/K int8
 streams back to MEM, then loads Q into MXM0 and streams K to compute sampled
@@ -69,23 +69,23 @@ fp32, stores that intermediate in MEM, and computes each query row maximum with
 an ALU self-feedback `Max`. Pass 2 reloads scaled scores and saved maxima,
 computes `exp(x - max)`, and accumulates each row sum with a self-feedback
 `Add`. Passes 2 and 3 stripe key positions across four independent MEM groups
-and use four VXM ALU pipelines in parallel. Pass 2 combines four 40-element
-partial sums into the final 160-element row sum. Pass 3 reloads exponentials
+and use four VXM ALU pipelines in parallel. Pass 2 combines four 8-element
+partial sums into the final 32-element row sum. Pass 3 reloads exponentials
 and saved sums, divides, scales,
 `Cast(Int8)`, and stores the final attention probabilities in MEM. MXM emits one
 key position per cycle while VXM lanes represent queries, so both reductions
 run without a physical transpose or host-side reduction. Pass 1 still takes
-160 data cycles for the full-row maximum; the striped Pass 2 and Pass 3 each
-take 40 data cycles.
+32 data cycles for the full-row maximum; the striped Pass 2 and Pass 3 each
+take 8 data cycles.
 X rows are striped across 16 MEM slices. MXM1 loads 16 original X rows per cycle
 as weight columns, so its buffer is logically `X^T` without materializing a
-transposed matrix. After softmax pass 1 drains, ICU streams the 320 columns of
+transposed matrix. After softmax pass 1 drains, ICU streams the 64 columns of
 Wv on `E16..E31`; MXM1 computes one row of `V^T = Wv^T * X^T` per cycle.
 ALU3..5 requantize those rows and stripe them across 16 MEM slices. The final
-phase reads the striped `V^T` directly on 16 weight streams and loads MXM1 in 20
+phase reads the striped `V^T` directly on 16 weight streams and loads MXM1 in 4
 cycles, eliminating the former full-matrix V transpose. ICU then reads the
 striped softmax layout, SXM assembles one query row per cycle, and MXM1 computes
-`softmax * V`. The `160 x 320` int32 result returns on `W0..W3`, is stored in
+`softmax * V`. The `32 x 64` int32 result returns on `W0..W3`, is stored in
 four MEM slices, and is checked against golden data.
 The test writes an ICU dispatch trace to
 `build-vs2026/logs/single_head_attention/icu.log`.
@@ -152,7 +152,7 @@ ctest --test-dir build-vs2019 -C Debug -R sxm_softmax_v_test --output-on-failure
 
 This test initializes softmax and V only in MEM SRAM, then executes ICU-driven
 MEM Read, MXM `IW`, SXM Transpose, non-identity Permute, MXM Compute, and
-four-byte MEM Write queues for `seq_len=160`. The final `160 x 320` int32 matrix
+four-byte MEM Write queues for `seq_len=32`. The final `32 x 64` int32 matrix
 is reconstructed from four MEM slices and checked against golden data. Its ICU
 trace is written to
 `logs/sxm_softmax_v/icu.log` under the active CTest build directory.

@@ -165,7 +165,7 @@ private:
     static void check_tile(std::size_t tile)
     {
         if (tile >= kTileCount) {
-            throw std::out_of_range("VXM slice tile is outside the 20-row slice");
+            throw std::out_of_range("VXM slice tile is outside the configured slice");
         }
     }
 

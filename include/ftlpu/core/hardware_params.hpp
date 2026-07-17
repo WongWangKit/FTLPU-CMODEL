@@ -4,7 +4,7 @@
 
 namespace ftlpu::hw {
 
-constexpr std::size_t kTileRows = 20;
+constexpr std::size_t kTileRows = 4;
 constexpr std::size_t kLanesPerTile = 16;
 constexpr std::size_t kPhysicalVectorBytes = kTileRows * kLanesPerTile;
 
@@ -46,11 +46,11 @@ constexpr std::size_t kMemLanesPerCycle = kLanesPerTile;
 constexpr std::size_t kMemReadBytesPerCycle = kMemLanesPerCycle * kStreamRegisterBytes;
 constexpr std::size_t kMemWriteBytesPerCycle = kMemLanesPerCycle * kStreamRegisterBytes;
 
-constexpr std::size_t kMxmRows = 320;
-constexpr std::size_t kMxmColumns = 320;
+constexpr std::size_t kMxmRows = kPhysicalVectorBytes;
+constexpr std::size_t kMxmColumns = kPhysicalVectorBytes;
 constexpr std::size_t kMxmSupercellRows = 16;
 constexpr std::size_t kMxmSupercellColumns = 16;
-constexpr std::size_t kMxmSupercellsPerPlane = 20;
+constexpr std::size_t kMxmSupercellsPerPlane = kTileRows;
 constexpr std::size_t kMxmLoadStreamsPerCycle = 16;
 constexpr std::size_t kMxmLoadBytesPerCycle = kLanesPerTile * kMxmLoadStreamsPerCycle * kStreamRegisterBytes;
 
@@ -59,18 +59,19 @@ constexpr std::size_t kSxmConcurrentStreamOps = 16;
 constexpr std::size_t kHemispheres = 2;
 constexpr std::size_t kPublicSramBlocks = 88;
 constexpr std::size_t kModeledSramBlocks = kPublicSramBlocks / kHemispheres;
-// One 2.5-MiB SRAM bank is owned by each MEM slice.
+// One vector-wide SRAM block, split into two address banks, is owned by each
+// MEM slice.
 constexpr std::size_t kSramBlocksPerSlice = 1;
 constexpr std::size_t kSramBlocks = kModeledSramBlocks;
 constexpr std::size_t kSramRowBytes = kPhysicalVectorBytes;
 constexpr std::size_t kSramDepthRows = 8192;
-// Compatibility alias for code that historically called a 320-byte row a word.
+// Compatibility alias for code that historically called a vector row a word.
 constexpr std::size_t kSramDepthWords = kSramDepthRows;
 constexpr std::size_t kSramBlockBytes = kSramRowBytes * kSramDepthRows;
 constexpr std::size_t kTotalSramBytes = kSramBlocks * kSramBlockBytes;
 constexpr std::size_t kPublicTotalSramBytes = kPublicSramBlocks * kSramBlockBytes;
 
-static_assert(kPhysicalVectorBytes == 320);
+static_assert(kPhysicalVectorBytes == 64);
 static_assert(kMemSliceColumns % kMemSlicesPerGroup == 0);
 static_assert(kMemBoundaryStreamRegisterColumns == 12);
 static_assert(kSystemStreamRegisterColumns == 13);
@@ -89,8 +90,8 @@ static_assert(kMxmColumns == kMxmSupercellColumns * kMxmSupercellsPerPlane);
 static_assert(kMxmLoadStreamsPerCycle == kMxmSupercellColumns);
 static_assert(kMxmLoadBytesPerCycle == 256);
 static_assert(kSxmConcurrentStreamOps == 16);
-static_assert(kSramBlockBytes == 5 * 1024 * 1024 / 2);
-static_assert(kTotalSramBytes == 110 * 1024 * 1024);
-static_assert(kPublicTotalSramBytes == 220 * 1024 * 1024);
+static_assert(kSramBlockBytes == 512 * 1024);
+static_assert(kTotalSramBytes == 22 * 1024 * 1024);
+static_assert(kPublicTotalSramBytes == 44 * 1024 * 1024);
 
 } // namespace ftlpu::hw

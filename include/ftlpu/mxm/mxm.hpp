@@ -160,7 +160,7 @@ public:
     {
         check_tile(tile);
         if (column_block >= hw::kMxmSupercellsPerPlane) {
-            throw std::out_of_range("MXM column block is outside the 20-column array");
+            throw std::out_of_range("MXM column block is outside the configured array");
         }
         return last_computing_[tile][column_block];
     }
@@ -182,7 +182,7 @@ private:
     static void check_tile(std::size_t tile)
     {
         if (tile >= hw::kMxmSupercellsPerPlane) {
-            throw std::out_of_range("MXM tile is outside the 20-row array");
+            throw std::out_of_range("MXM tile is outside the configured array");
         }
     }
 

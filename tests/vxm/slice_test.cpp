@@ -103,9 +103,9 @@ int main()
     assert(text.find("ICU -> VXM alu0") != std::string::npos);
     assert(text.find("vxm_slice cycle 0") != std::string::npos);
     assert(text.find("tile 0 alu0 cast") != std::string::npos);
-    assert(text.find("tile 19 alu0 cast") != std::string::npos);
+    assert(text.find("tile 3 alu0 cast") != std::string::npos);
     assert(text.find("tile 0 output") != std::string::npos);
-    assert(text.find("tile 19 output") != std::string::npos);
+    assert(text.find("tile 3 output") != std::string::npos);
 
     return 0;
 }

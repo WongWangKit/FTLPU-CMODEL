@@ -7,7 +7,7 @@
 
 namespace {
 
-constexpr std::size_t kAttentionSize = 160;
+constexpr std::size_t kAttentionSize = 32;
 constexpr std::size_t kBlockSize = ftlpu::hw::kLanesPerTile;
 constexpr std::size_t kBlocks = kAttentionSize / kBlockSize;
 
@@ -80,8 +80,8 @@ int main()
     }
 
     // Staging supplies the ten chunks for one query in reverse block order.
-    // Permute map restores key order in lanes 0..159; lanes 160..319 are the
-    // zero padding required by the 320-wide MXM activation input.
+    // Permute restores key order in the active lanes and zero-fills the rest
+    // of the configured MXM activation vector.
     auto map = ftlpu::Permute320::identity_map();
     for (std::size_t output = 0; output < kAttentionSize; ++output) {
         const auto key_block = output / kBlockSize;

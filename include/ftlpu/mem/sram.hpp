@@ -11,10 +11,10 @@
 
 namespace ftlpu {
 
-// One physical SRAM bank owned by one MEM functional slice.  A bank contains
-// 8192 rows, and every row spans all 20 tiles (16 bytes per tile):
+// One SRAM storage block owned by one MEM functional slice. It contains 8192
+// rows (two 4096-row banks), and every row spans all configured tiles:
 //
-//   8192 rows * (20 tiles * 16 bytes) = 2.5 MiB.
+//   8192 rows * (4 tiles * 16 bytes) = 512 KiB.
 //
 // MEM instructions address rows.  As an instruction travels through a tile,
 // that tile reads or writes its own contiguous 16-byte portion of the row.
@@ -79,7 +79,7 @@ private:
     static std::size_t tile_byte_offset(std::size_t tile)
     {
         if (tile >= hw::kTileRows) {
-            throw std::out_of_range("SRAM tile is outside the 20-row MEM slice");
+            throw std::out_of_range("SRAM tile is outside the configured MEM slice");
         }
         return tile * kBytesPerTileSegment;
     }
@@ -88,7 +88,7 @@ private:
     {
         check_row(row);
         if (byte_offset >= kBytesPerRow) {
-            throw std::out_of_range("SRAM byte offset is outside the 320-byte row");
+            throw std::out_of_range("SRAM byte offset is outside the physical vector row");
         }
         return row * kBytesPerRow + byte_offset;
     }

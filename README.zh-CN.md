@@ -15,18 +15,18 @@ ALU 指令队列；SXM 对 eastward 向量执行 transpose 或 permute；ICU 将
 
 仓库当前建模了：
 
-- `MEM`：44 个 slice column、20 个 tile row、每个 tile 16 lane，每 lane 有
+- `MEM`：44 个 slice column、4 个 tile row、每个 tile 16 lane，每 lane 有
   32 条 east stream 和 32 条 west stream。每个 stream register 宽 1 byte。
   每个 tile-local SRAM 有 2 个 bank，每个 bank 为 4096 x 16 byte。
-- `MXM`：east 侧两个 MXM unit。每个 unit 是 20 x 20 个 16 x 16 supercell。
+- `MXM`：east 侧两个 MXM unit。每个 unit 是 4 x 4 个 16 x 16 supercell。
   每个 supercell 有两个对等 weight buffer；`IW` 选择接收右移 weight stream 的
   buffer，`Compute` 同时选择 weight buffer 和 output stream base，执行带 int32
-  accumulation 的 320 x 320 int8 GEMM datapath。
-- `VXM`：west 侧一个 VXM slice，包含 20 个 superlane/tile。每个 superlane
+  accumulation 的 64 x 64 int8 GEMM datapath。
+- `VXM`：west 侧一个 VXM slice，包含 4 个 superlane/tile。每个 superlane
   有 16 lane，每 lane 有 16 个 ALU issue queue。ALU 输出可向 stream 写入 int8
   或 fp16 byte。
 - `SXM`：MEM 与 MXM 之间 east 侧的数据移动 slice。它消费和生成 32 条 east
-  stream，支持 `Transpose sg16` 和 320-lane `Permute`；队列没有发射时被动
+  stream，支持 `Transpose sg16` 和 64-lane `Permute`；队列没有发射时被动
   forward 数据。
 - `ICU`：按 queue 分发指令，支持 `NOP N` 和 `Repeat n,d`，包括 MEM address
   stride。两个 SXM queue 分别发射 Transpose 和 Permute 指令。
@@ -52,7 +52,7 @@ VXM 指令在 cycle 0 之前离线生成并加载到 ICU。MXM output 由 `Compu
 控制；runtime loop 只推进时钟并桥接数据。这正是未来编译器后端应生成的形态。
 
 `single_head_attention_test` 建模完整 single-head attention datapath。它在 MEM
-初始化 `seq_len=160`、`hidden=320` 的输入和 Wq/Wk/Wv 矩阵，将 Wq/Wk 加载到
+初始化 `seq_len=32`、`hidden=64` 的输入和 Wq/Wk/Wv 矩阵，将 Wq/Wk 加载到
 两个 MXM，使 X 流经两个 MXM，并将 Q/K int32 result 送入 VXM。ALU 通过
 `Multiply` + `Cast(Int8)` requantize，随后将 Q/K int8 stream 写回 MEM，再将
 Q 加载到 MXM0、发送 K，计算采样的 `K * Q^T` score 并与 golden data 比较。
@@ -62,20 +62,20 @@ Raw score 不写入 MEM：MXM west-stream score output 直接进入 VXM softmax 
 计算每个 query row 的 maximum。Pass 2 重新加载 scaled score 和 maximum，计算
 `exp(x - max)` 并通过 self-feedback `Add` 累加 row sum。Pass 2/3 将 key position
 分到四个独立 MEM group，使用四条 VXM ALU pipeline 并行执行。Pass 2 将四个
-40-element partial sum 合并为 160-element row sum。Pass 3 重新加载 exponential
+8-element partial sum 合并为 32-element row sum。Pass 3 重新加载 exponential
 和 sum，执行 divide、scale、`Cast(Int8)`，并保存最终 attention probability。
 
 MXM 每 cycle 输出一个 key position，而 VXM lane 表示 query，因此 reduction 无需
-物理 transpose 或 host reduction。Pass 1 仍需 160 个 data cycle；条带化的
-Pass 2 和 Pass 3 各需 40 个 data cycle。
+物理 transpose 或 host reduction。Pass 1 仍需 32 个 data cycle；条带化的
+Pass 2 和 Pass 3 各需 8 个 data cycle。
 
-MXM0 计算 QK 时，MXM1 将 Wv 加载到第二个 weight buffer，并从独立 X stream
-计算 V。ALU3..5 在 ALU0..2 执行 softmax pass 1 的同时 requantize V，然后将已
-验证的 int8 V 保存到 MEM。Softmax 完成后，ICU 在 `E1` 读回 V；SXM
-Transpose+Permute 把 row-major V 转换成 20 cycle 的 `E16..E31` weight traffic
-并加载 MXM1。随后 ICU 读取条带化 softmax SRAM layout，SXM 每 cycle 组装一行
-query，MXM1 计算 `softmax * V`。`160 x 320` int32 result 通过 `W0..W3`
-返回四个 MEM slice，并与 golden data 比较。
+X row 跨 16 个 MEM slice 条带存储。MXM1 每 cycle 将 16 行原始 X 作为 weight
+column 加载，因此无需物化转置矩阵即可在 buffer 中形成逻辑 `X^T`。Softmax
+pass 1 排空后，ICU 在 `E16..E31` 按 column 发送 Wv，MXM1 每 cycle 生成一行
+`V^T = Wv^T * X^T`。ALU3..5 requantize 后将 V 条带写回 MEM。最终 phase 直接
+用 16 条 weight stream 在 4 cycle 内加载 V，无需对 V 执行 SXM transpose。
+随后 SXM 组装 softmax query row，MXM1 计算 `softmax * V`。`32 x 64` int32
+result 通过 `W0..W3` 返回四个 MEM slice，并与 golden data 比较。
 
 测试将 ICU dispatch trace 写入
 `build-vs2019/logs/single_head_attention/icu.log`。
@@ -142,7 +142,7 @@ ctest --test-dir build-vs2019 -C Debug -R sxm_softmax_v_test --output-on-failure
 
 该测试只在 MEM SRAM 初始化 softmax 和 V，随后执行 ICU 驱动的 MEM Read、
 MXM `IW`、SXM Transpose、非 identity Permute、MXM Compute 和四 byte MEM
-Write queue。最终从四个 MEM slice 还原 `160 x 320` int32 matrix，并与 golden
+Write queue。最终从四个 MEM slice 还原 `32 x 64` int32 matrix，并与 golden
 data 比较。ICU trace 位于当前 CTest build 目录下的 `logs/sxm_softmax_v/icu.log`。
 
 ## 日志和图示

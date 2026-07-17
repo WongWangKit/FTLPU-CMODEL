@@ -27,7 +27,7 @@ The modeled slice uses the constants in `include/ftlpu/core/hardware_params.hpp`
 
 Current topology:
 
-- 20 tile rows.
+- 4 tile rows.
 - 44 MEM slice columns.
 - 4 MEM slices per stream-register group.
 - 11 MEM slice groups.
@@ -38,10 +38,10 @@ Current topology:
 - 1 byte per stream register.
 - One modeled hemisphere: 44 MEM/SRAM slice columns.
 - Public two-hemisphere total: 88 MEM/SRAM slices.
-- Each slice column has 20 tile-local SRAM blocks.
+- Each slice column has 4 tile-local SRAM blocks.
 - Each tile-local SRAM block has two banks.
 - Each bank is 4096 words x 16 bytes.
-- A complete slice is 20 x 2 x 4096 x 16 bytes = 2.5 MiB.
+- A complete slice is 4 x 2 x 4096 x 16 bytes = 512 KiB.
 
 Software-visible MEM addresses follow the public-style layout:
 
@@ -104,7 +104,7 @@ The MXM model lives under `include/ftlpu/mxm/`.
 Current components:
 
 - `MxmSupercell`: one 16 x 16 int8 weight block.
-- `MxmArray`: a 20 x 20 grid of supercells.
+- `MxmArray`: a 4 x 4 grid of supercells.
 - `MxmControlSlice`: south-to-north control pipeline for `IW` and `Compute`.
 - `Mxm`: wrapper containing the array, its control slice, and the datapath
   state for activation flow, int32 accumulation, and output stream injection.
@@ -116,8 +116,8 @@ The system contains two MXMs on the east side of MEM.
 Each supercell has two peer weight buffers. `IW(buffer)` injects one 16 x 16
 weight block into the west side of the selected row buffer. On every valid `IW`
 cycle for that row, the selected buffer shifts one column to the east and the
-new block enters column 0. To end with column 0..19 in the expected order, MEM
-reads weight column blocks in reverse order: column block 19 first, then 18,
+new block enters column 0. To end with column 0..3 in the expected order, MEM
+reads weight column blocks in reverse order: column block 3 first, then 2,
 down to 0. There is no separate `LW` commit instruction:
 `Compute(buffer, activation_stream, output_stream)` directly selects which
 buffer supplies weights for that activation token.
@@ -128,8 +128,8 @@ Each MXM uses 16 streams per cycle:
 - MXM 0 consumes streams `E0..E15`.
 - MXM 1 consumes streams `E16..E31`.
 
-For a full 320 x 320 weight matrix, there are 20 column blocks. The current
-tests issue 20 continuous `IW` pulses into one buffer while the other buffer can
+For a full 64 x 64 weight matrix, there are 4 column blocks. The current
+tests issue 4 continuous `IW` pulses into one buffer while the other buffer can
 still be used by in-flight compute. The two weight buffers have independent row
 shift state, so loading one buffer does not disturb the other.
 
@@ -150,7 +150,7 @@ The system-owned MXM runtime models activation flow:
 - Partial sums accumulate into int32 result columns.
 
 The runtime is owned by `TspSliceSystem`. ICU `Compute` pulses consume MEM east
-handoff streams through the MXM datapath. When the contribution from tile row 19
+handoff streams through the MXM datapath. When the contribution from tile row 3
 completes a result column block, the MXM automatically injects the int32 result
 bytes onto the MEM west streams named by the `Compute` instruction.
 
@@ -163,7 +163,7 @@ Hierarchy:
 - `VxmAlu`: vector helper for supported ALU ops.
 - `VxmLane`: one lane with 16 ALUs and one instruction queue per ALU.
 - `VxmSuperlane`: 16 lanes.
-- `VxmSlice`: 20 superlanes/tiles with south-to-north instruction flow.
+- `VxmSlice`: 4 superlanes/tiles with south-to-north instruction flow.
 
 Supported ALU opcodes currently include:
 
@@ -289,7 +289,7 @@ The main integration file is:
 tests/integration/mem_dual_mxm_swiglu_test.cpp
 ```
 
-It builds a 160 x 320 activation matrix and three 640 x 320 weight matrices:
+It builds a 32 x 64 activation matrix and three 128 x 64 weight matrices:
 
 - gate projection weights
 - up projection weights
@@ -304,12 +304,12 @@ out = quant((hidden_left * W_down_left) + (hidden_right * W_down_right))
 
 Shapes:
 
-- Activation: `160 x 320`, int8.
-- Gate weight: effectively `320 x 640`, loaded in two 320-column passes.
-- Up weight: effectively `320 x 640`, loaded in two 320-column passes.
-- Hidden: `160 x 640`, int8.
-- Down weight: `640 x 320`, split across two MXMs.
-- Final output: `160 x 320`, int8.
+- Activation: `32 x 64`, int8.
+- Gate weight: effectively `64 x 128`, loaded in two 64-column passes.
+- Up weight: effectively `64 x 128`, loaded in two 64-column passes.
+- Hidden: `32 x 128`, int8.
+- Down weight: `128 x 64`, split across two MXMs.
+- Final output: `32 x 64`, int8.
 
 The generated data uses non-trivial symmetric quantization scales so the output
 is not mostly zero. The test compares SRAM contents against golden reference
@@ -346,9 +346,9 @@ pass 3: 4 x [Divide(sum) -> Multiply(127) -> Cast(Int8)]
 ```
 
 The first `Max` instruction uses negative infinity as its seed and the first
-`Add` in each parallel group uses zero. Pass 1 reduces all 160 key positions.
+`Add` in each parallel group uses zero. Pass 1 reduces all 32 key positions.
 Passes 2 and 3 stripe keys by `key % 4` across four disjoint four-slice MEM
-groups and four VXM pipelines. Each pass-2 feedback `Add` reduces 40 values;
+groups and four VXM pipelines. Each pass-2 feedback `Add` reduces 8 values;
 three additional `Add` instructions combine the four partial sums. The saved
 row maximum and row sum are read once per pass and held in an ALU output for
 reuse. Scaled scores, exponentials, final maxima, and final sums are moved
@@ -361,7 +361,7 @@ rows per cycle into 16 weight streams, making each original X row an MXM output
 column. The weight buffer is therefore logically `X^T` without a separate SXM
 transpose. Once softmax pass 1 and its streams drain, ICU reads Wv by column on
 `E16..E31`. MXM1 computes `V^T = Wv^T * X^T`, one hidden column per cycle.
-ALU3..5 requantize each 320-byte output vector, whose first 160 lanes are one
+ALU3..5 requantize each 64-byte output vector, whose first 32 lanes are one
 column of V, and stripe the vectors across 16 MEM slices. The test validates Q,
 K, V, QK scores, softmax maxima and sums, and every final softmax byte.
 
@@ -369,40 +369,40 @@ The final attention phase is also ICU scheduled. MEM reads 16 striped `V^T`
 rows in parallel and emits them directly on `E16..E31` for each hidden-column
 block. The blocks are read in reverse hidden-block order because MXM `IW` shifts
 each new block into column 0. MXM1 buffer 0 is therefore fully replaced by V in
-20 cycles without applying SXM Transpose or Permute to V.
+4 cycles without applying SXM Transpose or Permute to V.
 MEM then reads the four striped softmax columns in reverse lane order within
 each 16-key block. SXM Transpose+Permute restores key order and emits one
-zero-padded 320-byte query row per cycle. MXM1 computes 160 rows of
+zero-padded 64-byte query row per cycle. MXM1 computes 32 rows of
 `softmax * V`; `W0..W3` carry the little-endian int32 output back to four MEM
 slices. The test validates the complete MXM weight buffer, all MXM output
-blocks, and the final `160 x 320` SRAM matrix against golden data.
+blocks, and the final `32 x 64` SRAM matrix against golden data.
 
 `sxm_attention_transpose_test` verifies the block algorithm needed before that
-GEMM. It aligns 16 key columns on 16 streams, executes 100 real
-`Transpose sg16` instructions for the `10 x 10` grid of `16 x 16` blocks,
+GEMM. It aligns 16 key columns on 16 streams, executes 4 real
+`Transpose sg16` instructions for the `2 x 2` grid of `16 x 16` blocks,
 stages the resulting row chunks, and applies a non-identity `Permute320` map to
-assemble each 160-element query row in a zero-padded 320-lane MXM activation.
-All 25,600 values and all 160 padding lanes are checked.
+assemble each 32-element query row in a zero-padded 64-lane MXM activation.
+All 1,024 values and 32 padding lanes per row are checked.
 
 `sxm_softmax_v_test` verifies the complete stream-register path for
-`seq_len=160`. Test code initializes only SRAM and the ICU queues. ICU MEM
-Read instructions move V through `E16..E31` while MXM1 receives 20 continuous
+`seq_len=32`. Test code initializes only SRAM and the ICU queues. ICU MEM
+Read instructions move V through `E16..E31` while MXM1 receives 4 continuous
 `IW` pulses. A separate MEM Read queue moves softmax columns on `E1`. Because
 MEM instructions propagate north, SXM independently collects 16 phases for
-each tile; Transpose is issued for `160 + 20 - 1` cycles to cover the complete
+each tile; Transpose is issued for `32 + 4 - 1` cycles to cover the complete
 diagonal wavefront. Each local `16 x 16` block still has 16-cycle latency.
 
 Continuous Permute instructions first capture the local Transpose segments and
-assemble the ten key blocks belonging to each query. The MEM reader deliberately
+assemble the two key blocks belonging to each query. The MEM reader deliberately
 reads the 16 keys inside each block in reverse order, and a non-identity
 lane-reversal `Permute320` map restores canonical key order. Once the complete
-wavefront has been collected, Permute emits one zero-padded 320-byte query row
+wavefront has been collected, Permute emits one zero-padded 64-byte query row
 per cycle with the tile skew required by MXM Compute.
 
-MXM1 consumes 160 consecutive transposed rows and emits int32 results on
+MXM1 consumes 32 consecutive transposed rows and emits int32 results on
 `W0..W3`. Four MEM Write queues store the four little-endian result bytes in
 four adjacent MEM slices. The test reconstructs every result from SRAM and
-compares the complete `160 x 320` matrix against a scalar golden model; it also
+compares the complete `32 x 64` matrix against a scalar golden model; it also
 checks every MXM output block before writeback.
 
 The current offline test only loads the ICU queues, initializes external MEM
@@ -418,9 +418,9 @@ pass use this ping-pong schedule:
 - MXM0 starts `IW` immediately when the previous GEMM starts. Shared activation
   traffic uses alternate stream IDs during the first few rows so it does not
   collide with `E0..E15`.
-- MXM1 starts `IW` immediately after MXM0's 20-cycle `IW` window. The current
-  FFN schedule uses `MXM0: cycles 38..57` and `MXM1: cycles 58..77` for the
-  second gate/up pass.
+- MXM1 weight transfer still waits until activation traffic moves away from
+  `E16..E31`. The actual `IW` payload is only 4 cycles; the remaining separation
+  is a stream-scheduling constraint, not an MXM array-size constraint.
 - In the early-compute variant, the second gate/up GEMM starts as soon as the
   compute queue is free. The down weights are loaded in two segments: MXM1 can
   start early after stream conflicts clear, while MXM0 waits until the `E0`
@@ -434,8 +434,8 @@ pass use this ping-pong schedule:
 `mxm.log` includes per-phase and total MXM performance counters:
 
 ```text
-offline_gate_up_p0_mxm0 perf cycles=160 active_cycles=160 ...
-offline_total_mxm0 perf cycles=614 active_cycles=480 ...
+offline_gate_up_p0_mxm0 perf cycles=32 active_cycles=32 ...
+offline_total_mxm0 perf cycles=... active_cycles=96 ...
 ```
 
 The per-phase utilization uses the tile0 compute window. The total utilization
@@ -471,12 +471,13 @@ offline ICU FFN program loaded before cycle 0
   load0.mxm0_iw=... gemm0=... gemm0_output=...
 ```
 
-The early-compute variant currently prints:
+The early-compute variant prints the schedule calculated for the configured
+array size:
 
 ```text
 offline ICU FFN program loaded before cycle 0
   schedule=early_mxm_compute p1 compute starts as soon as the compute queue is free
-  load0.mxm0_iw=18 load0.mxm1_iw=18 load0.done=38 gemm0=38 gemm0_output=38 load1.mxm1_iw=58 load1.mxm0_iw=38 load1.done=78 gemm1=198 gemm1_output=236 down_load.mxm1_iw=256 down_load.mxm0_iw=367 down_load.done=387 down_gemm=450 down_output=450
+  load0.mxm0_iw=... gemm0=... gemm0_output=...
 ```
 
 ## Data Layout Summary
@@ -495,7 +496,7 @@ Weights:
 - Staged across MEM columns `0..31`.
 - MXM0 reads weight streams from columns `0..15`.
 - MXM1 reads weight streams from columns `16..31`.
-- Each pass reads 20 column blocks in reverse order, because `IW` shifts each
+- Each pass reads 4 column blocks in reverse order, because `IW` shifts each
   row's selected weight buffer eastward.
 
 SwiGLU hidden output:

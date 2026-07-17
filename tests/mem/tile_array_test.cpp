@@ -50,8 +50,8 @@ int main()
     }
     assert(caught);
 
-    model->set_sram_lane_byte(0, 19, ftlpu::hw::kSramDepthRows - 1, 15, 0xa5);
-    assert(model->sram_lane_byte(0, 19, ftlpu::hw::kSramDepthRows - 1, 15) == 0xa5);
+    model->set_sram_lane_byte(0, ftlpu::hw::kTileRows - 1, ftlpu::hw::kSramDepthRows - 1, 15, 0xa5);
+    assert(model->sram_lane_byte(0, ftlpu::hw::kTileRows - 1, ftlpu::hw::kSramDepthRows - 1, 15) == 0xa5);
 
     caught = false;
     try {

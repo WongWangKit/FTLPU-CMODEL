@@ -27,10 +27,10 @@ constexpr std::size_t kMatrixCount = 3;
 constexpr std::size_t kGateMatrix = 0;
 constexpr std::size_t kUpMatrix = 1;
 constexpr std::size_t kDownMatrix = 2;
-constexpr std::size_t kActivationRows = 160;
+constexpr std::size_t kActivationRows = 32;
 constexpr std::size_t kKPerPass = ftlpu::hw::kMxmRows;
 constexpr std::size_t kColumns = ftlpu::hw::kMxmColumns;
-constexpr std::size_t kHiddenColumns = 640;
+constexpr std::size_t kHiddenColumns = 2 * kColumns;
 constexpr std::size_t kPasses = kHiddenColumns / kColumns;
 constexpr std::size_t kBlocks = ftlpu::hw::kMxmSupercellsPerPlane;
 constexpr std::size_t kLanes = ftlpu::hw::kLanesPerTile;
@@ -53,6 +53,7 @@ constexpr std::size_t kLhsWestStreamBase = kLhsStreamBase - ftlpu::hw::kEastStre
 constexpr std::size_t kRhsWestStreamBase = kRhsStreamBase - ftlpu::hw::kEastStreams;
 constexpr std::size_t kOutputStream = 0;
 constexpr std::size_t kSwigluOutputStream = 31;
+constexpr std::size_t kMxm1PingPongIwDelay = 20;
 constexpr std::size_t kSwigluLatency = 9;
 constexpr std::size_t kAddQuantLatency = 5;
 constexpr std::size_t kWeightHandoffBaseCycle = 18;
@@ -218,8 +219,8 @@ bool verify_loaded_weights(
     std::size_t pass,
     const char* label)
 {
-    const std::array<std::size_t, 4> sample_tiles {0, 7, 13, 19};
-    const std::array<std::size_t, 5> sample_columns {0, 1, 31, 128, 319};
+    const std::array<std::size_t, 4> sample_tiles {0, 1, 2, kBlocks - 1};
+    const std::array<std::size_t, 5> sample_columns {0, 1, 15, kColumns / 2, kColumns - 1};
     for (const auto tile : sample_tiles) {
         for (const auto column : sample_columns) {
             const auto column_block = column / kLoadStreams;
@@ -956,7 +957,8 @@ std::array<MatrixI32, kMxmCount> run_dual_mxm_gemm(
     }
 
     if (logs.enabled) {
-        logs.mxm << "dual_mxm_compute shared_activation_streams=E0..E15 rows=160 k=320\n";
+        logs.mxm << "dual_mxm_compute shared_activation_streams=E0..E15 rows="
+                 << kActivationRows << " k=" << kKPerPass << '\n';
     }
     if (swiglu_stream != nullptr) {
         logs.vxm << "vxm_swiglu source=MEM west edge gate_streams=W0..W3 up_streams=W4..W7 out=E"
@@ -1505,7 +1507,12 @@ DualMxmLoadSchedule make_pingpong_load_schedule(
 DualMxmLoadSchedule initial_weight_load_schedule(std::size_t start)
 {
     const auto iw_start = start + kWeightHandoffBaseCycle;
-    return DualMxmLoadSchedule {iw_start, iw_start, iw_issue_window_end(iw_start)};
+    const auto stream_drain = east_stream_cycles_to_sreg11(kActivationMemColumn);
+    return DualMxmLoadSchedule {
+        iw_start,
+        iw_start,
+        iw_issue_window_end(iw_start) + stream_drain,
+    };
 }
 
 std::size_t pingpong_candidate_load_start(std::size_t gemm_start)
@@ -1516,7 +1523,9 @@ std::size_t pingpong_candidate_load_start(std::size_t gemm_start)
 DualMxmLoadSchedule pingpong_buffer_load_after_gemm_start(std::size_t gemm_start)
 {
     const auto mxm0_iw_start = pingpong_candidate_load_start(gemm_start);
-    const auto mxm1_iw_start = mxm0_iw_start + kBlocks;
+    // E16 carries the first activation rows while MXM0 loads on E0..E15.
+    // Delay MXM1 until the activation scheduler has moved away from E16..E31.
+    const auto mxm1_iw_start = mxm0_iw_start + kMxm1PingPongIwDelay;
     return make_pingpong_load_schedule(mxm0_iw_start, mxm1_iw_start, gemm_start);
 }
 
@@ -2295,7 +2304,8 @@ try
     stage_weight_matrices(system->mem());
     stage_activation_matrix(system->mem());
     if (logs.enabled) {
-        logs.mem << "mem initialized activation=160x320 gate/up/down weights=640x320\n";
+        logs.mem << "mem initialized activation=" << kActivationRows << 'x' << kKPerPass
+                 << " gate/up/down weights=" << kHiddenColumns << 'x' << kKPerPass << '\n';
         logs.mem << "  activation matrix column=" << kActivationMemColumn << '\n';
         logs.mem << "  swiglu output column=" << kSwigluMemColumn << '\n';
         logs.mem << "  final output column=" << kFinalMemColumn << '\n';

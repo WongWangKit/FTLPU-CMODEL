@@ -233,14 +233,14 @@ private:
     static void check_tile(std::size_t tile)
     {
         if (tile >= hw::kMxmSupercellsPerPlane) {
-            throw std::out_of_range("MXM control tile is outside the 20-row array");
+            throw std::out_of_range("MXM control tile is outside the configured array");
         }
     }
 
     static void check_column(std::size_t column)
     {
         if (column >= hw::kMxmSupercellsPerPlane) {
-            throw std::out_of_range("MXM control supercell column is outside the 20-column array");
+            throw std::out_of_range("MXM control supercell column is outside the configured array");
         }
     }
 

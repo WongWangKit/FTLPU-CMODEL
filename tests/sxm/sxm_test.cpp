@@ -68,25 +68,25 @@ int main()
     assert(north[0][0] == 1);
     assert(north[0][14] == 15);
     assert(north[0][15] == 16);
-    assert(north[18][15] == 304);
-    assert(north[19][0] == 305);
-    assert(north[19][15] == -1);
+    assert(north[ftlpu::hw::kTileRows - 2][15] == 48);
+    assert(north[ftlpu::hw::kTileRows - 1][0] == 49);
+    assert(north[ftlpu::hw::kTileRows - 1][15] == -1);
 
     const auto south = ftlpu::SxmSlice::shift_select(input_stream, ftlpu::SxmShiftSource::SouthShifted, 2, -1);
     assert(south[0][0] == -1);
     assert(south[0][1] == -1);
     assert(south[0][2] == 0);
     assert(south[1][0] == 14);
-    assert(south[19][15] == 317);
+    assert(south[ftlpu::hw::kTileRows - 1][15] == 61);
 
     auto permutation = ftlpu::Permute320::identity_map();
     for (std::size_t index = 0; index < ftlpu::Permute320::kTotalLanes; ++index) {
         permutation[index] = ftlpu::Permute320::kTotalLanes - 1 - index;
     }
     const auto permuted = ftlpu::SxmSlice::permute(input_stream, permutation);
-    assert(permuted[0][0] == 319);
-    assert(permuted[0][15] == 304);
-    assert(permuted[19][15] == 0);
+    assert(permuted[0][0] == 63);
+    assert(permuted[0][15] == 48);
+    assert(permuted[ftlpu::hw::kTileRows - 1][15] == 0);
 
     bool caught = false;
     permutation[1] = permutation[0];
@@ -214,7 +214,7 @@ int main()
     assert(!fabric.cell(0, 0, 0, east0).valid);
     assert(fabric.cell(1, 0, 0, east1).valid);
     assert(fabric.cell(1, 0, 0, east1).data == 15);
-    assert(fabric.cell(1, 19, 0, east1).data == 63);
+    assert(fabric.cell(1, ftlpu::hw::kTileRows - 1, 0, east1).data == 63);
 
     return 0;
 }

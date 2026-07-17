@@ -99,7 +99,7 @@ int main()
     assert(text.find("c" + std::to_string(mem_slice) + ".t0=Read(a=128,s=" + std::to_string(stream) + ")") != std::string::npos);
     assert(text.find("store E" + std::to_string(stream) + " addr=128 bytes=0x") != std::string::npos);
     assert(text.find("load E" + std::to_string(stream) + " addr=128 bytes=0x") != std::string::npos);
-    assert(text.find("tile 19:") != std::string::npos);
+    assert(text.find("tile " + std::to_string(ftlpu::hw::kTileRows - 1) + ":") != std::string::npos);
     assert(text.find("sreg 11: E" + std::to_string(stream) + "=0x" + last_tile_hex) != std::string::npos);
 
     return 0;

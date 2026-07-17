@@ -366,7 +366,7 @@ private:
                     throw std::logic_error("SXM Permute source does not match pending Transpose output stream");
                 }
                 if (output.block >= hw::kTileRows) {
-                    throw std::logic_error("SXM Transpose history exceeds the 20-block plane");
+                    throw std::logic_error("SXM Transpose history exceeds the configured plane");
                 }
                 for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                     transpose_history_[tile][output.block][output.row][lane] =
@@ -393,7 +393,7 @@ private:
     PendingVector assemble_transpose_history(const SxmInstruction& instruction)
     {
         if (transpose_history_query_ >= hw::kMxmRows) {
-            throw std::logic_error("SXM Permute requested more than 320 transposed rows");
+            throw std::logic_error("SXM Permute requested more rows than the physical vector width");
         }
         const auto source_tile = transpose_history_query_ / hw::kLanesPerTile;
         const auto row = transpose_history_query_ % hw::kLanesPerTile;
@@ -431,7 +431,7 @@ private:
         const SxmInstruction& instruction)
     {
         if (transpose_history_weight_column_ >= hw::kTileRows) {
-            throw std::logic_error("SXM weight Permute requested more than 20 column blocks");
+            throw std::logic_error("SXM weight Permute requested too many column blocks");
         }
         const auto source_tile = hw::kTileRows - 1 - transpose_history_weight_column_;
         for (std::size_t stream = 0; stream < hw::kMxmLoadStreamsPerCycle; ++stream) {

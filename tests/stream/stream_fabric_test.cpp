@@ -9,7 +9,7 @@ int main()
     ftlpu::StreamRegisterFabric fabric(3);
     const auto stream = ftlpu::StreamId::East(7);
 
-    // One StreamId denotes the same logical stream across all 320 lanes.
+    // One StreamId denotes the same logical stream across all physical lanes.
     fabric.begin_cycle();
     for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
         ftlpu::StreamPayloadSegment16 segment{};

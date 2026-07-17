@@ -21,7 +21,8 @@ bool require(bool condition, const char* message)
 ftlpu::MxmControlSlice::WeightInput row_input(std::size_t tile, std::size_t supercell_column)
 {
     ftlpu::MxmControlSlice::WeightInput input{};
-    const auto base = static_cast<std::uint8_t>((tile * 20 + supercell_column) & 0xff);
+    const auto base = static_cast<std::uint8_t>(
+        (tile * ftlpu::hw::kMxmSupercellsPerPlane + supercell_column) & 0xff);
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
         for (std::size_t stream = 0; stream < ftlpu::hw::kMxmLoadStreamsPerCycle; ++stream) {
             input[lane][stream] = ftlpu::MxmArray::Supercell::InputWord {
@@ -35,7 +36,8 @@ ftlpu::MxmControlSlice::WeightInput row_input(std::size_t tile, std::size_t supe
 
 std::int8_t expected_weight(std::size_t tile, std::size_t supercell_column, std::size_t lane, std::size_t stream)
 {
-    const auto base = static_cast<std::uint8_t>((tile * 20 + supercell_column) & 0xff);
+    const auto base = static_cast<std::uint8_t>(
+        (tile * ftlpu::hw::kMxmSupercellsPerPlane + supercell_column) & 0xff);
     return static_cast<std::int8_t>(base + lane + stream);
 }
 
@@ -150,22 +152,22 @@ int main()
     if (!require(text.find("tile 0 IW b1 inject") != std::string::npos, "missing tile 0 IW log")) {
         return 1;
     }
-    if (!require(text.find("tile 19 IW b1 inject") != std::string::npos, "missing tile 19 IW log")) {
+    if (!require(text.find("tile 3 IW b1 inject") != std::string::npos, "missing last-tile IW log")) {
         return 1;
     }
     if (!require(text.find("IW buffer1=0x") != std::string::npos, "missing IW buffer log")) {
         return 1;
     }
-    if (!require(text.find("load_matrix:") != std::string::npos, "missing 20x20 load matrix log")) {
+    if (!require(text.find("load_matrix:") != std::string::npos, "missing load matrix log")) {
         return 1;
     }
-    if (!require(text.find("row 0: LLLLLLLLLLLLLLLLLLLL") != std::string::npos, "missing row 0 load marker")) {
+    if (!require(text.find("row 0: LLLL") != std::string::npos, "missing row 0 load marker")) {
         return 1;
     }
-    if (!require(text.find("row 19: LLLLLLLLLLLLLLLLLLLL") != std::string::npos, "missing row 19 load marker")) {
+    if (!require(text.find("row 3: LLLL") != std::string::npos, "missing last-row load marker")) {
         return 1;
     }
-    if (!require(text.find("row 1: LLLLLLLLLLLLLLLLLLLL") != std::string::npos, "missing row 1 load marker")) {
+    if (!require(text.find("row 1: LLLL") != std::string::npos, "missing row 1 load marker")) {
         return 1;
     }
 

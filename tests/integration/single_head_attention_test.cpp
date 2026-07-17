@@ -22,7 +22,7 @@
 
 namespace {
 
-constexpr std::size_t kSeqLen = 160;
+constexpr std::size_t kSeqLen = 32;
 constexpr std::size_t kHidden = ftlpu::hw::kMxmRows;
 constexpr std::size_t kBlocks = ftlpu::hw::kMxmSupercellsPerPlane;
 constexpr std::size_t kLanes = ftlpu::hw::kLanesPerTile;
@@ -96,7 +96,7 @@ constexpr std::size_t kVProjectionLastWrite =
     kVProjectionOutputStart + kHidden - 1 + 2
     + east_stream_write_latency(kVInt8ColumnBase + kVInt8Columns - 1);
 constexpr float kProjectionScale = 1.0f / 256.0f;
-constexpr float kScoreScale = 1.0f / 17.88854381999832f; // 1 / sqrt(320)
+constexpr float kScoreScale = 1.0f / 8.0f; // 1 / sqrt(64)
 constexpr float kSoftmaxInt8Scale = 127.0f;
 
 static_assert(kSeqLen % kSoftmaxParallelRows == 0);
@@ -575,7 +575,7 @@ void emit_fp32_mem_write(
 SoftmaxSchedule emit_direct_score_softmax(Program& program)
 {
     // MXM emits one key per cycle.  VXM lanes are queries, so feedback along
-    // time reduces the 160 keys independently for every query lane.
+    // time reduces all key positions independently for every query lane.
     auto pass1_last_scaled_write = std::size_t {0};
     for (std::size_t key = 0; key < kSeqLen; ++key) {
         const auto issue_cycle = kDirectScoreVxmStart + key;
@@ -1221,8 +1221,8 @@ try
         }
     }
 
-    const std::array<std::size_t, 4> sample_rows {0, 7, 79, 159};
-    const std::array<std::size_t, 6> sample_columns {0, 1, 15, 16, 127, 319};
+    const std::array<std::size_t, 4> sample_rows {0, 7, 15, kSeqLen - 1};
+    const std::array<std::size_t, 6> sample_columns {0, 1, 15, 16, kHidden / 2, kHidden - 1};
     for (const auto row : sample_rows) {
         for (const auto column : sample_columns) {
             const auto q_actual = stored_q_int8(system->mem(), row, column);
@@ -1246,8 +1246,8 @@ try
         }
     }
 
-    const std::array<std::size_t, 5> score_rows {0, 3, 31, 80, 159};
-    const std::array<std::size_t, 5> score_columns {0, 2, 47, 128, 159};
+    const std::array<std::size_t, 5> score_rows {0, 3, 7, 16, kSeqLen - 1};
+    const std::array<std::size_t, 5> score_columns {0, 2, 7, 16, kSeqLen - 1};
     for (const auto row : score_rows) {
         for (const auto column : score_columns) {
             const auto actual = qk_scores[score_index(row, column)];
