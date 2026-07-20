@@ -22,7 +22,6 @@ public:
 
     using Superlane = VxmSuperlane;
     using AluInstruction = VxmLaneAluInstruction;
-    using Int32Vector = Superlane::Int32Vector;
     using Int8Vector = Superlane::Int8Vector;
     using StreamMatrix = Superlane::StreamMatrix;
     using InstructionSlot = std::optional<AluInstruction>;
@@ -46,19 +45,16 @@ public:
         for (auto& superlane : superlanes_) {
             superlane.reset();
         }
-        for (auto& input : input_slots_) {
-            input.reset();
-        }
+        for (auto& hemisphere_inputs : input_slots_) for (auto& input : hemisphere_inputs) input.reset();
         for (auto& output : output_slots_) {
             output.reset();
         }
         for (auto& outputs : output_slots_multi_) {
             outputs.clear();
         }
-        for (auto& required : required_streams_) {
-            required.reset();
-        }
+        for (auto& hemisphere_required : required_streams_) for (auto& required : hemisphere_required) required.reset();
         cycle_ = 0;
+        prepared_ = false;
     }
 
     void issue_south(std::size_t alu, AluInstruction instruction)
@@ -67,31 +63,19 @@ public:
         instruction_queues_[alu].push_back(instruction);
     }
 
-    void set_swiglu_input(std::size_t tile, const Int32Vector& gates, const Int32Vector& ups)
+    void set_stream_inputs(Hemisphere hemisphere, std::size_t tile, const StreamMatrix& streams)
     {
         check_tile(tile);
-        if (input_slots_[tile].has_value()) {
+        auto& input = input_slots_[hemisphere_index(hemisphere)][tile];
+        if (input.has_value()) {
             throw std::logic_error("VXM tile input is already occupied");
         }
-        auto streams = StreamMatrix {};
-        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            const auto gate_bytes = VxmLane::pack_int32(gates[lane]);
-            const auto up_bytes = VxmLane::pack_int32(ups[lane]);
-            for (std::size_t byte = 0; byte < 4; ++byte) {
-                streams[lane][byte] = gate_bytes[byte];
-                streams[lane][4 + byte] = up_bytes[byte];
-            }
-        }
-        input_slots_[tile] = InputSlot {streams};
+        input = InputSlot {streams};
     }
 
     void set_stream_inputs(std::size_t tile, const StreamMatrix& streams)
     {
-        check_tile(tile);
-        if (input_slots_[tile].has_value()) {
-            throw std::logic_error("VXM tile input is already occupied");
-        }
-        input_slots_[tile] = InputSlot {streams};
+        set_stream_inputs(Hemisphere::East, tile, streams);
     }
 
     void tick(std::ostream* os = nullptr, std::optional<std::size_t> log_tile = std::nullopt)
@@ -108,9 +92,7 @@ public:
         execute_instructions(os, log_tile);
         tick_superlanes(os, log_tile);
         advance_instructions();
-        for (auto& input : input_slots_) {
-            input.reset();
-        }
+        for (auto& hemisphere_inputs : input_slots_) for (auto& input : hemisphere_inputs) input.reset();
         prepared_ = false;
         ++cycle_;
     }
@@ -149,10 +131,15 @@ public:
         return output_slots_multi_[tile];
     }
 
-    const std::optional<RequiredStreams>& required_streams_at(std::size_t tile) const
+    const std::optional<RequiredStreams>& required_streams_at(Hemisphere hemisphere, std::size_t tile) const
     {
         check_tile(tile);
-        return required_streams_[tile];
+        return required_streams_[hemisphere_index(hemisphere)][tile];
+    }
+
+    const std::optional<RequiredStreams>& required_streams_at(std::size_t tile) const
+    {
+        return required_streams_at(Hemisphere::East, tile);
     }
 
     const Superlane& superlane(std::size_t tile) const
@@ -204,11 +191,7 @@ private:
         }
 
         std::size_t inputs = 0;
-        for (const auto& slot : input_slots_) {
-            if (slot.has_value()) {
-                ++inputs;
-            }
-        }
+        for (const auto& hemisphere_inputs : input_slots_) for (const auto& slot : hemisphere_inputs) if (slot.has_value()) ++inputs;
 
         os << "  status:";
         if (log_tile.has_value()) {
@@ -253,10 +236,14 @@ private:
         for (std::size_t tile = 0; tile < kTileCount; ++tile) {
             output_slots_[tile].reset();
             output_slots_multi_[tile].clear();
-            if (input_slots_[tile].has_value()) {
-                superlanes_[tile].set_stream_inputs(input_slots_[tile]->streams);
-                if (os != nullptr && (!log_tile.has_value() || tile == *log_tile)) {
-                    *os << "  tile " << tile << " input\n";
+            for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
+                if (input_slots_[hemisphere][tile].has_value()) {
+                    superlanes_[tile].set_stream_inputs(
+                        static_cast<Hemisphere>(hemisphere), input_slots_[hemisphere][tile]->streams);
+                    if (os != nullptr && (!log_tile.has_value() || tile == *log_tile)) {
+                        *os << "  tile " << tile << " input "
+                            << hemisphere_short_name(static_cast<Hemisphere>(hemisphere)) << '\n';
+                    }
                 }
             }
 
@@ -289,14 +276,16 @@ private:
 
     static void mark_operand_streams(RequiredStreams& required, const VxmLaneOperand& operand)
     {
-        if (operand.kind != VxmLaneOperandKind::StreamInt32
-            && operand.kind != VxmLaneOperandKind::StreamFloat32) {
-            return;
+        std::size_t width = 0;
+        switch (operand.kind) {
+        case VxmLaneOperandKind::StreamInt8: width = 1; break;
+        case VxmLaneOperandKind::StreamFloat16: width = 2; break;
+        case VxmLaneOperandKind::StreamInt32:
+        case VxmLaneOperandKind::StreamFloat32: width = 4; break;
+        default: return;
         }
-        if (operand.index + 3 >= hw::kStreams) {
-            throw std::out_of_range("VXM int32 stream operand is outside the 64-stream set");
-        }
-        for (std::size_t byte = 0; byte < 4; ++byte) {
+        if (operand.index + width > hw::kStreams) throw std::out_of_range("VXM stream operand is outside the stream set");
+        for (std::size_t byte = 0; byte < width; ++byte) {
             required[operand.index + byte] = true;
         }
     }
@@ -304,7 +293,9 @@ private:
     static bool operand_uses_stream(const VxmLaneOperand& operand)
     {
         return operand.kind == VxmLaneOperandKind::StreamInt32
-            || operand.kind == VxmLaneOperandKind::StreamFloat32;
+            || operand.kind == VxmLaneOperandKind::StreamFloat32
+            || operand.kind == VxmLaneOperandKind::StreamInt8
+            || operand.kind == VxmLaneOperandKind::StreamFloat16;
     }
 
     static bool instruction_uses_stream(const AluInstruction& instruction)
@@ -314,35 +305,33 @@ private:
 
     void refresh_required_streams()
     {
-        for (auto& required : required_streams_) {
-            required.reset();
-        }
+        for (auto& hemisphere_required : required_streams_) for (auto& required : hemisphere_required) required.reset();
 
         for (std::size_t tile = 0; tile < kTileCount; ++tile) {
-            auto required = RequiredStreams {};
-            bool any = false;
+            auto required = std::array<RequiredStreams, hw::kHemispheres> {};
+            auto any = std::array<bool, hw::kHemispheres> {};
             for (std::size_t alu = 0; alu < kAluQueues; ++alu) {
                 const auto& instruction = instruction_rows_[alu][tile];
                 if (!instruction.has_value() || !instruction_uses_stream(*instruction)) {
                     continue;
                 }
-                mark_operand_streams(required, instruction->lhs);
-                mark_operand_streams(required, instruction->rhs);
-                any = true;
+                const auto hemisphere = hemisphere_index(instruction->input_hemisphere);
+                mark_operand_streams(required[hemisphere], instruction->lhs);
+                mark_operand_streams(required[hemisphere], instruction->rhs);
+                any[hemisphere] = true;
             }
-            if (any) {
-                required_streams_[tile] = required;
-            }
+            for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere)
+                if (any[hemisphere]) required_streams_[hemisphere][tile] = required[hemisphere];
         }
     }
 
     std::array<std::deque<AluInstruction>, kAluQueues> instruction_queues_{};
     std::array<std::array<InstructionSlot, kTileCount>, kAluQueues> instruction_rows_{};
     std::array<Superlane, kTileCount> superlanes_{};
-    std::array<std::optional<InputSlot>, kTileCount> input_slots_{};
+    std::array<std::array<std::optional<InputSlot>, kTileCount>, hw::kHemispheres> input_slots_{};
     std::array<OutputSlot, kTileCount> output_slots_{};
     std::array<std::vector<Superlane::Output>, kTileCount> output_slots_multi_{};
-    std::array<std::optional<RequiredStreams>, kTileCount> required_streams_{};
+    std::array<std::array<std::optional<RequiredStreams>, kTileCount>, hw::kHemispheres> required_streams_{};
     std::size_t cycle_{0};
     bool prepared_{false};
 };

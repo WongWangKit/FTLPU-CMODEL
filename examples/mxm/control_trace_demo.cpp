@@ -13,10 +13,10 @@ ftlpu::MxmControlSlice::WeightInput row_input(std::size_t tile, std::size_t supe
     ftlpu::MxmControlSlice::WeightInput input{};
     const auto base = static_cast<std::uint8_t>((tile * 20 + supercell_column) & 0xff);
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-        for (std::size_t stream = 0; stream < ftlpu::hw::kMxmLoadStreamsPerCycle; ++stream) {
+        for (std::size_t stream = 0; stream < ftlpu::hw::kMxmSupercellColumns; ++stream) {
             input[lane][stream] = ftlpu::MxmArray::Supercell::InputWord {
-                static_cast<std::int8_t>(base + lane + stream),
-                stream + 1 == ftlpu::hw::kMxmLoadStreamsPerCycle,
+                static_cast<float>(base + lane + stream),
+                stream + 1 == ftlpu::hw::kMxmSupercellColumns,
             };
         }
     }

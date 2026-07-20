@@ -400,7 +400,7 @@ private:
     static void check_lane(std::size_t lane)
     {
         if (lane >= hw::kLanesPerTile) {
-            throw std::out_of_range("lane is outside the 16-lane tile");
+            throw std::out_of_range("lane is outside the configured tile");
         }
     }
 

@@ -7,6 +7,7 @@
 #include "ftlpu/mem/sram.hpp"
 
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -144,6 +145,7 @@ public:
         enum class Kind {
             StoreStreamToSram,
             LoadSramToStream,
+            AccumulateStreamIntoSram,
         };
 
         Kind kind{Kind::StoreStreamToSram};
@@ -326,6 +328,8 @@ private:
             return "Gather";
         case MemOpcode::Scatter:
             return "Scatter";
+        case MemOpcode::Accumulate:
+            return "Accumulate";
         }
         return "Unknown";
     }
@@ -336,6 +340,7 @@ private:
         switch (instruction.opcode) {
         case MemOpcode::Read:
         case MemOpcode::Write:
+        case MemOpcode::Accumulate:
             os << "(a=" << instruction.address << ",s=" << instruction.stream << ")";
             break;
         case MemOpcode::Gather:
@@ -374,6 +379,9 @@ private:
                     break;
                 case MemOpcode::Write:
                     execute_write(fabric, mem_slice, tile, *instruction);
+                    break;
+                case MemOpcode::Accumulate:
+                    execute_accumulate(fabric, mem_slice, tile, *instruction);
                     break;
                 case MemOpcode::Gather:
                 case MemOpcode::Scatter:
@@ -452,6 +460,74 @@ private:
         });
     }
 
+    void execute_accumulate(
+        StreamRegisterFabric& fabric,
+        std::size_t mem_slice,
+        std::size_t tile,
+        const MemInstruction& instruction)
+    {
+        const auto kGroupBase = mem_slice;
+        if (kGroupBase != hw::kWestAccumulatorMemSliceBase
+            && kGroupBase != hw::kEastAccumulatorMemSliceBase) {
+            throw std::logic_error("MEM Accumulate must issue on one of the two accumulator group base queues");
+        }
+        for (std::size_t byte = 1; byte < sizeof(float); ++byte) {
+            if (instruction_rows_[kGroupBase + byte][tile].has_value()) {
+                throw std::logic_error("MEM Accumulate conflicts with another instruction in its four-slice group");
+            }
+        }
+
+        const auto stream = instruction.stream_id();
+        if (stream.direction() != StreamDirection::West
+            || stream.index() + sizeof(float) > hw::kWestStreams) {
+            throw std::logic_error("MEM Accumulate requires four consecutive west streams");
+        }
+        const auto sr_column = ports_.input_column(kGroupBase, StreamDirection::West);
+        std::array<StreamPayloadSegment16, sizeof(float)> stream_bytes{};
+        for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+            StreamInputPort input(fabric, sr_column, StreamDirection::West, "MEM Accumulate");
+            if (!input.segment_valid(tile, stream.index() + byte)) {
+                throw std::logic_error("MEM Accumulate reached an invalid FP32 stream segment");
+            }
+            const auto segment = input.consume_segment(tile, stream.index() + byte);
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                stream_bytes[byte][lane] = segment[lane].data;
+            }
+        }
+
+        std::array<StreamPayloadSegment16, sizeof(float)> memory_bytes{};
+        std::array<StreamPayloadSegment16, sizeof(float)> result_bytes{};
+        for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+            memory_bytes[byte] = sram_.bank(kGroupBase + byte).read_segment(tile, instruction.address);
+        }
+        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+            std::uint32_t memory_raw = 0;
+            std::uint32_t stream_raw = 0;
+            for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+                memory_raw |= static_cast<std::uint32_t>(memory_bytes[byte][lane]) << (byte * 8);
+                stream_raw |= static_cast<std::uint32_t>(stream_bytes[byte][lane]) << (byte * 8);
+            }
+            const auto result = std::bit_cast<float>(memory_raw) + std::bit_cast<float>(stream_raw);
+            const auto result_raw = std::bit_cast<std::uint32_t>(result);
+            for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+                result_bytes[byte][lane] = static_cast<std::uint8_t>((result_raw >> (byte * 8)) & 0xffu);
+            }
+        }
+
+        for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+            sram_.bank(kGroupBase + byte).write_segment(tile, instruction.address, result_bytes[byte]);
+            executed_mem_.push_back(MemTransfer {
+                MemTransfer::Kind::AccumulateStreamIntoSram,
+                kGroupBase + byte,
+                tile,
+                sr_column,
+                StreamId::West(stream.index() + byte),
+                instruction.address,
+                result_bytes[byte],
+            });
+        }
+    }
+
     void advance_instructions()
     {
         for (auto& mem_slice : instruction_rows_) {
@@ -519,7 +595,9 @@ private:
                 continue;
             }
             os << "    c" << transfer.mem_slice << ".t" << transfer.tile << ' '
-               << (transfer.kind == MemTransfer::Kind::StoreStreamToSram ? "store" : "load")
+               << (transfer.kind == MemTransfer::Kind::StoreStreamToSram
+                       ? "store"
+                       : transfer.kind == MemTransfer::Kind::LoadSramToStream ? "load" : "acc")
                << ' ' << direction_name(transfer.stream.direction()) << transfer.stream.index()
                << " addr=" << transfer.address << " bytes=0x";
             print_hex_bytes(os, transfer.bytes);

@@ -43,11 +43,11 @@ ftlpu::SxmInstruction::StreamList stream_range(std::size_t first, std::size_t co
 int main()
 {
     auto map = ftlpu::Distribute16::identity_map();
-    map[0] = 15;
+    map[0] = ftlpu::hw::kLanesPerTile - 1;
     map[1] = 0;
     map[2] = ftlpu::Distribute16::kZeroFill;
     const auto distributed = ftlpu::SxmSlice::distribute(lane_vector(100), map, -1);
-    assert(distributed[0] == 115);
+    assert(distributed[0] == 107);
     assert(distributed[1] == 100);
     assert(distributed[2] == -1);
     assert(distributed[3] == 103);
@@ -61,32 +61,32 @@ int main()
     const auto transposed = ftlpu::SxmSlice::transpose(matrix);
     assert(transposed[0][1] == 100);
     assert(transposed[7][3] == 307);
-    assert(transposed[15][14] == 1415);
+    assert(transposed[7][6] == 607);
 
     const auto input_stream = stream_vector();
     const auto north = ftlpu::SxmSlice::shift_select(input_stream, ftlpu::SxmShiftSource::NorthShifted, 1, -1);
     assert(north[0][0] == 1);
-    assert(north[0][14] == 15);
-    assert(north[0][15] == 16);
-    assert(north[ftlpu::hw::kTileRows - 2][15] == 48);
-    assert(north[ftlpu::hw::kTileRows - 1][0] == 49);
-    assert(north[ftlpu::hw::kTileRows - 1][15] == -1);
+    assert(north[0][6] == 7);
+    assert(north[0][7] == 8);
+    assert(north[ftlpu::hw::kTileRows - 2][7] == 24);
+    assert(north[ftlpu::hw::kTileRows - 1][0] == 25);
+    assert(north[ftlpu::hw::kTileRows - 1][7] == -1);
 
     const auto south = ftlpu::SxmSlice::shift_select(input_stream, ftlpu::SxmShiftSource::SouthShifted, 2, -1);
     assert(south[0][0] == -1);
     assert(south[0][1] == -1);
     assert(south[0][2] == 0);
-    assert(south[1][0] == 14);
-    assert(south[ftlpu::hw::kTileRows - 1][15] == 61);
+    assert(south[1][0] == 6);
+    assert(south[ftlpu::hw::kTileRows - 1][7] == 29);
 
     auto permutation = ftlpu::Permute320::identity_map();
     for (std::size_t index = 0; index < ftlpu::Permute320::kTotalLanes; ++index) {
         permutation[index] = ftlpu::Permute320::kTotalLanes - 1 - index;
     }
     const auto permuted = ftlpu::SxmSlice::permute(input_stream, permutation);
-    assert(permuted[0][0] == 63);
-    assert(permuted[0][15] == 48);
-    assert(permuted[ftlpu::hw::kTileRows - 1][15] == 0);
+    assert(permuted[0][0] == 31);
+    assert(permuted[0][7] == 24);
+    assert(permuted[ftlpu::hw::kTileRows - 1][7] == 0);
 
     bool caught = false;
     permutation[1] = permutation[0];
@@ -114,17 +114,17 @@ int main()
         set_input(inputs, stream, lane_vector(static_cast<std::int32_t>(stream * 100)));
     }
 
-    sxm.issue(ftlpu::SxmInstruction::Transpose(stream_range(0, 16), stream_range(16, 16)));
+    sxm.issue(ftlpu::SxmInstruction::Transpose(stream_range(0, 8), stream_range(8, 8)));
     auto evaluation = sxm.evaluate(inputs);
     sxm.complete_cycle();
-    assert(evaluation.produced[16]);
-    assert(evaluation.outputs[16][3]->data == 300);
-    assert(evaluation.outputs[23][3]->data == 307);
+    assert(evaluation.produced[8]);
+    assert(evaluation.outputs[8][3]->data == 300);
+    assert(evaluation.outputs[15][3]->data == 307);
 
     auto chained_map = ftlpu::Distribute16::identity_map();
     chained_map[0] = 3;
     sxm.issue(ftlpu::SxmInstruction::Distribute(
-        ftlpu::SxmStreamId {16},
+        ftlpu::SxmStreamId {8},
         ftlpu::SxmStreamId {40},
         chained_map));
     evaluation = sxm.evaluate(evaluation.outputs);
@@ -200,7 +200,7 @@ int main()
     }
 
     auto sr_map = ftlpu::Distribute16::identity_map();
-    sr_map[0] = 15;
+    sr_map[0] = ftlpu::hw::kLanesPerTile - 1;
     ftlpu::SxmSlice sr_sxm(ftlpu::SxmStreamPortMap::SameDirection(0, 1));
     sr_sxm.issue(ftlpu::SxmInstruction::Distribute(
         ftlpu::SxmStreamId {east0.packed()},
@@ -213,8 +213,8 @@ int main()
     assert(sr_sxm.cycle() == 1);
     assert(!fabric.cell(0, 0, 0, east0).valid);
     assert(fabric.cell(1, 0, 0, east1).valid);
-    assert(fabric.cell(1, 0, 0, east1).data == 15);
-    assert(fabric.cell(1, ftlpu::hw::kTileRows - 1, 0, east1).data == 63);
+    assert(fabric.cell(1, 0, 0, east1).data == 7);
+    assert(fabric.cell(1, ftlpu::hw::kTileRows - 1, 0, east1).data == 31);
 
     return 0;
 }

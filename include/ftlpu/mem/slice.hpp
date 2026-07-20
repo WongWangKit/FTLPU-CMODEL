@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/stream.hpp"
 
 #include <cstddef>
@@ -15,6 +16,7 @@ enum class MemOpcode {
     Write,
     Gather,
     Scatter,
+    Accumulate,
 };
 
 struct MemInstruction {
@@ -57,6 +59,22 @@ struct MemInstruction {
     static MemInstruction Write(std::size_t address, std::size_t packed_stream)
     {
         return Write(address, StreamId::from_packed(packed_stream));
+    }
+
+    static MemInstruction Accumulate(std::size_t address, StreamId stream)
+    {
+        if (stream.direction() != StreamDirection::West) {
+            throw std::invalid_argument("MEM Accumulate requires a west stream base");
+        }
+        if (stream.index() + sizeof(float) > hw::kWestStreams) {
+            throw std::out_of_range("MEM Accumulate FP32 input exceeds west streams");
+        }
+        return MemInstruction {MemOpcode::Accumulate, address, stream.packed(), 0};
+    }
+
+    static MemInstruction Accumulate(std::size_t address, std::size_t packed_stream)
+    {
+        return Accumulate(address, StreamId::from_packed(packed_stream));
     }
 
     static MemInstruction Gather(StreamId stream, StreamId map_stream)

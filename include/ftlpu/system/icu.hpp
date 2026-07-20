@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
+#include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/mem/tile_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
 #include "ftlpu/sxm/slice.hpp"
@@ -21,9 +22,22 @@ namespace ftlpu {
 class InstructionControlUnit {
 public:
     static constexpr std::size_t kVxmQueues = VxmSlice::kAluQueues;
-    static constexpr std::size_t kMemQueues = hw::kSliceColumns;
-    static constexpr std::size_t kMxmQueues = 2;
-    static constexpr std::size_t kSxmQueues = 2;
+    static constexpr std::size_t kMemQueuesPerHemisphere = hw::kSliceColumns;
+    static constexpr std::size_t kMxmQueuesPerHemisphere = 2;
+    static constexpr std::size_t kSxmQueuesPerHemisphere = 2;
+    static constexpr std::size_t kMemQueues = hw::kHemispheres * kMemQueuesPerHemisphere;
+    static constexpr std::size_t kMxmQueues = hw::kHemispheres * kMxmQueuesPerHemisphere;
+    static constexpr std::size_t kSxmQueues = hw::kHemispheres * kSxmQueuesPerHemisphere;
+
+    static constexpr std::size_t mem_queue(Hemisphere hemisphere, std::size_t column)
+    {
+        return hemisphere_index(hemisphere) * kMemQueuesPerHemisphere + column;
+    }
+
+    static constexpr std::size_t mxm_queue(Hemisphere hemisphere, std::size_t local_mxm)
+    {
+        return hemisphere_index(hemisphere) * kMxmQueuesPerHemisphere + local_mxm;
+    }
 
     struct Repeat {
         std::size_t count{0};
@@ -33,9 +47,7 @@ public:
 
     void reset()
     {
-        for (auto& queue : vxm_queues_) {
-            queue.reset();
-        }
+        for (auto& queue : vxm_queues_) queue.reset();
         for (auto& queue : mem_queues_) {
             queue.reset();
         }
@@ -45,16 +57,14 @@ public:
         for (auto& queue : mxm_compute_queues_) {
             queue.reset();
         }
-        sxm_transpose_queue_.reset();
-        sxm_permute_queue_.reset();
+        for (auto& queue : sxm_transpose_queues_) queue.reset();
+        for (auto& queue : sxm_permute_queues_) queue.reset();
         cycle_ = 0;
     }
 
     void enqueue_nop(std::size_t cycles)
     {
-        for (auto& queue : vxm_queues_) {
-            queue.push_nop(cycles);
-        }
+        for (auto& queue : vxm_queues_) queue.push_nop(cycles);
         for (auto& queue : mem_queues_) {
             queue.push_nop(cycles);
         }
@@ -64,8 +74,8 @@ public:
         for (auto& queue : mxm_compute_queues_) {
             queue.push_nop(cycles);
         }
-        sxm_transpose_queue_.push_nop(cycles);
-        sxm_permute_queue_.push_nop(cycles);
+        for (auto& queue : sxm_transpose_queues_) queue.push_nop(cycles);
+        for (auto& queue : sxm_permute_queues_) queue.push_nop(cycles);
     }
 
     void enqueue_vxm(std::size_t alu, VxmLaneAluInstruction instruction)
@@ -157,38 +167,68 @@ public:
 
     void enqueue_sxm_transpose(SxmInstruction instruction)
     {
+        enqueue_sxm_transpose(Hemisphere::East, std::move(instruction));
+    }
+
+    void enqueue_sxm_transpose(Hemisphere hemisphere, SxmInstruction instruction)
+    {
         if (instruction.opcode != SxmOpcode::Transpose) {
             throw std::invalid_argument("ICU SXM transpose queue requires a Transpose instruction");
         }
-        sxm_transpose_queue_.push_instruction(std::move(instruction));
+        sxm_transpose_queues_[hemisphere_index(hemisphere)].push_instruction(std::move(instruction));
     }
 
     void enqueue_sxm_permute(SxmInstruction instruction)
     {
+        enqueue_sxm_permute(Hemisphere::East, std::move(instruction));
+    }
+
+    void enqueue_sxm_permute(Hemisphere hemisphere, SxmInstruction instruction)
+    {
         if (instruction.opcode != SxmOpcode::Permute) {
             throw std::invalid_argument("ICU SXM permute queue requires a Permute instruction");
         }
-        sxm_permute_queue_.push_instruction(std::move(instruction));
+        sxm_permute_queues_[hemisphere_index(hemisphere)].push_instruction(std::move(instruction));
     }
 
     void enqueue_sxm_transpose_nop(std::size_t cycles)
     {
-        sxm_transpose_queue_.push_nop(cycles);
+        enqueue_sxm_transpose_nop(Hemisphere::East, cycles);
+    }
+
+    void enqueue_sxm_transpose_nop(Hemisphere hemisphere, std::size_t cycles)
+    {
+        sxm_transpose_queues_[hemisphere_index(hemisphere)].push_nop(cycles);
     }
 
     void enqueue_sxm_permute_nop(std::size_t cycles)
     {
-        sxm_permute_queue_.push_nop(cycles);
+        enqueue_sxm_permute_nop(Hemisphere::East, cycles);
+    }
+
+    void enqueue_sxm_permute_nop(Hemisphere hemisphere, std::size_t cycles)
+    {
+        sxm_permute_queues_[hemisphere_index(hemisphere)].push_nop(cycles);
     }
 
     void enqueue_sxm_transpose_repeat(std::size_t count, std::size_t interval = 1)
     {
-        sxm_transpose_queue_.push_repeat(Repeat {count, interval, 0});
+        enqueue_sxm_transpose_repeat(Hemisphere::East, count, interval);
+    }
+
+    void enqueue_sxm_transpose_repeat(Hemisphere hemisphere, std::size_t count, std::size_t interval = 1)
+    {
+        sxm_transpose_queues_[hemisphere_index(hemisphere)].push_repeat(Repeat {count, interval, 0});
     }
 
     void enqueue_sxm_permute_repeat(std::size_t count, std::size_t interval = 1)
     {
-        sxm_permute_queue_.push_repeat(Repeat {count, interval, 0});
+        enqueue_sxm_permute_repeat(Hemisphere::East, count, interval);
+    }
+
+    void enqueue_sxm_permute_repeat(Hemisphere hemisphere, std::size_t count, std::size_t interval = 1)
+    {
+        sxm_permute_queues_[hemisphere_index(hemisphere)].push_repeat(Repeat {count, interval, 0});
     }
 
     void dispatch_vxm(VxmSlice& vxm, std::ostream* os = nullptr)
@@ -197,23 +237,19 @@ public:
         bool any = false;
         for (std::size_t alu = 0; alu < kVxmQueues; ++alu) {
             const auto instruction = vxm_queues_[alu].dispatch_next();
-            if (!instruction.has_value()) {
-                continue;
-            }
+            if (!instruction.has_value()) continue;
             vxm.issue_south(alu, *instruction);
             any = true;
-            if (os != nullptr) {
-                *os << "  ICU -> VXM alu" << alu << ' ' << describe_vxm(*instruction) << '\n';
-            }
+            if (os != nullptr) *os << "  ICU -> VXM.alu" << alu << ' ' << describe_vxm(*instruction) << '\n';
         }
         log_dispatch_idle(os, any);
         ++cycle_;
     }
 
     void dispatch(
-        TileArrayModel& mem,
+        std::array<TileArrayModel, hw::kHemispheres>& mems,
         VxmSlice& vxm,
-        SxmSlice& sxm,
+        std::array<SxmSlice, hw::kHemispheres>& sxms,
         std::array<Mxm, kMxmQueues>& mxms,
         std::ostream* os = nullptr)
     {
@@ -222,14 +258,10 @@ public:
         bool any = false;
         for (std::size_t alu = 0; alu < kVxmQueues; ++alu) {
             const auto instruction = vxm_queues_[alu].dispatch_next();
-            if (!instruction.has_value()) {
-                continue;
-            }
+            if (!instruction.has_value()) continue;
             vxm.issue_south(alu, *instruction);
             any = true;
-            if (os != nullptr) {
-                *os << "  ICU -> VXM alu" << alu << ' ' << describe_vxm(*instruction) << '\n';
-            }
+            if (os != nullptr) *os << "  ICU -> VXM.alu" << alu << ' ' << describe_vxm(*instruction) << '\n';
         }
 
         for (std::size_t column = 0; column < kMemQueues; ++column) {
@@ -237,28 +269,35 @@ public:
             if (!instruction.has_value()) {
                 continue;
             }
-            mem.enqueue_instruction(column, *instruction);
+            const auto hemisphere = column / kMemQueuesPerHemisphere;
+            const auto local_column = column % kMemQueuesPerHemisphere;
+            mems[hemisphere].enqueue_instruction(local_column, *instruction);
             any = true;
             if (os != nullptr) {
-                *os << "  ICU -> MEM q" << column << ' ' << describe_mem(*instruction) << '\n';
+                *os << "  ICU -> MEM." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
+                    << " q" << local_column << ' ' << describe_mem(*instruction) << '\n';
             }
         }
 
-        const auto transpose = sxm_transpose_queue_.dispatch_next();
-        if (transpose.has_value()) {
-            sxm.issue(*transpose);
-            any = true;
-            if (os != nullptr) {
-                *os << "  ICU -> SXM.transpose " << describe_sxm(*transpose) << '\n';
+        for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
+            const auto transpose = sxm_transpose_queues_[hemisphere].dispatch_next();
+            if (transpose.has_value()) {
+                sxms[hemisphere].issue(*transpose);
+                any = true;
+                if (os != nullptr) {
+                    *os << "  ICU -> SXM." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
+                        << ".transpose " << describe_sxm(*transpose) << '\n';
+                }
             }
-        }
 
-        const auto permute = sxm_permute_queue_.dispatch_next();
-        if (permute.has_value()) {
-            sxm.issue(*permute);
-            any = true;
-            if (os != nullptr) {
-                *os << "  ICU -> SXM.permute " << describe_sxm(*permute) << '\n';
+            const auto permute = sxm_permute_queues_[hemisphere].dispatch_next();
+            if (permute.has_value()) {
+                sxms[hemisphere].issue(*permute);
+                any = true;
+                if (os != nullptr) {
+                    *os << "  ICU -> SXM." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
+                        << ".permute " << describe_sxm(*permute) << '\n';
+                }
             }
         }
 
@@ -451,25 +490,23 @@ private:
         return instruction;
     }
 
-    static void check_vxm_queue(std::size_t alu)
-    {
-        if (alu >= kVxmQueues) {
-            throw std::out_of_range("ICU VXM queue is outside the 16 ALU queues");
-        }
-    }
-
     static void check_mem_queue(std::size_t column)
     {
         if (column >= kMemQueues) {
-            throw std::out_of_range("ICU MEM queue is outside the 44 MEM queues");
+            throw std::out_of_range("ICU MEM queue is outside the 88 full-chip MEM queues");
         }
     }
 
     static void check_mxm_queue(std::size_t mxm)
     {
         if (mxm >= kMxmQueues) {
-            throw std::out_of_range("ICU MXM queue is outside the two MXM queues");
+            throw std::out_of_range("ICU MXM queue is outside the four full-chip MXM queues");
         }
+    }
+
+    static void check_vxm_queue(std::size_t alu)
+    {
+        if (alu >= kVxmQueues) throw std::out_of_range("ICU VXM queue is outside the 16 ALU queues");
     }
 
     template <typename QueueArray>
@@ -494,8 +531,8 @@ private:
             << " mem=" << queued_instruction_count(mem_queues_)
             << " mxm_load=" << queued_instruction_count(mxm_load_queues_)
             << " mxm_compute=" << queued_instruction_count(mxm_compute_queues_)
-            << " sxm_transpose=" << sxm_transpose_queue_.queued_count()
-            << " sxm_permute=" << sxm_permute_queue_.queued_count()
+            << " sxm_transpose=" << queued_instruction_count(sxm_transpose_queues_)
+            << " sxm_permute=" << queued_instruction_count(sxm_permute_queues_)
             << '\n';
     }
 
@@ -517,6 +554,8 @@ private:
             return "Gather";
         case MemOpcode::Scatter:
             return "Scatter";
+        case MemOpcode::Accumulate:
+            return "Accumulate";
         }
         return "?";
     }
@@ -559,49 +598,13 @@ private:
         return os.str();
     }
 
-    static std::string describe_operand(const VxmLaneOperand& operand)
-    {
-        std::ostringstream os;
-        switch (operand.kind) {
-        case VxmLaneOperandKind::AluOutput:
-            os << "alu" << operand.index;
-            break;
-        case VxmLaneOperandKind::StreamInt32:
-            os << "stream[" << operand.index << ".." << (operand.index + 3) << "]";
-            break;
-        case VxmLaneOperandKind::Immediate:
-            os << "imm(" << operand.immediate << ")";
-            break;
-        }
-        return os.str();
-    }
-
     static std::string describe_vxm(const VxmLaneAluInstruction& instruction)
     {
-        auto cast_target_name = [](VxmCastTarget target) {
-            switch (target) {
-            case VxmCastTarget::Float32:
-                return "fp32";
-            case VxmCastTarget::Float16:
-                return "fp16";
-            case VxmCastTarget::Int8:
-                return "int8";
-            }
-            return "?";
-        };
-
         std::ostringstream os;
         os << VxmLane::opcode_name(instruction.opcode)
-           << " lhs=" << describe_operand(instruction.lhs)
-           << " rhs=" << describe_operand(instruction.rhs);
-        if (instruction.opcode == VxmAluOpcode::Cast) {
-            os << " cast=" << cast_target_name(instruction.cast_target);
-        }
-        os << " scale=" << instruction.scale
-           << " zp=" << instruction.output_zero_point;
-        if (instruction.output_stream.has_value()) {
-            os << " out_stream=" << *instruction.output_stream;
-        }
+           << " in_hemi=" << hemisphere_short_name(instruction.input_hemisphere)
+           << " out_hemi=" << hemisphere_short_name(instruction.output_hemisphere);
+        if (instruction.output_stream.has_value()) os << " output=" << *instruction.output_stream;
         return os.str();
     }
 
@@ -609,8 +612,8 @@ private:
     std::array<DispatchQueue<MemInstruction>, kMemQueues> mem_queues_{};
     std::array<DispatchQueue<MxmControlInstruction>, kMxmQueues> mxm_load_queues_{};
     std::array<DispatchQueue<MxmControlInstruction>, kMxmQueues> mxm_compute_queues_{};
-    DispatchQueue<SxmInstruction> sxm_transpose_queue_{};
-    DispatchQueue<SxmInstruction> sxm_permute_queue_{};
+    std::array<DispatchQueue<SxmInstruction>, hw::kHemispheres> sxm_transpose_queues_{};
+    std::array<DispatchQueue<SxmInstruction>, hw::kHemispheres> sxm_permute_queues_{};
     std::size_t cycle_{0};
 };
 

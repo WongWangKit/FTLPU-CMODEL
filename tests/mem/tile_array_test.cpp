@@ -12,7 +12,8 @@ int main()
     auto model = std::make_unique<ftlpu::TileArrayModel>();
     std::ostringstream log;
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-        model->set_east_stream_input(2, lane, 3, {static_cast<std::uint8_t>(10 + lane), lane == 15});
+        model->set_east_stream_input(2, lane, 3, {
+            static_cast<std::uint8_t>(10 + lane), lane + 1 == ftlpu::hw::kLanesPerTile});
         model->set_sram_lane_byte(43, 2, 32, lane, static_cast<std::uint8_t>(40 + lane));
     }
 
@@ -39,7 +40,7 @@ int main()
         assert(model->sram_lane_byte(8, 2, 16, lane) == 10 + lane);
         assert(model->west_register(2, lane, 11, 4).has_value());
         assert(model->west_register(2, lane, 11, 4)->data == 40 + lane);
-        assert(model->west_register(2, lane, 11, 4)->last == (lane == 15));
+        assert(model->west_register(2, lane, 11, 4)->last == (lane + 1 == ftlpu::hw::kLanesPerTile));
     }
     bool caught = false;
     try {
@@ -50,8 +51,12 @@ int main()
     }
     assert(caught);
 
-    model->set_sram_lane_byte(0, ftlpu::hw::kTileRows - 1, ftlpu::hw::kSramDepthRows - 1, 15, 0xa5);
-    assert(model->sram_lane_byte(0, ftlpu::hw::kTileRows - 1, ftlpu::hw::kSramDepthRows - 1, 15) == 0xa5);
+    model->set_sram_lane_byte(
+        0, ftlpu::hw::kTileRows - 1, ftlpu::hw::kSramDepthRows - 1,
+        ftlpu::hw::kLanesPerTile - 1, 0xa5);
+    assert(model->sram_lane_byte(
+        0, ftlpu::hw::kTileRows - 1, ftlpu::hw::kSramDepthRows - 1,
+        ftlpu::hw::kLanesPerTile - 1) == 0xa5);
 
     caught = false;
     try {
@@ -67,10 +72,10 @@ int main()
     assert(text.find("c8.t1=Write(a=16,s=3)") != std::string::npos);
     assert(text.find("c8.t2=Write(a=16,s=3)") != std::string::npos);
     assert(text.find("c43.t2=Read(a=32,s=36)") != std::string::npos);
-    assert(text.find("c8.t2 store E3 addr=16 bytes=0x0a0b0c0d0e0f10111213141516171819") != std::string::npos);
-    assert(text.find("c43.t2 load W4 addr=32 bytes=0x28292a2b2c2d2e2f3031323334353637") != std::string::npos);
+    assert(text.find("c8.t2 store E3 addr=16 bytes=0x0a0b0c0d0e0f1011") != std::string::npos);
+    assert(text.find("c43.t2 load W4 addr=32 bytes=0x28292a2b2c2d2e2f") != std::string::npos);
     assert(text.find("tile 2:") != std::string::npos);
-    assert(text.find("sreg 11: W4=0x28292a2b2c2d2e2f3031323334353637") != std::string::npos);
+    assert(text.find("sreg 11: W4=0x28292a2b2c2d2e2f") != std::string::npos);
 
     return 0;
 }

@@ -24,21 +24,21 @@ ftlpu::MxmControlSlice::WeightInput row_input(std::size_t tile, std::size_t supe
     const auto base = static_cast<std::uint8_t>(
         (tile * ftlpu::hw::kMxmSupercellsPerPlane + supercell_column) & 0xff);
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-        for (std::size_t stream = 0; stream < ftlpu::hw::kMxmLoadStreamsPerCycle; ++stream) {
+        for (std::size_t stream = 0; stream < ftlpu::hw::kMxmSupercellColumns; ++stream) {
             input[lane][stream] = ftlpu::MxmArray::Supercell::InputWord {
-                static_cast<std::int8_t>(base + lane + stream),
-                stream + 1 == ftlpu::hw::kMxmLoadStreamsPerCycle,
+                static_cast<float>(base + lane + stream),
+                stream + 1 == ftlpu::hw::kMxmSupercellColumns,
             };
         }
     }
     return input;
 }
 
-std::int8_t expected_weight(std::size_t tile, std::size_t supercell_column, std::size_t lane, std::size_t stream)
+float expected_weight(std::size_t tile, std::size_t supercell_column, std::size_t lane, std::size_t stream)
 {
     const auto base = static_cast<std::uint8_t>(
         (tile * ftlpu::hw::kMxmSupercellsPerPlane + supercell_column) & 0xff);
-    return static_cast<std::int8_t>(base + lane + stream);
+    return static_cast<float>(base + lane + stream);
 }
 
 } // namespace
@@ -66,10 +66,10 @@ int main()
 
     for (std::size_t tile = 0; tile < ftlpu::hw::kMxmSupercellsPerPlane; ++tile) {
         for (std::size_t column = 0; column < ftlpu::hw::kMxmSupercellsPerPlane; ++column) {
-            if (!require(array->buffered_weight(kBuffer, tile, column, 15, 15) == expected_weight(tile, column, 15, 15), "buffered weight mismatch")) {
+            if (!require(array->buffered_weight(kBuffer, tile, column, 7, 7) == expected_weight(tile, column, 7, 7), "buffered weight mismatch")) {
                 return 1;
             }
-            if (!require(array->weight(0, tile, column, 15, 15) == 0, "IW should not modify the other buffer")) {
+            if (!require(array->weight(0, tile, column, 7, 7) == 0, "IW should not modify the other buffer")) {
                 return 1;
             }
             if (!require(control.loaded_cell(kBuffer, tile, column), "IW should set loaded-cell marker for selected buffer")) {
@@ -81,7 +81,7 @@ int main()
     auto parallel_array = std::make_unique<ftlpu::MxmArray>();
     ftlpu::MxmControlSlice parallel_control(*parallel_array);
     constexpr std::size_t kActivationStream = 7;
-    constexpr std::size_t kOutputStream = 36;
+    constexpr std::size_t kOutputStream = 20;
     parallel_control.issue_south(ftlpu::MxmControlInstruction::IW(kBuffer));
     parallel_control.issue_south(ftlpu::MxmControlInstruction::Compute(kBuffer, kActivationStream, kOutputStream));
     parallel_control.set_weight_input(0, row_input(0, 0));
@@ -103,7 +103,7 @@ int main()
         return 1;
     }
     if (!require(
-            parallel_array->buffered_weight(kBuffer, 0, 0, 15, 15) == expected_weight(0, 0, 15, 15),
+            parallel_array->buffered_weight(kBuffer, 0, 0, 7, 7) == expected_weight(0, 0, 7, 7),
             "parallel IW should fill weight buffer")) {
         return 1;
     }
@@ -113,10 +113,10 @@ int main()
             if (!require(array->weight(kBuffer, tile, column, 0, 0) == expected_weight(tile, column, 0, 0), "weight(0,0) mismatch")) {
                 return 1;
             }
-            if (!require(array->weight(kBuffer, tile, column, 7, 9) == expected_weight(tile, column, 7, 9), "weight(7,9) mismatch")) {
+            if (!require(array->weight(kBuffer, tile, column, 3, 5) == expected_weight(tile, column, 3, 5), "weight(3,5) mismatch")) {
                 return 1;
             }
-            if (!require(array->weight(kBuffer, tile, column, 15, 15) == expected_weight(tile, column, 15, 15), "weight(15,15) mismatch")) {
+            if (!require(array->weight(kBuffer, tile, column, 7, 7) == expected_weight(tile, column, 7, 7), "weight(7,7) mismatch")) {
                 return 1;
             }
         }

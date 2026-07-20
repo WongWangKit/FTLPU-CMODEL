@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
+#include "ftlpu/core/fp16.hpp"
 #include "ftlpu/mem/tile_array.hpp"
 #include "ftlpu/mxm/array.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
@@ -20,8 +21,8 @@ namespace ftlpu {
 class Mxm {
 public:
     static constexpr std::size_t kWeightBuffers = MxmSupercell::kWeightBuffers;
-    using ActivationData = std::array<std::int8_t, hw::kLanesPerTile>;
-    using ResultValues = std::array<std::int32_t, hw::kMxmSupercellColumns>;
+    using ActivationData = std::array<float, hw::kLanesPerTile>;
+    using ResultValues = std::array<float, hw::kMxmSupercellColumns>;
 
     struct ColumnOutput {
         std::size_t row{0};
@@ -198,26 +199,29 @@ private:
         check_weight_buffer(weight_buffer);
         next_row_for_tile_[weight_buffer].fill(0);
         for (auto& row : accumulators_[weight_buffer]) {
-            row.fill(0);
+            row.fill(0.0f);
         }
         for (auto& row : contribution_counts_[weight_buffer]) {
-            row.fill(0);
+            row.fill(0.0f);
         }
     }
 
-    static ActivationData collect_activation(const TileArrayModel& mem, std::size_t tile, std::size_t stream_base)
+    static ActivationData collect_activation(TileArrayModel& mem, std::size_t tile, std::size_t stream_base)
     {
         constexpr auto kTargetSreg = hw::kMxmBoundaryStreamRegisterColumn;
-        if (stream_base >= hw::kStreams) {
-            throw std::out_of_range("MXM activation stream is outside the stream set");
+        if (stream_base + hw::kMxmActivationStreamsPerVector > hw::kEastStreams) {
+            throw std::out_of_range("MXM FP16 activation requires two consecutive east streams");
         }
         ActivationData data {};
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            const auto& slot = mem.east_register(tile, lane, kTargetSreg, stream_base);
-            if (!slot.has_value()) {
-                throw std::logic_error("MXM Compute reached tile before SXM east stream arrived at sreg12");
+            const auto low = mem.consume_east_register(tile, lane, kTargetSreg, stream_base);
+            const auto high = mem.consume_east_register(tile, lane, kTargetSreg, stream_base + 1);
+            if (!low.has_value() || !high.has_value()) {
+                throw std::logic_error("MXM Compute reached tile before both FP16 activation streams arrived");
             }
-            data[lane] = static_cast<std::int8_t>(slot->data);
+            const auto bits = static_cast<std::uint16_t>(low->data)
+                | (static_cast<std::uint16_t>(high->data) << 8);
+            data[lane] = Fp16::from_bits(bits).to_float();
         }
         return data;
     }
@@ -227,8 +231,8 @@ private:
         for (std::size_t local_column = 0; local_column < hw::kMxmSupercellColumns; ++local_column) {
             const auto global_column = column_block * hw::kMxmSupercellColumns + local_column;
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                const auto partial = static_cast<std::int32_t>(event.data[lane])
-                    * static_cast<std::int32_t>(
+                const auto partial = event.data[lane]
+                    * static_cast<float>(
                         array_.weight(event.weight_buffer, event.tile, column_block, lane, local_column));
                 accumulators_[event.weight_buffer][event.row][global_column] += partial;
             }
@@ -267,7 +271,7 @@ private:
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             const auto value = accumulators_[event.weight_buffer][event.row][global_column_base + lane];
             output.values[lane] = value;
-            const auto raw = static_cast<std::uint32_t>(value);
+            const auto raw = std::bit_cast<std::uint32_t>(value);
             const std::array<std::uint8_t, 4> bytes {
                 static_cast<std::uint8_t>(raw & 0xffu),
                 static_cast<std::uint8_t>((raw >> 8) & 0xffu),
@@ -275,14 +279,14 @@ private:
                 static_cast<std::uint8_t>((raw >> 24) & 0xffu),
             };
             for (std::size_t byte = 0; byte < bytes.size(); ++byte) {
-                mem.set_west_stream_input(
+                mem.set_west_stream_cell(
                     column_block,
                     lane,
                     event.output_stream_base + byte,
-                    TileArrayModel::DataWord {
+                    StreamCell::Valid(
                         bytes[byte],
                         lane + 1 == hw::kLanesPerTile,
-                    });
+                        event.row));
             }
         }
         last_outputs_.push_back(output);
@@ -308,7 +312,7 @@ private:
     std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane> last_computing_{};
     std::array<std::array<std::size_t, hw::kMxmSupercellsPerPlane>, kWeightBuffers> next_row_for_tile_{};
     std::array<bool, kWeightBuffers> compute_active_by_buffer_{};
-    std::array<std::array<std::array<std::int32_t, hw::kMxmColumns>, hw::kMxmRows>, kWeightBuffers> accumulators_{};
+    std::array<std::array<std::array<float, hw::kMxmColumns>, hw::kMxmRows>, kWeightBuffers> accumulators_{};
     std::array<std::array<std::array<std::size_t, hw::kMxmColumns>, hw::kMxmRows>, kWeightBuffers>
         contribution_counts_{};
     std::vector<ColumnOutput> last_outputs_{};

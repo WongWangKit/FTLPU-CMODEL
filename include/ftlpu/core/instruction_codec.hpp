@@ -20,17 +20,18 @@ namespace isa {
 // FTLPU hardware ISA encoding for the modeled slice.
 //
 // MEM 32b:
-//   [1:0] opcode, [7:2] stream, [13:8] map stream,
-//   [26:14] slice-local SRAM word address, copied from software address bits [16:4].
+//   [2:0] opcode, [8:3] stream, [14:9] map stream,
+//   [27:15] slice-local SRAM word address, copied from software address bits [16:4].
 // MXM control 32b:
 //   IW      [1:0] opcode, [2] weight buffer.
 //   Compute [1:0] opcode, [2] weight buffer, [8:3] activation stream base,
 //           [14:9] output stream base.
-// VXM ALU 3x32b:
-//   word0 [4:0] opcode, [6:5] lhs kind, [12:7] lhs index,
-//         [14:13] rhs kind, [20:15] rhs index, [22:21] cast target,
-//         [23] output valid, [29:24] output stream.
-//   word1 lhs immediate literal, word2 rhs immediate literal.
+// VXM ALU 4x32b:
+//   word0 [4:0] opcode, [7:5] lhs kind, [13:8] lhs index,
+//         [16:14] rhs kind, [22:17] rhs index, [24:23] cast target,
+//         [25] output valid, [31:26] output stream.
+//   word1/2 are lhs/rhs immediate FP32 values.
+//   word3 [0] input hemisphere, [1] output hemisphere.
 // ICU queue command 32b:
 //   NOP    [1:0] opcode, [31:2] cycle count.
 //   Repeat [1:0] opcode, [11:2] count, [19:12] interval,
@@ -40,7 +41,7 @@ using EncodedMxmInstruction = std::uint32_t;
 using EncodedIcuCommand = std::uint32_t;
 
 struct EncodedVxmInstruction {
-    std::array<std::uint32_t, 3> words{};
+    std::array<std::uint32_t, 4> words{};
 };
 
 enum class IcuCommandOpcode : std::uint8_t {
@@ -91,53 +92,11 @@ inline void require_reserved_zero(std::uint64_t word, std::uint64_t used_mask, c
     }
 }
 
-inline void require_default_float(float value, const char* field)
-{
-    if (value != 1.0f) {
-        throw std::logic_error(field);
-    }
-}
-
-inline void require_zero_float(float value, const char* field)
-{
-    if (value != 0.0f) {
-        throw std::logic_error(field);
-    }
-}
-
-inline void require_operand_index_fits(const VxmLaneOperand& operand, const char* field)
-{
-    switch (operand.kind) {
-    case VxmLaneOperandKind::AluOutput:
-        require_unsigned_fit(operand.index, VxmLane::kAluCount - 1, field);
-        return;
-    case VxmLaneOperandKind::StreamInt32:
-        require_unsigned_fit(operand.index, hw::kStreams - 4, field);
-        return;
-    case VxmLaneOperandKind::StreamFloat32:
-        require_unsigned_fit(operand.index, hw::kStreams - 4, field);
-        return;
-    case VxmLaneOperandKind::Immediate:
-        require_unsigned_fit(operand.index, 0, field);
-        return;
-    }
-    throw std::logic_error("unknown VXM operand kind");
-}
-
-inline void require_operand_hardware_encodable(const VxmLaneOperand& operand, const char* field)
-{
-    require_operand_index_fits(operand, field);
-    require_default_float(operand.scale, "VXM operand scale is model metadata, not a hardware ISA field");
-    if (operand.kind != VxmLaneOperandKind::Immediate) {
-        require_zero_float(operand.immediate, "VXM non-immediate operand carries a literal value");
-    }
-}
-
 } // namespace detail
 
 inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instruction)
 {
-    constexpr std::uint64_t kOpcodeMask = 0x3;
+    constexpr std::uint64_t kOpcodeMask = 0x7;
     constexpr std::uint64_t kStreamMask = 0x3f;
     constexpr std::uint64_t kAddressMask = hw::kSramDepthWords - 1;
 
@@ -160,19 +119,19 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
 
     return static_cast<std::uint32_t>(
         static_cast<std::uint64_t>(instruction.opcode)
-        | (static_cast<std::uint64_t>(instruction.stream) << 2)
-        | (static_cast<std::uint64_t>(instruction.map_stream) << 8)
-        | (static_cast<std::uint64_t>(instruction.address) << 14));
+        | (static_cast<std::uint64_t>(instruction.stream) << 3)
+        | (static_cast<std::uint64_t>(instruction.map_stream) << 9)
+        | (static_cast<std::uint64_t>(instruction.address) << 15));
 }
 
 inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
 {
-    constexpr std::uint64_t kUsedMask = 0x07ffffffull;
+    constexpr std::uint64_t kUsedMask = 0x0fffffffull;
     detail::require_reserved_zero(word, kUsedMask, "encoded MEM instruction has non-zero reserved bits");
-    const auto opcode = static_cast<MemOpcode>(detail::low_bits(word, 0, 0x3));
-    const auto stream = static_cast<std::size_t>(detail::low_bits(word, 2, 0x3f));
-    const auto map_stream = static_cast<std::size_t>(detail::low_bits(word, 8, 0x3f));
-    const auto address = static_cast<std::size_t>(detail::low_bits(word, 14, 0x1fff));
+    const auto opcode = static_cast<MemOpcode>(detail::low_bits(word, 0, 0x7));
+    const auto stream = static_cast<std::size_t>(detail::low_bits(word, 3, 0x3f));
+    const auto map_stream = static_cast<std::size_t>(detail::low_bits(word, 9, 0x3f));
+    const auto address = static_cast<std::size_t>(detail::low_bits(word, 15, 0x1fff));
 
     switch (opcode) {
     case MemOpcode::Read:
@@ -183,6 +142,8 @@ inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
         return MemInstruction::Gather(stream, map_stream);
     case MemOpcode::Scatter:
         return MemInstruction::Scatter(stream, map_stream);
+    case MemOpcode::Accumulate:
+        return MemInstruction::Accumulate(address, stream);
     }
     throw std::logic_error("unknown encoded MEM opcode");
 }
@@ -246,91 +207,83 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
     throw std::logic_error("unknown encoded MXM opcode");
 }
 
+namespace detail {
+inline void require_default_float(float value, const char* field)
+{
+    if (value != 1.0f) throw std::logic_error(field);
+}
+
+inline void require_zero_float(float value, const char* field)
+{
+    if (value != 0.0f) throw std::logic_error(field);
+}
+
+inline void require_operand_hardware_encodable(const VxmLaneOperand& operand, const char* field)
+{
+    if (operand.kind == VxmLaneOperandKind::AluOutput) {
+        require_unsigned_fit(operand.index, VxmLane::kAluCount - 1, field);
+    } else if (operand.kind == VxmLaneOperandKind::Immediate) {
+        require_unsigned_fit(operand.index, 0, field);
+    } else {
+        std::size_t width = 1;
+        if (operand.kind == VxmLaneOperandKind::StreamFloat16) width = 2;
+        if (operand.kind == VxmLaneOperandKind::StreamInt32
+            || operand.kind == VxmLaneOperandKind::StreamFloat32) width = 4;
+        require_unsigned_fit(operand.index, hw::kStreams - width, field);
+    }
+    require_default_float(operand.scale, "VXM operand scale is model metadata, not a hardware ISA field");
+    if (operand.kind != VxmLaneOperandKind::Immediate) {
+        require_zero_float(operand.immediate, "VXM non-immediate operand carries a literal value");
+    }
+}
+
+} // namespace detail
+
 inline EncodedVxmInstruction encode_vxm_instruction(const VxmLaneAluInstruction& instruction)
 {
-    constexpr std::uint32_t kOpcodeMask = 0x1f;
-    constexpr std::uint32_t kOperandKindMask = 0x3;
-    constexpr std::uint32_t kCastTargetMask = 0x3;
-    constexpr std::uint32_t kOutputStreamMask = 0x3f;
-
-    detail::require_default_float(instruction.scale, "VXM instruction scale is model metadata, not a hardware ISA field");
-    if (instruction.output_zero_point != 0) {
-        throw std::logic_error("VXM output zero point is synthesized with ALU ops, not an encoded ISA field");
-    }
-    detail::require_operand_hardware_encodable(instruction.lhs, "VXM lhs operand index does not fit encoded instruction");
-    detail::require_operand_hardware_encodable(instruction.rhs, "VXM rhs operand index does not fit encoded instruction");
-    detail::require_unsigned_fit(
-        static_cast<std::uint64_t>(instruction.opcode),
-        kOpcodeMask,
-        "VXM opcode does not fit encoded instruction");
-    detail::require_unsigned_fit(
-        static_cast<std::uint64_t>(instruction.lhs.kind),
-        kOperandKindMask,
-        "VXM lhs operand kind does not fit encoded instruction");
-    detail::require_unsigned_fit(
-        static_cast<std::uint64_t>(instruction.rhs.kind),
-        kOperandKindMask,
-        "VXM rhs operand kind does not fit encoded instruction");
-    detail::require_unsigned_fit(
-        static_cast<std::uint64_t>(instruction.cast_target),
-        kCastTargetMask,
-        "VXM cast target does not fit encoded instruction");
-    if (instruction.output_stream.has_value()) {
-        detail::require_unsigned_fit(
-            *instruction.output_stream,
-            kOutputStreamMask,
-            "VXM output stream does not fit encoded instruction");
-    }
+    detail::require_default_float(instruction.scale, "VXM instruction scale is not an ISA field");
+    if (instruction.output_zero_point != 0) throw std::logic_error("VXM zero point must be synthesized with ALU ops");
+    detail::require_operand_hardware_encodable(instruction.lhs, "VXM lhs index does not fit");
+    detail::require_operand_hardware_encodable(instruction.rhs, "VXM rhs index does not fit");
+    detail::require_unsigned_fit(static_cast<std::uint64_t>(instruction.opcode), 0x1f, "VXM opcode does not fit");
+    detail::require_unsigned_fit(static_cast<std::uint64_t>(instruction.lhs.kind), 0x7, "VXM lhs kind does not fit");
+    detail::require_unsigned_fit(static_cast<std::uint64_t>(instruction.rhs.kind), 0x7, "VXM rhs kind does not fit");
+    if (instruction.output_stream.has_value()) detail::require_unsigned_fit(*instruction.output_stream, 0x3f, "VXM output stream does not fit");
 
     auto control = static_cast<std::uint32_t>(instruction.opcode)
         | (static_cast<std::uint32_t>(instruction.lhs.kind) << 5)
-        | (static_cast<std::uint32_t>(instruction.lhs.index) << 7)
-        | (static_cast<std::uint32_t>(instruction.rhs.kind) << 13)
-        | (static_cast<std::uint32_t>(instruction.rhs.index) << 15)
-        | (static_cast<std::uint32_t>(instruction.cast_target) << 21);
+        | (static_cast<std::uint32_t>(instruction.lhs.index) << 8)
+        | (static_cast<std::uint32_t>(instruction.rhs.kind) << 14)
+        | (static_cast<std::uint32_t>(instruction.rhs.index) << 17)
+        | (static_cast<std::uint32_t>(instruction.cast_target) << 23);
     if (instruction.output_stream.has_value()) {
-        control |= 1u << 23;
-        control |= static_cast<std::uint32_t>(*instruction.output_stream) << 24;
+        control |= 1u << 25;
+        control |= static_cast<std::uint32_t>(*instruction.output_stream) << 26;
     }
-
-    return EncodedVxmInstruction {
-        std::array<std::uint32_t, 3> {
-            control,
-            detail::float_to_bits(instruction.lhs.immediate),
-            detail::float_to_bits(instruction.rhs.immediate),
-        },
-    };
+    const auto routing = static_cast<std::uint32_t>(hemisphere_index(instruction.input_hemisphere))
+        | (static_cast<std::uint32_t>(hemisphere_index(instruction.output_hemisphere)) << 1);
+    return EncodedVxmInstruction {{control, detail::float_to_bits(instruction.lhs.immediate),
+        detail::float_to_bits(instruction.rhs.immediate), routing}};
 }
 
 inline VxmLaneAluInstruction decode_vxm_instruction(const EncodedVxmInstruction& encoded)
 {
+    detail::require_reserved_zero(encoded.words[3], 0x3u, "encoded VXM routing word has non-zero reserved bits");
     const auto control = encoded.words[0];
-    constexpr std::uint32_t kUsedMask = 0x3fffffffu;
-    detail::require_reserved_zero(control, kUsedMask, "encoded VXM control word has non-zero reserved bits");
     auto instruction = VxmLaneAluInstruction {};
     instruction.opcode = static_cast<VxmAluOpcode>(control & 0x1fu);
-    instruction.lhs.kind = static_cast<VxmLaneOperandKind>((control >> 5) & 0x3u);
-    instruction.lhs.index = static_cast<std::size_t>((control >> 7) & 0x3fu);
-    instruction.rhs.kind = static_cast<VxmLaneOperandKind>((control >> 13) & 0x3u);
-    instruction.rhs.index = static_cast<std::size_t>((control >> 15) & 0x3fu);
-    instruction.cast_target = static_cast<VxmCastTarget>((control >> 21) & 0x3u);
-    if (((control >> 23) & 0x1u) != 0u) {
-        instruction.output_stream = static_cast<std::size_t>((control >> 24) & 0x3fu);
-    } else {
-        instruction.output_stream.reset();
-    }
+    instruction.lhs.kind = static_cast<VxmLaneOperandKind>((control >> 5) & 0x7u);
+    instruction.lhs.index = (control >> 8) & 0x3fu;
+    instruction.rhs.kind = static_cast<VxmLaneOperandKind>((control >> 14) & 0x7u);
+    instruction.rhs.index = (control >> 17) & 0x3fu;
+    instruction.cast_target = static_cast<VxmCastTarget>((control >> 23) & 0x3u);
+    if (((control >> 25) & 1u) != 0) instruction.output_stream = (control >> 26) & 0x3fu;
     instruction.lhs.immediate = detail::bits_to_float(encoded.words[1]);
     instruction.rhs.immediate = detail::bits_to_float(encoded.words[2]);
-    instruction.scale = 1.0f;
-    instruction.output_zero_point = 0;
-    instruction.lhs.scale = 1.0f;
-    instruction.rhs.scale = 1.0f;
-    if (instruction.lhs.kind != VxmLaneOperandKind::Immediate) {
-        instruction.lhs.immediate = 0.0f;
-    }
-    if (instruction.rhs.kind != VxmLaneOperandKind::Immediate) {
-        instruction.rhs.immediate = 0.0f;
-    }
+    if (instruction.lhs.kind != VxmLaneOperandKind::Immediate) instruction.lhs.immediate = 0.0f;
+    if (instruction.rhs.kind != VxmLaneOperandKind::Immediate) instruction.rhs.immediate = 0.0f;
+    instruction.input_hemisphere = static_cast<Hemisphere>(encoded.words[3] & 1u);
+    instruction.output_hemisphere = static_cast<Hemisphere>((encoded.words[3] >> 1) & 1u);
     return instruction;
 }
 

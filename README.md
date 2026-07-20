@@ -2,9 +2,9 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-FTLPU-CMODEL is a cycle-oriented C++17 model for experimenting with an
+FTLPU-CMODEL is a cycle-oriented C++20 model for experimenting with an
 FTLPU/TSP-style dataflow: MEM streams move through stream registers, MXM consumes
-streamed int8 vectors for matrix multiply, VXM executes ALU instruction queues,
+streamed FP16 vectors for matrix multiply, VXM executes 16-ALU lane programs,
 SXM transposes or permutes eastward vectors, and an ICU dispatches instructions
 into each functional block.
 
@@ -17,78 +17,76 @@ handoffs can be tested cycle by cycle.
 
 The repository currently models:
 
-- `MEM`: 44 slice columns, 4 tile rows, 16 lanes per tile, 32 east streams and
+- `MEM`: two mirrored hemispheres with 44 slice columns each (88 total), 4 tile
+  rows, 8 lanes per tile, 32 east streams and
   32 west streams per lane. Each stream register is one byte wide. Each
-  tile-local SRAM has two banks, and each bank is 4096 x 16 bytes.
-- `MXM`: two east-side MXM units. Each unit is a 4 x 4 array of 16 x 16
+  tile-local SRAM has two banks, and each bank is 4096 x 8 bytes. The eastmost
+  two four-slice groups nearest MXM retain normal SRAM Read/Write behavior and
+  additionally support `Accumulate(address, stream)`: each group forms one
+  FP32 value, adds a streamed FP32 value, and writes it back in place.
+- `MXM`: four units, two beyond each hemisphere. Each unit is a 4 x 4 array of 8 x 8
   supercells. Each supercell has two peer weight buffers; `IW` selects which
   buffer receives the right-shifting weight stream and `Compute` selects both
-  the weight buffer and output stream base for a 64 x 64 int8 GEMM datapath
-  with int32 accumulation.
-- `VXM`: one west-side VXM slice with 4 superlanes/tiles. Each superlane has
-  16 lanes, and each lane has 16 ALU issue queues. ALU outputs can write int8
-  or fp16 bytes onto streams.
-- `SXM`: one east-side data-movement slice between MEM and MXM. It consumes and
-  produces the 32 east streams, supports `Transpose sg16` and 64-lane
+  the weight buffer and output stream base for a 32 x 32 FP16 GEMM datapath
+  with FP32 accumulation. Stored INT8 weights use symmetric per-output-column
+  scales and are dequantized and cast to FP16 by VXM before `IW`; each MXM
+  consumes 16 byte streams for eight FP16 columns.
+- `VXM`: one central VXM slice with 4 superlanes/tiles and 8 lanes per
+  superlane. Every lane has 16 ALUs with independent ICU queues. ALU operands
+  can come from INT8/FP16/FP32 streams, immediates, or prior-cycle ALU outputs;
+  results can be retained or emitted to a selected stream and hemisphere.
+  Offline programs synthesize dequant as eight multiply/cast pairs and SwiGLU
+  as a pipelined multiply, sigmoid decomposition, and FP16 cast.
+- `SXM`: one data-movement slice per hemisphere between MEM and MXM. Each consumes and
+  produces the 32 east streams, supports 8 x 8 transpose and 32-lane
   `Permute`, and passively forwards data when its queues do not issue.
 - `ICU`: per-queue instruction dispatch with `NOP N` and `Repeat n,d`, including
-  MEM address stride support. Two SXM queues independently issue Transpose and
-  Permute instructions.
-- `TspSliceSystem`: fixed local topology with VXM on the west side of MEM and
-  SXM followed by two MXMs on the east side of MEM. The fabric has 13
-  stream-register columns: MEM occupies boundaries `sreg0..sreg11`, while
-  `sreg12` is the SXM-to-MXM boundary; the west path has the same extra hop.
+  MEM address stride support. It owns 88 MEM queues, 4 MXM load queues, 4 MXM
+  compute queues, 16 VXM ALU queues, and independent Transpose/Permute queues
+  for both SXMs.
+- `TspSliceSystem`: full mirrored topology with VXM in the center. Each side has
+  `MEM <-> SXM <-> MXM0/1` in local orientation and 13 stream-register columns.
+  Global MXM IDs 0..1 and MEM queues 0..43 select East; MXM IDs 2..3 and MEM
+  queues 44..87 select West. VXM instructions independently select their input
+  and output hemispheres.
 - A compact model ISA codec for MEM, MXM, VXM ALU, and ICU queue commands.
 
-The largest integration test models an FFN-like path:
+`w8a16_projection_test` is the canonical whole-system test. It computes
+`[128,576] x [576,1536]` with per-output-column symmetric W8 quantization. Before
+cycle 0, the test may initialize SRAM and result storage and enqueue the complete
+program into ICU. During execution it calls only `TspSliceSystem::tick()`.
+ICU-scheduled MEM reads feed INT8 weights west to VXM, VXM converts them to FP16,
+ICU `IW` loads both MXMs, ICU MEM reads stream FP16 activations east, and ICU
+`Compute` pulses produce FP32 partial sums. ICU MEM `Accumulate` instructions
+combine all 18 K tiles in slices 36..43. MXM0 and MXM1 use separate four-slice
+read-modify-write groups, so their compute/output windows remain parallel.
 
-1. Load gate/up weights from MEM into two MXMs.
-2. Stream activations from MEM into both MXMs.
-3. Route gate/up int32 outputs west through MEM streams into VXM.
-4. Execute SwiGLU using ALU instructions.
-5. Store the int8 hidden result back to MEM.
-6. Load down-projection weights into the two MXMs.
-7. Stream the hidden result through MXM.
-8. Route the two int32 partial results into VXM for add + quant.
-9. Store the final int8 result back to MEM and compare against golden data.
+`w8a16_swiglu_test` extends that flow to a complete
+`X[128,576] -> gate/up[128,1536] -> SwiGLU[128,1536]` workload. MXM0 and MXM1
+produce gate/up partial sums, the two MEM accumulator groups combine all 18 K
+tiles, ICU MEM Reads stream both FP32 operands west, and an ICU-scheduled VXM
+ALU pipeline writes FP16 results back to MEM. The final 196,608 values are checked.
 
-`mem_dual_mxm_swiglu_offline_icu_test` is the canonical FFN integration test.
-All MEM, MXM, and VXM instructions are generated offline and loaded into the ICU
-before cycle 0. MXM output is controlled by the `Compute` instruction stream.
-The runtime loop only advances clocks and bridges data. This is the shape
-intended for a future compiler backend.
+`dual_hemisphere_w8a16_swiglu_test` is the full-chip regression with the same
+`X[128,576]` and gate/up `[576,1536]` dimensions. Adjacent 32-column output
+blocks alternate between hemispheres: East MXM0/1 and West MXM2/3 work in the
+same compute windows. The central VXM interleaves East/West Swish instructions
+and writes each FP16 half back to its own MEM hemisphere. All projection
+accumulators and 196,608 SwiGLU outputs are checked against software golden data.
 
-`single_head_attention_test` models a complete single-head attention datapath. It
-initializes `seq_len=32`, `hidden=64` input and Wq/Wk/Wv matrices in MEM, loads
-Wq and Wk into the two MXMs, streams X through both MXMs, sends Q/K int32 results
-to VXM, requantizes to int8 with ALU `Multiply` + `Cast(Int8)`, stores Q/K int8
-streams back to MEM, then loads Q into MXM0 and streams K to compute sampled
-`K * Q^T` scores against golden data. Raw scores are not staged to MEM: the MXM
-west-stream score output feeds VXM directly for softmax pass 1, which scales to
-fp32, stores that intermediate in MEM, and computes each query row maximum with
-an ALU self-feedback `Max`. Pass 2 reloads scaled scores and saved maxima,
-computes `exp(x - max)`, and accumulates each row sum with a self-feedback
-`Add`. Passes 2 and 3 stripe key positions across four independent MEM groups
-and use four VXM ALU pipelines in parallel. Pass 2 combines four 8-element
-partial sums into the final 32-element row sum. Pass 3 reloads exponentials
-and saved sums, divides, scales,
-`Cast(Int8)`, and stores the final attention probabilities in MEM. MXM emits one
-key position per cycle while VXM lanes represent queries, so both reductions
-run without a physical transpose or host-side reduction. Pass 1 still takes
-32 data cycles for the full-row maximum; the striped Pass 2 and Pass 3 each
-take 8 data cycles.
-X rows are striped across 16 MEM slices. MXM1 loads 16 original X rows per cycle
-as weight columns, so its buffer is logically `X^T` without materializing a
-transposed matrix. After softmax pass 1 drains, ICU streams the 64 columns of
-Wv on `E16..E31`; MXM1 computes one row of `V^T = Wv^T * X^T` per cycle.
-ALU3..5 requantize those rows and stripe them across 16 MEM slices. The final
-phase reads the striped `V^T` directly on 16 weight streams and loads MXM1 in 4
-cycles, eliminating the former full-matrix V transpose. ICU then reads the
-striped softmax layout, SXM assembles one query row per cycle, and MXM1 computes
-`softmax * V`. The `32 x 64` int32 result returns on `W0..W3`, is stored in
-four MEM slices, and is checked against golden data.
-The test writes an ICU dispatch trace to
-`build-vs2026/logs/single_head_attention/icu.log`.
+`smollm2_kv_projection_test` begins the SmolLM2 attention path. It treats the
+input as an already normalized FP16 `X[128,576]`, quantizes K/V weights
+`[576,192]` with symmetric per-output-column W8 scales, and computes
+`K/V[128,192]` across all four MXMs. Adjacent 32-column blocks alternate between
+East and West; K and V FP32 accumulators are stored in the two nearest MEM
+groups and all 49,152 values are checked. RMSNorm, FP32-to-FP16 conversion,
+RoPE, and KV-cache placement are subsequent stages.
+
+Whole-system tests follow a strict offline contract. Before cycle 0 they may
+initialize MEM SRAM and enqueue a complete ICU
+program. After ticking starts, they cannot access MEM, MXM, VXM, or SXM control
+interfaces directly. `TspSliceSystem` intentionally exposes only explicit
+initialization/result methods, `icu()`, `tick()`, and `cycle()`.
 
 ## Repository Layout
 
@@ -111,9 +109,9 @@ The test writes an ICU dispatch trace to
 On Windows with Visual Studio generator:
 
 ```powershell
-cmake -S . -B build-vs2019
-cmake --build build-vs2019 --config Debug
-ctest --test-dir build-vs2019 -C Debug --output-on-failure
+cmake -S . -B build-vs2026
+cmake --build build-vs2026 --config Release
+ctest --test-dir build-vs2026 -C Release --output-on-failure
 ```
 
 With a single-config generator:
@@ -126,84 +124,44 @@ ctest --test-dir build --output-on-failure
 
 ## Common Tests
 
-Run the offline ICU FFN test:
+Run the offline ICU W8A16 projection:
 
 ```powershell
-ctest --test-dir build-vs2019 -C Debug -R mem_dual_mxm_swiglu_offline_icu --output-on-failure
+ctest --test-dir build-vs2026 -C Release -R w8a16_projection_test --output-on-failure
+```
+
+Run the complete W8A16 SwiGLU workload:
+
+```powershell
+ctest --test-dir build-vs2026 -C Release -R w8a16_swiglu_test --output-on-failure
 ```
 
 Run the VXM tests:
 
 ```powershell
-ctest --test-dir build-vs2019 -C Debug -R "vxm_alu|vxm_lane|vxm_superlane|vxm_slice" --output-on-failure
+ctest --test-dir build-vs2026 -C Release -R "vxm_dequant|vxm_swish|vxm_lane|vxm_superlane|vxm_slice" --output-on-failure
 ```
-
-Run the single-head attention test:
-
-```powershell
-ctest --test-dir build-vs2019 -C Debug -R single_head_attention_test --output-on-failure
-```
-
-Run the stream-facing SXM `softmax * V` test:
-
-```powershell
-ctest --test-dir build-vs2019 -C Debug -R sxm_softmax_v_test --output-on-failure
-```
-
-This test initializes softmax and V only in MEM SRAM, then executes ICU-driven
-MEM Read, MXM `IW`, SXM Transpose, non-identity Permute, MXM Compute, and
-four-byte MEM Write queues for `seq_len=32`. The final `32 x 64` int32 matrix
-is reconstructed from four MEM slices and checked against golden data. Its ICU
-trace is written to
-`logs/sxm_softmax_v/icu.log` under the active CTest build directory.
 
 ## Logs and Diagrams
 
-FFN integration tests skip log generation by default so the long-running
-workloads are not dominated by file I/O. Enable logs when debugging:
-
-```powershell
-$env:FTLPU_FFN_LOG = "1"
-ctest --test-dir build-vs2019 -C Debug -R mem_dual_mxm_swiglu_offline_icu --output-on-failure
-Remove-Item Env:\FTLPU_FFN_LOG
-```
-
-When enabled, integration tests write logs under the build directory:
-
-- `build-vs2019/logs/mem_mxm/`
-- `build-vs2019/logs/mem_dual_mxm_swiglu_offline_icu/`
-- `build-vs2019/logs/mem_dual_mxm_swiglu_early_compute_icu/`
-
-The FFN tests generate four functional-unit logs:
-
-- `icu.log`
-- `mem.log`
-- `mxm.log`
-- `vxm.log`
-
-They also generate a pipeline diagram:
-
-- `build-vs2019/logs/mem_dual_mxm_swiglu_offline_icu/pipeline.svg`
-
-The diagram separates `MEM W read`, `MEM A read`, `MEM write`, `MXM0 load`,
-`MXM0 compute`, `MXM1 load`, `MXM1 compute`, and `VXM` rows. There is no
-separate `LW` phase; `IW` fills a selected buffer and `Compute` names the buffer
-to consume plus the output stream base.
+Long whole-system workloads keep logging disabled by default so file I/O does
+not dominate simulation time. Unit-level trace demos remain under `examples/`.
+The current offline projection schedule is shown in
+[docs/w8a16_projection_pipeline.svg](docs/w8a16_projection_pipeline.svg).
 
 ## Demo Executables
 
 After building, demos are available under the build output directory. Examples:
 
 ```powershell
-.\build-vs2019\Debug\tile_array_trace_demo.exe tile_array_trace.log
-.\build-vs2019\Debug\vector_roundtrip_demo.exe vector_roundtrip.log
-.\build-vs2019\Debug\mxm_control_trace_demo.exe mxm_control_trace.log
-.\build-vs2019\Debug\mem_mxm_trace_demo.exe mem_mxm_mem.log mem_mxm_mxm.log
-.\build-vs2019\Debug\vxm_lane_trace_demo.exe vxm_lane_trace.log
+.\build-vs2026\Release\tile_array_trace_demo.exe tile_array_trace.log
+.\build-vs2026\Release\vector_roundtrip_demo.exe vector_roundtrip.log
+.\build-vs2026\Release\mxm_control_trace_demo.exe mxm_control_trace.log
+.\build-vs2026\Release\mem_mxm_trace_demo.exe mem_mxm_mem.log mem_mxm_mxm.log
 ```
 
 ## More Documentation
 
 See [docs/architecture.md](docs/architecture.md) for the current architecture,
-timing model, instruction queues, FFN workload, data layout, generated logs, and
+timing model, instruction queues, offline workload contract, data layout, and
 known limitations.

@@ -1,5 +1,6 @@
 #include "ftlpu/mem/tile_array.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
+#include "ftlpu/core/fp16.hpp"
 #include "ftlpu/core/topology.hpp"
 
 #include <cstdint>
@@ -17,11 +18,16 @@ constexpr std::size_t kSramAddress = 256;
 constexpr std::size_t kTargetSreg = ftlpu::hw::kStreamRegisterColumns - 1;
 constexpr std::size_t kReadExecuteBaseCycle = 6;
 constexpr std::size_t kMxmHandoffBaseCycle = 17;
-constexpr std::size_t kMxmColumn = 6;
+constexpr std::size_t kMxmColumn = 0;
 
 std::uint8_t pattern(std::size_t tile, std::size_t stream, std::size_t lane)
 {
-    return static_cast<std::uint8_t>(tile * 4 + stream * 2 + lane);
+    const auto column = stream / 2;
+    const auto value = static_cast<float>(tile * 8 + column + lane) * 0.125f;
+    const auto bits = ftlpu::Fp16::from_float(value).bits();
+    return stream % 2 == 0
+        ? static_cast<std::uint8_t>(bits & 0xffu)
+        : static_cast<std::uint8_t>(bits >> 8);
 }
 
 void inject_weight_streams(ftlpu::TileArrayModel& mem, std::size_t tile)
@@ -65,14 +71,17 @@ ftlpu::MxmControlSlice::WeightInput collect_mxm_weight_input(
 {
     ftlpu::MxmControlSlice::WeightInput input{};
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-        for (std::size_t stream = 0; stream < kLoadStreams; ++stream) {
-            const auto& slot = mem.east_register(tile, lane, kTargetSreg, stream);
-            if (!slot.has_value()) {
+        for (std::size_t column = 0; column < ftlpu::hw::kMxmSupercellColumns; ++column) {
+            const auto& low = mem.east_register(tile, lane, kTargetSreg, column * 2);
+            const auto& high = mem.east_register(tile, lane, kTargetSreg, column * 2 + 1);
+            if (!low.has_value() || !high.has_value()) {
                 throw std::logic_error("MEM to MXM handoff reached an empty stream slot");
             }
-            input[lane][stream] = ftlpu::MxmArray::Supercell::InputWord {
-                static_cast<std::int8_t>(slot->data),
-                stream + 1 == kLoadStreams,
+            const auto bits = static_cast<std::uint16_t>(low->data)
+                | (static_cast<std::uint16_t>(high->data) << 8);
+            input[lane][column] = ftlpu::MxmArray::Supercell::InputWord {
+                ftlpu::Fp16::from_bits(bits).to_float(),
+                column + 1 == ftlpu::hw::kMxmSupercellColumns,
             };
         }
     }

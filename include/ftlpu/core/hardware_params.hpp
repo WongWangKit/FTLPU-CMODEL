@@ -5,7 +5,7 @@
 namespace ftlpu::hw {
 
 constexpr std::size_t kTileRows = 4;
-constexpr std::size_t kLanesPerTile = 16;
+constexpr std::size_t kLanesPerTile = 8;
 constexpr std::size_t kPhysicalVectorBytes = kTileRows * kLanesPerTile;
 
 // Stream identity is 0..31 plus a direction.  kStreams is retained as the
@@ -20,6 +20,13 @@ constexpr std::size_t kStreamRegisterBytes = 1;
 constexpr std::size_t kMemSliceColumns = 44;
 constexpr std::size_t kMemSlicesPerGroup = 4;
 constexpr std::size_t kMemGroups = kMemSliceColumns / kMemSlicesPerGroup;
+constexpr std::size_t kAccumulatorMemGroupCount = 2;
+constexpr std::size_t kWestAccumulatorMemGroup = kMemGroups - 2;
+constexpr std::size_t kEastAccumulatorMemGroup = kMemGroups - 1;
+constexpr std::size_t kWestAccumulatorMemSliceBase =
+    kWestAccumulatorMemGroup * kMemSlicesPerGroup;
+constexpr std::size_t kEastAccumulatorMemSliceBase =
+    kEastAccumulatorMemGroup * kMemSlicesPerGroup;
 constexpr std::size_t kMemBoundaryStreamRegisterColumns = kMemGroups + 1;
 constexpr std::size_t kSxmToMxmStreamRegisterColumns = 1;
 constexpr std::size_t kSystemStreamRegisterColumns =
@@ -48,10 +55,12 @@ constexpr std::size_t kMemWriteBytesPerCycle = kMemLanesPerCycle * kStreamRegist
 
 constexpr std::size_t kMxmRows = kPhysicalVectorBytes;
 constexpr std::size_t kMxmColumns = kPhysicalVectorBytes;
-constexpr std::size_t kMxmSupercellRows = 16;
-constexpr std::size_t kMxmSupercellColumns = 16;
+constexpr std::size_t kMxmSupercellRows = kLanesPerTile;
+constexpr std::size_t kMxmSupercellColumns = kLanesPerTile;
 constexpr std::size_t kMxmSupercellsPerPlane = kTileRows;
-constexpr std::size_t kMxmLoadStreamsPerCycle = 16;
+constexpr std::size_t kMxmWeightBytesPerValue = 2;
+constexpr std::size_t kMxmLoadStreamsPerCycle = kMxmSupercellColumns * kMxmWeightBytesPerValue;
+constexpr std::size_t kMxmActivationStreamsPerVector = 2;
 constexpr std::size_t kMxmLoadBytesPerCycle = kLanesPerTile * kMxmLoadStreamsPerCycle * kStreamRegisterBytes;
 
 constexpr std::size_t kSxmConcurrentStreamOps = 16;
@@ -71,8 +80,11 @@ constexpr std::size_t kSramBlockBytes = kSramRowBytes * kSramDepthRows;
 constexpr std::size_t kTotalSramBytes = kSramBlocks * kSramBlockBytes;
 constexpr std::size_t kPublicTotalSramBytes = kPublicSramBlocks * kSramBlockBytes;
 
-static_assert(kPhysicalVectorBytes == 64);
+static_assert(kPhysicalVectorBytes == 32);
 static_assert(kMemSliceColumns % kMemSlicesPerGroup == 0);
+static_assert(kAccumulatorMemGroupCount == 2);
+static_assert(kWestAccumulatorMemSliceBase == 36);
+static_assert(kEastAccumulatorMemSliceBase == 40);
 static_assert(kMemBoundaryStreamRegisterColumns == 12);
 static_assert(kSystemStreamRegisterColumns == 13);
 static_assert(kMemEastBoundaryStreamRegisterColumn == 11);
@@ -82,16 +94,16 @@ static_assert(kPublicSramBlocks == 88);
 static_assert(kSramBlocks == 44);
 static_assert(kSramBlocksPerSlice == 1);
 static_assert(kEastStreams + kWestStreams == kStreams);
-static_assert(kLanesPerTile == 16);
-static_assert(kMemReadBytesPerCycle == 16);
-static_assert(kMemWriteBytesPerCycle == 16);
+static_assert(kLanesPerTile == 8);
+static_assert(kMemReadBytesPerCycle == 8);
+static_assert(kMemWriteBytesPerCycle == 8);
 static_assert(kMxmRows == kMxmSupercellRows * kMxmSupercellsPerPlane);
 static_assert(kMxmColumns == kMxmSupercellColumns * kMxmSupercellsPerPlane);
-static_assert(kMxmLoadStreamsPerCycle == kMxmSupercellColumns);
-static_assert(kMxmLoadBytesPerCycle == 256);
+static_assert(kMxmLoadStreamsPerCycle == 16);
+static_assert(kMxmLoadBytesPerCycle == 128);
 static_assert(kSxmConcurrentStreamOps == 16);
-static_assert(kSramBlockBytes == 512 * 1024);
-static_assert(kTotalSramBytes == 22 * 1024 * 1024);
-static_assert(kPublicTotalSramBytes == 44 * 1024 * 1024);
+static_assert(kSramBlockBytes == 256 * 1024);
+static_assert(kTotalSramBytes == 11 * 1024 * 1024);
+static_assert(kPublicTotalSramBytes == 22 * 1024 * 1024);
 
 } // namespace ftlpu::hw

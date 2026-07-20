@@ -15,17 +15,17 @@ ftlpu::MxmArray::InputVector cell_input(std::size_t supercell_row, std::size_t s
     const auto base = static_cast<std::uint8_t>(
         (supercell_row * ftlpu::hw::kMxmSupercellsPerPlane + supercell_column) & 0xff);
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-        for (std::size_t stream = 0; stream < ftlpu::hw::kMxmLoadStreamsPerCycle; ++stream) {
+        for (std::size_t stream = 0; stream < ftlpu::hw::kMxmSupercellColumns; ++stream) {
             input[lane][stream] = ftlpu::MxmArray::Supercell::InputWord {
-                static_cast<std::int8_t>(base + lane + stream),
-                stream + 1 == ftlpu::hw::kMxmLoadStreamsPerCycle,
+                static_cast<float>(base + lane + stream),
+                stream + 1 == ftlpu::hw::kMxmSupercellColumns,
             };
         }
     }
     return input;
 }
 
-std::int8_t expected_weight(
+float expected_weight(
     std::size_t supercell_row,
     std::size_t supercell_column,
     std::size_t lane,
@@ -33,7 +33,7 @@ std::int8_t expected_weight(
 {
     const auto base = static_cast<std::uint8_t>(
         (supercell_row * ftlpu::hw::kMxmSupercellsPerPlane + supercell_column) & 0xff);
-    return static_cast<std::int8_t>(base + lane + stream);
+    return static_cast<float>(base + lane + stream);
 }
 
 } // namespace
@@ -45,21 +45,22 @@ int main()
 
     for (std::size_t row = 0; row < ftlpu::hw::kMxmSupercellsPerPlane; ++row) {
         for (std::size_t column = 0; column < ftlpu::hw::kMxmSupercellsPerPlane; ++column) {
-            array->load_weights(row, column, cell_input(row, column), log);
+            array->tick_cell_iw_load(row, column, 0, cell_input(row, column), log);
         }
     }
 
     for (std::size_t row = 0; row < ftlpu::hw::kMxmSupercellsPerPlane; ++row) {
         for (std::size_t column = 0; column < ftlpu::hw::kMxmSupercellsPerPlane; ++column) {
             assert(array->weight(row, column, 0, 0) == expected_weight(row, column, 0, 0));
-            assert(array->weight(row, column, 7, 9) == expected_weight(row, column, 7, 9));
-            assert(array->weight(row, column, 15, 15) == expected_weight(row, column, 15, 15));
+            assert(array->weight(row, column, 3, 5) == expected_weight(row, column, 3, 5));
+            assert(array->weight(row, column, 7, 7) == expected_weight(row, column, 7, 7));
         }
     }
 
     bool caught = false;
     try {
-        array->load_weights(ftlpu::hw::kMxmSupercellsPerPlane, 0, cell_input(0, 0), log);
+        array->tick_cell_iw_load(
+            ftlpu::hw::kMxmSupercellsPerPlane, 0, 0, cell_input(0, 0), log);
     } catch (const std::out_of_range&) {
         caught = true;
     }
@@ -67,7 +68,8 @@ int main()
 
     caught = false;
     try {
-        array->load_weights(0, ftlpu::hw::kMxmSupercellsPerPlane, cell_input(0, 0), log);
+        array->tick_cell_iw_load(
+            0, ftlpu::hw::kMxmSupercellsPerPlane, 0, cell_input(0, 0), log);
     } catch (const std::out_of_range&) {
         caught = true;
     }

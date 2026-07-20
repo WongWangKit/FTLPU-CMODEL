@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
+#include "ftlpu/core/fp16.hpp"
 #include "ftlpu/core/stream.hpp"
 
 #include <array>
@@ -30,20 +31,22 @@ struct MxmInstruction {
 
 class MxmSupercell {
 public:
-    using Weight = std::int8_t;
+    using Weight = float;
     using InputWord = StreamWord<Weight>;
     using InputSlot = std::optional<InputWord>;
-    using InputLane = std::array<InputSlot, hw::kMxmLoadStreamsPerCycle>;
+    using InputLane = std::array<InputSlot, hw::kMxmSupercellColumns>;
     using InputVector = std::array<InputLane, hw::kLanesPerTile>;
-    using ActivationVector = std::array<InputSlot, hw::kLanesPerTile>;
-    using ActivationData = std::array<Weight, hw::kLanesPerTile>;
+    using ActivationWord = StreamWord<float>;
+    using ActivationSlot = std::optional<ActivationWord>;
+    using ActivationVector = std::array<ActivationSlot, hw::kLanesPerTile>;
+    using ActivationData = std::array<float, hw::kLanesPerTile>;
     using WeightRow = std::array<Weight, hw::kMxmSupercellColumns>;
     using WeightMatrix = std::array<WeightRow, hw::kMxmSupercellRows>;
     static constexpr std::size_t kWeightBuffers = 2;
 
     struct ComputeResult {
         std::size_t column{0};
-        std::int32_t value{0};
+        float value{0.0f};
     };
 
     struct ActivationPayload {
@@ -185,7 +188,7 @@ private:
         ActivationData data{};
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             if (!input[lane].has_value()) {
-                throw std::logic_error("MXM compute requires all 16 activation lanes to be valid");
+                throw std::logic_error("MXM compute requires all activation lanes to be valid");
             }
             data[lane] = input[lane]->data;
         }
@@ -214,17 +217,17 @@ private:
         advance_activation_stages();
     }
 
-    std::int32_t dot_product(const ActivationPayload& activation, std::size_t column) const
+    float dot_product(const ActivationPayload& activation, std::size_t column) const
     {
         check_column(column);
         check_buffer(activation.weight_buffer);
         if (!weight_buffer_valid_[activation.weight_buffer]) {
             throw std::logic_error("MXM compute requires a valid selected weight buffer");
         }
-        std::int32_t sum = 0;
+        float sum = 0.0f;
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            sum += static_cast<std::int32_t>(activation.data[lane])
-                * static_cast<std::int32_t>(weight_buffers_[activation.weight_buffer][lane][column]);
+            sum += activation.data[lane]
+                * static_cast<float>(weight_buffers_[activation.weight_buffer][lane][column]);
         }
         return sum;
     }
@@ -248,11 +251,12 @@ private:
     void write_buffer_from_input()
     {
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            for (std::size_t stream = 0; stream < hw::kMxmLoadStreamsPerCycle; ++stream) {
-                if (!input_[lane][stream].has_value()) {
-                    throw std::logic_error("MXM IW requires 16 streams on all 16 lanes to be valid");
+            for (std::size_t column = 0; column < hw::kMxmSupercellColumns; ++column) {
+                if (!input_[lane][column].has_value()) {
+                    throw std::logic_error("MXM IW requires every weight stream on every lane to be valid");
                 }
-                weight_buffers_[instruction_->weight_buffer][lane][stream] = input_[lane][stream]->data;
+                weight_buffers_[instruction_->weight_buffer][lane][column]
+                    = Fp16::from_float(input_[lane][column]->data).to_float();
             }
         }
         weight_buffer_valid_[instruction_->weight_buffer] = true;
@@ -265,7 +269,7 @@ private:
         os << std::hex << std::setfill('0');
         for (const auto& row : matrix) {
             for (const auto value : row) {
-                os << std::setw(2) << static_cast<unsigned>(static_cast<std::uint8_t>(value));
+                os << std::setw(4) << static_cast<unsigned>(Fp16::from_float(value).bits());
             }
         }
         os.flags(old_flags);

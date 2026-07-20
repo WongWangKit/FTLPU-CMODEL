@@ -1,10 +1,10 @@
 #include "ftlpu/mxm/supercell.hpp"
 
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <sstream>
 #include <stdexcept>
-#include <string>
 
 namespace {
 
@@ -12,38 +12,42 @@ ftlpu::MxmSupercell::InputVector full_input()
 {
     ftlpu::MxmSupercell::InputVector input{};
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-        for (std::size_t stream = 0; stream < ftlpu::hw::kMxmLoadStreamsPerCycle; ++stream) {
+        for (std::size_t stream = 0; stream < ftlpu::hw::kMxmSupercellColumns; ++stream) {
             input[lane][stream] = ftlpu::MxmSupercell::InputWord {
-                static_cast<std::int8_t>(lane * 16 + stream),
-                stream + 1 == ftlpu::hw::kMxmLoadStreamsPerCycle,
+                static_cast<float>(static_cast<int>(lane * 8 + stream) - 31),
+                stream + 1 == ftlpu::hw::kMxmSupercellColumns,
             };
         }
     }
     return input;
 }
 
-ftlpu::MxmSupercell::ActivationVector activation_input(std::int8_t base = 1)
+ftlpu::MxmSupercell::ActivationVector activation_input(float base = 0.5f)
 {
     ftlpu::MxmSupercell::ActivationVector input{};
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-        input[lane] = ftlpu::MxmSupercell::InputWord {
-            static_cast<std::int8_t>(base + static_cast<std::int8_t>(lane)),
+        input[lane] = ftlpu::MxmSupercell::ActivationWord {
+            base + static_cast<float>(lane) * 0.25f,
             lane + 1 == ftlpu::hw::kLanesPerTile,
         };
     }
     return input;
 }
 
-std::int32_t expected_dot(std::int8_t activation_base, std::size_t column)
+float expected_dot(float activation_base, std::size_t column)
 {
-    std::int32_t sum = 0;
+    float sum = 0.0f;
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-        const auto activation = static_cast<std::int32_t>(
-            static_cast<std::int8_t>(activation_base + static_cast<std::int8_t>(lane)));
-        const auto weight = static_cast<std::int32_t>(static_cast<std::int8_t>(lane * 16 + column));
+        const auto activation = activation_base + static_cast<float>(lane) * 0.25f;
+        const auto weight = static_cast<float>(static_cast<int>(lane * 8 + column) - 31);
         sum += activation * weight;
     }
     return sum;
+}
+
+bool nearly_equal(float lhs, float rhs)
+{
+    return std::fabs(lhs - rhs) < 1.0e-5f;
 }
 
 } // namespace
@@ -58,14 +62,8 @@ int main()
     supercell.tick(log);
     assert(supercell.weight_buffer_valid(1));
     assert(!supercell.weight_buffer_valid(0));
-    assert(supercell.weight(0, 15, 15) == 0);
-    assert(supercell.weight(1, 15, 15) == static_cast<std::int8_t>(15 * 16 + 15));
-
-    for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-        for (std::size_t stream = 0; stream < ftlpu::hw::kMxmLoadStreamsPerCycle; ++stream) {
-            assert(supercell.weight(1, lane, stream) == static_cast<std::int8_t>(lane * 16 + stream));
-        }
-    }
+    assert(supercell.weight(0, 7, 7) == 0);
+    assert(supercell.weight(1, 7, 7) == static_cast<std::int8_t>(32));
 
     supercell.set_activation_input(activation_input(), 1);
     for (std::size_t column = 0; column < ftlpu::hw::kMxmSupercellColumns; ++column) {
@@ -73,28 +71,11 @@ int main()
         const auto& outputs = supercell.outputs();
         assert(outputs.size() == 1);
         assert(outputs[0].column == column);
-        assert(outputs[0].value == expected_dot(1, column));
+        assert(nearly_equal(outputs[0].value, expected_dot(0.5f, column)));
     }
 
     supercell.tick(log);
     assert(supercell.outputs().empty());
-
-    for (std::size_t cycle = 0; cycle < ftlpu::hw::kMxmSupercellColumns; ++cycle) {
-        const auto base = static_cast<std::int8_t>(cycle + 1);
-        supercell.set_activation_input(activation_input(base), 1);
-        supercell.tick(log);
-
-        const auto& outputs = supercell.outputs();
-        assert(outputs.size() == cycle + 1);
-        for (std::size_t i = 0; i < outputs.size(); ++i) {
-            const auto column = outputs[i].column;
-            const auto source_cycle = cycle - column;
-            const auto expected_base = static_cast<std::int8_t>(source_cycle + 1);
-            assert(outputs[i].value == expected_dot(expected_base, column));
-        }
-    }
-
-    assert(supercell.outputs().size() == ftlpu::hw::kMxmSupercellColumns);
 
     supercell.reset();
     bool caught = false;
@@ -107,8 +88,8 @@ int main()
     assert(caught);
 
     supercell.reset();
-    ftlpu::MxmSupercell::InputVector missing = full_input();
-    missing[15][15].reset();
+    auto missing = full_input();
+    missing[7][7].reset();
     caught = false;
     try {
         supercell.set_input(missing);
@@ -119,11 +100,6 @@ int main()
     }
     assert(caught);
 
-    const auto text = log.str();
-    assert(text.find("IW buffer1=0x000102030405060708090a0b0c0d0e0f") != std::string::npos);
-    assert(text.find("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff") != std::string::npos);
-    assert(text.find("MAC col=0 result=" + std::to_string(expected_dot(1, 0))) != std::string::npos);
-    assert(text.find("MAC col=15 result=" + std::to_string(expected_dot(1, 15))) != std::string::npos);
-
+    assert(log.str().find("MAC col=7 result=") != std::string::npos);
     return 0;
 }

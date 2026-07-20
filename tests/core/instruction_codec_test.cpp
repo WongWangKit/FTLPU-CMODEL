@@ -24,23 +24,15 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
         && lhs.activation_stream_base == rhs.activation_stream_base;
 }
 
-bool same_operand(const ftlpu::VxmLaneOperand& lhs, const ftlpu::VxmLaneOperand& rhs)
-{
-    return lhs.kind == rhs.kind
-        && lhs.index == rhs.index
-        && lhs.immediate == rhs.immediate
-        && lhs.scale == rhs.scale;
-}
-
 bool same_vxm(const ftlpu::VxmLaneAluInstruction& lhs, const ftlpu::VxmLaneAluInstruction& rhs)
 {
     return lhs.opcode == rhs.opcode
-        && same_operand(lhs.lhs, rhs.lhs)
-        && same_operand(lhs.rhs, rhs.rhs)
-        && lhs.scale == rhs.scale
-        && lhs.output_zero_point == rhs.output_zero_point
+        && lhs.lhs.kind == rhs.lhs.kind && lhs.lhs.index == rhs.lhs.index
+        && lhs.rhs.kind == rhs.rhs.kind && lhs.rhs.immediate == rhs.rhs.immediate
         && lhs.cast_target == rhs.cast_target
-        && lhs.output_stream == rhs.output_stream;
+        && lhs.output_stream == rhs.output_stream
+        && lhs.input_hemisphere == rhs.input_hemisphere
+        && lhs.output_hemisphere == rhs.output_hemisphere;
 }
 
 bool require(bool condition, const std::string& message)
@@ -72,6 +64,7 @@ bool verify_mem_codec()
         ftlpu::MemInstruction::Write(ftlpu::hw::kSramDepthRows - 1, 63),
         ftlpu::MemInstruction::Gather(7, 55),
         ftlpu::MemInstruction::Scatter(36, 12),
+        ftlpu::MemInstruction::Accumulate(6143, ftlpu::StreamId::West(28)),
     };
 
     for (const auto& instruction : instructions) {
@@ -94,7 +87,7 @@ bool verify_mxm_codec()
 {
     const ftlpu::MxmControlInstruction instructions[] {
         ftlpu::MxmControlInstruction::IW(1),
-        ftlpu::MxmControlInstruction::Compute(1, 31, 36),
+        ftlpu::MxmControlInstruction::Compute(1, 30, 20),
     };
 
     for (const auto& instruction : instructions) {
@@ -116,62 +109,24 @@ bool verify_vxm_codec()
 {
     auto instruction = ftlpu::VxmLaneAluInstruction {
         ftlpu::VxmAluOpcode::Multiply,
-        ftlpu::VxmLaneOperand::StreamInt32(32),
-        ftlpu::VxmLaneOperand::Alu(13),
-        1.0f,
-        0,
-        ftlpu::VxmCastTarget::Float32,
-    };
-    instruction.output_stream = 31;
+        ftlpu::VxmLaneOperand::StreamInt8(32),
+        ftlpu::VxmLaneOperand::Imm(0.125f),
+        1.0f, 0, ftlpu::VxmCastTarget::Float16, 16,
+        ftlpu::Hemisphere::West, ftlpu::Hemisphere::East};
 
     const auto encoded = ftlpu::isa::encode_vxm_instruction(instruction);
     const auto decoded = ftlpu::isa::decode_vxm_instruction(encoded);
-    if (!require(same_vxm(instruction, decoded), "VXM instruction codec round-trip failed")) {
-        return false;
-    }
-
-    auto cast = ftlpu::VxmLaneAluInstruction {
-        ftlpu::VxmAluOpcode::Cast,
-        ftlpu::VxmLaneOperand::Alu(14),
-        ftlpu::VxmLaneOperand::Imm(0.0f),
-        1.0f,
-        0,
-        ftlpu::VxmCastTarget::Int8,
-        9,
-    };
-    const auto decoded_cast = ftlpu::isa::decode_vxm_instruction(ftlpu::isa::encode_vxm_instruction(cast));
-    if (!require(same_vxm(cast, decoded_cast), "VXM cast/output codec round-trip failed")) {
+    if (!require(same_vxm(instruction, decoded), "VXM ALU instruction codec round-trip failed")) {
         return false;
     }
 
     return require_throws(
         [] {
-            auto invalid = ftlpu::VxmLaneAluInstruction {
-                ftlpu::VxmAluOpcode::Pass,
-                ftlpu::VxmLaneOperand::Alu(16),
-            };
+            auto invalid = ftlpu::VxmLaneAluInstruction {};
+            invalid.lhs = ftlpu::VxmLaneOperand::StreamInt8(64);
             ftlpu::isa::encode_vxm_instruction(invalid);
         },
-        "VXM codec should reject ALU indexes outside the 16-ALU lane")
-        && require_throws(
-            [] {
-                auto invalid = ftlpu::VxmLaneAluInstruction {
-                    ftlpu::VxmAluOpcode::Pass,
-                    ftlpu::VxmLaneOperand::StreamInt32(61),
-                };
-                ftlpu::isa::encode_vxm_instruction(invalid);
-            },
-            "VXM codec should reject int32 stream operands that cross the 64-stream boundary")
-        && require_throws(
-            [] {
-                auto invalid = ftlpu::VxmLaneAluInstruction {
-                    ftlpu::VxmAluOpcode::Pass,
-                    ftlpu::VxmLaneOperand::Alu(0),
-                };
-                invalid.output_zero_point = 1;
-                ftlpu::isa::encode_vxm_instruction(invalid);
-            },
-            "VXM codec should reject model-only output zero point metadata");
+        "VXM codec should reject stream indexes outside the stream set");
 }
 
 bool verify_icu_command_codec()

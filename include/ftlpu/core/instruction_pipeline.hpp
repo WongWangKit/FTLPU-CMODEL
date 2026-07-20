@@ -68,6 +68,8 @@ private:
             return "Gather";
         case MemOpcode::Scatter:
             return "Scatter";
+        case MemOpcode::Accumulate:
+            return "Accumulate";
         }
         return "Unknown";
     }
@@ -78,6 +80,7 @@ private:
         switch (instruction.opcode) {
         case MemOpcode::Read:
         case MemOpcode::Write:
+        case MemOpcode::Accumulate:
             os << " a=" << instruction.address << " s=" << instruction.stream;
             break;
         case MemOpcode::Gather:

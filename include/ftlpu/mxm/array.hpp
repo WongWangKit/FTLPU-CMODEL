@@ -75,25 +75,6 @@ public:
         return cell(supercell_row, supercell_column).weight(buffer, row, column);
     }
 
-    void issue_iw(std::size_t row, std::size_t column, std::size_t buffer, InputVector input, std::ostream& os)
-    {
-        auto& target = cell(row, column);
-        os << "mxm_array cell(" << row << "," << column << ") ";
-        target.set_input(input);
-        target.issue(MxmInstruction::IW(buffer));
-        target.tick(os);
-    }
-
-    void load_weights(std::size_t row, std::size_t column, InputVector input, std::ostream& os)
-    {
-        tick_cell_iw_load(row, column, 0, input, os);
-    }
-
-    void tick_cell_iw_load(std::size_t row, std::size_t column, InputVector input, std::ostream& os)
-    {
-        tick_cell_iw_load(row, column, 0, input, os);
-    }
-
     void tick_cell_iw_load(std::size_t row, std::size_t column, std::size_t buffer, InputVector input, std::ostream& os)
     {
         auto& target = cell(row, column);

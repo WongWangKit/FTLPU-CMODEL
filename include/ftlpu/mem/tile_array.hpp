@@ -110,6 +110,21 @@ public:
         });
     }
 
+    void set_west_stream_cell(
+        std::size_t tile,
+        std::size_t lane,
+        std::size_t stream,
+        StreamCell cell)
+    {
+        pending_inputs_.push_back(PendingInput {
+            hw::kMxmBoundaryStreamRegisterColumn,
+            tile,
+            lane,
+            StreamId::West(stream),
+            cell,
+        });
+    }
+
     void set_sram_byte(
         std::size_t column,
         std::size_t row,

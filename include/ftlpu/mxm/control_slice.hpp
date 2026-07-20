@@ -55,15 +55,15 @@ struct MxmControlInstruction {
 
     static void check_activation_stream_base(std::size_t activation_stream_base)
     {
-        if (activation_stream_base >= hw::kStreams) {
-            throw std::out_of_range("MXM activation stream base is outside the stream set");
+        if (activation_stream_base + hw::kMxmActivationStreamsPerVector > hw::kEastStreams) {
+            throw std::out_of_range("MXM FP16 activation requires two consecutive east streams");
         }
     }
 
     static void check_stream_base(std::size_t stream_base)
     {
-        if (stream_base + 3 >= hw::kStreams) {
-            throw std::out_of_range("MXM output stream base must leave room for four int32 byte streams");
+        if (stream_base + 3 >= hw::kWestStreams) {
+            throw std::out_of_range("MXM output stream base must leave room for four FP32 byte streams");
         }
     }
 };
