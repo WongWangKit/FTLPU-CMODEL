@@ -86,7 +86,7 @@ int main()
     for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
         const auto bytes = tile_vector(tile);
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-            assert(model->sram_byte(mem_slice, tile, kSramAddress + lane) == bytes[lane]);
+            assert(model->sram_lane_byte(mem_slice, tile, kSramAddress, lane) == bytes[lane]);
         }
     }
 
@@ -95,10 +95,10 @@ int main()
     const auto text = log.str();
 
     assert(text.find("scenario seed=0x46544c50") != std::string::npos);
-    assert(text.find("c" + std::to_string(mem_slice) + ".t0=Write(a=128,s=" + std::to_string(stream) + ")") != std::string::npos);
-    assert(text.find("c" + std::to_string(mem_slice) + ".t0=Read(a=128,s=" + std::to_string(stream) + ")") != std::string::npos);
-    assert(text.find("store E" + std::to_string(stream) + " addr=128 bytes=0x") != std::string::npos);
-    assert(text.find("load E" + std::to_string(stream) + " addr=128 bytes=0x") != std::string::npos);
+    assert(text.find("c" + std::to_string(mem_slice) + ".t0=Write(addr=b0:w128 encoded=0x0080,s=" + std::to_string(stream) + ")") != std::string::npos);
+    assert(text.find("c" + std::to_string(mem_slice) + ".t0=Read(addr=b0:w128 encoded=0x0080,s=" + std::to_string(stream) + ")") != std::string::npos);
+    assert(text.find("store E" + std::to_string(stream) + " addr=b0:w128 encoded=0x0080 bytes=0x") != std::string::npos);
+    assert(text.find("load E" + std::to_string(stream) + " addr=b0:w128 encoded=0x0080 bytes=0x") != std::string::npos);
     assert(text.find("tile 19:") != std::string::npos);
     assert(text.find("sreg 11: E" + std::to_string(stream) + "=0x" + last_tile_hex) != std::string::npos);
 

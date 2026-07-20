@@ -49,26 +49,38 @@ constexpr std::size_t kMxmLoadBytesPerCycle = kLanesPerTile * kMxmLoadStreamsPer
 constexpr std::size_t kSxmConcurrentStreamOps = 16;
 
 constexpr std::size_t kHemispheres = 2;
-constexpr std::size_t kPublicSramBlocks = 88;
-constexpr std::size_t kModeledSramBlocks = kPublicSramBlocks / kHemispheres;
-// One 2.5-MiB SRAM bank is owned by each MEM slice.
-constexpr std::size_t kSramBlocksPerSlice = 1;
-constexpr std::size_t kSramBlocks = kModeledSramBlocks;
-constexpr std::size_t kSramRowBytes = kPhysicalVectorBytes;
-constexpr std::size_t kSramDepthRows = 8192;
-// Compatibility alias for code that historically called a 320-byte row a word.
-constexpr std::size_t kSramDepthWords = kSramDepthRows;
-constexpr std::size_t kSramBlockBytes = kSramRowBytes * kSramDepthRows;
-constexpr std::size_t kTotalSramBytes = kSramBlocks * kSramBlockBytes;
-constexpr std::size_t kPublicTotalSramBytes = kPublicSramBlocks * kSramBlockBytes;
+constexpr std::size_t kPublicMemSlices = kMemSliceColumns * kHemispheres;
+constexpr std::size_t kSramTileBlocksPerSlice = kTileRows;
+constexpr std::size_t kSramBanksPerTileBlock = 2;
+constexpr std::size_t kSramWordsPerBank = 4096;
+constexpr std::size_t kSramWordBytes = kLanesPerTile;
+constexpr std::size_t kMemLocalWordAddressCount =
+    kSramBanksPerTileBlock * kSramWordsPerBank;
+constexpr std::size_t kSramBankBytes = kSramWordsPerBank * kSramWordBytes;
+constexpr std::size_t kSramTileBlockBytes =
+    kSramBanksPerTileBlock * kSramBankBytes;
+constexpr std::size_t kSramSliceBytes =
+    kSramTileBlocksPerSlice * kSramTileBlockBytes;
+constexpr std::size_t kModeledSramTileBlocks =
+    kMemSliceColumns * kSramTileBlocksPerSlice;
+constexpr std::size_t kPublicSramTileBlocks =
+    kPublicMemSlices * kSramTileBlocksPerSlice;
+constexpr std::size_t kModeledSramBanks =
+    kModeledSramTileBlocks * kSramBanksPerTileBlock;
+constexpr std::size_t kPublicSramBanks =
+    kPublicSramTileBlocks * kSramBanksPerTileBlock;
+constexpr std::size_t kTotalSramBytes = kMemSliceColumns * kSramSliceBytes;
+constexpr std::size_t kPublicTotalSramBytes = kPublicMemSlices * kSramSliceBytes;
 
 static_assert(kPhysicalVectorBytes == 320);
 static_assert(kMemSliceColumns % kMemSlicesPerGroup == 0);
 static_assert(kMemBoundaryStreamRegisterColumns == 12);
-static_assert(kModeledSramBlocks == kMemSliceColumns);
-static_assert(kPublicSramBlocks == 88);
-static_assert(kSramBlocks == 44);
-static_assert(kSramBlocksPerSlice == 1);
+static_assert(kPublicMemSlices == 88);
+static_assert(kSramTileBlocksPerSlice == 20);
+static_assert(kSramBanksPerTileBlock == 2);
+static_assert(kSramWordsPerBank == 4096);
+static_assert(kSramWordBytes == 16);
+static_assert(kMemLocalWordAddressCount == 8192);
 static_assert(kEastStreams + kWestStreams == kStreams);
 static_assert(kLanesPerTile == 16);
 static_assert(kMemReadBytesPerCycle == 16);
@@ -78,7 +90,11 @@ static_assert(kMxmColumns == kMxmSupercellColumns * kMxmSupercellsPerPlane);
 static_assert(kMxmLoadStreamsPerCycle == kMxmSupercellColumns);
 static_assert(kMxmLoadBytesPerCycle == 256);
 static_assert(kSxmConcurrentStreamOps == 16);
-static_assert(kSramBlockBytes == 5 * 1024 * 1024 / 2);
+static_assert(kSramBankBytes == 64 * 1024);
+static_assert(kSramTileBlockBytes == 128 * 1024);
+static_assert(kSramSliceBytes == 5 * 1024 * 1024 / 2);
+static_assert(kModeledSramTileBlocks == 880);
+static_assert(kModeledSramBanks == 1760);
 static_assert(kTotalSramBytes == 110 * 1024 * 1024);
 static_assert(kPublicTotalSramBytes == 220 * 1024 * 1024);
 

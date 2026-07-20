@@ -69,7 +69,7 @@ bool verify_mem_codec()
 {
     const ftlpu::MemInstruction instructions[] {
         ftlpu::MemInstruction::Read(4096, 45),
-        ftlpu::MemInstruction::Write(ftlpu::hw::kSramDepthRows - 1, 63),
+        ftlpu::MemInstruction::Write(ftlpu::hw::kMemLocalWordAddressCount - 1, 63),
         ftlpu::MemInstruction::Gather(7, 55),
         ftlpu::MemInstruction::Scatter(36, 12),
     };
@@ -85,9 +85,9 @@ bool verify_mem_codec()
     return require_throws(
         [] {
             ftlpu::isa::encode_mem_instruction(
-                ftlpu::MemInstruction::Read(ftlpu::hw::kSramDepthRows, 0));
+                ftlpu::MemInstruction::Read(ftlpu::hw::kMemLocalWordAddressCount, 0));
         },
-        "MEM codec should reject row addresses outside the 8192-row bank");
+        "MEM codec should reject addresses outside the 13-bit local word range");
 }
 
 bool verify_mxm_codec()

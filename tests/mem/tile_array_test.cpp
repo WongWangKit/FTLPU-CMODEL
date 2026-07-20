@@ -50,12 +50,22 @@ int main()
     }
     assert(caught);
 
-    model->set_sram_lane_byte(0, 19, ftlpu::hw::kSramDepthRows - 1, 15, 0xa5);
-    assert(model->sram_lane_byte(0, 19, ftlpu::hw::kSramDepthRows - 1, 15) == 0xa5);
+    const auto bank0_word = ftlpu::MemLocalWordAddress13::FromFields(0, 7);
+    const auto bank1_word = ftlpu::MemLocalWordAddress13::FromFields(1, 7);
+    model->set_sram_lane_byte(0, 5, bank0_word, 3, 0x11);
+    model->set_sram_byte(0, 5, bank1_word.slice_byte_address(3), 0x22);
+    assert(model->sram_lane_byte(0, 5, bank0_word, 3) == 0x11);
+    assert(model->sram_byte(0, 5, bank1_word.slice_byte_address(3)) == 0x22);
+    assert(model->sram_lane_byte(0, 6, bank1_word, 3) == 0);
+
+    const auto last_address = ftlpu::MemLocalWordAddress13::FromFields(1, 4095);
+    model->set_sram_lane_byte(0, 19, last_address, 15, 0xa5);
+    assert(model->sram_lane_byte(0, 19, last_address, 15) == 0xa5);
 
     caught = false;
     try {
-        model->set_sram_lane_byte(0, 0, ftlpu::hw::kSramDepthRows, 0, 1);
+        model->set_sram_lane_byte(
+            0, 0, ftlpu::hw::kMemLocalWordAddressCount, 0, 1);
     } catch (const std::out_of_range&) {
         caught = true;
     }
@@ -63,12 +73,12 @@ int main()
 
     const std::string text = log.str();
     assert(text.find("cycle 0") != std::string::npos);
-    assert(text.find("c8.t0=Write(a=16,s=3)") != std::string::npos);
-    assert(text.find("c8.t1=Write(a=16,s=3)") != std::string::npos);
-    assert(text.find("c8.t2=Write(a=16,s=3)") != std::string::npos);
-    assert(text.find("c43.t2=Read(a=32,s=36)") != std::string::npos);
-    assert(text.find("c8.t2 store E3 addr=16 bytes=0x0a0b0c0d0e0f10111213141516171819") != std::string::npos);
-    assert(text.find("c43.t2 load W4 addr=32 bytes=0x28292a2b2c2d2e2f3031323334353637") != std::string::npos);
+    assert(text.find("c8.t0=Write(addr=b0:w16 encoded=0x0010,s=3)") != std::string::npos);
+    assert(text.find("c8.t1=Write(addr=b0:w16 encoded=0x0010,s=3)") != std::string::npos);
+    assert(text.find("c8.t2=Write(addr=b0:w16 encoded=0x0010,s=3)") != std::string::npos);
+    assert(text.find("c43.t2=Read(addr=b0:w32 encoded=0x0020,s=36)") != std::string::npos);
+    assert(text.find("c8.t2 store E3 addr=b0:w16 encoded=0x0010 bytes=0x0a0b0c0d0e0f10111213141516171819") != std::string::npos);
+    assert(text.find("c43.t2 load W4 addr=b0:w32 encoded=0x0020 bytes=0x28292a2b2c2d2e2f3031323334353637") != std::string::npos);
     assert(text.find("tile 2:") != std::string::npos);
     assert(text.find("sreg 11: W4=0x28292a2b2c2d2e2f3031323334353637") != std::string::npos);
 

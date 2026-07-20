@@ -111,21 +111,32 @@ public:
 
     void set_sram_byte(
         std::size_t column,
-        std::size_t row,
-        std::size_t byte_offset,
+        std::size_t tile,
+        MemSliceByteAddress17 address,
         Data value)
     {
-        mem_.set_sram_byte(column, row, byte_offset, value);
+        mem_.set_sram_byte(column, tile, address, value);
     }
 
     void set_sram_lane_byte(
         std::size_t column,
         std::size_t tile,
-        std::size_t row,
+        MemLocalWordAddress13 address,
         std::size_t lane,
         Data value)
     {
-        mem_.set_sram_lane_byte(column, tile, row, lane, value);
+        mem_.set_sram_lane_byte(column, tile, address, lane, value);
+    }
+
+    void set_sram_lane_byte(
+        std::size_t column,
+        std::size_t tile,
+        std::size_t address,
+        std::size_t lane,
+        Data value)
+    {
+        set_sram_lane_byte(
+            column, tile, MemLocalWordAddress13(address), lane, value);
     }
 
     const StreamSlot& east_register(
@@ -161,18 +172,31 @@ public:
         return cell;
     }
 
-    Data sram_byte(std::size_t column, std::size_t row, std::size_t byte_offset) const
+    Data sram_byte(
+        std::size_t column,
+        std::size_t tile,
+        MemSliceByteAddress17 address) const
     {
-        return mem_.sram_byte(column, row, byte_offset);
+        return mem_.sram_byte(column, tile, address);
     }
 
     Data sram_lane_byte(
         std::size_t column,
         std::size_t tile,
-        std::size_t row,
+        MemLocalWordAddress13 address,
         std::size_t lane) const
     {
-        return mem_.sram_lane_byte(column, tile, row, lane);
+        return mem_.sram_lane_byte(column, tile, address, lane);
+    }
+
+    Data sram_lane_byte(
+        std::size_t column,
+        std::size_t tile,
+        std::size_t address,
+        std::size_t lane) const
+    {
+        return sram_lane_byte(
+            column, tile, MemLocalWordAddress13(address), lane);
     }
 
     const InstructionSlot& instruction_at(std::size_t column, std::size_t tile) const

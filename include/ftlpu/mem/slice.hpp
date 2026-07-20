@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/stream.hpp"
+#include "ftlpu/mem/address.hpp"
 
 #include <cstddef>
 #include <optional>
@@ -19,8 +20,8 @@ enum class MemOpcode {
 
 struct MemInstruction {
     MemOpcode opcode{MemOpcode::Read};
-    // SRAM row address (0..8191), not a byte address.
-    std::size_t address{0};
+    // 13-bit word address: bank in bit 12 and word offset in bits 11:0.
+    MemLocalWordAddress13 address{};
 
     // Packed ISA selector retained for codec compatibility:
     //   0..31  = E0..E31
@@ -39,9 +40,19 @@ struct MemInstruction {
         return StreamId::from_packed(map_stream);
     }
 
-    static MemInstruction Read(std::size_t address, StreamId stream)
+    static MemInstruction Read(MemLocalWordAddress13 address, StreamId stream)
     {
         return MemInstruction {MemOpcode::Read, address, stream.packed(), 0};
+    }
+
+    static MemInstruction Read(std::size_t address, StreamId stream)
+    {
+        return Read(MemLocalWordAddress13(address), stream);
+    }
+
+    static MemInstruction Read(MemLocalWordAddress13 address, std::size_t packed_stream)
+    {
+        return Read(address, StreamId::from_packed(packed_stream));
     }
 
     static MemInstruction Read(std::size_t address, std::size_t packed_stream)
@@ -49,9 +60,19 @@ struct MemInstruction {
         return Read(address, StreamId::from_packed(packed_stream));
     }
 
-    static MemInstruction Write(std::size_t address, StreamId stream)
+    static MemInstruction Write(MemLocalWordAddress13 address, StreamId stream)
     {
         return MemInstruction {MemOpcode::Write, address, stream.packed(), 0};
+    }
+
+    static MemInstruction Write(std::size_t address, StreamId stream)
+    {
+        return Write(MemLocalWordAddress13(address), stream);
+    }
+
+    static MemInstruction Write(MemLocalWordAddress13 address, std::size_t packed_stream)
+    {
+        return Write(address, StreamId::from_packed(packed_stream));
     }
 
     static MemInstruction Write(std::size_t address, std::size_t packed_stream)
@@ -61,7 +82,11 @@ struct MemInstruction {
 
     static MemInstruction Gather(StreamId stream, StreamId map_stream)
     {
-        return MemInstruction {MemOpcode::Gather, 0, stream.packed(), map_stream.packed()};
+        return MemInstruction {
+            MemOpcode::Gather,
+            MemLocalWordAddress13(0),
+            stream.packed(),
+            map_stream.packed()};
     }
 
     static MemInstruction Gather(std::size_t packed_stream, std::size_t packed_map_stream)
@@ -73,7 +98,11 @@ struct MemInstruction {
 
     static MemInstruction Scatter(StreamId stream, StreamId map_stream)
     {
-        return MemInstruction {MemOpcode::Scatter, 0, stream.packed(), map_stream.packed()};
+        return MemInstruction {
+            MemOpcode::Scatter,
+            MemLocalWordAddress13(0),
+            stream.packed(),
+            map_stream.packed()};
     }
 
     static MemInstruction Scatter(std::size_t packed_stream, std::size_t packed_map_stream)
@@ -136,12 +165,13 @@ public:
         if (instruction.opcode != MemOpcode::Read) {
             throw std::logic_error("MemSlice currently implements Read only");
         }
-        if (instruction.address > memory_.size()
-            || vector_length_ > memory_.size() - instruction.address) {
+        const auto address = instruction.address.encoded();
+        if (address > memory_.size()
+            || vector_length_ > memory_.size() - address) {
             throw std::out_of_range("MemSlice Read range is outside memory");
         }
 
-        address_ = instruction.address;
+        address_ = address;
         remaining_ = vector_length_;
         stream_ = instruction.stream;
         busy_ = true;

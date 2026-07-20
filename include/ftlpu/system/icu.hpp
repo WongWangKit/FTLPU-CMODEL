@@ -383,10 +383,12 @@ private:
         std::size_t repeat_index)
     {
         const auto delta = address_stride * static_cast<std::int64_t>(repeat_index);
-        if (delta < 0 && instruction.address < static_cast<std::size_t>(-delta)) {
+        const auto address = static_cast<std::int64_t>(instruction.address.encoded());
+        if (delta < 0 && address < -delta) {
             throw std::out_of_range("ICU MEM Repeat address stride underflow");
         }
-        instruction.address = static_cast<std::size_t>(static_cast<std::int64_t>(instruction.address) + delta);
+        instruction.address = MemLocalWordAddress13(
+            static_cast<std::size_t>(address + delta));
         return instruction;
     }
 
@@ -462,7 +464,9 @@ private:
     {
         std::ostringstream os;
         os << mem_opcode_name(instruction.opcode)
-           << " address=" << instruction.address
+           << " addr=b" << instruction.address.bank()
+           << ":w" << instruction.address.word()
+           << " encoded=0x" << std::hex << instruction.address.encoded() << std::dec
            << " stream=" << instruction.stream;
         if (instruction.opcode == MemOpcode::Gather || instruction.opcode == MemOpcode::Scatter) {
             os << " map_stream=" << instruction.map_stream;

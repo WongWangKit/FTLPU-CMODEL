@@ -28,6 +28,7 @@ ftlpu_add_test(stream_fabric_test tests/stream/stream_fabric_test.cpp)
 ftlpu_add_test(stream_port_test tests/stream/stream_port_test.cpp)
 
 ftlpu_add_test(mem_slice_test tests/mem/slice_test.cpp)
+ftlpu_add_test(mem_address_test tests/mem/address_test.cpp)
 ftlpu_add_test(mem_array_separated_test tests/mem/mem_array_separated_test.cpp)
 ftlpu_add_test(tile_array_test tests/mem/tile_array_test.cpp)
 ftlpu_add_test(vector_roundtrip_test tests/mem/vector_roundtrip_test.cpp)

@@ -6,7 +6,8 @@
 int main()
 {
     constexpr std::size_t kMemSlice = 8; // group 2: east input SR2, east output SR3
-    constexpr std::size_t kAddress = 64;
+    constexpr auto kAddress =
+        ftlpu::MemLocalWordAddress13::FromFields(1, 64);
     const auto stream = ftlpu::StreamId::East(5);
 
     {
@@ -40,6 +41,11 @@ int main()
             assert(cell.valid);
             assert(cell.data == static_cast<std::uint8_t>(100 + lane));
         }
+        assert(mem.executed_transfers().size() == 1);
+        const auto& transfer = mem.executed_transfers().front();
+        assert(transfer.address == kAddress);
+        assert(transfer.bank == 1);
+        assert(transfer.word == 64);
     }
 
     {

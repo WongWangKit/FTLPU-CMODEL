@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <optional>
+#include <iomanip>
 #include <ostream>
 #include <stdexcept>
 #include <string>
@@ -78,7 +79,11 @@ private:
         switch (instruction.opcode) {
         case MemOpcode::Read:
         case MemOpcode::Write:
-            os << " a=" << instruction.address << " s=" << instruction.stream;
+            os << " addr=b" << instruction.address.bank()
+               << ":w" << instruction.address.word()
+               << " encoded=0x" << std::hex << std::setw(4) << std::setfill('0')
+               << instruction.address.encoded() << std::dec << std::setfill(' ')
+               << " s=" << instruction.stream;
             break;
         case MemOpcode::Gather:
         case MemOpcode::Scatter:

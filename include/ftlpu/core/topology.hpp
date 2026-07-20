@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
+#include "ftlpu/mem/address.hpp"
 
 #include <cstddef>
 #include <stdexcept>
@@ -40,6 +41,7 @@ struct MemGroupCoord {
 
 struct SramCoord {
     std::size_t mem_slice{0};
+    std::size_t tile{0};
 };
 
 inline MemGroupCoord mem_group_for(MemTileCoord coord)
@@ -76,7 +78,20 @@ inline std::size_t sram_block_index(SramCoord coord)
     if (coord.mem_slice >= hw::kMemSliceColumns) {
         throw std::out_of_range("SRAM slice is outside the modeled hemisphere");
     }
-    return coord.mem_slice;
+    if (coord.tile >= hw::kSramTileBlocksPerSlice) {
+        throw std::out_of_range("SRAM tile block is outside the MEM slice");
+    }
+    return coord.mem_slice * hw::kSramTileBlocksPerSlice + coord.tile;
+}
+
+inline std::size_t sram_byte_address(
+    std::size_t tile_block,
+    MemSliceByteAddress17 address)
+{
+    if (tile_block >= hw::kModeledSramTileBlocks) {
+        throw std::out_of_range("SRAM tile block index is outside the modeled hemisphere");
+    }
+    return tile_block * hw::kSramTileBlockBytes + address.encoded();
 }
 
 inline std::size_t sram_byte_address(
@@ -84,19 +99,9 @@ inline std::size_t sram_byte_address(
     std::size_t word_index,
     std::size_t byte_offset)
 {
-    if (block >= hw::kSramBlocks) {
-        throw std::out_of_range("SRAM block index is outside the TSP memory");
-    }
-    if (word_index >= hw::kSramDepthWords) {
-        throw std::out_of_range("SRAM word index is outside the block");
-    }
-    if (byte_offset >= hw::kPhysicalVectorBytes) {
-        throw std::out_of_range("SRAM byte offset is outside the vector word");
-    }
-
-    return block * hw::kSramBlockBytes
-        + word_index * hw::kPhysicalVectorBytes
-        + byte_offset;
+    return sram_byte_address(
+        block,
+        MemLocalWordAddress13(word_index).slice_byte_address(byte_offset));
 }
 
 // Compatibility aliases for existing examples.  New code should use the

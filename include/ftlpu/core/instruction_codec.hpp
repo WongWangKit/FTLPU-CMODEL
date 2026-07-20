@@ -136,7 +136,7 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
 {
     constexpr std::uint64_t kOpcodeMask = 0x3;
     constexpr std::uint64_t kStreamMask = 0x3f;
-    constexpr std::uint64_t kAddressMask = hw::kSramDepthWords - 1;
+    constexpr std::uint64_t kAddressMask = MemLocalWordAddress13::kLimit - 1;
 
     detail::require_unsigned_fit(
         static_cast<std::uint64_t>(instruction.opcode),
@@ -151,15 +151,15 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
         kStreamMask,
         "MEM map stream does not fit encoded instruction");
     detail::require_unsigned_fit(
-        static_cast<std::uint64_t>(instruction.address),
+        static_cast<std::uint64_t>(instruction.address.encoded()),
         kAddressMask,
-        "MEM row address does not fit encoded instruction");
+        "MEM local word address does not fit encoded instruction");
 
     return static_cast<std::uint32_t>(
         static_cast<std::uint64_t>(instruction.opcode)
         | (static_cast<std::uint64_t>(instruction.stream) << 2)
         | (static_cast<std::uint64_t>(instruction.map_stream) << 8)
-        | (static_cast<std::uint64_t>(instruction.address) << 14));
+        | (static_cast<std::uint64_t>(instruction.address.encoded()) << 14));
 }
 
 inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)

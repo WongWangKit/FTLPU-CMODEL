@@ -151,7 +151,9 @@ public:
         std::size_t tile{0};
         std::size_t sr_column{0};
         StreamId stream{StreamId::East(0)};
-        std::size_t address{0};
+        MemLocalWordAddress13 address{};
+        std::size_t bank{0};
+        std::size_t word{0};
         StreamPayloadSegment16 bytes{};
     };
 
@@ -203,44 +205,67 @@ public:
 
     void set_sram_byte(
         std::size_t mem_slice,
-        std::size_t row,
-        std::size_t byte_offset,
+        std::size_t tile,
+        MemSliceByteAddress17 address,
         std::uint8_t value)
     {
         check_mem_slice(mem_slice);
-        sram_.bank(mem_slice).set_byte(row, byte_offset, value);
+        check_tile(tile);
+        sram_.slice(mem_slice).tile_block(tile).set_byte(address, value);
     }
 
     std::uint8_t sram_byte(
         std::size_t mem_slice,
-        std::size_t row,
-        std::size_t byte_offset) const
+        std::size_t tile,
+        MemSliceByteAddress17 address) const
     {
         check_mem_slice(mem_slice);
-        return sram_.bank(mem_slice).byte(row, byte_offset);
+        check_tile(tile);
+        return sram_.slice(mem_slice).tile_block(tile).byte(address);
     }
 
     void set_sram_lane_byte(
         std::size_t mem_slice,
         std::size_t tile,
-        std::size_t row,
+        MemLocalWordAddress13 address,
         std::size_t lane,
         std::uint8_t value)
     {
         check_tile(tile);
         check_lane(lane);
-        set_sram_byte(mem_slice, row, tile * hw::kLanesPerTile + lane, value);
+        set_sram_byte(mem_slice, tile, address.slice_byte_address(lane), value);
+    }
+
+    void set_sram_lane_byte(
+        std::size_t mem_slice,
+        std::size_t tile,
+        std::size_t address,
+        std::size_t lane,
+        std::uint8_t value)
+    {
+        set_sram_lane_byte(
+            mem_slice, tile, MemLocalWordAddress13(address), lane, value);
     }
 
     std::uint8_t sram_lane_byte(
         std::size_t mem_slice,
         std::size_t tile,
-        std::size_t row,
+        MemLocalWordAddress13 address,
         std::size_t lane) const
     {
         check_tile(tile);
         check_lane(lane);
-        return sram_byte(mem_slice, row, tile * hw::kLanesPerTile + lane);
+        return sram_byte(mem_slice, tile, address.slice_byte_address(lane));
+    }
+
+    std::uint8_t sram_lane_byte(
+        std::size_t mem_slice,
+        std::size_t tile,
+        std::size_t address,
+        std::size_t lane) const
+    {
+        return sram_lane_byte(
+            mem_slice, tile, MemLocalWordAddress13(address), lane);
     }
 
     const InstructionSlot& instruction_at(std::size_t mem_slice, std::size_t tile) const
@@ -336,13 +361,26 @@ private:
         switch (instruction.opcode) {
         case MemOpcode::Read:
         case MemOpcode::Write:
-            os << "(a=" << instruction.address << ",s=" << instruction.stream << ")";
+            os << "(";
+            print_address(os, instruction.address);
+            os << ",s=" << instruction.stream << ")";
             break;
         case MemOpcode::Gather:
         case MemOpcode::Scatter:
             os << "(s=" << instruction.stream << ",map=" << instruction.map_stream << ")";
             break;
         }
+    }
+
+    static void print_address(std::ostream& os, MemLocalWordAddress13 address)
+    {
+        const auto old_flags = os.flags();
+        const auto old_fill = os.fill();
+        os << "addr=b" << address.bank() << ":w" << address.word()
+           << " encoded=0x" << std::hex << std::setw(4) << std::setfill('0')
+           << address.encoded();
+        os.flags(old_flags);
+        os.fill(old_fill);
     }
 
     void dispatch_from_queues()
@@ -391,7 +429,8 @@ private:
     {
         const auto stream = instruction.stream_id();
         const auto sr_column = ports_.output_column(mem_slice, stream.direction());
-        const auto bytes = sram_.bank(mem_slice).read_segment(tile, instruction.address);
+        const auto bytes =
+            sram_.slice(mem_slice).tile_block(tile).read_word(instruction.address);
         const auto vector_tag = static_cast<std::uint64_t>(cycle_) * hw::kTileRows + tile;
 
         StreamOutputPort output(
@@ -412,6 +451,8 @@ private:
             sr_column,
             stream,
             instruction.address,
+            instruction.address.bank(),
+            instruction.address.word(),
             bytes,
         });
     }
@@ -440,7 +481,7 @@ private:
             throw std::logic_error("MEM Write reached an invalid stream segment");
         }
 
-        sram_.bank(mem_slice).write_segment(tile, instruction.address, bytes);
+        sram_.slice(mem_slice).tile_block(tile).write_word(instruction.address, bytes);
         executed_mem_.push_back(MemTransfer {
             MemTransfer::Kind::StoreStreamToSram,
             mem_slice,
@@ -448,6 +489,8 @@ private:
             sr_column,
             stream,
             instruction.address,
+            instruction.address.bank(),
+            instruction.address.word(),
             bytes,
         });
     }
@@ -521,7 +564,9 @@ private:
             os << "    c" << transfer.mem_slice << ".t" << transfer.tile << ' '
                << (transfer.kind == MemTransfer::Kind::StoreStreamToSram ? "store" : "load")
                << ' ' << direction_name(transfer.stream.direction()) << transfer.stream.index()
-               << " addr=" << transfer.address << " bytes=0x";
+               << ' ';
+            print_address(os, transfer.address);
+            os << " bytes=0x";
             print_hex_bytes(os, transfer.bytes);
             os << '\n';
         }

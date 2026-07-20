@@ -54,9 +54,13 @@ Software-visible MEM addresses follow the public-style layout:
 The current model instantiates one hemisphere. A MEM slice receives one
 instruction stream; for `Read` and `Write`, the encoded hardware address field
 is the 13-bit slice-local word address copied from software address bits
-`[16:4]`. `set_sram_byte` and `sram_byte` keep byte-level access for tests and
-initialization, while MEM `Read` and `Write` require 16-byte alignment and move
-one full SRAM word per cycle.
+`[16:4]`. Address domains are kept distinct by `MemGlobalAddress24`,
+`MemSliceByteAddress17`, and `MemLocalWordAddress13` in
+`include/ftlpu/mem/address.hpp`; there are no implicit conversions between
+them. `set_sram_byte` and `sram_byte` take an explicit tile plus a
+`MemSliceByteAddress17` for byte-level DMA/test initialization, while MEM
+`Read` and `Write` carry a `MemLocalWordAddress13` and move one full aligned
+SRAM word per cycle.
 
 ## Stream Direction Conventions
 

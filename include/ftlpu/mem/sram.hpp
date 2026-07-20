@@ -2,8 +2,10 @@
 
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/stream.hpp"
+#include "ftlpu/mem/address.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -11,19 +13,12 @@
 
 namespace ftlpu {
 
-// One physical SRAM bank owned by one MEM functional slice.  A bank contains
-// 8192 rows, and every row spans all 20 tiles (16 bytes per tile):
-//
-//   8192 rows * (20 tiles * 16 bytes) = 2.5 MiB.
-//
-// MEM instructions address rows.  As an instruction travels through a tile,
-// that tile reads or writes its own contiguous 16-byte portion of the row.
+// One of the two physical banks in a tile-local SRAM block.
 class SramBank {
 public:
-    static constexpr std::size_t kRows = hw::kSramDepthRows;
-    static constexpr std::size_t kBytesPerRow = hw::kSramRowBytes;
-    static constexpr std::size_t kBytesPerTileSegment = hw::kLanesPerTile;
-    static constexpr std::size_t kCapacityBytes = kRows * kBytesPerRow;
+    static constexpr std::size_t kWords = hw::kSramWordsPerBank;
+    static constexpr std::size_t kBytesPerWord = hw::kSramWordBytes;
+    static constexpr std::size_t kCapacityBytes = hw::kSramBankBytes;
 
     SramBank()
         : bytes_(kCapacityBytes, 0)
@@ -35,74 +30,57 @@ public:
         std::fill(bytes_.begin(), bytes_.end(), 0);
     }
 
-    std::uint8_t byte(std::size_t row, std::size_t byte_offset) const
+    std::uint8_t byte(std::size_t word, std::size_t byte_offset) const
     {
-        return bytes_.at(flat_index(row, byte_offset));
+        return bytes_.at(flat_index(word, byte_offset));
     }
 
-    void set_byte(std::size_t row, std::size_t byte_offset, std::uint8_t value)
+    void set_byte(std::size_t word, std::size_t byte_offset, std::uint8_t value)
     {
-        bytes_.at(flat_index(row, byte_offset)) = value;
+        bytes_.at(flat_index(word, byte_offset)) = value;
     }
 
-    StreamPayloadSegment16 read_segment(std::size_t tile, std::size_t row) const
+    StreamPayloadSegment16 read_word(std::size_t word) const
     {
-        const auto byte_offset = tile_byte_offset(tile);
-        check_row(row);
+        check_word(word);
         StreamPayloadSegment16 result{};
-        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            result[lane] = byte(row, byte_offset + lane);
+        for (std::size_t byte = 0; byte < kBytesPerWord; ++byte) {
+            result[byte] = this->byte(word, byte);
         }
         return result;
     }
 
-    void write_segment(
-        std::size_t tile,
-        std::size_t row,
-        const StreamPayloadSegment16& values)
+    void write_word(std::size_t word, const StreamPayloadSegment16& values)
     {
-        const auto byte_offset = tile_byte_offset(tile);
-        check_row(row);
-        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            set_byte(row, byte_offset + lane, values[lane]);
+        check_word(word);
+        for (std::size_t byte = 0; byte < kBytesPerWord; ++byte) {
+            set_byte(word, byte, values[byte]);
         }
     }
 
 private:
-    static void check_row(std::size_t row)
+    static void check_word(std::size_t word)
     {
-        if (row >= kRows) {
-            throw std::out_of_range("SRAM row is outside the 8192-row bank");
+        if (word >= kWords) {
+            throw std::out_of_range("SRAM word is outside the 4096-word bank");
         }
     }
 
-    static std::size_t tile_byte_offset(std::size_t tile)
+    static std::size_t flat_index(std::size_t word, std::size_t byte_offset)
     {
-        if (tile >= hw::kTileRows) {
-            throw std::out_of_range("SRAM tile is outside the 20-row MEM slice");
+        check_word(word);
+        if (byte_offset >= kBytesPerWord) {
+            throw std::out_of_range("SRAM byte offset is outside the 16-byte word");
         }
-        return tile * kBytesPerTileSegment;
-    }
-
-    static std::size_t flat_index(std::size_t row, std::size_t byte_offset)
-    {
-        check_row(row);
-        if (byte_offset >= kBytesPerRow) {
-            throw std::out_of_range("SRAM byte offset is outside the 320-byte row");
-        }
-        return row * kBytesPerRow + byte_offset;
+        return word * kBytesPerWord + byte_offset;
     }
 
     std::vector<std::uint8_t> bytes_{};
 };
 
-class SramArray {
+// SRAM physically attached to one MEM tile: two 4096 x 16-byte banks.
+class SramTileBlock {
 public:
-    SramArray()
-        : banks_(hw::kMemSliceColumns)
-    {
-    }
-
     void clear()
     {
         for (auto& bank : banks_) {
@@ -110,18 +88,91 @@ public:
         }
     }
 
-    SramBank& bank(std::size_t mem_slice)
+    std::uint8_t byte(MemSliceByteAddress17 address) const
     {
-        return banks_.at(mem_slice);
+        return bank(address.bank()).byte(address.word(), address.byte_offset());
     }
 
-    const SramBank& bank(std::size_t mem_slice) const
+    void set_byte(MemSliceByteAddress17 address, std::uint8_t value)
     {
-        return banks_.at(mem_slice);
+        bank(address.bank()).set_byte(address.word(), address.byte_offset(), value);
+    }
+
+    StreamPayloadSegment16 read_word(MemLocalWordAddress13 address) const
+    {
+        return bank(address.bank()).read_word(address.word());
+    }
+
+    void write_word(
+        MemLocalWordAddress13 address,
+        const StreamPayloadSegment16& values)
+    {
+        bank(address.bank()).write_word(address.word(), values);
+    }
+
+    SramBank& bank(std::size_t bank)
+    {
+        return banks_.at(bank);
+    }
+
+    const SramBank& bank(std::size_t bank) const
+    {
+        return banks_.at(bank);
     }
 
 private:
-    std::vector<SramBank> banks_{};
+    std::array<SramBank, hw::kSramBanksPerTileBlock> banks_{};
+};
+
+class SramSlice {
+public:
+    void clear()
+    {
+        for (auto& block : tile_blocks_) {
+            block.clear();
+        }
+    }
+
+    SramTileBlock& tile_block(std::size_t tile)
+    {
+        return tile_blocks_.at(tile);
+    }
+
+    const SramTileBlock& tile_block(std::size_t tile) const
+    {
+        return tile_blocks_.at(tile);
+    }
+
+private:
+    std::array<SramTileBlock, hw::kSramTileBlocksPerSlice> tile_blocks_{};
+};
+
+class SramArray {
+public:
+    SramArray()
+        : slices_(hw::kMemSliceColumns)
+    {
+    }
+
+    void clear()
+    {
+        for (auto& slice : slices_) {
+            slice.clear();
+        }
+    }
+
+    SramSlice& slice(std::size_t mem_slice)
+    {
+        return slices_.at(mem_slice);
+    }
+
+    const SramSlice& slice(std::size_t mem_slice) const
+    {
+        return slices_.at(mem_slice);
+    }
+
+private:
+    std::vector<SramSlice> slices_{};
 };
 
 } // namespace ftlpu
