@@ -173,6 +173,11 @@ public:
 
     void reset()
     {
+        reset_execution_state();
+    }
+
+    void reset_execution_state()
+    {
         cycle_ = 0;
         for (auto& queue : instruction_queues_) {
             queue.clear();
@@ -182,9 +187,19 @@ public:
                 slot.reset();
             }
         }
-        sram_.clear();
         executed_mem_.clear();
         executed_instructions_.clear();
+    }
+
+    void clear_sram()
+    {
+        sram_.clear();
+    }
+
+    void reset_and_clear_sram()
+    {
+        reset_execution_state();
+        clear_sram();
     }
 
     std::size_t cycle() const noexcept
@@ -266,6 +281,23 @@ public:
     {
         return sram_lane_byte(
             mem_slice, tile, MemLocalWordAddress13(address), lane);
+    }
+
+    void write_sram_vector(
+        std::size_t mem_slice,
+        MemLocalWordAddress13 address,
+        const StreamPayloadVector320& values)
+    {
+        check_mem_slice(mem_slice);
+        sram_.slice(mem_slice).write_vector(address, values);
+    }
+
+    StreamPayloadVector320 read_sram_vector(
+        std::size_t mem_slice,
+        MemLocalWordAddress13 address) const
+    {
+        check_mem_slice(mem_slice);
+        return sram_.slice(mem_slice).read_vector(address);
     }
 
     const InstructionSlot& instruction_at(std::size_t mem_slice, std::size_t tile) const

@@ -97,6 +97,19 @@ public:
     constexpr std::size_t bank() const noexcept { return encoded_ >> 12; }
     constexpr std::size_t word() const noexcept { return encoded_ & 0x0fff; }
 
+    constexpr MemLocalWordAddress13 next_word() const
+    {
+        return advance_words(1);
+    }
+
+    constexpr MemLocalWordAddress13 advance_words(std::size_t count) const
+    {
+        if (count > hw::kSramWordsPerBank - 1 - word()) {
+            throw std::out_of_range("MEM word address advance crosses a bank boundary");
+        }
+        return FromFields(bank(), word() + count);
+    }
+
     constexpr MemSliceByteAddress17 slice_byte_address(
         std::size_t byte_offset = 0) const
     {

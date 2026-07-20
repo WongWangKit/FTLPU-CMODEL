@@ -44,6 +44,23 @@ int main()
     assert(aligned.local_word_address() == local_word);
     assert(throws([&] { (void)local_byte.local_word_address(); }));
 
+    constexpr auto bank0_word10 =
+        ftlpu::MemLocalWordAddress13::FromFields(0, 10);
+    static_assert(bank0_word10.next_word()
+        == ftlpu::MemLocalWordAddress13::FromFields(0, 11));
+    static_assert(bank0_word10.advance_words(100)
+        == ftlpu::MemLocalWordAddress13::FromFields(0, 110));
+    static_assert(bank0_word10.advance_words(0) == bank0_word10);
+    assert(throws([] {
+        (void)ftlpu::MemLocalWordAddress13::FromFields(0, 4095).next_word();
+    }));
+    assert(throws([] {
+        (void)ftlpu::MemLocalWordAddress13::FromFields(1, 4095).next_word();
+    }));
+    assert(throws([] {
+        (void)ftlpu::MemLocalWordAddress13::FromFields(0, 4090).advance_words(6);
+    }));
+
     const auto global = ftlpu::MemGlobalAddress24::FromFields(1, 43, local_byte);
     assert(global.hemisphere() == 1);
     assert(global.mem_slice() == 43);

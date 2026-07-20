@@ -29,6 +29,7 @@ ftlpu_add_test(stream_port_test tests/stream/stream_port_test.cpp)
 
 ftlpu_add_test(mem_slice_test tests/mem/slice_test.cpp)
 ftlpu_add_test(mem_address_test tests/mem/address_test.cpp)
+ftlpu_add_test(mem_sram_test tests/mem/sram_test.cpp)
 ftlpu_add_test(mem_array_separated_test tests/mem/mem_array_separated_test.cpp)
 ftlpu_add_test(tile_array_test tests/mem/tile_array_test.cpp)
 ftlpu_add_test(vector_roundtrip_test tests/mem/vector_roundtrip_test.cpp)
@@ -56,6 +57,7 @@ ftlpu_add_test(sxm_test tests/sxm/sxm_test.cpp)
 ftlpu_add_test(icu_test tests/icu/icu_test.cpp)
 
 ftlpu_add_test(c2c_test tests/c2c/c2c_test.cpp)
+ftlpu_add_test(dma_test tests/dma/dma_test.cpp)
 
 
 ftlpu_add_demo(northbound_pipeline_demo examples/core/northbound_pipeline_demo.cpp)

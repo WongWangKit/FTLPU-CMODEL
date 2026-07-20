@@ -27,6 +27,9 @@ The repository currently models:
   or fp16 bytes onto streams.
 - `ICU`: per-queue instruction dispatch with `NOP N` and `Repeat n,d`, including
   MEM address stride support.
+- `DMA`: Host buffers referenced by handles, descriptor-driven Host/MEM
+  transfers, global hemisphere/slice/bank/word address routing, and one
+  320-byte vector transferred per DMA cycle.
 - `TspSliceSystem`: fixed local topology with VXM on the west side of MEM and
   two MXMs on the east side of MEM.
 - A compact model ISA codec for MEM, MXM, VXM ALU, and ICU queue commands.

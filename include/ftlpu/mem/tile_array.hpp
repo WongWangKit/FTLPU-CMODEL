@@ -49,6 +49,17 @@ public:
         pending_consumptions_.clear();
     }
 
+    void clear_sram()
+    {
+        mem_.clear_sram();
+    }
+
+    void reset_and_clear_sram()
+    {
+        reset();
+        clear_sram();
+    }
+
     std::size_t cycle() const noexcept
     {
         return cycle_;

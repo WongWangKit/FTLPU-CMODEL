@@ -42,20 +42,16 @@ public:
 
     StreamPayloadSegment16 read_word(std::size_t word) const
     {
-        check_word(word);
+        const auto base = word_base_index(word);
         StreamPayloadSegment16 result{};
-        for (std::size_t byte = 0; byte < kBytesPerWord; ++byte) {
-            result[byte] = this->byte(word, byte);
-        }
+        std::copy_n(bytes_.begin() + base, kBytesPerWord, result.begin());
         return result;
     }
 
     void write_word(std::size_t word, const StreamPayloadSegment16& values)
     {
-        check_word(word);
-        for (std::size_t byte = 0; byte < kBytesPerWord; ++byte) {
-            set_byte(word, byte, values[byte]);
-        }
+        const auto base = word_base_index(word);
+        std::copy(values.begin(), values.end(), bytes_.begin() + base);
     }
 
 private:
@@ -73,6 +69,12 @@ private:
             throw std::out_of_range("SRAM byte offset is outside the 16-byte word");
         }
         return word * kBytesPerWord + byte_offset;
+    }
+
+    static std::size_t word_base_index(std::size_t word)
+    {
+        check_word(word);
+        return word * kBytesPerWord;
     }
 
     std::vector<std::uint8_t> bytes_{};
@@ -141,6 +143,24 @@ public:
     const SramTileBlock& tile_block(std::size_t tile) const
     {
         return tile_blocks_.at(tile);
+    }
+
+    StreamPayloadVector320 read_vector(MemLocalWordAddress13 address) const
+    {
+        StreamPayloadVector320 result{};
+        for (std::size_t tile = 0; tile < hw::kSramTileBlocksPerSlice; ++tile) {
+            result[tile] = tile_blocks_[tile].read_word(address);
+        }
+        return result;
+    }
+
+    void write_vector(
+        MemLocalWordAddress13 address,
+        const StreamPayloadVector320& values)
+    {
+        for (std::size_t tile = 0; tile < hw::kSramTileBlocksPerSlice; ++tile) {
+            tile_blocks_[tile].write_word(address, values[tile]);
+        }
     }
 
 private:

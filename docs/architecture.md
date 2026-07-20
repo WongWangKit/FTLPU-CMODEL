@@ -87,16 +87,40 @@ Important behavior:
   issue a `Read` and a `Write` in the same cycle; schedules that need both must
   place them on different cycles.
 - A `Read(address, stream)` reads one aligned 16-byte SRAM word from the bank
-  selected by address bit 16, one byte per lane, and writes those bytes into the
+  selected by local word-address bit 12, one byte per lane, and writes those bytes into the
   selected stream at the stream register adjacent to that MEM slice.
 - A `Write(address, stream)` consumes 16 bytes from the selected stream, one byte
   per lane, and writes one aligned SRAM word into the bank selected by address
-  bit 16.
+  bit 12.
+- `SramSlice::read_vector` and `write_vector` aggregate the same local word
+  address across all 20 tile-local blocks into a 320-byte payload.
+- `MemLocalWordAddress13::next_word` and `advance_words` stay within the current
+  4096-word bank; crossing into another bank or slice is rejected.
+- `MemArrayModel::reset` clears execution state but preserves SRAM.
+  `clear_sram` clears storage explicitly, while `reset_and_clear_sram` performs
+  both operations.
 - `Gather` and `Scatter` are represented in the instruction enum, but the current
   tests focus on `Read` and `Write`.
 
 Per cycle and per tile, one MEM instruction can move 16 bytes across the 16 lanes
 for a single stream ID.
+
+## DMA Model
+
+The DMA model under `include/ftlpu/dma/` separates Host storage from SRAM
+initialization:
+
+- `HostMemorySpace` registers model files and tensors as independent byte
+  buffers identified by `HostBufferId` handles.
+- `DmaDescriptor` records the transaction ID, direction, purpose, Host buffer,
+  Host byte offset, global MEM address, and vector count.
+- `GlobalMemoryAddressSpace` decodes hemisphere, MEM slice, bank, and word, then
+  routes the transfer to the selected `MemArrayModel`.
+- `DmaEngine::tick` transfers at most one 320-byte vector per cycle. Consecutive
+  vectors advance by 320 bytes in the Host buffer and by one local SRAM word in
+  the same bank. Crossing a bank boundary is currently rejected.
+
+Both Host-to-MEM initialization and MEM-to-Host output transfers are modeled.
 
 ## MXM Model
 

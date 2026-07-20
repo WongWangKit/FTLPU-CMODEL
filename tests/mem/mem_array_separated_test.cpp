@@ -91,6 +91,25 @@ int main()
                     == static_cast<std::uint8_t>(tile * 16 + lane));
             }
         }
+
+        mem.enqueue_instruction(
+            kMemSlice,
+            ftlpu::MemInstruction::Read(kWriteAddress, stream));
+        mem.reset();
+        assert(mem.cycle() == 0);
+        assert(mem.sram_lane_byte(kMemSlice, 7, kWriteAddress, 3) == 7 * 16 + 3);
+        fabric.begin_cycle();
+        mem.evaluate(fabric);
+        fabric.stage_linear_links();
+        fabric.commit_cycle();
+        assert(mem.executed_instructions().empty());
+
+        mem.clear_sram();
+        assert(mem.sram_lane_byte(kMemSlice, 7, kWriteAddress, 3) == 0);
+
+        mem.set_sram_lane_byte(kMemSlice, 7, kWriteAddress, 3, 0xa5);
+        mem.reset_and_clear_sram();
+        assert(mem.sram_lane_byte(kMemSlice, 7, kWriteAddress, 3) == 0);
     }
 
     return 0;
