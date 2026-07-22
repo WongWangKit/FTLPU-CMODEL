@@ -28,11 +28,15 @@ struct MxmControlInstruction {
     std::size_t weight_buffer{0};
     std::size_t stream_base{0};
     std::size_t activation_stream_base{0};
+    std::size_t accumulator_bank{0};
+    bool accumulate{false};
+    bool reduce{true};
+    bool start_of_k_block{false};
 
     static MxmControlInstruction IW(std::size_t weight_buffer = 0)
     {
         check_weight_buffer(weight_buffer);
-        return MxmControlInstruction {MxmControlOpcode::IW, weight_buffer, 0, 0};
+        return MxmControlInstruction {MxmControlOpcode::IW, weight_buffer, 0, 0, 0, false, false, false};
     }
 
     static MxmControlInstruction Compute(
@@ -43,7 +47,44 @@ struct MxmControlInstruction {
         check_weight_buffer(weight_buffer);
         check_activation_stream_base(activation_stream_base);
         check_stream_base(stream_base);
-        return MxmControlInstruction {MxmControlOpcode::Compute, weight_buffer, stream_base, activation_stream_base};
+        // Legacy Compute is a complete K=320 operation.  Keep its historical
+        // automatic clear/reduce behaviour while no longer making the storage
+        // itself a weight-buffer-owned object.
+        return MxmControlInstruction {
+            MxmControlOpcode::Compute,
+            weight_buffer,
+            stream_base,
+            activation_stream_base,
+            weight_buffer,
+            false,
+            true,
+            false,
+        };
+    }
+
+    static MxmControlInstruction ComputeToAccumulator(
+        std::size_t weight_buffer,
+        std::size_t accumulator_bank,
+        std::size_t activation_stream_base,
+        std::size_t stream_base,
+        bool accumulate,
+        bool reduce,
+        bool start_of_k_block = false)
+    {
+        check_weight_buffer(weight_buffer);
+        check_accumulator_bank(accumulator_bank);
+        check_activation_stream_base(activation_stream_base);
+        check_stream_base(stream_base);
+        return MxmControlInstruction {
+            MxmControlOpcode::Compute,
+            weight_buffer,
+            stream_base,
+            activation_stream_base,
+            accumulator_bank,
+            accumulate,
+            reduce,
+            start_of_k_block,
+        };
     }
 
     static void check_weight_buffer(std::size_t weight_buffer)
@@ -57,6 +98,13 @@ struct MxmControlInstruction {
     {
         if (activation_stream_base >= hw::kStreams) {
             throw std::out_of_range("MXM activation stream base is outside the stream set");
+        }
+    }
+
+    static void check_accumulator_bank(std::size_t accumulator_bank)
+    {
+        if (accumulator_bank >= hw::kMxmAccumulatorBanks) {
+            throw std::out_of_range("MXM accumulator bank is outside the accumulator-bank set");
         }
     }
 
@@ -79,6 +127,10 @@ public:
         std::size_t weight_buffer{0};
         std::size_t activation_stream_base{0};
         std::size_t stream_base{0};
+        std::size_t accumulator_bank{0};
+        bool accumulate{false};
+        bool reduce{true};
+        bool start_of_k_block{false};
     };
 
     explicit MxmControlSlice(MxmArray& array)
@@ -199,6 +251,12 @@ public:
             : std::nullopt;
     }
 
+    std::optional<ComputePulse> compute_pulse(std::size_t tile) const
+    {
+        check_tile(tile);
+        return compute_pulse_details_[tile];
+    }
+
     void tick(std::ostream& os, bool print_matrix = true, std::optional<std::size_t> log_tile = std::nullopt)
     {
         tick(os, nullptr, print_matrix, log_tile);
@@ -248,6 +306,7 @@ private:
     {
         MxmControlInstruction::check_weight_buffer(instruction.weight_buffer);
         if (instruction.opcode == MxmControlOpcode::Compute) {
+            MxmControlInstruction::check_accumulator_bank(instruction.accumulator_bank);
             MxmControlInstruction::check_activation_stream_base(instruction.activation_stream_base);
             MxmControlInstruction::check_stream_base(instruction.stream_base);
         }
@@ -371,14 +430,21 @@ private:
                 if (!log_tile.has_value() || tile == *log_tile) {
                     any_logged = true;
                     os << "  tile " << tile << " Compute b" << compute_instruction->weight_buffer
+                       << " acc=" << compute_instruction->accumulator_bank
+                       << (compute_instruction->accumulate ? "+=" : "=")
                        << " stream=" << compute_instruction->activation_stream_base
-                       << " out=" << compute_instruction->stream_base << '\n';
+                       << " out=" << compute_instruction->stream_base
+                       << (compute_instruction->reduce ? " reduce" : " retain") << '\n';
                 }
                 compute_pulses_[tile] = true;
                 compute_pulse_details_[tile] = ComputePulse {
                     compute_instruction->weight_buffer,
                     compute_instruction->activation_stream_base,
                     compute_instruction->stream_base,
+                    compute_instruction->accumulator_bank,
+                    compute_instruction->accumulate,
+                    compute_instruction->reduce,
+                    compute_instruction->start_of_k_block,
                 };
             }
         }

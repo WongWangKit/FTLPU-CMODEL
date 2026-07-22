@@ -582,8 +582,11 @@ private:
             os << "IW b" << instruction.weight_buffer;
         } else {
             os << "Compute b" << instruction.weight_buffer
+               << " acc=" << instruction.accumulator_bank
+               << (instruction.accumulate ? "+=" : "=")
                << " stream=" << instruction.activation_stream_base
-               << " out=" << instruction.stream_base;
+               << " out=" << instruction.stream_base
+               << (instruction.reduce ? " reduce" : " retain");
         }
         return os.str();
     }

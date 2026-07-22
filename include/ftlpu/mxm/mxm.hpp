@@ -93,13 +93,16 @@ private:
 class Mxm {
 public:
     static constexpr std::size_t kWeightBuffers = MxmSupercell::kWeightBuffers;
+    static constexpr std::size_t kAccumulatorBanks = hw::kMxmAccumulatorBanks;
     using ActivationData = std::array<std::int8_t, hw::kLanesPerTile>;
     using ResultValues = std::array<std::int32_t, hw::kMxmSupercellColumns>;
+    using PartialSum = MxmSupercell::PartialSum;
 
     struct ColumnOutput {
         std::size_t row{0};
         std::size_t column_block{0};
         ResultValues values{};
+        std::size_t accumulator_bank{0};
     };
 
     Mxm()
@@ -162,12 +165,12 @@ public:
                 lane.clear();
             }
         }
-        for (auto& buffer : accumulators_) {
-            for (auto& row : buffer) {
-                row.fill(0);
+        for (auto& row : north_pipeline_) {
+            for (auto& column : row) {
+                column.clear();
             }
         }
-        for (auto& buffer : contribution_counts_) {
+        for (auto& buffer : accumulator_banks_) {
             for (auto& row : buffer) {
                 row.fill(0);
             }
@@ -178,7 +181,7 @@ public:
         for (auto& cursor : next_row_for_tile_) {
             cursor.fill(0);
         }
-        compute_active_by_buffer_.fill(false);
+        compute_active_by_accumulator_.fill(false);
         last_outputs_.clear();
         active_ = false;
     }
@@ -227,41 +230,62 @@ public:
             active_ = true;
         }
 
-        auto current_compute_active_by_buffer = std::array<bool, kWeightBuffers> {};
+        auto current_compute_active_by_accumulator = std::array<bool, kAccumulatorBanks> {};
         for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
             if (!control_.compute_active(tile)) {
                 continue;
             }
-            const auto weight_buffer = control_.compute_weight_buffer(tile).value_or(0);
-            const auto stream_base = control_.compute_activation_stream_base(tile).value_or(0);
-            const auto output_stream_base = control_.output_stream_base(tile).value_or(0);
-            check_weight_buffer(weight_buffer);
-            current_compute_active_by_buffer[weight_buffer] = true;
-            if (tile == 0 && !compute_active_by_buffer_[weight_buffer]) {
-                reset_buffer_state(weight_buffer);
+            const auto pulse = control_.compute_pulse(tile).value();
+            check_weight_buffer(pulse.weight_buffer);
+            check_accumulator_bank(pulse.accumulator_bank);
+            current_compute_active_by_accumulator[pulse.accumulator_bank] = true;
+
+            const auto begins_block = tile == 0
+                && (pulse.start_of_k_block
+                    || !compute_active_by_accumulator_[pulse.accumulator_bank]);
+            if (begins_block) {
+                begin_k_block(pulse.accumulator_bank, pulse.accumulate);
             }
-            const auto data = collect_activation(fabric, tile, stream_base);
-            const auto row = next_row_for_tile_[weight_buffer][tile]++;
-            east_pipeline_[0][tile].push_back(ActivationEvent {tile, row, weight_buffer, output_stream_base, data});
+            const auto data = collect_activation(fabric, tile, pulse.activation_stream_base);
+            const auto row = next_row_for_tile_[pulse.accumulator_bank][tile]++;
+            if (row >= hw::kMxmRows) {
+                throw std::overflow_error("MXM K block contains more than 320 result rows");
+            }
+            east_pipeline_[0][tile].push_back(ActivationEvent {
+                tile,
+                row,
+                pulse.weight_buffer,
+                pulse.accumulator_bank,
+                pulse.stream_base,
+                pulse.accumulate,
+                pulse.reduce,
+                data,
+            });
             if (os != nullptr && (!log_tile.has_value() || *log_tile == tile)) {
                 *os << "  MXM" << mxm_id << " consume activation tile=" << tile
                     << " row=" << row
-                    << " buffer=" << weight_buffer
-                    << " stream=" << stream_base
-                    << " out=" << output_stream_base << '\n';
+                    << " weight_buffer=" << pulse.weight_buffer
+                    << " accumulator=" << pulse.accumulator_bank
+                    << " stream=" << pulse.activation_stream_base
+                    << " out=" << pulse.stream_base
+                    << (pulse.reduce ? " reduce" : " retain") << '\n';
             }
         }
 
         std::array<std::array<std::deque<ActivationEvent>, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>
             next_pipeline {};
+        std::array<std::array<std::deque<PartialSumEvent>, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>
+            next_north_pipeline {};
         std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane> computing {};
         for (std::size_t column_block = 0; column_block < hw::kMxmSupercellsPerPlane; ++column_block) {
             for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
                 for (const auto& event : east_pipeline_[column_block][tile]) {
                     computing[tile][column_block] = true;
-                    compute_column_block(event, column_block);
-                    if (event.tile + 1 == hw::kMxmSupercellsPerPlane) {
-                        emit_column_output(fabric, column_block, event);
+                    const auto north = compute_supercell(event, column_block);
+                    if (tile + 1 == hw::kMxmSupercellsPerPlane) {
+                        commit_north_output(fabric, column_block, north);
+                    } else {
+                        next_north_pipeline[tile + 1][column_block].push_back(north);
                     }
                     if (column_block + 1 < hw::kMxmSupercellsPerPlane) {
                         next_pipeline[column_block + 1][tile].push_back(event);
@@ -270,12 +294,13 @@ public:
             }
         }
         east_pipeline_ = std::move(next_pipeline);
+        north_pipeline_ = std::move(next_north_pipeline);
         last_computing_ = computing;
 
         if (active_ && pipelines_empty()) {
             active_ = false;
         }
-        compute_active_by_buffer_ = current_compute_active_by_buffer;
+        compute_active_by_accumulator_ = current_compute_active_by_accumulator;
     }
 
     bool computing_cell(std::size_t tile, std::size_t column_block) const
@@ -292,13 +317,46 @@ public:
         return last_outputs_;
     }
 
+    std::int32_t accumulator_value(
+        std::size_t accumulator_bank,
+        std::size_t row,
+        std::size_t column) const
+    {
+        check_accumulator_bank(accumulator_bank);
+        if (row >= hw::kMxmRows || column >= hw::kMxmColumns) {
+            throw std::out_of_range("MXM accumulator coordinate is outside the 320x320 bank");
+        }
+        return accumulator_banks_[accumulator_bank][row][column];
+    }
+
+    void clear_accumulator(std::size_t accumulator_bank)
+    {
+        check_accumulator_bank(accumulator_bank);
+        if (pipeline_uses_accumulator(accumulator_bank)) {
+            throw std::logic_error("cannot clear an MXM accumulator bank with partial sums in flight");
+        }
+        clear_accumulator_unchecked(accumulator_bank);
+    }
+
 private:
     struct ActivationEvent {
         std::size_t tile{0};
         std::size_t row{0};
         std::size_t weight_buffer{0};
+        std::size_t accumulator_bank{0};
         std::size_t output_stream_base{0};
+        bool accumulate{false};
+        bool reduce{true};
         ActivationData data{};
+    };
+
+    struct PartialSumEvent {
+        std::size_t row{0};
+        std::size_t weight_buffer{0};
+        std::size_t accumulator_bank{0};
+        std::size_t output_stream_base{0};
+        bool reduce{true};
+        PartialSum values{};
     };
 
     static void check_tile(std::size_t tile)
@@ -312,6 +370,13 @@ private:
     {
         if (weight_buffer >= kWeightBuffers) {
             throw std::out_of_range("MXM weight buffer is outside the two-buffer set");
+        }
+    }
+
+    static void check_accumulator_bank(std::size_t accumulator_bank)
+    {
+        if (accumulator_bank >= kAccumulatorBanks) {
+            throw std::out_of_range("MXM accumulator bank is outside the accumulator-bank set");
         }
     }
 
@@ -348,14 +413,22 @@ private:
         return result;
     }
 
-    void reset_buffer_state(std::size_t weight_buffer)
+    void begin_k_block(std::size_t accumulator_bank, bool accumulate)
     {
-        check_weight_buffer(weight_buffer);
-        next_row_for_tile_[weight_buffer].fill(0);
-        for (auto& row : accumulators_[weight_buffer]) {
-            row.fill(0);
+        check_accumulator_bank(accumulator_bank);
+        next_row_for_tile_[accumulator_bank].fill(0);
+        if (!accumulate) {
+            if (pipeline_uses_accumulator(accumulator_bank)) {
+                throw std::logic_error(
+                    "cannot clear an MXM accumulator bank while an earlier K block is in flight");
+            }
+            clear_accumulator_unchecked(accumulator_bank);
         }
-        for (auto& row : contribution_counts_[weight_buffer]) {
+    }
+
+    void clear_accumulator_unchecked(std::size_t accumulator_bank)
+    {
+        for (auto& row : accumulator_banks_[accumulator_bank]) {
             row.fill(0);
         }
     }
@@ -383,54 +456,65 @@ private:
         return data;
     }
 
-    void compute_column_block(const ActivationEvent& event, std::size_t column_block)
+    PartialSumEvent compute_supercell(const ActivationEvent& event, std::size_t column_block)
     {
-        for (std::size_t local_column = 0; local_column < hw::kMxmSupercellColumns; ++local_column) {
-            const auto global_column = column_block * hw::kMxmSupercellColumns + local_column;
-            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                const auto partial = static_cast<std::int32_t>(event.data[lane])
-                    * static_cast<std::int32_t>(
-                        array_.weight(event.weight_buffer, event.tile, column_block, lane, local_column));
-                accumulators_[event.weight_buffer][event.row][global_column] += partial;
+        PartialSum south_partial {};
+        if (event.tile != 0) {
+            auto& incoming = north_pipeline_[event.tile][column_block];
+            if (incoming.empty()) {
+                throw std::logic_error(
+                    "MXM activation reached a supercell before its aligned south partial sum");
             }
-            ++contribution_counts_[event.weight_buffer][event.row][global_column];
+            const auto south = incoming.front();
+            incoming.pop_front();
+            if (south.row != event.row
+                || south.weight_buffer != event.weight_buffer
+                || south.accumulator_bank != event.accumulator_bank
+                || south.output_stream_base != event.output_stream_base
+                || south.reduce != event.reduce) {
+                throw std::logic_error("MXM activation and south partial-sum pipelines are misaligned");
+            }
+            south_partial = south.values;
         }
+
+        return PartialSumEvent {
+            event.row,
+            event.weight_buffer,
+            event.accumulator_bank,
+            event.output_stream_base,
+            event.reduce,
+            array_.cell(event.tile, column_block).compute_partial(
+                event.data,
+                event.weight_buffer,
+                south_partial),
+        };
     }
 
-    bool column_output_ready(std::size_t weight_buffer, std::size_t row, std::size_t column_block) const
+    void commit_north_output(
+        StreamRegisterFabric& fabric,
+        std::size_t column_block,
+        const PartialSumEvent& partial)
     {
         const auto global_column_base = column_block * hw::kMxmSupercellColumns;
         for (std::size_t local_column = 0; local_column < hw::kMxmSupercellColumns; ++local_column) {
-            if (contribution_counts_[weight_buffer][row][global_column_base + local_column]
-                < hw::kMxmSupercellsPerPlane) {
-                return false;
-            }
+            accumulator_banks_[partial.accumulator_bank][partial.row][global_column_base + local_column]
+                += partial.values[local_column];
         }
-        return true;
+        if (partial.reduce) {
+            emit_column_output(fabric, column_block, partial);
+        }
     }
 
     void emit_column_output(
         StreamRegisterFabric& fabric,
         std::size_t column_block,
-        const ActivationEvent& event)
+        const PartialSumEvent& event)
     {
-        if (!column_output_ready(event.weight_buffer, event.row, column_block)) {
-            std::string detail;
-            const auto global_column_base = column_block * hw::kMxmSupercellColumns;
-            detail += " b" + std::to_string(event.weight_buffer)
-                + ":row=" + std::to_string(event.row)
-                + ":count0="
-                + std::to_string(contribution_counts_[event.weight_buffer][event.row][global_column_base]);
-            throw std::logic_error(
-                "MXM automatic output reached column block " + std::to_string(column_block)
-                + " before a complete result row was ready;" + detail);
-        }
-
-        ColumnOutput output {event.row, column_block, {}};
+        ColumnOutput output {event.row, column_block, {}, event.accumulator_bank};
         const auto global_column_base = column_block * hw::kMxmSupercellColumns;
         std::array<StreamSegment16, 4> output_segments{};
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            const auto value = accumulators_[event.weight_buffer][event.row][global_column_base + lane];
+            const auto value = accumulator_banks_[event.accumulator_bank][event.row][global_column_base + lane];
             output.values[lane] = value;
             const auto raw = static_cast<std::uint32_t>(value);
             const std::array<std::uint8_t, 4> bytes {
@@ -492,7 +576,37 @@ private:
                 }
             }
         }
+        for (const auto& row : north_pipeline_) {
+            for (const auto& column : row) {
+                if (!column.empty()) {
+                    return false;
+                }
+            }
+        }
         return true;
+    }
+
+    bool pipeline_uses_accumulator(std::size_t accumulator_bank) const
+    {
+        for (const auto& column : east_pipeline_) {
+            for (const auto& row : column) {
+                for (const auto& event : row) {
+                    if (event.accumulator_bank == accumulator_bank) {
+                        return true;
+                    }
+                }
+            }
+        }
+        for (const auto& row : north_pipeline_) {
+            for (const auto& column : row) {
+                for (const auto& event : column) {
+                    if (event.accumulator_bank == accumulator_bank) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     MxmArray array_{};
@@ -501,12 +615,15 @@ private:
     bool active_{false};
     std::array<std::array<std::deque<ActivationEvent>, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>
         east_pipeline_{};
+    // [north destination row][column].  A token produced at row r is only
+    // visible to row r+1 on the following evaluate cycle.
+    std::array<std::array<std::deque<PartialSumEvent>, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>
+        north_pipeline_{};
     std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane> last_computing_{};
-    std::array<std::array<std::size_t, hw::kMxmSupercellsPerPlane>, kWeightBuffers> next_row_for_tile_{};
-    std::array<bool, kWeightBuffers> compute_active_by_buffer_{};
-    std::array<std::array<std::array<std::int32_t, hw::kMxmColumns>, hw::kMxmRows>, kWeightBuffers> accumulators_{};
-    std::array<std::array<std::array<std::size_t, hw::kMxmColumns>, hw::kMxmRows>, kWeightBuffers>
-        contribution_counts_{};
+    std::array<std::array<std::size_t, hw::kMxmSupercellsPerPlane>, kAccumulatorBanks> next_row_for_tile_{};
+    std::array<bool, kAccumulatorBanks> compute_active_by_accumulator_{};
+    std::array<std::array<std::array<std::int32_t, hw::kMxmColumns>, hw::kMxmRows>, kAccumulatorBanks>
+        accumulator_banks_{};
     std::vector<ColumnOutput> last_outputs_{};
 };
 

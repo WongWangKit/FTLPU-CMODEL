@@ -43,6 +43,7 @@ constexpr std::size_t kMxmColumns = 320;
 constexpr std::size_t kMxmSupercellRows = 16;
 constexpr std::size_t kMxmSupercellColumns = 16;
 constexpr std::size_t kMxmSupercellsPerPlane = 20;
+constexpr std::size_t kMxmAccumulatorBanks = 2;
 constexpr std::size_t kMxmLoadStreamsPerCycle = 16;
 constexpr std::size_t kMxmLoadBytesPerCycle = kLanesPerTile * kMxmLoadStreamsPerCycle * kStreamRegisterBytes;
 

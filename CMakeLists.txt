@@ -40,6 +40,7 @@ ftlpu_add_test(mxm_supercell_test tests/mxm/supercell_test.cpp)
 ftlpu_add_test(mxm_array_test tests/mxm/array_test.cpp)
 ftlpu_add_test(mxm_control_slice_test tests/mxm/control_slice_test.cpp)
 ftlpu_add_test(mxm_stream_interface_test tests/mxm/stream_interface_test.cpp)
+ftlpu_add_test(mxm_systolic_accumulator_test tests/mxm/systolic_accumulator_test.cpp)
 
 ftlpu_add_test(mem_dual_mxm_swiglu_offline_icu_test tests/integration/mem_dual_mxm_swiglu_test.cpp)
 target_compile_definitions(mem_dual_mxm_swiglu_offline_icu_test PRIVATE FTLPU_OFFLINE_ICU_FFN_TEST)

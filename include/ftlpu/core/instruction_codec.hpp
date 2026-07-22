@@ -25,7 +25,9 @@ namespace isa {
 // MXM control 32b:
 //   IW      [1:0] opcode, [2] weight buffer.
 //   Compute [1:0] opcode, [2] weight buffer, [8:3] activation stream base,
-//           [14:9] output stream base.
+//           [14:9] output stream base, [15] accumulator bank,
+//           [16] accumulate existing, [17] reduce/output,
+//           [18] explicit K-block start, [19] accumulator-control present.
 // VXM ALU 3x32b:
 //   word0 [4:0] opcode, [6:5] lhs kind, [12:7] lhs index,
 //         [14:13] rhs kind, [20:15] rhs index, [22:21] cast target,
@@ -190,6 +192,8 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
     constexpr std::uint32_t kWeightBufferMask = 0x1;
     constexpr std::uint32_t kStreamBaseMask = 0x3f;
     constexpr std::uint32_t kActivationStreamMask = 0x3f;
+    constexpr std::uint32_t kAccumulatorBankMask = 0x1;
+    constexpr std::uint32_t kAccumulatorControlPresent = 1u << 19;
 
     detail::require_unsigned_fit(
         static_cast<std::uint64_t>(instruction.opcode),
@@ -216,10 +220,19 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
             static_cast<std::uint64_t>(instruction.stream_base),
             kStreamBaseMask,
             "MXM output stream base does not fit encoded instruction");
+        detail::require_unsigned_fit(
+            static_cast<std::uint64_t>(instruction.accumulator_bank),
+            kAccumulatorBankMask,
+            "MXM accumulator bank does not fit encoded instruction");
         return opcode
             | (static_cast<std::uint32_t>(instruction.weight_buffer) << 2)
             | (static_cast<std::uint32_t>(instruction.activation_stream_base) << 3)
-            | (static_cast<std::uint32_t>(instruction.stream_base) << 9);
+            | (static_cast<std::uint32_t>(instruction.stream_base) << 9)
+            | (static_cast<std::uint32_t>(instruction.accumulator_bank) << 15)
+            | (static_cast<std::uint32_t>(instruction.accumulate) << 16)
+            | (static_cast<std::uint32_t>(instruction.reduce) << 17)
+            | (static_cast<std::uint32_t>(instruction.start_of_k_block) << 18)
+            | kAccumulatorControlPresent;
     }
     throw std::logic_error("unknown MXM opcode");
 }
@@ -231,14 +244,32 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
     const auto compute_weight_buffer = static_cast<std::size_t>((word >> 2) & 0x1u);
     const auto compute_activation_stream_base = static_cast<std::size_t>((word >> 3) & 0x3fu);
     const auto stream_base = static_cast<std::size_t>((word >> 9) & 0x3fu);
+    const auto accumulator_bank = static_cast<std::size_t>((word >> 15) & 0x1u);
+    const auto accumulate = ((word >> 16) & 0x1u) != 0;
+    const auto reduce = ((word >> 17) & 0x1u) != 0;
+    const auto start_of_k_block = ((word >> 18) & 0x1u) != 0;
+    const auto has_accumulator_control = ((word >> 19) & 0x1u) != 0;
 
     switch (opcode) {
     case MxmControlOpcode::IW:
         detail::require_reserved_zero(word, 0x00000007u, "encoded MXM IW instruction has non-zero reserved bits");
         return MxmControlInstruction::IW(iw_weight_buffer);
     case MxmControlOpcode::Compute:
-        detail::require_reserved_zero(word, 0x00007fffu, "encoded MXM Compute instruction has non-zero reserved bits");
-        return MxmControlInstruction::Compute(compute_weight_buffer, compute_activation_stream_base, stream_base);
+        detail::require_reserved_zero(word, 0x000fffffu, "encoded MXM Compute instruction has non-zero reserved bits");
+        if (!has_accumulator_control) {
+            return MxmControlInstruction::Compute(
+                compute_weight_buffer,
+                compute_activation_stream_base,
+                stream_base);
+        }
+        return MxmControlInstruction::ComputeToAccumulator(
+            compute_weight_buffer,
+            accumulator_bank,
+            compute_activation_stream_base,
+            stream_base,
+            accumulate,
+            reduce,
+            start_of_k_block);
     }
     throw std::logic_error("unknown encoded MXM opcode");
 }

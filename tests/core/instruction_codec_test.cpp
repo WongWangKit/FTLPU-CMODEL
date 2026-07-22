@@ -21,7 +21,11 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
     return lhs.opcode == rhs.opcode
         && lhs.weight_buffer == rhs.weight_buffer
         && lhs.stream_base == rhs.stream_base
-        && lhs.activation_stream_base == rhs.activation_stream_base;
+        && lhs.activation_stream_base == rhs.activation_stream_base
+        && lhs.accumulator_bank == rhs.accumulator_bank
+        && lhs.accumulate == rhs.accumulate
+        && lhs.reduce == rhs.reduce
+        && lhs.start_of_k_block == rhs.start_of_k_block;
 }
 
 bool same_operand(const ftlpu::VxmLaneOperand& lhs, const ftlpu::VxmLaneOperand& rhs)
@@ -95,6 +99,7 @@ bool verify_mxm_codec()
     const ftlpu::MxmControlInstruction instructions[] {
         ftlpu::MxmControlInstruction::IW(1),
         ftlpu::MxmControlInstruction::Compute(1, 31, 36),
+        ftlpu::MxmControlInstruction::ComputeToAccumulator(0, 1, 17, 24, true, false, true),
     };
 
     for (const auto& instruction : instructions) {

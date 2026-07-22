@@ -67,6 +67,17 @@ int main()
         }
     }
 
+    ftlpu::MxmSupercell::ActivationData activation{};
+    ftlpu::MxmSupercell::PartialSum south_partial{};
+    for (std::size_t lane = 0; lane < activation.size(); ++lane) {
+        activation[lane] = static_cast<std::int8_t>(lane + 1);
+    }
+    south_partial.fill(1000);
+    const auto north_partial = supercell.compute_partial(activation, 1, south_partial);
+    for (std::size_t column = 0; column < north_partial.size(); ++column) {
+        assert(north_partial[column] == 1000 + expected_dot(1, column));
+    }
+
     supercell.set_activation_input(activation_input(), 1);
     for (std::size_t column = 0; column < ftlpu::hw::kMxmSupercellColumns; ++column) {
         supercell.tick(log);

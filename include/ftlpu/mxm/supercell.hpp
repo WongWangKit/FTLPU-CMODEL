@@ -37,6 +37,7 @@ public:
     using InputVector = std::array<InputLane, hw::kLanesPerTile>;
     using ActivationVector = std::array<InputSlot, hw::kLanesPerTile>;
     using ActivationData = std::array<Weight, hw::kLanesPerTile>;
+    using PartialSum = std::array<std::int32_t, hw::kMxmSupercellColumns>;
     using WeightRow = std::array<Weight, hw::kMxmSupercellColumns>;
     using WeightMatrix = std::array<WeightRow, hw::kMxmSupercellRows>;
     static constexpr std::size_t kWeightBuffers = 2;
@@ -128,6 +129,29 @@ public:
     bool weight_buffer_valid() const
     {
         return weight_buffer_valid(0);
+    }
+
+    // One systolic-array cycle for this supercell: form the 16 local dot
+    // products and add the partial sum arriving from the supercell to the
+    // south.  The returned vector is the token forwarded north next cycle.
+    PartialSum compute_partial(
+        const ActivationData& activation,
+        std::size_t weight_buffer,
+        const PartialSum& south_partial = {}) const
+    {
+        check_buffer(weight_buffer);
+        if (!weight_buffer_valid_[weight_buffer]) {
+            throw std::logic_error("MXM compute requires a valid selected weight buffer");
+        }
+
+        auto north_partial = south_partial;
+        for (std::size_t column = 0; column < hw::kMxmSupercellColumns; ++column) {
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                north_partial[column] += static_cast<std::int32_t>(activation[lane])
+                    * static_cast<std::int32_t>(weight_buffers_[weight_buffer][lane][column]);
+            }
+        }
+        return north_partial;
     }
 
     const std::vector<ComputeResult>& outputs() const
