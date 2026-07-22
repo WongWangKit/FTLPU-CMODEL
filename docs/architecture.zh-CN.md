@@ -117,10 +117,9 @@ MXM 模型位于 `include/ftlpu/mxm/`。
 
 ### Weight 加载
 
-每个 supercell 有两个对等 weight buffer。`IW(buffer)` 将一个 8 x 8 FP16 weight
-block 注入所选 row buffer 的 west 侧。该 row 上每个有效 `IW` cycle 都使所选
-buffer 向 east 移动一 column，新 block 进入 column 0。为了最终按 column 0..3
-得到预期顺序，MEM 以反序读取 weight column block：先读 3，再读 2，直到 0。
+每个 supercell 有两个对等 weight buffer。`IW(buffer, column)` 将一个 8 x 8
+FP16 weight block 直接写入所选 row 和 supercell column。2-bit column ID
+允许 column 0..3 按任意数据流顺序加载，不再发生隐式向 east 移列。
 不存在单独的 `LW` commit 指令；`Compute(buffer, activation_stream,
 output_stream)` 直接选择为当前 activation token 提供 weight 的 buffer。
 
@@ -280,7 +279,7 @@ A[128,576] fp16 x W[576,1536] int8 -> C[128,1536] fp32
 - MEM Read 从八个 slice group 向西发出八条 W8 stream。
 - 一条 VXM Dequant 指令应用 8 个输出列 scale，并生成包含 8 个 FP16 的 16 条
   east byte stream。
-- 连续四个逆序 `IW` pulse 装载一个 32-column MXM weight tile；MXM0 和
+- 四个带显式 column ID 的 `IW` pulse 装载一个 32-column MXM weight tile；MXM0 和
   MXM1 负责相邻的输出 tile。
 - MEM Read 在 east stream 上发出 FP16 activation vector。
 - 连续 `Compute` pulse 指定 weight buffer、activation stream base 和 west
@@ -292,6 +291,18 @@ A[128,576] fp16 x W[576,1536] int8 -> C[128,1536] fp32
 group10 累加；group9 距离更远一个 west register hop，因此 ACC 指令晚1拍。
 最终从 SRAM 重建 196,608 个 FP32 值，与考虑 FP16 舍入的 scalar golden model
 逐元素比较。
+
+### RMSNorm 回归测试
+
+`tests/integration/rmsnorm_test.cpp` 通过完整的 ICU/MEM/MXM/VXM 路径验证一个
+`[32,32]` 的 FP16 RMSNorm 工作负载。VXM 先对每个 `x` 向量求平方；东侧
+MXM0 装载 `32 x 32` 的 FP16 全 1 权重矩阵，将平方向量归约为重复的 FP32
+行和，再由 MEM accumulator 写回。随后 VXM 完成除以 hidden size、加
+epsilon、开方、求倒数，以及用该倒数乘原始 `x` 和 `gamma`，最后转换为 FP16。
+
+倒数在对应的 `x`、`gamma` 之后四拍才到达，因此测试通过 `Pass` 指令显式
+延迟这两个操作数，保证连续行流量的对齐，避免后一行覆盖前一行数据。测试会将
+所有存回 MEM 的 FP16 元素与考虑 FP16 舍入的标量 golden reference 比较。
 
 ### W8A16 SwiGLU 回归测试
 
@@ -334,9 +345,8 @@ FP16 activation 在 slice `32..35` 中复制两份：两条 byte stream 输入 M
 slice `40..43`；每组四片分别保存四个 byte plane，地址为
 `row * 48 + output_block`。
 
-由于每次 `IW` 会把所选 weight buffer 向东移动并把新 block 插入 column 0，
-权重 column block 必须逆序读取。Activation row 和 output column 均按 MXM 的
-32-element 维度分块。
+每条 `IW` 都携带目标 column ID，因此发射顺序不会改变最终 weight layout。
+Activation row 和 output column 均按 MXM 的 32-element 维度分块。
 
 ## 已知限制
 

@@ -51,7 +51,8 @@ int main()
     constexpr std::size_t kBuffer = 1;
 
     for (std::size_t column = 0; column < ftlpu::hw::kMxmSupercellsPerPlane; ++column) {
-        control.issue_south(ftlpu::MxmControlInstruction::IW(kBuffer));
+        control.issue_south(ftlpu::MxmControlInstruction::IW(
+            kBuffer, ftlpu::hw::kMxmSupercellsPerPlane - 1 - column));
     }
 
     auto provider = [&control](std::size_t tile) {
@@ -132,6 +133,17 @@ int main()
         return 1;
     }
 
+    caught = false;
+    try {
+        control.issue_south(ftlpu::MxmControlInstruction::IW(
+            0, ftlpu::hw::kMxmSupercellsPerPlane));
+    } catch (const std::out_of_range&) {
+        caught = true;
+    }
+    if (!require(caught, "expected bad weight column to throw")) {
+        return 1;
+    }
+
     auto empty_array = std::make_unique<ftlpu::MxmArray>();
     ftlpu::MxmControlSlice missing_input_control(*empty_array);
     missing_input_control.issue_south(ftlpu::MxmControlInstruction::IW(0));
@@ -149,10 +161,10 @@ int main()
     if (!require(text.find("mxm_control cycle 0") != std::string::npos, "missing cycle 0 log")) {
         return 1;
     }
-    if (!require(text.find("tile 0 IW b1 inject") != std::string::npos, "missing tile 0 IW log")) {
+    if (!require(text.find("tile 0 IW b1 col=") != std::string::npos, "missing tile 0 IW log")) {
         return 1;
     }
-    if (!require(text.find("tile 3 IW b1 inject") != std::string::npos, "missing last-tile IW log")) {
+    if (!require(text.find("tile 3 IW b1 col=") != std::string::npos, "missing last-tile IW log")) {
         return 1;
     }
     if (!require(text.find("IW buffer1=0x") != std::string::npos, "missing IW buffer log")) {

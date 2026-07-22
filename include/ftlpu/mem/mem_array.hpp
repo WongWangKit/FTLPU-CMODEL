@@ -146,6 +146,7 @@ public:
             StoreStreamToSram,
             LoadSramToStream,
             AccumulateStreamIntoSram,
+            AccumulateStreamToStream,
         };
 
         Kind kind{Kind::StoreStreamToSram};
@@ -340,8 +341,14 @@ private:
         switch (instruction.opcode) {
         case MemOpcode::Read:
         case MemOpcode::Write:
-        case MemOpcode::Accumulate:
             os << "(a=" << instruction.address << ",s=" << instruction.stream << ")";
+            break;
+        case MemOpcode::Accumulate:
+            os << "(a=" << instruction.address << ",s=" << instruction.stream
+               << ",dst="
+               << (instruction.accumulator_destination == MemAccumulatorDestination::Sram
+                       ? "sram" : "stream")
+               << ")";
             break;
         case MemOpcode::Gather:
         case MemOpcode::Scatter:
@@ -399,7 +406,8 @@ private:
     {
         const auto stream = instruction.stream_id();
         const auto sr_column = ports_.output_column(mem_slice, stream.direction());
-        const auto bytes = sram_.bank(mem_slice).read_segment(tile, instruction.address);
+        const auto physical_address = instruction.address;
+        const auto bytes = sram_.bank(mem_slice).read_segment(tile, physical_address);
         const auto vector_tag = static_cast<std::uint64_t>(cycle_) * hw::kTileRows + tile;
 
         StreamOutputPort output(
@@ -419,7 +427,7 @@ private:
             tile,
             sr_column,
             stream,
-            instruction.address,
+            physical_address,
             bytes,
         });
     }
@@ -514,13 +522,41 @@ private:
             }
         }
 
+        if (instruction.accumulator_destination == MemAccumulatorDestination::Sram) {
+            for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+                sram_.bank(kGroupBase + byte).write_segment(tile, instruction.address, result_bytes[byte]);
+                executed_mem_.push_back(MemTransfer {
+                    MemTransfer::Kind::AccumulateStreamIntoSram,
+                    kGroupBase + byte,
+                    tile,
+                    sr_column,
+                    StreamId::West(stream.index() + byte),
+                    instruction.address,
+                    result_bytes[byte],
+                });
+            }
+            return;
+        }
+
+        const auto output_column = ports_.boundary_column(
+            kGroupBase / hw::kMemSlicesPerGroup);
+        const auto vector_tag = static_cast<std::uint64_t>(cycle_) * hw::kTileRows + tile;
+        StreamOutputPort output(fabric, output_column, StreamDirection::West, "MEM Accumulate");
         for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
-            sram_.bank(kGroupBase + byte).write_segment(tile, instruction.address, result_bytes[byte]);
+            output.write_payload_segment(
+                tile,
+                stream.index() + byte,
+                result_bytes[byte],
+                vector_tag);
+            sram_.bank(kGroupBase + byte).write_segment(
+                tile,
+                instruction.address,
+                StreamPayloadSegment16 {});
             executed_mem_.push_back(MemTransfer {
-                MemTransfer::Kind::AccumulateStreamIntoSram,
+                MemTransfer::Kind::AccumulateStreamToStream,
                 kGroupBase + byte,
                 tile,
-                sr_column,
+                output_column,
                 StreamId::West(stream.index() + byte),
                 instruction.address,
                 result_bytes[byte],
@@ -597,7 +633,10 @@ private:
             os << "    c" << transfer.mem_slice << ".t" << transfer.tile << ' '
                << (transfer.kind == MemTransfer::Kind::StoreStreamToSram
                        ? "store"
-                       : transfer.kind == MemTransfer::Kind::LoadSramToStream ? "load" : "acc")
+                       : transfer.kind == MemTransfer::Kind::LoadSramToStream
+                           ? "load"
+                           : transfer.kind == MemTransfer::Kind::AccumulateStreamToStream
+                               ? "acc-out" : "acc")
                << ' ' << direction_name(transfer.stream.direction()) << transfer.stream.index()
                << " addr=" << transfer.address << " bytes=0x";
             print_hex_bytes(os, transfer.bytes);

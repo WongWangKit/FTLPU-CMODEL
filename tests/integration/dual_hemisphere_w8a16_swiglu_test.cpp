@@ -86,11 +86,11 @@ public:
         end_cycle_ = std::max(end_cycle_, cycle + 6);
     }
 
-    void mxm_load_at(std::size_t mxm, std::size_t cycle)
+    void mxm_load_at(std::size_t mxm, std::size_t cycle, std::size_t weight_column)
     {
         require_available(mxm_load_[mxm], cycle, "MXM load " + std::to_string(mxm));
         pad(mxm_load_[mxm], cycle, [&](std::size_t count) { icu_.enqueue_mxm_load_nop(mxm, count); });
-        icu_.enqueue_mxm(mxm, ftlpu::MxmControlInstruction::IW(0));
+        icu_.enqueue_mxm(mxm, ftlpu::MxmControlInstruction::IW(0, weight_column));
         advance(mxm_load_[mxm], cycle + 1);
     }
 
@@ -307,7 +307,7 @@ int main() try
                                 weight_address, ftlpu::StreamId::West(stream)));
                     }
                     schedule.dequant_at(cycle, instruction);
-                    schedule.mxm_load_at(global_mxm, cycle + kWeightToIwLatency);
+                    schedule.mxm_load_at(global_mxm, cycle + kWeightToIwLatency, block);
                     ++weight_address;
                 }
             }

@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="760" viewBox="0 0 1800 760">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#4b5661"/>
+    </marker>
+    <style>
+      .title { font: 700 30px 'Segoe UI', Arial, sans-serif; fill: #17212b; }
+      .sub { font: 15px 'Segoe UI', Arial, sans-serif; fill: #5c6874; }
+      .head { font: 700 19px 'Segoe UI', Arial, sans-serif; fill: #25313c; }
+      .row { font: 600 16px 'Segoe UI', Arial, sans-serif; fill: #25313c; }
+      .label { font: 600 12px 'Segoe UI', Arial, sans-serif; fill: #17212b; }
+      .tiny { font: 11px 'Segoe UI', Arial, sans-serif; fill: #35414d; }
+      .note { font: 13px 'Segoe UI', Arial, sans-serif; fill: #35414d; }
+      .q { fill: #87b5e5; stroke: #3f668c; }
+      .k { fill: #a99fdb; stroke: #62598e; }
+      .v { fill: #70c1b8; stroke: #34756e; }
+      .copy { fill: #d9dee3; stroke: #8a949e; }
+      .qk { fill: #ef9b70; stroke: #8b5031; }
+      .pv { fill: #f0cb78; stroke: #80662f; }
+      .op { fill: #d99fbe; stroke: #814f6a; }
+      .box { fill: #f7f9fb; stroke: #c9d1d9; stroke-width: 1.2; }
+      .grid { stroke: #dce2e8; stroke-width: 1; }
+    </style>
+  </defs>
+
+  <rect width="1800" height="760" fill="#fff"/>
+  <text x="42" y="48" class="title">SmolLM2 Attention Pipeline Optimization</text>
+  <text x="42" y="76" class="sub">Validated cycle-accurate schedule; both versions pass the complete numerical golden check</text>
+
+  <text x="42" y="120" class="head">Measured schedule</text>
+  <line x1="270" y1="112" x2="1720" y2="112" stroke="#4b5661" stroke-width="2.4" stroke-dasharray="10 8" marker-end="url(#arrow)"/>
+  <text x="1732" y="118" class="row">Time</text>
+  <line x1="270" y1="130" x2="270" y2="300" class="grid"/>
+  <line x1="632.5" y1="130" x2="632.5" y2="300" class="grid"/>
+  <line x1="995" y1="130" x2="995" y2="300" class="grid"/>
+  <line x1="1357.5" y1="130" x2="1357.5" y2="300" class="grid"/>
+  <line x1="1720" y1="130" x2="1720" y2="300" class="grid"/>
+  <text x="270" y="320" text-anchor="middle" class="tiny">0</text>
+  <text x="632.5" y="320" text-anchor="middle" class="tiny">41.7k</text>
+  <text x="995" y="320" text-anchor="middle" class="tiny">83.5k</text>
+  <text x="1357.5" y="320" text-anchor="middle" class="tiny">125.2k</text>
+  <text x="1720" y="320" text-anchor="middle" class="tiny">166.9k cycles</text>
+
+  <text x="42" y="170" class="row">Baseline</text>
+  <rect x="270" y="142" width="234" height="50" rx="4" class="q"/>
+  <text x="387" y="164" text-anchor="middle" class="label">Q projection</text><text x="387" y="181" text-anchor="middle" class="tiny">26,900</text>
+  <rect x="504" y="142" width="93" height="50" rx="4" class="k"/>
+  <text x="550" y="164" text-anchor="middle" class="label">K</text><text x="550" y="181" text-anchor="middle" class="tiny">10,760</text>
+  <rect x="597" y="142" width="94" height="50" rx="4" class="v"/>
+  <text x="644" y="164" text-anchor="middle" class="label">V</text><text x="644" y="181" text-anchor="middle" class="tiny">10,760</text>
+  <rect x="691" y="142" width="5" height="50" class="copy"/>
+  <rect x="696" y="142" width="324" height="50" rx="4" class="qk"/>
+  <text x="858" y="164" text-anchor="middle" class="label">QK + softmax</text><text x="858" y="181" text-anchor="middle" class="tiny">37,440</text>
+  <rect x="1020" y="142" width="273" height="50" rx="4" class="pv"/>
+  <text x="1156" y="164" text-anchor="middle" class="label">P x V</text><text x="1156" y="181" text-anchor="middle" class="tiny">31,392</text>
+  <rect x="1293" y="142" width="7" height="50" class="copy"/>
+  <rect x="1300" y="142" width="420" height="50" rx="4" class="op"/>
+  <text x="1510" y="164" text-anchor="middle" class="label">o_proj</text><text x="1510" y="181" text-anchor="middle" class="tiny">48,412</text>
+
+  <text x="42" y="252" class="row">Current</text>
+  <rect x="270" y="224" width="157" height="50" rx="4" class="q"/>
+  <text x="348" y="246" text-anchor="middle" class="label">Q</text><text x="348" y="263" text-anchor="middle" class="tiny">18,060</text>
+  <rect x="427" y="224" width="63" height="50" rx="4" class="k"/>
+  <text x="458" y="246" text-anchor="middle" class="label">K</text><text x="458" y="263" text-anchor="middle" class="tiny">7,224</text>
+  <rect x="490" y="224" width="63" height="50" rx="4" class="v"/>
+  <text x="521" y="246" text-anchor="middle" class="label">V</text><text x="521" y="263" text-anchor="middle" class="tiny">7,224</text>
+  <rect x="553" y="224" width="2" height="50" class="copy"/>
+  <rect x="555" y="224" width="4" height="50" class="copy"/>
+  <rect x="559" y="224" width="166" height="50" rx="4" class="qk"/>
+  <text x="642" y="246" text-anchor="middle" class="label">QK + softmax</text><text x="642" y="263" text-anchor="middle" class="tiny">19,132</text>
+  <rect x="725" y="224" width="14" height="50" rx="3" class="copy"><title>P replay layout: 1,582 cycles</title></rect>
+  <line x1="732" y1="224" x2="732" y2="211" stroke="#8a949e" stroke-width="1"/>
+  <text x="732" y="207" text-anchor="middle" class="tiny">P replay layout: 1,582</text>
+  <rect x="739" y="224" width="94" height="50" rx="4" class="pv"/>
+  <text x="786" y="246" text-anchor="middle" class="label">P x V</text><text x="786" y="263" text-anchor="middle" class="tiny">10,856</text>
+  <rect x="833" y="224" width="2" height="50" class="copy"/>
+  <rect x="835" y="224" width="275" height="50" rx="4" class="op"/>
+  <text x="972" y="246" text-anchor="middle" class="label">o_proj</text><text x="972" y="263" text-anchor="middle" class="tiny">31,654</text>
+  <line x1="1110" y1="249" x2="1710" y2="249" stroke="#4f8a61" stroke-width="3"/>
+  <text x="1410" y="240" text-anchor="middle" class="row" fill="#356b48">96,388 cycles: -70,525 (-42.3%)</text>
+
+  <text x="42" y="372" class="head">Next overlap targets</text>
+  <g transform="translate(42,392)">
+    <rect x="0" y="0" width="535" height="125" rx="6" class="box"/>
+    <text x="18" y="27" class="row">Overlap P transpose with softmax</text>
+    <rect x="18" y="44" width="190" height="28" rx="3" class="qk"/><text x="113" y="63" text-anchor="middle" class="label">QK + softmax tail</text>
+    <rect x="160" y="78" width="150" height="28" rx="3" class="copy"/><text x="235" y="97" text-anchor="middle" class="label">SXM P replay layout</text>
+    <text x="18" y="118" class="tiny">P3 already writes x16; launch SXM when each completed block releases its slices.</text>
+
+    <rect x="552" y="0" width="535" height="125" rx="6" class="box"/>
+    <text x="570" y="27" class="row">Pipeline softmax passes</text>
+    <rect x="570" y="44" width="130" height="28" rx="3" class="qk"/><text x="635" y="63" text-anchor="middle" class="label">P1 block N+2</text>
+    <rect x="675" y="78" width="130" height="28" rx="3" class="pv"/><text x="740" y="97" text-anchor="middle" class="label">P2 block N+1</text>
+    <rect x="780" y="44" width="130" height="28" rx="3" class="v"/><text x="845" y="63" text-anchor="middle" class="label">P3 block N</text>
+    <text x="570" y="118" class="tiny">Separate west/east stream ranges remove current operand collisions.</text>
+
+    <rect x="1104" y="0" width="612" height="125" rx="6" class="box"/>
+    <text x="1122" y="27" class="row">Prefetch the next V block</text>
+    <rect x="1122" y="44" width="250" height="28" rx="3" class="pv"/><text x="1247" y="63" text-anchor="middle" class="label">Compute current P x V</text>
+    <rect x="1250" y="78" width="250" height="28" rx="3" class="v"/><text x="1375" y="97" text-anchor="middle" class="label">SXM ping-pong load next V</text>
+    <text x="1518" y="59" class="tiny">IW carries column ID;</text>
+    <text x="1518" y="80" class="tiny">no reverse load order</text>
+    <text x="1518" y="101" class="tiny">or MEM IW staging.</text>
+  </g>
+
+  <g transform="translate(42,550)">
+    <rect x="0" y="0" width="1716" height="160" rx="6" fill="#f7f9fb" stroke="#c9d1d9"/>
+    <text x="18" y="30" class="head">Critical constraints discovered</text>
+    <text x="18" y="58" class="note">1. MXM block issue needs 38 cycles today: 32 inputs + 3 control-skew cycles + 3 datapath-tail cycles.</text>
+    <text x="18" y="84" class="note">2. V projection writes packed x16 MEM directly; SXM Transpose + Permute later writes IW(column) in the same cycle.</text>
+    <text x="18" y="110" class="note">3. P3 writes packed x16 directly; SXM runs after softmax, and P x V only performs the two-stream replay.</text>
+    <text x="18" y="136" class="note">4. Context remains local and remote o_proj halves are routed on demand; no cross-hemisphere context copy is materialized.</text>
+  </g>
+</svg>

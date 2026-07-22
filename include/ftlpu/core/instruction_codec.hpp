@@ -21,9 +21,10 @@ namespace isa {
 //
 // MEM 32b:
 //   [2:0] opcode, [8:3] stream, [14:9] map stream,
-//   [27:15] slice-local SRAM word address, copied from software address bits [16:4].
+//   [27:15] slice-local SRAM word address, copied from software address bits [16:4],
+//   [28] accumulator destination (0=SRAM, 1=west stream).
 // MXM control 32b:
-//   IW      [1:0] opcode, [2] weight buffer.
+//   IW      [1:0] opcode, [2] weight buffer, [4:3] weight column.
 //   Compute [1:0] opcode, [2] weight buffer, [8:3] activation stream base,
 //           [14:9] output stream base.
 // VXM ALU 4x32b:
@@ -117,22 +118,36 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
         kAddressMask,
         "MEM row address does not fit encoded instruction");
 
+    detail::require_unsigned_fit(
+        static_cast<std::uint64_t>(instruction.accumulator_destination),
+        0x1,
+        "MEM accumulator destination does not fit encoded instruction");
+    if (instruction.opcode != MemOpcode::Accumulate
+        && instruction.accumulator_destination != MemAccumulatorDestination::Sram) {
+        throw std::logic_error("only MEM Accumulate may select a stream destination");
+    }
     return static_cast<std::uint32_t>(
         static_cast<std::uint64_t>(instruction.opcode)
         | (static_cast<std::uint64_t>(instruction.stream) << 3)
         | (static_cast<std::uint64_t>(instruction.map_stream) << 9)
-        | (static_cast<std::uint64_t>(instruction.address) << 15));
+        | (static_cast<std::uint64_t>(instruction.address) << 15)
+        | (static_cast<std::uint64_t>(instruction.accumulator_destination) << 28));
 }
 
 inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
 {
-    constexpr std::uint64_t kUsedMask = 0x0fffffffull;
+    constexpr std::uint64_t kUsedMask = 0x1fffffffull;
     detail::require_reserved_zero(word, kUsedMask, "encoded MEM instruction has non-zero reserved bits");
     const auto opcode = static_cast<MemOpcode>(detail::low_bits(word, 0, 0x7));
     const auto stream = static_cast<std::size_t>(detail::low_bits(word, 3, 0x3f));
     const auto map_stream = static_cast<std::size_t>(detail::low_bits(word, 9, 0x3f));
     const auto address = static_cast<std::size_t>(detail::low_bits(word, 15, 0x1fff));
-
+    const auto accumulator_destination = static_cast<MemAccumulatorDestination>(
+        detail::low_bits(word, 28, 0x1));
+    if (opcode != MemOpcode::Accumulate
+        && accumulator_destination != MemAccumulatorDestination::Sram) {
+        throw std::logic_error("encoded non-accumulate MEM instruction selects an accumulator destination");
+    }
     switch (opcode) {
     case MemOpcode::Read:
         return MemInstruction::Read(address, stream);
@@ -143,7 +158,7 @@ inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
     case MemOpcode::Scatter:
         return MemInstruction::Scatter(stream, map_stream);
     case MemOpcode::Accumulate:
-        return MemInstruction::Accumulate(address, stream);
+        return MemInstruction::Accumulate(address, stream, accumulator_destination);
     }
     throw std::logic_error("unknown encoded MEM opcode");
 }
@@ -152,6 +167,7 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
 {
     constexpr std::uint32_t kOpcodeMask = 0x3;
     constexpr std::uint32_t kWeightBufferMask = 0x1;
+    constexpr std::uint32_t kWeightColumnMask = 0x3;
     constexpr std::uint32_t kStreamBaseMask = 0x3f;
     constexpr std::uint32_t kActivationStreamMask = 0x3f;
 
@@ -166,7 +182,13 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
             static_cast<std::uint64_t>(instruction.weight_buffer),
             kWeightBufferMask,
             "MXM weight buffer does not fit encoded instruction");
-        return opcode | (static_cast<std::uint32_t>(instruction.weight_buffer) << 2);
+        detail::require_unsigned_fit(
+            static_cast<std::uint64_t>(instruction.weight_column),
+            kWeightColumnMask,
+            "MXM weight column does not fit encoded instruction");
+        return opcode
+            | (static_cast<std::uint32_t>(instruction.weight_buffer) << 2)
+            | (static_cast<std::uint32_t>(instruction.weight_column) << 3);
     case MxmControlOpcode::Compute:
         detail::require_unsigned_fit(
             static_cast<std::uint64_t>(instruction.weight_buffer),
@@ -192,14 +214,15 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
 {
     const auto opcode = static_cast<MxmControlOpcode>(word & 0x3u);
     const auto iw_weight_buffer = static_cast<std::size_t>((word >> 2) & 0x1u);
+    const auto iw_weight_column = static_cast<std::size_t>((word >> 3) & 0x3u);
     const auto compute_weight_buffer = static_cast<std::size_t>((word >> 2) & 0x1u);
     const auto compute_activation_stream_base = static_cast<std::size_t>((word >> 3) & 0x3fu);
     const auto stream_base = static_cast<std::size_t>((word >> 9) & 0x3fu);
 
     switch (opcode) {
     case MxmControlOpcode::IW:
-        detail::require_reserved_zero(word, 0x00000007u, "encoded MXM IW instruction has non-zero reserved bits");
-        return MxmControlInstruction::IW(iw_weight_buffer);
+        detail::require_reserved_zero(word, 0x0000001fu, "encoded MXM IW instruction has non-zero reserved bits");
+        return MxmControlInstruction::IW(iw_weight_buffer, iw_weight_column);
     case MxmControlOpcode::Compute:
         detail::require_reserved_zero(word, 0x00007fffu, "encoded MXM Compute instruction has non-zero reserved bits");
         return MxmControlInstruction::Compute(compute_weight_buffer, compute_activation_stream_base, stream_base);

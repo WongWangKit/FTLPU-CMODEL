@@ -14,7 +14,6 @@
 #include <ostream>
 #include <stdexcept>
 #include <streambuf>
-#include <vector>
 
 namespace ftlpu {
 
@@ -28,11 +27,16 @@ struct MxmControlInstruction {
     std::size_t weight_buffer{0};
     std::size_t stream_base{0};
     std::size_t activation_stream_base{0};
+    std::size_t weight_column{0};
 
-    static MxmControlInstruction IW(std::size_t weight_buffer = 0)
+    static MxmControlInstruction IW(
+        std::size_t weight_buffer = 0,
+        std::size_t weight_column = 0)
     {
         check_weight_buffer(weight_buffer);
-        return MxmControlInstruction {MxmControlOpcode::IW, weight_buffer, 0, 0};
+        check_column(weight_column);
+        return MxmControlInstruction {
+            MxmControlOpcode::IW, weight_buffer, 0, 0, weight_column};
     }
 
     static MxmControlInstruction Compute(
@@ -43,13 +47,25 @@ struct MxmControlInstruction {
         check_weight_buffer(weight_buffer);
         check_activation_stream_base(activation_stream_base);
         check_stream_base(stream_base);
-        return MxmControlInstruction {MxmControlOpcode::Compute, weight_buffer, stream_base, activation_stream_base};
+        return MxmControlInstruction {
+            MxmControlOpcode::Compute,
+            weight_buffer,
+            stream_base,
+            activation_stream_base,
+            0};
     }
 
     static void check_weight_buffer(std::size_t weight_buffer)
     {
         if (weight_buffer >= MxmSupercell::kWeightBuffers) {
             throw std::out_of_range("MXM weight buffer is outside the two-buffer set");
+        }
+    }
+
+    static void check_column(std::size_t column)
+    {
+        if (column >= hw::kMxmSupercellsPerPlane) {
+            throw std::out_of_range("MXM weight column is outside the array");
         }
     }
 
@@ -97,9 +113,6 @@ public:
             slot.reset();
         }
         for (auto& slot : weight_inputs_) {
-            slot.reset();
-        }
-        for (auto& slot : weight_pipeline_) {
             slot.reset();
         }
         compute_pulses_.fill(false);
@@ -223,13 +236,6 @@ public:
     }
 
 private:
-    struct WeightToken {
-        std::size_t weight_buffer{0};
-        WeightInput input{};
-    };
-
-    using WeightTokenSlot = std::optional<WeightToken>;
-
     static void check_tile(std::size_t tile)
     {
         if (tile >= hw::kMxmSupercellsPerPlane) {
@@ -250,6 +256,8 @@ private:
         if (instruction.opcode == MxmControlOpcode::Compute) {
             MxmControlInstruction::check_activation_stream_base(instruction.activation_stream_base);
             MxmControlInstruction::check_stream_base(instruction.stream_base);
+        } else {
+            MxmControlInstruction::check_column(instruction.weight_column);
         }
     }
 
@@ -331,37 +339,30 @@ private:
                     }
 
                     if (should_log) {
-                        os << "IW b" << instruction->weight_buffer << " inject ";
+                        os << "IW b" << instruction->weight_buffer
+                           << " col=" << instruction->weight_column << " inject ";
                     }
-                    for (std::size_t column = hw::kMxmSupercellsPerPlane - 1; column > 0; --column) {
-                        weight_token(instruction->weight_buffer, tile, column)
-                            = weight_token(instruction->weight_buffer, tile, column - 1);
-                    }
-                    weight_token(instruction->weight_buffer, tile, 0)
-                        = WeightToken {instruction->weight_buffer, *weight_inputs_[tile]};
+                    const auto column = instruction->weight_column;
+                    const auto input = *weight_inputs_[tile];
                     weight_inputs_[tile].reset();
 
-                    for (std::size_t column = 0; column < hw::kMxmSupercellsPerPlane; ++column) {
-                        const auto& token = weight_token(instruction->weight_buffer, tile, column);
-                        if (!token.has_value()) {
-                            continue;
-                        }
-                        any = true;
-                        if (should_log) {
-                            any_logged = true;
-                            os << "  tile " << tile << " weight b" << token->weight_buffer << " col=" << column << " ";
-                            array_.tick_cell_iw_load(tile, column, token->weight_buffer, token->input, os);
-                        } else {
-                            static NullStream null_stream;
-                            array_.tick_cell_iw_load(
-                                tile,
-                                column,
-                                token->weight_buffer,
-                                token->input,
-                                null_stream.stream());
-                        }
-                        loaded_cells_[token->weight_buffer][tile][column] = true;
+                    any = true;
+                    if (should_log) {
+                        any_logged = true;
+                        os << "  tile " << tile << " weight b" << instruction->weight_buffer
+                           << " col=" << column << " ";
+                        array_.tick_cell_iw_load(
+                            tile, column, instruction->weight_buffer, input, os);
+                    } else {
+                        static NullStream null_stream;
+                        array_.tick_cell_iw_load(
+                            tile,
+                            column,
+                            instruction->weight_buffer,
+                            input,
+                            null_stream.stream());
                     }
+                    loaded_cells_[instruction->weight_buffer][tile][column] = true;
                 }
             }
 
@@ -389,18 +390,6 @@ private:
         if (print_matrix) {
             print_load_matrix(os, loaded_cells_, log_tile);
         }
-    }
-
-    WeightTokenSlot& weight_token(std::size_t weight_buffer, std::size_t tile, std::size_t column)
-    {
-        return weight_pipeline_[
-            (weight_buffer * hw::kMxmSupercellsPerPlane + tile) * hw::kMxmSupercellsPerPlane + column];
-    }
-
-    const WeightTokenSlot& weight_token(std::size_t weight_buffer, std::size_t tile, std::size_t column) const
-    {
-        return weight_pipeline_[
-            (weight_buffer * hw::kMxmSupercellsPerPlane + tile) * hw::kMxmSupercellsPerPlane + column];
     }
 
     static void print_load_matrix(
@@ -441,8 +430,6 @@ private:
     std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> load_instruction_rows_{};
     std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> compute_instruction_rows_{};
     std::array<WeightInputSlot, hw::kMxmSupercellsPerPlane> weight_inputs_{};
-    std::vector<WeightTokenSlot> weight_pipeline_ = std::vector<WeightTokenSlot>(
-        MxmSupercell::kWeightBuffers * hw::kMxmSupercellsPerPlane * hw::kMxmSupercellsPerPlane);
     std::array<bool, hw::kMxmSupercellsPerPlane> compute_pulses_{};
     std::array<std::optional<ComputePulse>, hw::kMxmSupercellsPerPlane> compute_pulse_details_{};
     std::array<

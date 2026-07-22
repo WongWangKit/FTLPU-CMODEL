@@ -19,6 +19,11 @@ enum class MemOpcode {
     Accumulate,
 };
 
+enum class MemAccumulatorDestination {
+    Sram,
+    Stream,
+};
+
 struct MemInstruction {
     MemOpcode opcode{MemOpcode::Read};
     // SRAM row address (0..8191), not a byte address.
@@ -30,6 +35,7 @@ struct MemInstruction {
     // Architectural code should call stream_id()/map_stream_id().
     std::size_t stream{0};
     std::size_t map_stream{0};
+    MemAccumulatorDestination accumulator_destination{MemAccumulatorDestination::Sram};
 
     StreamId stream_id() const
     {
@@ -61,7 +67,10 @@ struct MemInstruction {
         return Write(address, StreamId::from_packed(packed_stream));
     }
 
-    static MemInstruction Accumulate(std::size_t address, StreamId stream)
+    static MemInstruction Accumulate(
+        std::size_t address,
+        StreamId stream,
+        MemAccumulatorDestination destination = MemAccumulatorDestination::Sram)
     {
         if (stream.direction() != StreamDirection::West) {
             throw std::invalid_argument("MEM Accumulate requires a west stream base");
@@ -69,12 +78,15 @@ struct MemInstruction {
         if (stream.index() + sizeof(float) > hw::kWestStreams) {
             throw std::out_of_range("MEM Accumulate FP32 input exceeds west streams");
         }
-        return MemInstruction {MemOpcode::Accumulate, address, stream.packed(), 0};
+        return MemInstruction {MemOpcode::Accumulate, address, stream.packed(), 0, destination};
     }
 
-    static MemInstruction Accumulate(std::size_t address, std::size_t packed_stream)
+    static MemInstruction Accumulate(
+        std::size_t address,
+        std::size_t packed_stream,
+        MemAccumulatorDestination destination = MemAccumulatorDestination::Sram)
     {
-        return Accumulate(address, StreamId::from_packed(packed_stream));
+        return Accumulate(address, StreamId::from_packed(packed_stream), destination);
     }
 
     static MemInstruction Gather(StreamId stream, StreamId map_stream)

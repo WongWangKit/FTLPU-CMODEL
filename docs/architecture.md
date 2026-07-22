@@ -93,9 +93,12 @@ Important behavior:
 - A `Write(address, stream)` consumes 16 bytes from the selected stream, one byte
   per lane, and writes one aligned SRAM word into the bank selected by address
   bit 16.
-- `Accumulate(address, stream)` is issued on MEM queue 36 or 40. The selected
+- `Accumulate(address, stream, destination)` is issued on MEM queue 36 or 40. The selected
   four-slice group reads one FP32 value per lane, consumes four consecutive
-  west streams, adds the values, and writes the result back in place.
+  west streams, and adds the values. `destination=SRAM` writes the result back
+  in place; `destination=stream` emits it from the group's west boundary on
+  the same four streams and clears that SRAM address after the result is sent,
+  making the accumulator slot reusable by the next reduction.
 - `Gather` and `Scatter` are represented in the instruction enum, but the current
   tests focus on `Read` and `Write`.
 
@@ -108,8 +111,9 @@ The two MEM groups nearest MXM remain fully SRAM-backed: slices 36..39 and
 40..43 still support ordinary `Read` and `Write`. An `Accumulate` instruction
 temporarily treats one group as the four byte planes of an FP32 SRAM vector.
 Each group has an independent single-port read-modify-write path and occupies
-its own four slices for that tile and cycle. Consumed streams do not continue
-west. There are no persistent routes or separate accumulator result storage.
+its own four slices for that tile and cycle. Input streams are always consumed;
+the stream destination creates a new result vector at the west boundary. There
+are no persistent routes or separate accumulator result storage.
 
 For a projection larger than one 32 x 32 MXM tile, the accumulator adds the
 partial vector from every K tile. The W8A16 projection regression uses 18 K
@@ -131,12 +135,10 @@ The system contains two MXMs per hemisphere, four in total.
 
 ### Weight Loading
 
-Each supercell has two peer weight buffers. `IW(buffer)` injects one 8 x 8
-weight block into the west side of the selected row buffer. On every valid `IW`
-cycle for that row, the selected buffer shifts one column to the east and the
-new block enters column 0. To end with column 0..3 in the expected order, MEM
-reads weight column blocks in reverse order: column block 3 first, then 2,
-down to 0. There is no separate `LW` commit instruction:
+Each supercell has two peer weight buffers. `IW(buffer, column)` writes one
+8 x 8 weight block directly into the selected row and supercell column. The
+2-bit column ID allows blocks 0..3 to be loaded in any stream order without an
+implicit eastward shift. There is no separate `LW` commit instruction:
 `Compute(buffer, activation_stream, output_stream)` directly selects which
 buffer supplies weights for that activation token.
 
@@ -257,6 +259,10 @@ Important paths:
 - MEM east streams cross SXM before feeding MXM weight and activation inputs.
 - SXM accepts only `E0..E31`. With no issued SXM instruction, east data moves
   from `sreg11` to `sreg12` as an ordinary one-cycle register hop.
+- Streaming FP16 weight transpose captures low/high byte streams as two planes.
+  Its weight Permute reconstructs each 32-element reduction vector and emits
+  eight FP16 columns as 16 interleaved byte streams, selecting `E0..E15` or
+  `E16..E31` for the target MXM.
 - The symmetric west register hop moves MXM output from `sreg12` to `sreg11`;
   SXM does not transform west streams.
 - MXM int32 outputs are written into west streams at `sreg12`.
@@ -309,8 +315,8 @@ weights and FP16 activations in SRAM, then preloads all ICU queues. At runtime:
 - MEM Read sends eight W8 streams west from eight slice groups.
 - Eight VXM multiply/cast ALU pairs apply the output-column scales and emit 16
   east byte streams containing eight FP16 values.
-- Four consecutive reverse-order `IW` pulses load one 32-column MXM weight
-  tile; MXM0 and MXM1 cover adjacent output tiles.
+- Four `IW(buffer, column)` pulses load one 32-column MXM weight tile directly;
+  MXM0 and MXM1 cover adjacent output tiles.
 - MEM Read emits FP16 activation vectors on east streams.
 - Repeated `Compute` pulses select the weight buffer, activation stream base,
   and west output stream base.
@@ -338,6 +344,22 @@ Read instructions emit gate on `W0..W3` and up on `W4..W7`; one Swish
 instruction consumes each pair at the west edge. The one-cycle result is
 injected on `E0..E1` and written to slices 29 and 30. The test independently
 checks both accumulated projections and every final FP16 result.
+
+### RMSNorm Regression
+
+`tests/integration/rmsnorm_test.cpp` validates a `[32,32]` FP16 RMSNorm
+workload through the full ICU/MEM/MXM/VXM path. VXM first squares each `x`
+vector. East MXM0 loads a `32 x 32` FP16 all-ones matrix and reduces the square
+vector into replicated FP32 row sums, which MEM's accumulator stores. VXM
+divides by the hidden size, adds epsilon, takes a square root, calculates its
+reciprocal, and multiplies the original `x` and `gamma` by that reciprocal
+before casting the result to FP16.
+
+The normalization operands are deliberately delayed with `Pass` instructions:
+the reciprocal becomes available four cycles after the corresponding `x` and
+`gamma` streams. This keeps continuous row traffic aligned instead of allowing
+later vectors to overwrite the operands. The test compares every stored FP16
+element with an FP16-aware scalar golden reference.
 
 ### Initialization And Result Access
 
@@ -368,9 +390,9 @@ MXM0 and two feed MXM1. MXM0 FP32 results occupy slices `36..39`, while MXM1
 results occupy slices `40..43`; each group stores four byte planes at
 `row * 48 + output_block`.
 
-Weight column blocks are read in reverse order because each `IW` shifts the
-selected weight buffer east and inserts the new block at column 0. Activation
-rows and output columns are tiled by the 32-element MXM dimension.
+Each `IW` carries its destination column ID, so scheduling order no longer
+changes the final weight layout. Activation rows and output columns are tiled
+by the 32-element MXM dimension.
 
 ## Known Limitations
 

@@ -4,6 +4,7 @@
 #include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/mem/tile_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
+#include "ftlpu/mxm/performance_monitor.hpp"
 #include "ftlpu/sxm/slice.hpp"
 #include "ftlpu/system/icu.hpp"
 #include "ftlpu/vxm/slice.hpp"
@@ -109,6 +110,7 @@ public:
         tick_mxm_datapaths(sinks);
         vxm_.prepare_cycle();
         transfer_mem_edges_to_vxm(sinks);
+        transfer_unconsumed_streams_across_vxm(sinks);
         vxm_.tick(sinks.vxm, sinks.vxm_log_tile);
         transfer_vxm_to_mem_edges(sinks);
         for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
@@ -119,6 +121,12 @@ public:
             } else {
                 mems_[hemisphere].tick(sxms_[hemisphere]);
             }
+            if (sinks.sxm != nullptr) {
+                *sinks.sxm << "sxm."
+                            << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
+                            << " system_cycle " << cycle_ << '\n';
+                sxms_[hemisphere].log_cycle(*sinks.sxm);
+            }
         }
         ++cycle_;
     }
@@ -126,6 +134,14 @@ public:
     std::size_t cycle() const
     {
         return cycle_;
+    }
+
+    const MxmPerformanceMonitor& mxm_performance(std::size_t mxm) const
+    {
+        if (mxm >= kMxmCount) {
+            throw std::out_of_range("MXM performance index is outside the system");
+        }
+        return mxm_performance_[mxm];
     }
 
 private:
@@ -170,7 +186,13 @@ private:
                 if (sinks.mxm != nullptr && (!sinks.mxm_log_tile.has_value() || tile == *sinks.mxm_log_tile)) {
                     *sinks.mxm << "  SXM.sreg12 -> MXM" << mxm << " tile " << tile << '\n';
                 }
-                return collect_mxm_weight_input_from_streams(mxm, tile);
+                try {
+                    return collect_mxm_weight_input_from_streams(mxm, tile);
+                } catch (const std::exception& ex) {
+                    throw std::logic_error(
+                        "MXM" + std::to_string(mxm)
+                        + " IW tile " + std::to_string(tile) + ": " + ex.what());
+                }
             };
             if (sinks.mxm != nullptr) {
                 mxms_[mxm].control().tick(*sinks.mxm, provider, false, sinks.mxm_log_tile);
@@ -187,6 +209,7 @@ private:
             const auto hemisphere = hemisphere_index(mxm_hemisphere(mxm));
             mxms_[mxm].tick_datapath(
                 mems_[hemisphere], local_mxm_index(mxm), sinks.mxm, sinks.mxm_log_tile);
+            mxm_performance_[mxm].sample(mxms_[mxm]);
         }
     }
 
@@ -263,6 +286,47 @@ private:
         }
     }
 
+    void transfer_unconsumed_streams_across_vxm(LogSinks sinks)
+    {
+        for (std::size_t source_index = 0; source_index < hw::kHemispheres; ++source_index) {
+            const auto source = static_cast<Hemisphere>(source_index);
+            const auto destination_index = source_index ^ 1;
+            auto& destination = mems_[destination_index];
+            const auto& source_mem = mems_[source_index];
+            for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+                const auto& required = vxm_.required_streams_at(source, tile);
+                for (std::size_t stream = 0; stream < hw::kWestStreams; ++stream) {
+                    const auto packed = hw::kEastStreams + stream;
+                    if (required.has_value() && (*required)[packed]) continue;
+
+                    auto complete = true;
+                    for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                        complete = complete
+                            && mem_edge_stream(source_mem, tile, lane, packed).has_value();
+                    }
+                    if (!complete) continue;
+
+                    for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                        const auto& cell = mem_edge_stream(source_mem, tile, lane, packed);
+                        destination.set_east_stream_input(
+                            tile,
+                            lane,
+                            stream,
+                            TileArrayModel::DataWord {cell->data, cell->last});
+                    }
+                    if (sinks.system != nullptr) {
+                        *sinks.system << "  passive VXM bridge "
+                                      << hemisphere_short_name(source) << ".W" << stream
+                                      << " -> "
+                                      << hemisphere_short_name(
+                                             static_cast<Hemisphere>(destination_index))
+                                      << ".E" << stream << " tile " << tile << '\n';
+                    }
+                }
+            }
+        }
+    }
+
     void transfer_vxm_to_mem_edges(LogSinks sinks)
     {
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
@@ -318,6 +382,7 @@ private:
     VxmSlice vxm_{};
     std::array<SxmSlice, hw::kHemispheres> sxms_;
     std::array<Mxm, kMxmCount> mxms_{};
+    std::array<MxmPerformanceMonitor, kMxmCount> mxm_performance_{};
     InstructionControlUnit icu_{};
     std::size_t cycle_{0};
 };

@@ -171,8 +171,21 @@ public:
         const auto id = StreamId::East(stream);
         const auto cell = streams_.cell(register_file, tile, lane, id);
         if (cell.valid) {
-            pending_consumptions_.push_back(
-                PendingConsumption {register_file, tile, lane, id});
+            const auto already_requested = std::any_of(
+                pending_consumptions_.begin(),
+                pending_consumptions_.end(),
+                [&](const PendingConsumption& pending) {
+                    return pending.column == register_file
+                        && pending.tile == tile
+                        && pending.lane == lane
+                        && pending.stream == id;
+                });
+            if (!already_requested) {
+                // Multiple MXMs may broadcast-read one activation stream in
+                // the same cycle; the shared SR cell is consumed only once.
+                pending_consumptions_.push_back(
+                    PendingConsumption {register_file, tile, lane, id});
+            }
         }
         return cell;
     }

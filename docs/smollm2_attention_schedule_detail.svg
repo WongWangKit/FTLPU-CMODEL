@@ -1,0 +1,1095 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="3528" viewBox="0 0 1800 3528">
+<style>
+.title{font:700 29px 'Segoe UI',Arial,sans-serif;fill:#17212b}
+.sub{font:14px 'Segoe UI',Arial,sans-serif;fill:#5d6874}
+.panel{font:700 18px 'Segoe UI',Arial,sans-serif;fill:#25313c}
+.row{font:600 12px 'Segoe UI',Arial,sans-serif;fill:#34404b}
+.tick{font:11px 'Segoe UI',Arial,sans-serif;fill:#66717d}
+.bar{font:600 10px 'Segoe UI',Arial,sans-serif;fill:#17212b}
+.grid{stroke:#dce2e8;stroke-width:1}
+.lane{fill:#fafbfc;stroke:#e1e6eb;stroke-width:1}
+</style>
+<rect width="100%" height="100%" fill="#fff"/>
+<text x="42" y="43" class="title">SmolLM2 Attention: Exact ICU Schedule Windows</text>
+<text x="42" y="69" class="sub">Bars are tile0 instruction issue intervals; MXM/SXM drain tails are omitted. Hover for cycle, resource, slice/stream/address, and repeat details.</text>
+<rect x="42" y="82" width="18" height="12" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7"/>
+<text x="68" y="93" class="sub">Accumulator -&gt; SRAM (keep partial sum)</text>
+<rect x="340" y="82" width="18" height="12" rx="2" fill="#e16b6f" stroke="#52606c" stroke-width="0.7"/>
+<text x="366" y="93" class="sub">Accumulator -&gt; stream + clear (final sum)</text>
+<text x="42" y="148" class="panel">Q projection: first reduction block</text>
+<text x="1755" y="148" text-anchor="end" class="sub">cycles 0..204 (204 cycles)</text>
+<line x1="245.00" y1="166" x2="245.00" y2="543" class="grid"/>
+<text x="245.00" y="159" text-anchor="middle" class="tick">0</text>
+<line x1="547.00" y1="166" x2="547.00" y2="543" class="grid"/>
+<text x="547.00" y="159" text-anchor="middle" class="tick">41</text>
+<line x1="849.00" y1="166" x2="849.00" y2="543" class="grid"/>
+<text x="849.00" y="159" text-anchor="middle" class="tick">82</text>
+<line x1="1151.00" y1="166" x2="1151.00" y2="543" class="grid"/>
+<text x="1151.00" y="159" text-anchor="middle" class="tick">122</text>
+<line x1="1453.00" y1="166" x2="1453.00" y2="543" class="grid"/>
+<text x="1453.00" y="159" text-anchor="middle" class="tick">163</text>
+<line x1="1755.00" y1="166" x2="1755.00" y2="543" class="grid"/>
+<text x="1755.00" y="159" text-anchor="middle" class="tick">204</text>
+<rect x="245" y="166" width="1510" height="24" class="lane"/>
+<text x="233" y="183" text-anchor="end" class="row">MEM.E.Read</text>
+<rect x="245" y="192" width="1510" height="24" class="lane"/>
+<text x="233" y="209" text-anchor="end" class="row">MEM.W.Read</text>
+<rect x="245" y="218" width="1510" height="24" class="lane"/>
+<text x="233" y="235" text-anchor="end" class="row">VXM.ALU0-7</text>
+<rect x="245" y="244" width="1510" height="24" class="lane"/>
+<text x="233" y="261" text-anchor="end" class="row">VXM.ALU8-15</text>
+<rect x="245" y="270" width="1510" height="24" class="lane"/>
+<text x="233" y="287" text-anchor="end" class="row">MXM.E0.Load</text>
+<rect x="245" y="296" width="1510" height="24" class="lane"/>
+<text x="233" y="313" text-anchor="end" class="row">MXM.E1.Load</text>
+<rect x="245" y="322" width="1510" height="24" class="lane"/>
+<text x="233" y="339" text-anchor="end" class="row">MXM.E0.Compute</text>
+<rect x="245" y="348" width="1510" height="24" class="lane"/>
+<text x="233" y="365" text-anchor="end" class="row">MXM.E1.Compute</text>
+<rect x="245" y="374" width="1510" height="24" class="lane"/>
+<text x="233" y="391" text-anchor="end" class="row">MEM.E.Accumulate</text>
+<rect x="245" y="400" width="1510" height="24" class="lane"/>
+<text x="233" y="417" text-anchor="end" class="row">MXM.W0.Load</text>
+<rect x="245" y="426" width="1510" height="24" class="lane"/>
+<text x="233" y="443" text-anchor="end" class="row">MXM.W1.Load</text>
+<rect x="245" y="452" width="1510" height="24" class="lane"/>
+<text x="233" y="469" text-anchor="end" class="row">MXM.W0.Compute</text>
+<rect x="245" y="478" width="1510" height="24" class="lane"/>
+<text x="233" y="495" text-anchor="end" class="row">MXM.W1.Compute</text>
+<rect x="245" y="504" width="1510" height="24" class="lane"/>
+<text x="233" y="521" text-anchor="end" class="row">MEM.W.Accumulate</text>
+<rect x="252.40" y="169" width="111.03" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 1..16; continuous reads; 64 coalesced events</title></rect>
+<text x="307.92" y="182" text-anchor="middle" class="bar" pointer-events="none">continuous rea...</text>
+<rect x="311.62" y="195" width="111.03" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 9..24; continuous reads; 64 coalesced events</title></rect>
+<text x="367.13" y="208" text-anchor="middle" class="bar" pointer-events="none">continuous rea...</text>
+<rect x="319.02" y="221" width="118.43" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU0-7: cycles 10..26; dequant mul; 16 coalesced events</title></rect>
+<text x="378.24" y="234" text-anchor="middle" class="bar" pointer-events="none">dequant mul x16</text>
+<rect x="326.42" y="247" width="118.43" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU8-15: cycles 11..27; dequant cast FP16; 16 coalesced events</title></rect>
+<text x="385.64" y="260" text-anchor="middle" class="bar" pointer-events="none">dequant cast FP...</text>
+<rect x="422.65" y="273" width="29.61" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Load: cycles 24..28; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="452.25" y="299" width="29.61" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Load: cycles 28..32; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="481.86" y="403" width="29.61" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Load: cycles 32..36; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="511.47" y="429" width="29.61" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Load: cycles 36..40; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="518.87" y="169" width="236.86" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 37..69; continuous reads; 8 coalesced events</title></rect>
+<text x="637.30" y="182" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="518.87" y="195" width="236.86" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 37..69; continuous reads; 8 coalesced events</title></rect>
+<text x="637.30" y="208" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="555.88" y="325" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 42..74; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="674.31" y="338" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E0 out=W0</text>
+<rect x="555.88" y="351" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 42..74; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="674.31" y="364" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E2 out=W4</text>
+<rect x="555.88" y="455" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 42..74; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="674.31" y="468" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E0 out=W0</text>
+<rect x="555.88" y="481" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 42..74; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="674.31" y="494" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E2 out=W4</text>
+<rect x="592.89" y="377" width="244.26" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 47..80; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="715.02" y="390" text-anchor="middle" class="bar" pointer-events="none">continuous accumulates -&gt; SRAM x4</text>
+<rect x="592.89" y="507" width="244.26" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 47..80; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="715.02" y="520" text-anchor="middle" class="bar" pointer-events="none">continuous accumulates -&gt; SRAM x4</text>
+<rect x="800.15" y="169" width="236.86" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 75..107; continuous reads; 8 coalesced events</title></rect>
+<text x="918.58" y="182" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="800.15" y="195" width="236.86" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 75..107; continuous reads; 8 coalesced events</title></rect>
+<text x="918.58" y="208" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="837.16" y="325" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 80..112; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="955.59" y="338" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E0 out=W0</text>
+<rect x="837.16" y="351" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 80..112; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="955.59" y="364" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E2 out=W4</text>
+<rect x="837.16" y="455" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 80..112; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="955.59" y="468" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E0 out=W0</text>
+<rect x="837.16" y="481" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 80..112; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="955.59" y="494" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E2 out=W4</text>
+<rect x="874.17" y="377" width="244.26" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 85..118; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="996.30" y="390" text-anchor="middle" class="bar" pointer-events="none">continuous accumulates -&gt; SRAM x4</text>
+<rect x="874.17" y="507" width="244.26" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 85..118; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="996.30" y="520" text-anchor="middle" class="bar" pointer-events="none">continuous accumulates -&gt; SRAM x4</text>
+<rect x="1081.42" y="169" width="236.86" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 113..145; continuous reads; 8 coalesced events</title></rect>
+<text x="1199.85" y="182" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="1081.42" y="195" width="236.86" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 113..145; continuous reads; 8 coalesced events</title></rect>
+<text x="1199.85" y="208" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="1118.43" y="325" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 118..150; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1236.86" y="338" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E0 out=W0</text>
+<rect x="1118.43" y="351" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 118..150; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1236.86" y="364" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E2 out=W4</text>
+<rect x="1118.43" y="455" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 118..150; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1236.86" y="468" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E0 out=W0</text>
+<rect x="1118.43" y="481" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 118..150; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1236.86" y="494" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E2 out=W4</text>
+<rect x="1155.44" y="377" width="244.26" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 123..156; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1277.57" y="390" text-anchor="middle" class="bar" pointer-events="none">continuous accumulates -&gt; SRAM x4</text>
+<rect x="1155.44" y="507" width="244.26" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 123..156; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1277.57" y="520" text-anchor="middle" class="bar" pointer-events="none">continuous accumulates -&gt; SRAM x4</text>
+<rect x="1362.70" y="169" width="236.86" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 151..183; continuous reads; 8 coalesced events</title></rect>
+<text x="1481.13" y="182" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="1362.70" y="195" width="236.86" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 151..183; continuous reads; 8 coalesced events</title></rect>
+<text x="1481.13" y="208" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="1399.71" y="325" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 156..188; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1518.14" y="338" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E0 out=W0</text>
+<rect x="1399.71" y="351" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 156..188; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1518.14" y="364" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E2 out=W4</text>
+<rect x="1399.71" y="455" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 156..188; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1518.14" y="468" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E0 out=W0</text>
+<rect x="1399.71" y="481" width="236.86" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 156..188; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1518.14" y="494" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E2 out=W4</text>
+<rect x="1436.72" y="377" width="244.26" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 161..194; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1558.85" y="390" text-anchor="middle" class="bar" pointer-events="none">continuous accumulates -&gt; SRAM x4</text>
+<rect x="1436.72" y="507" width="244.26" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 161..194; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1558.85" y="520" text-anchor="middle" class="bar" pointer-events="none">continuous accumulates -&gt; SRAM x4</text>
+<rect x="1688.38" y="169" width="66.62" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 195..204; continuous reads; 43 coalesced events</title></rect>
+<text x="1721.69" y="182" text-anchor="middle" class="bar" pointer-events="none">continuo...</text>
+<rect x="1747.60" y="195" width="7.40" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 203..204; continuous reads</title></rect>
+<text x="42" y="621" class="panel">Q RoPE: FP32 rotate, FP16 cast, and MEM writeback</text>
+<text x="1755" y="621" text-anchor="end" class="sub">cycles 3348..3432 (84 cycles)</text>
+<line x1="245.00" y1="639" x2="245.00" y2="1224" class="grid"/>
+<text x="245.00" y="632" text-anchor="middle" class="tick">3348</text>
+<line x1="547.00" y1="639" x2="547.00" y2="1224" class="grid"/>
+<text x="547.00" y="632" text-anchor="middle" class="tick">3365</text>
+<line x1="849.00" y1="639" x2="849.00" y2="1224" class="grid"/>
+<text x="849.00" y="632" text-anchor="middle" class="tick">3382</text>
+<line x1="1151.00" y1="639" x2="1151.00" y2="1224" class="grid"/>
+<text x="1151.00" y="632" text-anchor="middle" class="tick">3398</text>
+<line x1="1453.00" y1="639" x2="1453.00" y2="1224" class="grid"/>
+<text x="1453.00" y="632" text-anchor="middle" class="tick">3415</text>
+<line x1="1755.00" y1="639" x2="1755.00" y2="1224" class="grid"/>
+<text x="1755.00" y="632" text-anchor="middle" class="tick">3432</text>
+<rect x="245" y="639" width="1510" height="24" class="lane"/>
+<text x="233" y="656" text-anchor="end" class="row">MEM.E.Read</text>
+<rect x="245" y="665" width="1510" height="24" class="lane"/>
+<text x="233" y="682" text-anchor="end" class="row">MEM.E.Write</text>
+<rect x="245" y="691" width="1510" height="24" class="lane"/>
+<text x="233" y="708" text-anchor="end" class="row">MEM.W.Read</text>
+<rect x="245" y="717" width="1510" height="24" class="lane"/>
+<text x="233" y="734" text-anchor="end" class="row">MEM.W.Write</text>
+<rect x="245" y="743" width="1510" height="24" class="lane"/>
+<text x="233" y="760" text-anchor="end" class="row">VXM.ALU0</text>
+<rect x="245" y="769" width="1510" height="24" class="lane"/>
+<text x="233" y="786" text-anchor="end" class="row">VXM.ALU1</text>
+<rect x="245" y="795" width="1510" height="24" class="lane"/>
+<text x="233" y="812" text-anchor="end" class="row">VXM.ALU2</text>
+<rect x="245" y="821" width="1510" height="24" class="lane"/>
+<text x="233" y="838" text-anchor="end" class="row">VXM.ALU3</text>
+<rect x="245" y="847" width="1510" height="24" class="lane"/>
+<text x="233" y="864" text-anchor="end" class="row">VXM.ALU4</text>
+<rect x="245" y="873" width="1510" height="24" class="lane"/>
+<text x="233" y="890" text-anchor="end" class="row">VXM.ALU5</text>
+<rect x="245" y="899" width="1510" height="24" class="lane"/>
+<text x="233" y="916" text-anchor="end" class="row">VXM.ALU8</text>
+<rect x="245" y="925" width="1510" height="24" class="lane"/>
+<text x="233" y="942" text-anchor="end" class="row">VXM.ALU9</text>
+<rect x="245" y="951" width="1510" height="24" class="lane"/>
+<text x="233" y="968" text-anchor="end" class="row">VXM.ALU10</text>
+<rect x="245" y="977" width="1510" height="24" class="lane"/>
+<text x="233" y="994" text-anchor="end" class="row">VXM.ALU11</text>
+<rect x="245" y="1003" width="1510" height="24" class="lane"/>
+<text x="233" y="1020" text-anchor="end" class="row">VXM.ALU12</text>
+<rect x="245" y="1029" width="1510" height="24" class="lane"/>
+<text x="233" y="1046" text-anchor="end" class="row">VXM.ALU13</text>
+<rect x="245" y="1055" width="1510" height="24" class="lane"/>
+<text x="233" y="1072" text-anchor="end" class="row">MXM.E0.Compute</text>
+<rect x="245" y="1081" width="1510" height="24" class="lane"/>
+<text x="233" y="1098" text-anchor="end" class="row">MXM.E1.Compute</text>
+<rect x="245" y="1107" width="1510" height="24" class="lane"/>
+<text x="233" y="1124" text-anchor="end" class="row">MEM.E.Accumulate</text>
+<rect x="245" y="1133" width="1510" height="24" class="lane"/>
+<text x="233" y="1150" text-anchor="end" class="row">MXM.W0.Compute</text>
+<rect x="245" y="1159" width="1510" height="24" class="lane"/>
+<text x="233" y="1176" text-anchor="end" class="row">MXM.W1.Compute</text>
+<rect x="245" y="1185" width="1510" height="24" class="lane"/>
+<text x="233" y="1202" text-anchor="end" class="row">MEM.W.Accumulate</text>
+<rect x="245.00" y="642" width="665.12" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 3336..3385; continuous reads; 132 coalesced events</title></rect>
+<text x="577.56" y="655" text-anchor="middle" class="bar" pointer-events="none">continuous reads x132</text>
+<rect x="245.00" y="694" width="665.12" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 3336..3385; continuous reads; 132 coalesced events</title></rect>
+<text x="577.56" y="707" text-anchor="middle" class="bar" pointer-events="none">continuous reads x132</text>
+<rect x="245.00" y="1058" width="431.43" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 3340..3372; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="460.71" y="1071" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E0 out=W0</text>
+<rect x="245.00" y="1084" width="431.43" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 3340..3372; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="460.71" y="1097" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E2 out=W4</text>
+<rect x="245.00" y="1136" width="431.43" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 3340..3372; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="460.71" y="1149" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E0 out=W0</text>
+<rect x="245.00" y="1162" width="431.43" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 3340..3372; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="460.71" y="1175" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E2 out=W4</text>
+<rect x="245.00" y="1110" width="539.29" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 3346..3378; continuous accumulates -&gt; stream + clear; 2 coalesced events</title></rect>
+<text x="514.64" y="1123" text-anchor="middle" class="bar" pointer-events="none">continuous accumulates -&gt; stream + clear x2</text>
+<rect x="245.00" y="1188" width="539.29" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 3346..3378; continuous accumulates -&gt; stream + clear; 2 coalesced events</title></rect>
+<text x="514.64" y="1201" text-anchor="middle" class="bar" pointer-events="none">continuous accumulates -&gt; stream + clear x2</text>
+<rect x="388.81" y="746" width="575.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU0: cycles 3356..3388; RoPE mul; 32 coalesced events</title></rect>
+<text x="676.43" y="759" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x32</text>
+<rect x="388.81" y="772" width="575.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU1: cycles 3356..3388; RoPE mul; 32 coalesced events</title></rect>
+<text x="676.43" y="785" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x32</text>
+<rect x="388.81" y="824" width="575.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU3: cycles 3356..3388; RoPE mul; 32 coalesced events</title></rect>
+<text x="676.43" y="837" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x32</text>
+<rect x="388.81" y="850" width="575.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU4: cycles 3356..3388; RoPE mul; 32 coalesced events</title></rect>
+<text x="676.43" y="863" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x32</text>
+<rect x="388.81" y="902" width="575.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU8: cycles 3356..3388; RoPE mul; 32 coalesced events</title></rect>
+<text x="676.43" y="915" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x32</text>
+<rect x="388.81" y="928" width="575.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU9: cycles 3356..3388; RoPE mul; 32 coalesced events</title></rect>
+<text x="676.43" y="941" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x32</text>
+<rect x="388.81" y="980" width="575.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU11: cycles 3356..3388; RoPE mul; 32 coalesced events</title></rect>
+<text x="676.43" y="993" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x32</text>
+<rect x="388.81" y="1006" width="575.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU12: cycles 3356..3388; RoPE mul; 32 coalesced events</title></rect>
+<text x="676.43" y="1019" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x32</text>
+<rect x="406.79" y="798" width="575.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU2: cycles 3357..3389; RoPE sub -&gt; FP16; 32 coalesced events</title></rect>
+<text x="694.40" y="811" text-anchor="middle" class="bar" pointer-events="none">RoPE sub -&gt; FP16 x32</text>
+<rect x="406.79" y="876" width="575.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU5: cycles 3357..3389; RoPE add -&gt; FP16; 32 coalesced events</title></rect>
+<text x="694.40" y="889" text-anchor="middle" class="bar" pointer-events="none">RoPE add -&gt; FP16 x32</text>
+<rect x="406.79" y="954" width="575.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU10: cycles 3357..3389; RoPE sub -&gt; FP16; 32 coalesced events</title></rect>
+<text x="694.40" y="967" text-anchor="middle" class="bar" pointer-events="none">RoPE sub -&gt; FP16 x32</text>
+<rect x="406.79" y="1032" width="575.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU13: cycles 3357..3389; RoPE add -&gt; FP16; 32 coalesced events</title></rect>
+<text x="694.40" y="1045" text-anchor="middle" class="bar" pointer-events="none">RoPE add -&gt; FP16 x32</text>
+<rect x="424.76" y="668" width="35.95" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 3358..3360; continuous writes; 4 coalesced events</title></rect>
+<rect x="424.76" y="720" width="35.95" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Write: cycles 3358..3360; continuous writes; 4 coalesced events</title></rect>
+<rect x="496.67" y="668" width="125.83" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 3362..3369; continuous writes; 24 coalesced events</title></rect>
+<text x="559.58" y="681" text-anchor="middle" class="bar" pointer-events="none">continuous write...</text>
+<rect x="496.67" y="720" width="125.83" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Write: cycles 3362..3369; continuous writes; 24 coalesced events</title></rect>
+<text x="559.58" y="733" text-anchor="middle" class="bar" pointer-events="none">continuous write...</text>
+<rect x="640.48" y="668" width="125.83" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 3370..3377; continuous writes; 32 coalesced events</title></rect>
+<text x="703.39" y="681" text-anchor="middle" class="bar" pointer-events="none">continuous write...</text>
+<rect x="640.48" y="720" width="125.83" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Write: cycles 3370..3377; continuous writes; 32 coalesced events</title></rect>
+<text x="703.39" y="733" text-anchor="middle" class="bar" pointer-events="none">continuous write...</text>
+<rect x="784.29" y="668" width="125.83" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 3378..3385; continuous writes; 32 coalesced events</title></rect>
+<text x="847.20" y="681" text-anchor="middle" class="bar" pointer-events="none">continuous write...</text>
+<rect x="784.29" y="720" width="125.83" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Write: cycles 3378..3385; continuous writes; 32 coalesced events</title></rect>
+<text x="847.20" y="733" text-anchor="middle" class="bar" pointer-events="none">continuous write...</text>
+<rect x="928.10" y="668" width="125.83" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 3386..3393; continuous writes; 28 coalesced events</title></rect>
+<text x="991.01" y="681" text-anchor="middle" class="bar" pointer-events="none">continuous write...</text>
+<rect x="928.10" y="720" width="125.83" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Write: cycles 3386..3393; continuous writes; 28 coalesced events</title></rect>
+<text x="991.01" y="733" text-anchor="middle" class="bar" pointer-events="none">continuous write...</text>
+<rect x="1071.90" y="668" width="35.95" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 3394..3396; continuous writes; 4 coalesced events</title></rect>
+<rect x="1071.90" y="720" width="35.95" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Write: cycles 3394..3396; continuous writes; 4 coalesced events</title></rect>
+<rect x="1125.83" y="668" width="17.98" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 3397..3398; continuous writes; 4 coalesced events</title></rect>
+<rect x="1125.83" y="720" width="17.98" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Write: cycles 3397..3398; continuous writes; 4 coalesced events</title></rect>
+<rect x="1161.79" y="642" width="593.21" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 3399..3432; continuous reads; 68 coalesced events</title></rect>
+<text x="1458.39" y="655" text-anchor="middle" class="bar" pointer-events="none">continuous reads x68</text>
+<rect x="1161.79" y="694" width="593.21" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 3399..3432; continuous reads; 68 coalesced events</title></rect>
+<text x="1458.39" y="707" text-anchor="middle" class="bar" pointer-events="none">continuous reads x68</text>
+<rect x="1251.67" y="1058" width="503.33" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 3404..3436; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1503.33" y="1071" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E0 out=W0</text>
+<rect x="1251.67" y="1084" width="503.33" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 3404..3436; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1503.33" y="1097" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E2 out=W4</text>
+<rect x="1251.67" y="1136" width="503.33" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 3404..3436; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1503.33" y="1149" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E0 out=W0</text>
+<rect x="1251.67" y="1162" width="503.33" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 3404..3436; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1503.33" y="1175" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E2 out=W4</text>
+<rect x="1341.55" y="1110" width="413.45" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 3409..3442; continuous accumulates -&gt; stream + clear; 4 coalesced events</title></rect>
+<text x="1548.27" y="1123" text-anchor="middle" class="bar" pointer-events="none">continuous accumulates -&gt; stream + clear x4</text>
+<rect x="1341.55" y="1188" width="413.45" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 3409..3442; continuous accumulates -&gt; stream + clear; 4 coalesced events</title></rect>
+<text x="1548.27" y="1201" text-anchor="middle" class="bar" pointer-events="none">continuous accumulates -&gt; stream + clear x4</text>
+<rect x="1539.29" y="746" width="215.71" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU0: cycles 3420..3432; RoPE mul; 12 coalesced events</title></rect>
+<text x="1647.14" y="759" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x12</text>
+<rect x="1539.29" y="772" width="215.71" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU1: cycles 3420..3432; RoPE mul; 12 coalesced events</title></rect>
+<text x="1647.14" y="785" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x12</text>
+<rect x="1539.29" y="824" width="215.71" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU3: cycles 3420..3432; RoPE mul; 12 coalesced events</title></rect>
+<text x="1647.14" y="837" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x12</text>
+<rect x="1539.29" y="850" width="215.71" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU4: cycles 3420..3432; RoPE mul; 12 coalesced events</title></rect>
+<text x="1647.14" y="863" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x12</text>
+<rect x="1539.29" y="902" width="215.71" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU8: cycles 3420..3432; RoPE mul; 12 coalesced events</title></rect>
+<text x="1647.14" y="915" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x12</text>
+<rect x="1539.29" y="928" width="215.71" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU9: cycles 3420..3432; RoPE mul; 12 coalesced events</title></rect>
+<text x="1647.14" y="941" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x12</text>
+<rect x="1539.29" y="980" width="215.71" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU11: cycles 3420..3432; RoPE mul; 12 coalesced events</title></rect>
+<text x="1647.14" y="993" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x12</text>
+<rect x="1539.29" y="1006" width="215.71" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU12: cycles 3420..3432; RoPE mul; 12 coalesced events</title></rect>
+<text x="1647.14" y="1019" text-anchor="middle" class="bar" pointer-events="none">RoPE mul x12</text>
+<rect x="1557.26" y="798" width="197.74" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU2: cycles 3421..3432; RoPE sub -&gt; FP16; 11 coalesced events</title></rect>
+<text x="1656.13" y="811" text-anchor="middle" class="bar" pointer-events="none">RoPE sub -&gt; FP16 x11</text>
+<rect x="1557.26" y="876" width="197.74" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU5: cycles 3421..3432; RoPE add -&gt; FP16; 11 coalesced events</title></rect>
+<text x="1656.13" y="889" text-anchor="middle" class="bar" pointer-events="none">RoPE add -&gt; FP16 x11</text>
+<rect x="1557.26" y="954" width="197.74" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU10: cycles 3421..3432; RoPE sub -&gt; FP16; 11 coalesced events</title></rect>
+<text x="1656.13" y="967" text-anchor="middle" class="bar" pointer-events="none">RoPE sub -&gt; FP16 x11</text>
+<rect x="1557.26" y="1032" width="197.74" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU13: cycles 3421..3432; RoPE add -&gt; FP16; 11 coalesced events</title></rect>
+<text x="1656.13" y="1045" text-anchor="middle" class="bar" pointer-events="none">RoPE add -&gt; FP16 x11</text>
+<rect x="1575.24" y="668" width="35.95" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 3422..3424; continuous writes; 4 coalesced events</title></rect>
+<rect x="1575.24" y="720" width="35.95" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Write: cycles 3422..3424; continuous writes; 4 coalesced events</title></rect>
+<rect x="1647.14" y="668" width="107.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 3426..3432; continuous writes; 20 coalesced events</title></rect>
+<text x="1701.07" y="681" text-anchor="middle" class="bar" pointer-events="none">continuous wr...</text>
+<rect x="1647.14" y="720" width="107.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Write: cycles 3426..3432; continuous writes; 20 coalesced events</title></rect>
+<text x="1701.07" y="733" text-anchor="middle" class="bar" pointer-events="none">continuous wr...</text>
+<text x="42" y="1302" class="panel">V projection: FP16 cast -&gt; packed 16-stream MEM layout</text>
+<text x="1755" y="1302" text-anchor="end" class="sub">cycles 32320..32490 (170 cycles)</text>
+<line x1="245.00" y1="1320" x2="245.00" y2="1515" class="grid"/>
+<text x="245.00" y="1313" text-anchor="middle" class="tick">32320</text>
+<line x1="547.00" y1="1320" x2="547.00" y2="1515" class="grid"/>
+<text x="547.00" y="1313" text-anchor="middle" class="tick">32354</text>
+<line x1="849.00" y1="1320" x2="849.00" y2="1515" class="grid"/>
+<text x="849.00" y="1313" text-anchor="middle" class="tick">32388</text>
+<line x1="1151.00" y1="1320" x2="1151.00" y2="1515" class="grid"/>
+<text x="1151.00" y="1313" text-anchor="middle" class="tick">32422</text>
+<line x1="1453.00" y1="1320" x2="1453.00" y2="1515" class="grid"/>
+<text x="1453.00" y="1313" text-anchor="middle" class="tick">32456</text>
+<line x1="1755.00" y1="1320" x2="1755.00" y2="1515" class="grid"/>
+<text x="1755.00" y="1313" text-anchor="middle" class="tick">32490</text>
+<rect x="245" y="1320" width="1510" height="24" class="lane"/>
+<text x="233" y="1337" text-anchor="end" class="row">MEM.E.Read</text>
+<rect x="245" y="1346" width="1510" height="24" class="lane"/>
+<text x="233" y="1363" text-anchor="end" class="row">MEM.E.Write</text>
+<rect x="245" y="1372" width="1510" height="24" class="lane"/>
+<text x="233" y="1389" text-anchor="end" class="row">VXM.ALU0</text>
+<rect x="245" y="1398" width="1510" height="24" class="lane"/>
+<text x="233" y="1415" text-anchor="end" class="row">VXM.ALU1</text>
+<rect x="245" y="1424" width="1510" height="24" class="lane"/>
+<text x="233" y="1441" text-anchor="end" class="row">MXM.E0.Compute</text>
+<rect x="245" y="1450" width="1510" height="24" class="lane"/>
+<text x="233" y="1467" text-anchor="end" class="row">MXM.E1.Compute</text>
+<rect x="245" y="1476" width="1510" height="24" class="lane"/>
+<text x="233" y="1493" text-anchor="end" class="row">MEM.E.Accumulate</text>
+<rect x="245.00" y="1323" width="62.18" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 32296..32327; continuous reads; 4 coalesced events</title></rect>
+<text x="276.09" y="1336" text-anchor="middle" class="bar" pointer-events="none">continu...</text>
+<rect x="245.00" y="1427" width="106.59" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 32300..32332; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="298.29" y="1440" text-anchor="middle" class="bar" pointer-events="none">Compute buffe...</text>
+<rect x="245.00" y="1453" width="106.59" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 32300..32332; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="298.29" y="1466" text-anchor="middle" class="bar" pointer-events="none">Compute buffe...</text>
+<rect x="245.00" y="1479" width="159.88" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 32306..32338; continuous accumulates -&gt; stream + clear; 2 coalesced events</title></rect>
+<text x="324.94" y="1492" text-anchor="middle" class="bar" pointer-events="none">continuous accumulate...</text>
+<rect x="245.00" y="1375" width="248.71" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU0: cycles 32320..32348; cast output low pair; 28 coalesced events</title></rect>
+<text x="369.35" y="1388" text-anchor="middle" class="bar" pointer-events="none">cast output low pair x28</text>
+<rect x="245.00" y="1401" width="248.71" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU1: cycles 32320..32348; cast output high pair; 28 coalesced events</title></rect>
+<text x="369.35" y="1414" text-anchor="middle" class="bar" pointer-events="none">cast output high pair x28</text>
+<rect x="253.88" y="1349" width="62.18" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32321..32328; continuous writes; 24 coalesced events</title></rect>
+<text x="284.97" y="1362" text-anchor="middle" class="bar" pointer-events="none">continu...</text>
+<rect x="324.94" y="1349" width="62.18" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32329..32336; continuous writes; 32 coalesced events</title></rect>
+<text x="356.03" y="1362" text-anchor="middle" class="bar" pointer-events="none">continu...</text>
+<rect x="396.00" y="1349" width="62.18" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32337..32344; continuous writes; 32 coalesced events</title></rect>
+<text x="427.09" y="1362" text-anchor="middle" class="bar" pointer-events="none">continu...</text>
+<rect x="467.06" y="1349" width="62.18" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32345..32352; continuous writes; 28 coalesced events</title></rect>
+<text x="498.15" y="1362" text-anchor="middle" class="bar" pointer-events="none">continu...</text>
+<rect x="538.12" y="1349" width="17.76" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32353..32355; continuous writes; 4 coalesced events</title></rect>
+<rect x="564.76" y="1349" width="8.88" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32356..32357; continuous writes; 4 coalesced events</title></rect>
+<rect x="591.41" y="1323" width="284.24" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 32359..32391; continuous reads; 8 coalesced events</title></rect>
+<text x="733.53" y="1336" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="635.82" y="1427" width="284.24" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 32364..32396; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="777.94" y="1440" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E0 out=W0</text>
+<rect x="635.82" y="1453" width="284.24" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 32364..32396; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="777.94" y="1466" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E2 out=W4</text>
+<rect x="680.24" y="1479" width="293.12" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 32369..32402; continuous accumulates -&gt; stream + clear; 4 coalesced events</title></rect>
+<text x="826.79" y="1492" text-anchor="middle" class="bar" pointer-events="none">continuous accumulates -&gt; stream + clea...</text>
+<rect x="777.94" y="1375" width="284.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU0: cycles 32380..32412; cast output low pair; 32 coalesced events</title></rect>
+<text x="920.06" y="1388" text-anchor="middle" class="bar" pointer-events="none">cast output low pair x32</text>
+<rect x="777.94" y="1401" width="284.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU1: cycles 32380..32412; cast output high pair; 32 coalesced events</title></rect>
+<text x="920.06" y="1414" text-anchor="middle" class="bar" pointer-events="none">cast output high pair x32</text>
+<rect x="795.71" y="1349" width="17.76" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32382..32384; continuous writes; 4 coalesced events</title></rect>
+<rect x="822.35" y="1349" width="62.18" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32385..32392; continuous writes; 24 coalesced events</title></rect>
+<text x="853.44" y="1362" text-anchor="middle" class="bar" pointer-events="none">continu...</text>
+<rect x="893.41" y="1349" width="62.18" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32393..32400; continuous writes; 32 coalesced events</title></rect>
+<text x="924.50" y="1362" text-anchor="middle" class="bar" pointer-events="none">continu...</text>
+<rect x="964.47" y="1349" width="62.18" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32401..32408; continuous writes; 32 coalesced events</title></rect>
+<text x="995.56" y="1362" text-anchor="middle" class="bar" pointer-events="none">continu...</text>
+<rect x="1035.53" y="1349" width="62.18" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32409..32416; continuous writes; 28 coalesced events</title></rect>
+<text x="1066.62" y="1362" text-anchor="middle" class="bar" pointer-events="none">continu...</text>
+<rect x="1106.59" y="1349" width="17.76" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32417..32419; continuous writes; 4 coalesced events</title></rect>
+<rect x="1133.24" y="1349" width="8.88" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32420..32421; continuous writes; 4 coalesced events</title></rect>
+<rect x="1159.88" y="1323" width="284.24" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 32423..32455; continuous reads; 8 coalesced events</title></rect>
+<text x="1302.00" y="1336" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="1204.29" y="1427" width="284.24" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 32428..32460; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1346.41" y="1440" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E0 out=W0</text>
+<rect x="1204.29" y="1453" width="284.24" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 32428..32460; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1346.41" y="1466" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E2 out=W4</text>
+<rect x="1248.71" y="1479" width="293.12" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 32433..32466; continuous accumulates -&gt; stream + clear; 4 coalesced events</title></rect>
+<text x="1395.26" y="1492" text-anchor="middle" class="bar" pointer-events="none">continuous accumulates -&gt; stream + clea...</text>
+<rect x="1346.41" y="1375" width="284.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU0: cycles 32444..32476; cast output low pair; 32 coalesced events</title></rect>
+<text x="1488.53" y="1388" text-anchor="middle" class="bar" pointer-events="none">cast output low pair x32</text>
+<rect x="1346.41" y="1401" width="284.24" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU1: cycles 32444..32476; cast output high pair; 32 coalesced events</title></rect>
+<text x="1488.53" y="1414" text-anchor="middle" class="bar" pointer-events="none">cast output high pair x32</text>
+<rect x="1364.18" y="1349" width="17.76" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32446..32448; continuous writes; 4 coalesced events</title></rect>
+<rect x="1390.82" y="1349" width="62.18" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32449..32456; continuous writes; 24 coalesced events</title></rect>
+<text x="1421.91" y="1362" text-anchor="middle" class="bar" pointer-events="none">continu...</text>
+<rect x="1461.88" y="1349" width="62.18" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32457..32464; continuous writes; 32 coalesced events</title></rect>
+<text x="1492.97" y="1362" text-anchor="middle" class="bar" pointer-events="none">continu...</text>
+<rect x="1532.94" y="1349" width="62.18" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32465..32472; continuous writes; 32 coalesced events</title></rect>
+<text x="1564.03" y="1362" text-anchor="middle" class="bar" pointer-events="none">continu...</text>
+<rect x="1604.00" y="1349" width="62.18" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32473..32480; continuous writes; 28 coalesced events</title></rect>
+<text x="1635.09" y="1362" text-anchor="middle" class="bar" pointer-events="none">continu...</text>
+<rect x="1675.06" y="1349" width="17.76" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32481..32483; continuous writes; 4 coalesced events</title></rect>
+<rect x="1701.71" y="1349" width="8.88" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 32484..32485; continuous writes; 4 coalesced events</title></rect>
+<text x="42" y="1593" class="panel">QK: four MXMs, independent query blocks</text>
+<text x="1755" y="1593" text-anchor="end" class="sub">cycles 33148..33792 (644 cycles)</text>
+<line x1="245.00" y1="1611" x2="245.00" y2="1936" class="grid"/>
+<text x="245.00" y="1604" text-anchor="middle" class="tick">33148</text>
+<line x1="547.00" y1="1611" x2="547.00" y2="1936" class="grid"/>
+<text x="547.00" y="1604" text-anchor="middle" class="tick">33277</text>
+<line x1="849.00" y1="1611" x2="849.00" y2="1936" class="grid"/>
+<text x="849.00" y="1604" text-anchor="middle" class="tick">33406</text>
+<line x1="1151.00" y1="1611" x2="1151.00" y2="1936" class="grid"/>
+<text x="1151.00" y="1604" text-anchor="middle" class="tick">33534</text>
+<line x1="1453.00" y1="1611" x2="1453.00" y2="1936" class="grid"/>
+<text x="1453.00" y="1604" text-anchor="middle" class="tick">33663</text>
+<line x1="1755.00" y1="1611" x2="1755.00" y2="1936" class="grid"/>
+<text x="1755.00" y="1604" text-anchor="middle" class="tick">33792</text>
+<rect x="245" y="1611" width="1510" height="24" class="lane"/>
+<text x="233" y="1628" text-anchor="end" class="row">MEM.E.Read</text>
+<rect x="245" y="1637" width="1510" height="24" class="lane"/>
+<text x="233" y="1654" text-anchor="end" class="row">MEM.W.Read</text>
+<rect x="245" y="1663" width="1510" height="24" class="lane"/>
+<text x="233" y="1680" text-anchor="end" class="row">MXM.E0.Load</text>
+<rect x="245" y="1689" width="1510" height="24" class="lane"/>
+<text x="233" y="1706" text-anchor="end" class="row">MXM.E1.Load</text>
+<rect x="245" y="1715" width="1510" height="24" class="lane"/>
+<text x="233" y="1732" text-anchor="end" class="row">MXM.E0.Compute</text>
+<rect x="245" y="1741" width="1510" height="24" class="lane"/>
+<text x="233" y="1758" text-anchor="end" class="row">MXM.E1.Compute</text>
+<rect x="245" y="1767" width="1510" height="24" class="lane"/>
+<text x="233" y="1784" text-anchor="end" class="row">MEM.E.Accumulate</text>
+<rect x="245" y="1793" width="1510" height="24" class="lane"/>
+<text x="233" y="1810" text-anchor="end" class="row">MXM.W0.Load</text>
+<rect x="245" y="1819" width="1510" height="24" class="lane"/>
+<text x="233" y="1836" text-anchor="end" class="row">MXM.W1.Load</text>
+<rect x="245" y="1845" width="1510" height="24" class="lane"/>
+<text x="233" y="1862" text-anchor="end" class="row">MXM.W0.Compute</text>
+<rect x="245" y="1871" width="1510" height="24" class="lane"/>
+<text x="233" y="1888" text-anchor="end" class="row">MXM.W1.Compute</text>
+<rect x="245" y="1897" width="1510" height="24" class="lane"/>
+<text x="233" y="1914" text-anchor="end" class="row">MEM.W.Accumulate</text>
+<rect x="245.00" y="1614" width="133.65" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33148..33205; continuous reads; 264 coalesced events</title></rect>
+<text x="311.82" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuous reads ...</text>
+<rect x="245.00" y="1640" width="133.65" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33148..33205; continuous reads; 264 coalesced events</title></rect>
+<text x="311.82" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuous reads ...</text>
+<rect x="275.48" y="1666" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Load: cycles 33161..33165; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="275.48" y="1796" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Load: cycles 33161..33165; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="284.86" y="1666" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Load: cycles 33165..33169; IW buffer=1; 4 coalesced events</title></rect>
+<rect x="284.86" y="1796" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Load: cycles 33165..33169; IW buffer=1; 4 coalesced events</title></rect>
+<rect x="294.24" y="1692" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Load: cycles 33169..33173; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="294.24" y="1822" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Load: cycles 33169..33173; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="303.62" y="1692" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Load: cycles 33173..33177; IW buffer=1; 4 coalesced events</title></rect>
+<rect x="303.62" y="1822" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Load: cycles 33173..33177; IW buffer=1; 4 coalesced events</title></rect>
+<rect x="331.75" y="1718" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33185..33217; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="369.27" y="1731" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="331.75" y="1744" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33185..33217; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="369.27" y="1757" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="331.75" y="1848" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33185..33217; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="369.27" y="1861" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="331.75" y="1874" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33185..33217; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="369.27" y="1887" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="343.48" y="1770" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33190..33223; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="382.17" y="1783" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="343.48" y="1900" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33190..33223; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="382.17" y="1913" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="390.37" y="1614" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33210..33243; continuous reads; 8 coalesced events</title></rect>
+<text x="429.06" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="390.37" y="1640" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33210..33243; continuous reads; 8 coalesced events</title></rect>
+<text x="429.06" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="420.85" y="1718" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33223..33255; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="458.37" y="1731" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="420.85" y="1744" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33223..33255; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="458.37" y="1757" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="420.85" y="1848" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33223..33255; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="458.37" y="1861" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="420.85" y="1874" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33223..33255; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="458.37" y="1887" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="432.58" y="1770" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33228..33261; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="471.27" y="1783" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="432.58" y="1900" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33228..33261; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="471.27" y="1913" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="479.47" y="1614" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33248..33281; continuous reads; 8 coalesced events</title></rect>
+<text x="518.16" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="479.47" y="1640" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33248..33281; continuous reads; 8 coalesced events</title></rect>
+<text x="518.16" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="509.95" y="1718" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33261..33293; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="547.47" y="1731" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="509.95" y="1744" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33261..33293; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="547.47" y="1757" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="509.95" y="1848" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33261..33293; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="547.47" y="1861" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="509.95" y="1874" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33261..33293; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="547.47" y="1887" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="521.68" y="1770" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33266..33299; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="560.36" y="1783" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="521.68" y="1900" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33266..33299; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="560.36" y="1913" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="568.57" y="1614" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33286..33319; continuous reads; 8 coalesced events</title></rect>
+<text x="607.26" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="568.57" y="1640" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33286..33319; continuous reads; 8 coalesced events</title></rect>
+<text x="607.26" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="599.05" y="1718" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33299..33331; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="636.57" y="1731" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="599.05" y="1744" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33299..33331; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="636.57" y="1757" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="599.05" y="1848" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33299..33331; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="636.57" y="1861" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="599.05" y="1874" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33299..33331; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="636.57" y="1887" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="610.78" y="1770" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33304..33337; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="649.46" y="1783" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="610.78" y="1900" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33304..33337; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="649.46" y="1913" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="657.67" y="1614" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33324..33357; continuous reads; 8 coalesced events</title></rect>
+<text x="696.36" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="657.67" y="1640" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33324..33357; continuous reads; 8 coalesced events</title></rect>
+<text x="696.36" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="688.15" y="1718" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33337..33369; Compute buffer=1 act=E0 out=W0</title></rect>
+<text x="725.67" y="1731" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="688.15" y="1744" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33337..33369; Compute buffer=1 act=E2 out=W4</title></rect>
+<text x="725.67" y="1757" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="688.15" y="1848" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33337..33369; Compute buffer=1 act=E0 out=W0</title></rect>
+<text x="725.67" y="1861" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="688.15" y="1874" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33337..33369; Compute buffer=1 act=E2 out=W4</title></rect>
+<text x="725.67" y="1887" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="699.88" y="1770" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33342..33375; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="738.56" y="1783" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="699.88" y="1900" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33342..33375; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="738.56" y="1913" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="746.77" y="1614" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33362..33395; continuous reads; 8 coalesced events</title></rect>
+<text x="785.46" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="746.77" y="1640" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33362..33395; continuous reads; 8 coalesced events</title></rect>
+<text x="785.46" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="777.25" y="1718" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33375..33407; Compute buffer=1 act=E0 out=W0</title></rect>
+<text x="814.77" y="1731" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="777.25" y="1744" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33375..33407; Compute buffer=1 act=E2 out=W4</title></rect>
+<text x="814.77" y="1757" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="777.25" y="1848" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33375..33407; Compute buffer=1 act=E0 out=W0</title></rect>
+<text x="814.77" y="1861" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="777.25" y="1874" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33375..33407; Compute buffer=1 act=E2 out=W4</title></rect>
+<text x="814.77" y="1887" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="788.98" y="1770" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33380..33413; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="827.66" y="1783" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="788.98" y="1900" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33380..33413; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="827.66" y="1913" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="835.87" y="1614" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33400..33433; continuous reads; 8 coalesced events</title></rect>
+<text x="874.56" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="835.87" y="1640" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33400..33433; continuous reads; 8 coalesced events</title></rect>
+<text x="874.56" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="866.35" y="1718" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33413..33445; Compute buffer=1 act=E0 out=W0</title></rect>
+<text x="903.87" y="1731" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="866.35" y="1744" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33413..33445; Compute buffer=1 act=E2 out=W4</title></rect>
+<text x="903.87" y="1757" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="866.35" y="1848" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33413..33445; Compute buffer=1 act=E0 out=W0</title></rect>
+<text x="903.87" y="1861" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="866.35" y="1874" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33413..33445; Compute buffer=1 act=E2 out=W4</title></rect>
+<text x="903.87" y="1887" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="878.07" y="1770" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33418..33451; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="916.76" y="1783" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="878.07" y="1900" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33418..33451; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="916.76" y="1913" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="924.97" y="1614" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33438..33471; continuous reads; 8 coalesced events</title></rect>
+<text x="963.66" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="924.97" y="1640" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33438..33471; continuous reads; 8 coalesced events</title></rect>
+<text x="963.66" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="955.45" y="1718" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33451..33483; Compute buffer=1 act=E0 out=W0</title></rect>
+<text x="992.97" y="1731" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="955.45" y="1744" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33451..33483; Compute buffer=1 act=E2 out=W4</title></rect>
+<text x="992.97" y="1757" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="955.45" y="1848" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33451..33483; Compute buffer=1 act=E0 out=W0</title></rect>
+<text x="992.97" y="1861" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="955.45" y="1874" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33451..33483; Compute buffer=1 act=E2 out=W4</title></rect>
+<text x="992.97" y="1887" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="967.17" y="1770" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33456..33489; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1005.86" y="1783" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="967.17" y="1900" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33456..33489; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1005.86" y="1913" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1082.07" y="1614" width="133.65" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33505..33562; continuous reads; 264 coalesced events</title></rect>
+<text x="1148.89" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuous reads ...</text>
+<rect x="1082.07" y="1640" width="133.65" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33505..33562; continuous reads; 264 coalesced events</title></rect>
+<text x="1148.89" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuous reads ...</text>
+<rect x="1112.55" y="1666" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Load: cycles 33518..33522; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="1112.55" y="1796" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Load: cycles 33518..33522; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="1121.93" y="1666" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Load: cycles 33522..33526; IW buffer=1; 4 coalesced events</title></rect>
+<rect x="1121.93" y="1796" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Load: cycles 33522..33526; IW buffer=1; 4 coalesced events</title></rect>
+<rect x="1131.30" y="1692" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Load: cycles 33526..33530; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="1131.30" y="1822" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Load: cycles 33526..33530; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="1140.68" y="1692" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Load: cycles 33530..33534; IW buffer=1; 4 coalesced events</title></rect>
+<rect x="1140.68" y="1822" width="9.38" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Load: cycles 33530..33534; IW buffer=1; 4 coalesced events</title></rect>
+<rect x="1168.82" y="1718" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33542..33574; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1206.34" y="1731" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1168.82" y="1744" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33542..33574; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1206.34" y="1757" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1168.82" y="1848" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33542..33574; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1206.34" y="1861" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1168.82" y="1874" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33542..33574; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1206.34" y="1887" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1180.54" y="1770" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33547..33580; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1219.23" y="1783" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1180.54" y="1900" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33547..33580; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1219.23" y="1913" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1227.44" y="1614" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33567..33600; continuous reads; 8 coalesced events</title></rect>
+<text x="1266.13" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1227.44" y="1640" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33567..33600; continuous reads; 8 coalesced events</title></rect>
+<text x="1266.13" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1257.92" y="1718" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33580..33612; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1295.43" y="1731" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1257.92" y="1744" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33580..33612; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1295.43" y="1757" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1257.92" y="1848" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33580..33612; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1295.43" y="1861" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1257.92" y="1874" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33580..33612; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1295.43" y="1887" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1269.64" y="1770" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33585..33618; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1308.33" y="1783" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1269.64" y="1900" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33585..33618; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1308.33" y="1913" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1316.54" y="1614" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33605..33638; continuous reads; 8 coalesced events</title></rect>
+<text x="1355.23" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1316.54" y="1640" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33605..33638; continuous reads; 8 coalesced events</title></rect>
+<text x="1355.23" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1347.02" y="1718" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33618..33650; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1384.53" y="1731" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1347.02" y="1744" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33618..33650; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1384.53" y="1757" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1347.02" y="1848" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33618..33650; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1384.53" y="1861" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1347.02" y="1874" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33618..33650; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1384.53" y="1887" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1358.74" y="1770" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33623..33656; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1397.43" y="1783" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1358.74" y="1900" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33623..33656; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1397.43" y="1913" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1405.64" y="1614" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33643..33676; continuous reads; 8 coalesced events</title></rect>
+<text x="1444.32" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1405.64" y="1640" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33643..33676; continuous reads; 8 coalesced events</title></rect>
+<text x="1444.32" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1436.12" y="1718" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33656..33688; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1473.63" y="1731" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1436.12" y="1744" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33656..33688; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1473.63" y="1757" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1436.12" y="1848" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33656..33688; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1473.63" y="1861" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1436.12" y="1874" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33656..33688; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1473.63" y="1887" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1447.84" y="1770" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33661..33694; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1486.53" y="1783" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1447.84" y="1900" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33661..33694; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1486.53" y="1913" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1494.74" y="1614" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33681..33714; continuous reads; 8 coalesced events</title></rect>
+<text x="1533.42" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1494.74" y="1640" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33681..33714; continuous reads; 8 coalesced events</title></rect>
+<text x="1533.42" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1525.22" y="1718" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33694..33726; Compute buffer=1 act=E0 out=W0</title></rect>
+<text x="1562.73" y="1731" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1525.22" y="1744" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33694..33726; Compute buffer=1 act=E2 out=W4</title></rect>
+<text x="1562.73" y="1757" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1525.22" y="1848" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33694..33726; Compute buffer=1 act=E0 out=W0</title></rect>
+<text x="1562.73" y="1861" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1525.22" y="1874" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33694..33726; Compute buffer=1 act=E2 out=W4</title></rect>
+<text x="1562.73" y="1887" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1536.94" y="1770" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33699..33732; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1575.63" y="1783" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1536.94" y="1900" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33699..33732; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1575.63" y="1913" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1583.84" y="1614" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33719..33752; continuous reads; 8 coalesced events</title></rect>
+<text x="1622.52" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1583.84" y="1640" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33719..33752; continuous reads; 8 coalesced events</title></rect>
+<text x="1622.52" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1614.32" y="1718" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33732..33764; Compute buffer=1 act=E0 out=W0</title></rect>
+<text x="1651.83" y="1731" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1614.32" y="1744" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33732..33764; Compute buffer=1 act=E2 out=W4</title></rect>
+<text x="1651.83" y="1757" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1614.32" y="1848" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33732..33764; Compute buffer=1 act=E0 out=W0</title></rect>
+<text x="1651.83" y="1861" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1614.32" y="1874" width="75.03" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33732..33764; Compute buffer=1 act=E2 out=W4</title></rect>
+<text x="1651.83" y="1887" text-anchor="middle" class="bar" pointer-events="none">Compute b...</text>
+<rect x="1626.04" y="1770" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33737..33770; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1664.73" y="1783" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1626.04" y="1900" width="77.38" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33737..33770; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1664.73" y="1913" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1672.93" y="1614" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 33757..33790; continuous reads; 8 coalesced events</title></rect>
+<text x="1711.62" y="1627" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1672.93" y="1640" width="77.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 33757..33790; continuous reads; 8 coalesced events</title></rect>
+<text x="1711.62" y="1653" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1703.42" y="1718" width="51.58" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 33770..33802; Compute buffer=1 act=E0 out=W0</title></rect>
+<rect x="1703.42" y="1744" width="51.58" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 33770..33802; Compute buffer=1 act=E2 out=W4</title></rect>
+<rect x="1703.42" y="1848" width="51.58" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 33770..33802; Compute buffer=1 act=E0 out=W0</title></rect>
+<rect x="1703.42" y="1874" width="51.58" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 33770..33802; Compute buffer=1 act=E2 out=W4</title></rect>
+<rect x="1715.14" y="1770" width="39.86" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 33775..33808; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<rect x="1715.14" y="1900" width="39.86" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Accumulate: cycles 33775..33808; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="42" y="2014" class="panel">Softmax: pipelined P1 max, P2 exp/sum, and P3 normalize/cast</text>
+<text x="1755" y="2014" text-anchor="end" class="sub">cycles 37440..37880 (440 cycles)</text>
+<line x1="245.00" y1="2032" x2="245.00" y2="2279" class="grid"/>
+<text x="245.00" y="2025" text-anchor="middle" class="tick">37440</text>
+<line x1="547.00" y1="2032" x2="547.00" y2="2279" class="grid"/>
+<text x="547.00" y="2025" text-anchor="middle" class="tick">37528</text>
+<line x1="849.00" y1="2032" x2="849.00" y2="2279" class="grid"/>
+<text x="849.00" y="2025" text-anchor="middle" class="tick">37616</text>
+<line x1="1151.00" y1="2032" x2="1151.00" y2="2279" class="grid"/>
+<text x="1151.00" y="2025" text-anchor="middle" class="tick">37704</text>
+<line x1="1453.00" y1="2032" x2="1453.00" y2="2279" class="grid"/>
+<text x="1453.00" y="2025" text-anchor="middle" class="tick">37792</text>
+<line x1="1755.00" y1="2032" x2="1755.00" y2="2279" class="grid"/>
+<text x="1755.00" y="2025" text-anchor="middle" class="tick">37880</text>
+<rect x="245" y="2032" width="1510" height="24" class="lane"/>
+<text x="233" y="2049" text-anchor="end" class="row">MEM.E.Read</text>
+<rect x="245" y="2058" width="1510" height="24" class="lane"/>
+<text x="233" y="2075" text-anchor="end" class="row">MEM.E.Write</text>
+<rect x="245" y="2084" width="1510" height="24" class="lane"/>
+<text x="233" y="2101" text-anchor="end" class="row">VXM.ALU0</text>
+<rect x="245" y="2110" width="1510" height="24" class="lane"/>
+<text x="233" y="2127" text-anchor="end" class="row">VXM.ALU1</text>
+<rect x="245" y="2136" width="1510" height="24" class="lane"/>
+<text x="233" y="2153" text-anchor="end" class="row">VXM.ALU2</text>
+<rect x="245" y="2162" width="1510" height="24" class="lane"/>
+<text x="233" y="2179" text-anchor="end" class="row">VXM.ALU3</text>
+<rect x="245" y="2188" width="1510" height="24" class="lane"/>
+<text x="233" y="2205" text-anchor="end" class="row">VXM.ALU4</text>
+<rect x="245" y="2214" width="1510" height="24" class="lane"/>
+<text x="233" y="2231" text-anchor="end" class="row">VXM.ALU5</text>
+<rect x="245" y="2240" width="1510" height="24" class="lane"/>
+<text x="233" y="2257" text-anchor="end" class="row">VXM.ALU6</text>
+<rect x="245.00" y="2035" width="428.98" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 37440..37565; continuous reads; 500 coalesced events</title></rect>
+<text x="459.49" y="2048" text-anchor="middle" class="bar" pointer-events="none">continuous reads x500</text>
+<rect x="272.45" y="2087" width="439.27" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU0: cycles 37448..37576; softmax P1 scale -&gt; E8; 128 coalesced events</title></rect>
+<text x="492.09" y="2100" text-anchor="middle" class="bar" pointer-events="none">softmax P1 scale -&gt; E8 x128</text>
+<rect x="275.89" y="2113" width="3.43" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU1: cycles 37449..37450; softmax P1 max init</title></rect>
+<rect x="279.32" y="2113" width="435.84" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU1: cycles 37450..37577; softmax P1 recurrent max; 127 coalesced events</title></rect>
+<text x="497.24" y="2126" text-anchor="middle" class="bar" pointer-events="none">softmax P1 recurrent max x127</text>
+<rect x="282.75" y="2061" width="439.27" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37451..37579; continuous writes; 512 coalesced events</title></rect>
+<text x="502.39" y="2074" text-anchor="middle" class="bar" pointer-events="none">continuous writes x512</text>
+<rect x="725.45" y="2035" width="439.27" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 37580..37708; continuous reads; 512 coalesced events</title></rect>
+<text x="945.09" y="2048" text-anchor="middle" class="bar" pointer-events="none">continuous reads x512</text>
+<rect x="739.18" y="2139" width="439.27" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU2: cycles 37584..37712; softmax P2 subtract max; 128 coalesced events</title></rect>
+<text x="958.82" y="2152" text-anchor="middle" class="bar" pointer-events="none">softmax P2 subtract max x128</text>
+<rect x="742.61" y="2165" width="439.27" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU3: cycles 37585..37713; softmax P2 exp -&gt; E8; 128 coalesced events</title></rect>
+<text x="962.25" y="2178" text-anchor="middle" class="bar" pointer-events="none">softmax P2 exp -&gt; E8 x128</text>
+<rect x="746.05" y="2191" width="3.43" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU4: cycles 37586..37587; softmax P2 sum init</title></rect>
+<rect x="749.48" y="2191" width="435.84" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU4: cycles 37587..37714; softmax P2 recurrent sum; 127 coalesced events</title></rect>
+<text x="967.40" y="2204" text-anchor="middle" class="bar" pointer-events="none">softmax P2 recurrent sum x127</text>
+<rect x="756.34" y="2061" width="439.27" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37589..37717; continuous writes; 512 coalesced events</title></rect>
+<text x="975.98" y="2074" text-anchor="middle" class="bar" pointer-events="none">continuous writes x512</text>
+<rect x="1202.48" y="2035" width="439.27" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 37719..37847; continuous reads; 512 coalesced events</title></rect>
+<text x="1422.11" y="2048" text-anchor="middle" class="bar" pointer-events="none">continuous reads x512</text>
+<rect x="1219.64" y="2217" width="439.27" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU5: cycles 37724..37852; softmax P3 divide by sum; 128 coalesced events</title></rect>
+<text x="1439.27" y="2230" text-anchor="middle" class="bar" pointer-events="none">softmax P3 divide by sum x128</text>
+<rect x="1223.07" y="2243" width="439.27" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU6: cycles 37725..37853; softmax P3 cast FP16 -&gt; E8; 128 coalesced events</title></rect>
+<text x="1442.70" y="2256" text-anchor="middle" class="bar" pointer-events="none">softmax P3 cast FP16 -&gt; E8 x128</text>
+<rect x="1240.23" y="2061" width="3.43" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37730..37731; continuous writes; 2 coalesced events</title></rect>
+<rect x="1247.09" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37732..37734; continuous writes; 4 coalesced events</title></rect>
+<rect x="1257.39" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37735..37737; continuous writes; 4 coalesced events</title></rect>
+<rect x="1267.68" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37738..37742; continuous writes; 12 coalesced events</title></rect>
+<rect x="1284.84" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37743..37745; continuous writes; 4 coalesced events</title></rect>
+<rect x="1295.14" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37746..37750; continuous writes; 12 coalesced events</title></rect>
+<rect x="1312.30" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37751..37753; continuous writes; 4 coalesced events</title></rect>
+<rect x="1322.59" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37754..37758; continuous writes; 12 coalesced events</title></rect>
+<rect x="1339.75" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37759..37761; continuous writes; 4 coalesced events</title></rect>
+<rect x="1350.05" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37762..37766; continuous writes; 12 coalesced events</title></rect>
+<rect x="1367.20" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37767..37769; continuous writes; 4 coalesced events</title></rect>
+<rect x="1377.50" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37770..37774; continuous writes; 12 coalesced events</title></rect>
+<rect x="1394.66" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37775..37777; continuous writes; 4 coalesced events</title></rect>
+<rect x="1404.95" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37778..37782; continuous writes; 12 coalesced events</title></rect>
+<rect x="1422.11" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37783..37785; continuous writes; 4 coalesced events</title></rect>
+<rect x="1432.41" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37786..37790; continuous writes; 12 coalesced events</title></rect>
+<rect x="1449.57" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37791..37793; continuous writes; 4 coalesced events</title></rect>
+<rect x="1459.86" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37794..37798; continuous writes; 12 coalesced events</title></rect>
+<rect x="1477.02" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37799..37801; continuous writes; 4 coalesced events</title></rect>
+<rect x="1487.32" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37802..37806; continuous writes; 12 coalesced events</title></rect>
+<rect x="1504.48" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37807..37809; continuous writes; 4 coalesced events</title></rect>
+<rect x="1514.77" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37810..37814; continuous writes; 12 coalesced events</title></rect>
+<rect x="1531.93" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37815..37817; continuous writes; 4 coalesced events</title></rect>
+<rect x="1542.23" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37818..37822; continuous writes; 12 coalesced events</title></rect>
+<rect x="1559.39" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37823..37825; continuous writes; 4 coalesced events</title></rect>
+<rect x="1569.68" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37826..37830; continuous writes; 12 coalesced events</title></rect>
+<rect x="1586.84" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37831..37833; continuous writes; 4 coalesced events</title></rect>
+<rect x="1597.14" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37834..37838; continuous writes; 12 coalesced events</title></rect>
+<rect x="1614.30" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37839..37841; continuous writes; 4 coalesced events</title></rect>
+<rect x="1624.59" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37842..37846; continuous writes; 12 coalesced events</title></rect>
+<rect x="1641.75" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37847..37849; continuous writes; 4 coalesced events</title></rect>
+<rect x="1645.18" y="2035" width="109.82" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 37848..37880; continuous reads; 128 coalesced events</title></rect>
+<text x="1700.09" y="2048" text-anchor="middle" class="bar" pointer-events="none">continuous rea...</text>
+<rect x="1652.05" y="2061" width="13.73" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37850..37854; continuous writes; 12 coalesced events</title></rect>
+<rect x="1669.20" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37855..37857; continuous writes; 4 coalesced events</title></rect>
+<rect x="1679.50" y="2061" width="6.86" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37858..37860; continuous writes; 4 coalesced events</title></rect>
+<rect x="1686.36" y="2087" width="68.64" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU0: cycles 37860..37880; softmax P1 scale -&gt; E8; 20 coalesced events</title></rect>
+<text x="1720.68" y="2100" text-anchor="middle" class="bar" pointer-events="none">softmax ...</text>
+<rect x="1689.80" y="2061" width="3.43" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37861..37862; continuous writes; 2 coalesced events</title></rect>
+<rect x="1689.80" y="2113" width="3.43" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU1: cycles 37861..37862; softmax P1 max init</title></rect>
+<rect x="1693.23" y="2113" width="61.77" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU1: cycles 37862..37880; softmax P1 recurrent max; 18 coalesced events</title></rect>
+<text x="1724.11" y="2126" text-anchor="middle" class="bar" pointer-events="none">softmax...</text>
+<rect x="1696.66" y="2061" width="58.34" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 37863..37880; continuous writes; 68 coalesced events</title></rect>
+<text x="1725.83" y="2074" text-anchor="middle" class="bar" pointer-events="none">continu...</text>
+<text x="42" y="2357" class="panel">Post-softmax P layout: packed x16 blocks at II=4</text>
+<text x="1755" y="2357" text-anchor="end" class="sub">cycles 52288..52692 (404 cycles)</text>
+<line x1="245.00" y1="2375" x2="245.00" y2="2596" class="grid"/>
+<text x="245.00" y="2368" text-anchor="middle" class="tick">52288</text>
+<line x1="547.00" y1="2375" x2="547.00" y2="2596" class="grid"/>
+<text x="547.00" y="2368" text-anchor="middle" class="tick">52369</text>
+<line x1="849.00" y1="2375" x2="849.00" y2="2596" class="grid"/>
+<text x="849.00" y="2368" text-anchor="middle" class="tick">52450</text>
+<line x1="1151.00" y1="2375" x2="1151.00" y2="2596" class="grid"/>
+<text x="1151.00" y="2368" text-anchor="middle" class="tick">52530</text>
+<line x1="1453.00" y1="2375" x2="1453.00" y2="2596" class="grid"/>
+<text x="1453.00" y="2368" text-anchor="middle" class="tick">52611</text>
+<line x1="1755.00" y1="2375" x2="1755.00" y2="2596" class="grid"/>
+<text x="1755.00" y="2368" text-anchor="middle" class="tick">52692</text>
+<rect x="245" y="2375" width="1510" height="24" class="lane"/>
+<text x="233" y="2392" text-anchor="end" class="row">MEM.E.Read</text>
+<rect x="245" y="2401" width="1510" height="24" class="lane"/>
+<text x="233" y="2418" text-anchor="end" class="row">MEM.E.Write</text>
+<rect x="245" y="2427" width="1510" height="24" class="lane"/>
+<text x="233" y="2444" text-anchor="end" class="row">MEM.W.Read</text>
+<rect x="245" y="2453" width="1510" height="24" class="lane"/>
+<text x="233" y="2470" text-anchor="end" class="row">MEM.W.Write</text>
+<rect x="245" y="2479" width="1510" height="24" class="lane"/>
+<text x="233" y="2496" text-anchor="end" class="row">SXM.E.Transpose</text>
+<rect x="245" y="2505" width="1510" height="24" class="lane"/>
+<text x="233" y="2522" text-anchor="end" class="row">SXM.E.Permute</text>
+<rect x="245" y="2531" width="1510" height="24" class="lane"/>
+<text x="233" y="2548" text-anchor="end" class="row">SXM.W.Transpose</text>
+<rect x="245" y="2557" width="1510" height="24" class="lane"/>
+<text x="233" y="2574" text-anchor="end" class="row">SXM.W.Permute</text>
+<rect x="245.00" y="2378" width="1435.25" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52288..52672; continuous reads; 6112 coalesced events</title></rect>
+<text x="962.62" y="2391" text-anchor="middle" class="bar" pointer-events="none">continuous reads x6112</text>
+<rect x="245.00" y="2430" width="717.62" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52288..52480; continuous reads; 3040 coalesced events</title></rect>
+<text x="603.81" y="2443" text-anchor="middle" class="bar" pointer-events="none">continuous reads x3040</text>
+<rect x="259.95" y="2482" width="1435.25" height="18" rx="2" fill="#71c3bc" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>SXM.E.Transpose: cycles 52292..52676; Transpose sg16 capture/advance; 384 coalesced events</title></rect>
+<text x="977.57" y="2495" text-anchor="middle" class="bar" pointer-events="none">Transpose sg16 capture/advance x384</text>
+<rect x="259.95" y="2534" width="717.62" height="18" rx="2" fill="#71c3bc" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>SXM.W.Transpose: cycles 52292..52484; Transpose sg16 capture/advance; 192 coalesced events</title></rect>
+<text x="618.76" y="2547" text-anchor="middle" class="bar" pointer-events="none">Transpose sg16 capture/advance x192</text>
+<rect x="263.69" y="2508" width="1435.25" height="18" rx="2" fill="#4ca9a0" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>SXM.E.Permute: cycles 52293..52677; Permute/emit; 384 coalesced events</title></rect>
+<text x="981.31" y="2521" text-anchor="middle" class="bar" pointer-events="none">Permute/emit x384</text>
+<rect x="263.69" y="2560" width="717.62" height="18" rx="2" fill="#4ca9a0" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>SXM.W.Permute: cycles 52293..52485; Permute/emit; 192 coalesced events</title></rect>
+<text x="622.50" y="2573" text-anchor="middle" class="bar" pointer-events="none">Permute/emit x192</text>
+<rect x="274.90" y="2404" width="1465.15" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 52296..52688; continuous writes; 6144 coalesced events</title></rect>
+<text x="1007.48" y="2417" text-anchor="middle" class="bar" pointer-events="none">continuous writes x6144</text>
+<rect x="274.90" y="2456" width="747.52" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Write: cycles 52296..52496; continuous writes; 3072 coalesced events</title></rect>
+<text x="648.66" y="2469" text-anchor="middle" class="bar" pointer-events="none">continuous writes x3072</text>
+<text x="42" y="2674" class="panel">P x V: passive cross-hemisphere streams, V IW, and direct P replay</text>
+<text x="1755" y="2674" text-anchor="end" class="sub">cycles 52692..52980 (288 cycles)</text>
+<line x1="245.00" y1="2692" x2="245.00" y2="3121" class="grid"/>
+<text x="245.00" y="2685" text-anchor="middle" class="tick">52692</text>
+<line x1="547.00" y1="2692" x2="547.00" y2="3121" class="grid"/>
+<text x="547.00" y="2685" text-anchor="middle" class="tick">52750</text>
+<line x1="849.00" y1="2692" x2="849.00" y2="3121" class="grid"/>
+<text x="849.00" y="2685" text-anchor="middle" class="tick">52807</text>
+<line x1="1151.00" y1="2692" x2="1151.00" y2="3121" class="grid"/>
+<text x="1151.00" y="2685" text-anchor="middle" class="tick">52865</text>
+<line x1="1453.00" y1="2692" x2="1453.00" y2="3121" class="grid"/>
+<text x="1453.00" y="2685" text-anchor="middle" class="tick">52922</text>
+<line x1="1755.00" y1="2692" x2="1755.00" y2="3121" class="grid"/>
+<text x="1755.00" y="2685" text-anchor="middle" class="tick">52980</text>
+<rect x="245" y="2692" width="1510" height="24" class="lane"/>
+<text x="233" y="2709" text-anchor="end" class="row">MEM.E.Read</text>
+<rect x="245" y="2718" width="1510" height="24" class="lane"/>
+<text x="233" y="2735" text-anchor="end" class="row">MEM.E.Write</text>
+<rect x="245" y="2744" width="1510" height="24" class="lane"/>
+<text x="233" y="2761" text-anchor="end" class="row">MEM.W.Read</text>
+<rect x="245" y="2770" width="1510" height="24" class="lane"/>
+<text x="233" y="2787" text-anchor="end" class="row">MEM.W.Write</text>
+<rect x="245" y="2796" width="1510" height="24" class="lane"/>
+<text x="233" y="2813" text-anchor="end" class="row">SXM.E.Transpose</text>
+<rect x="245" y="2822" width="1510" height="24" class="lane"/>
+<text x="233" y="2839" text-anchor="end" class="row">SXM.E.Permute</text>
+<rect x="245" y="2848" width="1510" height="24" class="lane"/>
+<text x="233" y="2865" text-anchor="end" class="row">SXM.W.Transpose</text>
+<rect x="245" y="2874" width="1510" height="24" class="lane"/>
+<text x="233" y="2891" text-anchor="end" class="row">SXM.W.Permute</text>
+<rect x="245" y="2900" width="1510" height="24" class="lane"/>
+<text x="233" y="2917" text-anchor="end" class="row">MXM.E0.Load</text>
+<rect x="245" y="2926" width="1510" height="24" class="lane"/>
+<text x="233" y="2943" text-anchor="end" class="row">MXM.E1.Load</text>
+<rect x="245" y="2952" width="1510" height="24" class="lane"/>
+<text x="233" y="2969" text-anchor="end" class="row">MXM.E0.Compute</text>
+<rect x="245" y="2978" width="1510" height="24" class="lane"/>
+<text x="233" y="2995" text-anchor="end" class="row">MXM.E1.Compute</text>
+<rect x="245" y="3004" width="1510" height="24" class="lane"/>
+<text x="233" y="3021" text-anchor="end" class="row">MXM.W0.Load</text>
+<rect x="245" y="3030" width="1510" height="24" class="lane"/>
+<text x="233" y="3047" text-anchor="end" class="row">MXM.W1.Load</text>
+<rect x="245" y="3056" width="1510" height="24" class="lane"/>
+<text x="233" y="3073" text-anchor="end" class="row">MXM.W0.Compute</text>
+<rect x="245" y="3082" width="1510" height="24" class="lane"/>
+<text x="233" y="3099" text-anchor="end" class="row">MXM.W1.Compute</text>
+<rect x="245.00" y="2695" width="94.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52692..52710; continuous reads; 128 coalesced events</title></rect>
+<text x="292.19" y="2708" text-anchor="middle" class="bar" pointer-events="none">continuous r...</text>
+<rect x="245.00" y="2747" width="94.38" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52692..52710; continuous reads; 128 coalesced events</title></rect>
+<text x="292.19" y="2760" text-anchor="middle" class="bar" pointer-events="none">continuous r...</text>
+<rect x="302.67" y="2799" width="20.97" height="18" rx="2" fill="#71c3bc" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>SXM.E.Transpose: cycles 52703..52707; Transpose sg16 capture/advance; 4 coalesced events</title></rect>
+<rect x="302.67" y="2851" width="20.97" height="18" rx="2" fill="#71c3bc" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>SXM.W.Transpose: cycles 52703..52707; Transpose sg16 capture/advance; 4 coalesced events</title></rect>
+<rect x="307.92" y="2825" width="20.97" height="18" rx="2" fill="#4ca9a0" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>SXM.E.Permute: cycles 52704..52708; Permute/emit; 4 coalesced events</title></rect>
+<rect x="307.92" y="2877" width="20.97" height="18" rx="2" fill="#4ca9a0" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>SXM.W.Permute: cycles 52704..52708; Permute/emit; 4 coalesced events</title></rect>
+<rect x="313.16" y="2903" width="20.97" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Load: cycles 52705..52709; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="313.16" y="3007" width="20.97" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Load: cycles 52705..52709; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="339.38" y="2799" width="20.97" height="18" rx="2" fill="#71c3bc" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>SXM.E.Transpose: cycles 52710..52714; Transpose sg16 capture/advance; 4 coalesced events</title></rect>
+<rect x="339.38" y="2851" width="20.97" height="18" rx="2" fill="#71c3bc" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>SXM.W.Transpose: cycles 52710..52714; Transpose sg16 capture/advance; 4 coalesced events</title></rect>
+<rect x="344.62" y="2825" width="20.97" height="18" rx="2" fill="#4ca9a0" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>SXM.E.Permute: cycles 52711..52715; Permute/emit; 4 coalesced events</title></rect>
+<rect x="344.62" y="2877" width="20.97" height="18" rx="2" fill="#4ca9a0" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>SXM.W.Permute: cycles 52711..52715; Permute/emit; 4 coalesced events</title></rect>
+<rect x="349.86" y="2929" width="20.97" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Load: cycles 52712..52716; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="349.86" y="3033" width="20.97" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Load: cycles 52712..52716; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="428.51" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52727..52729; continuous reads; 4 coalesced events</title></rect>
+<rect x="428.51" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52727..52729; continuous reads; 4 coalesced events</title></rect>
+<rect x="449.48" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52731..52733; continuous reads; 4 coalesced events</title></rect>
+<rect x="449.48" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52731..52733; continuous reads; 4 coalesced events</title></rect>
+<rect x="465.21" y="2695" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52734..52738; continuous reads; 10 coalesced events</title></rect>
+<rect x="465.21" y="2747" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52734..52738; continuous reads; 10 coalesced events</title></rect>
+<rect x="491.42" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52739..52741; continuous reads; 4 coalesced events</title></rect>
+<rect x="491.42" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52739..52741; continuous reads; 4 coalesced events</title></rect>
+<rect x="496.67" y="2955" width="167.78" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 52740..52772; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="580.56" y="2968" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E...</text>
+<rect x="496.67" y="2981" width="167.78" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 52740..52772; Compute buffer=0 act=E0 out=W4</title></rect>
+<text x="580.56" y="2994" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E...</text>
+<rect x="496.67" y="3059" width="167.78" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 52740..52772; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="580.56" y="3072" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E...</text>
+<rect x="496.67" y="3085" width="167.78" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 52740..52772; Compute buffer=0 act=E0 out=W4</title></rect>
+<text x="580.56" y="3098" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E...</text>
+<rect x="507.15" y="2695" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52742..52746; continuous reads; 12 coalesced events</title></rect>
+<rect x="507.15" y="2747" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52742..52746; continuous reads; 12 coalesced events</title></rect>
+<rect x="522.88" y="2721" width="173.02" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 52745..52778; continuous writes; 16 coalesced events</title></rect>
+<text x="609.39" y="2734" text-anchor="middle" class="bar" pointer-events="none">continuous writes x16</text>
+<rect x="522.88" y="2773" width="173.02" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Write: cycles 52745..52778; continuous writes; 16 coalesced events</title></rect>
+<text x="609.39" y="2786" text-anchor="middle" class="bar" pointer-events="none">continuous writes x16</text>
+<rect x="533.37" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52747..52749; continuous reads; 4 coalesced events</title></rect>
+<rect x="533.37" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52747..52749; continuous reads; 4 coalesced events</title></rect>
+<rect x="549.10" y="2695" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52750..52754; continuous reads; 12 coalesced events</title></rect>
+<rect x="549.10" y="2747" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52750..52754; continuous reads; 12 coalesced events</title></rect>
+<rect x="575.31" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52755..52757; continuous reads; 4 coalesced events</title></rect>
+<rect x="575.31" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52755..52757; continuous reads; 4 coalesced events</title></rect>
+<rect x="591.04" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52758..52760; continuous reads; 6 coalesced events</title></rect>
+<rect x="591.04" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52758..52760; continuous reads; 6 coalesced events</title></rect>
+<rect x="606.77" y="2695" width="5.24" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52761..52762; continuous reads; 2 coalesced events</title></rect>
+<rect x="606.77" y="2747" width="5.24" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52761..52762; continuous reads; 2 coalesced events</title></rect>
+<rect x="632.99" y="2695" width="5.24" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52766..52767; continuous reads; 2 coalesced events</title></rect>
+<rect x="632.99" y="2747" width="5.24" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52766..52767; continuous reads; 2 coalesced events</title></rect>
+<rect x="916.11" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52820..52822; continuous reads; 4 coalesced events</title></rect>
+<rect x="916.11" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52820..52822; continuous reads; 4 coalesced events</title></rect>
+<rect x="937.08" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52824..52826; continuous reads; 4 coalesced events</title></rect>
+<rect x="937.08" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52824..52826; continuous reads; 4 coalesced events</title></rect>
+<rect x="952.81" y="2695" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52827..52831; continuous reads; 10 coalesced events</title></rect>
+<rect x="952.81" y="2747" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52827..52831; continuous reads; 10 coalesced events</title></rect>
+<rect x="979.03" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52832..52834; continuous reads; 4 coalesced events</title></rect>
+<rect x="979.03" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52832..52834; continuous reads; 4 coalesced events</title></rect>
+<rect x="984.27" y="2955" width="167.78" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 52833..52865; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1068.16" y="2968" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E...</text>
+<rect x="984.27" y="2981" width="167.78" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 52833..52865; Compute buffer=0 act=E0 out=W4</title></rect>
+<text x="1068.16" y="2994" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E...</text>
+<rect x="984.27" y="3059" width="167.78" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 52833..52865; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1068.16" y="3072" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E...</text>
+<rect x="984.27" y="3085" width="167.78" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 52833..52865; Compute buffer=0 act=E0 out=W4</title></rect>
+<text x="1068.16" y="3098" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E...</text>
+<rect x="994.76" y="2695" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52835..52839; continuous reads; 12 coalesced events</title></rect>
+<rect x="994.76" y="2747" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52835..52839; continuous reads; 12 coalesced events</title></rect>
+<rect x="1010.49" y="2721" width="173.02" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 52838..52871; continuous writes; 16 coalesced events</title></rect>
+<text x="1097.00" y="2734" text-anchor="middle" class="bar" pointer-events="none">continuous writes x16</text>
+<rect x="1010.49" y="2773" width="173.02" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Write: cycles 52838..52871; continuous writes; 16 coalesced events</title></rect>
+<text x="1097.00" y="2786" text-anchor="middle" class="bar" pointer-events="none">continuous writes x16</text>
+<rect x="1020.97" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52840..52842; continuous reads; 4 coalesced events</title></rect>
+<rect x="1020.97" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52840..52842; continuous reads; 4 coalesced events</title></rect>
+<rect x="1036.70" y="2695" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52843..52847; continuous reads; 12 coalesced events</title></rect>
+<rect x="1036.70" y="2747" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52843..52847; continuous reads; 12 coalesced events</title></rect>
+<rect x="1062.92" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52848..52850; continuous reads; 4 coalesced events</title></rect>
+<rect x="1062.92" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52848..52850; continuous reads; 4 coalesced events</title></rect>
+<rect x="1078.65" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52851..52853; continuous reads; 6 coalesced events</title></rect>
+<rect x="1078.65" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52851..52853; continuous reads; 6 coalesced events</title></rect>
+<rect x="1094.38" y="2695" width="5.24" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52854..52855; continuous reads; 2 coalesced events</title></rect>
+<rect x="1094.38" y="2747" width="5.24" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52854..52855; continuous reads; 2 coalesced events</title></rect>
+<rect x="1120.59" y="2695" width="5.24" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52859..52860; continuous reads; 2 coalesced events</title></rect>
+<rect x="1120.59" y="2747" width="5.24" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52859..52860; continuous reads; 2 coalesced events</title></rect>
+<rect x="1403.72" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52913..52915; continuous reads; 4 coalesced events</title></rect>
+<rect x="1403.72" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52913..52915; continuous reads; 4 coalesced events</title></rect>
+<rect x="1424.69" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52917..52919; continuous reads; 4 coalesced events</title></rect>
+<rect x="1424.69" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52917..52919; continuous reads; 4 coalesced events</title></rect>
+<rect x="1440.42" y="2695" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52920..52924; continuous reads; 10 coalesced events</title></rect>
+<rect x="1440.42" y="2747" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52920..52924; continuous reads; 10 coalesced events</title></rect>
+<rect x="1466.63" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52925..52927; continuous reads; 4 coalesced events</title></rect>
+<rect x="1466.63" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52925..52927; continuous reads; 4 coalesced events</title></rect>
+<rect x="1471.88" y="2955" width="167.78" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 52926..52958; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1555.76" y="2968" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E...</text>
+<rect x="1471.88" y="2981" width="167.78" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 52926..52958; Compute buffer=0 act=E0 out=W4</title></rect>
+<text x="1555.76" y="2994" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E...</text>
+<rect x="1471.88" y="3059" width="167.78" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W0.Compute: cycles 52926..52958; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1555.76" y="3072" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E...</text>
+<rect x="1471.88" y="3085" width="167.78" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.W1.Compute: cycles 52926..52958; Compute buffer=0 act=E0 out=W4</title></rect>
+<text x="1555.76" y="3098" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act=E...</text>
+<rect x="1482.36" y="2695" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52928..52932; continuous reads; 12 coalesced events</title></rect>
+<rect x="1482.36" y="2747" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52928..52932; continuous reads; 12 coalesced events</title></rect>
+<rect x="1498.09" y="2721" width="173.02" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Write: cycles 52931..52964; continuous writes; 16 coalesced events</title></rect>
+<text x="1584.60" y="2734" text-anchor="middle" class="bar" pointer-events="none">continuous writes x16</text>
+<rect x="1498.09" y="2773" width="173.02" height="18" rx="2" fill="#f0ca78" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Write: cycles 52931..52964; continuous writes; 16 coalesced events</title></rect>
+<text x="1584.60" y="2786" text-anchor="middle" class="bar" pointer-events="none">continuous writes x16</text>
+<rect x="1508.58" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52933..52935; continuous reads; 4 coalesced events</title></rect>
+<rect x="1508.58" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52933..52935; continuous reads; 4 coalesced events</title></rect>
+<rect x="1524.31" y="2695" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52936..52940; continuous reads; 12 coalesced events</title></rect>
+<rect x="1524.31" y="2747" width="20.97" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52936..52940; continuous reads; 12 coalesced events</title></rect>
+<rect x="1550.52" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52941..52943; continuous reads; 4 coalesced events</title></rect>
+<rect x="1550.52" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52941..52943; continuous reads; 4 coalesced events</title></rect>
+<rect x="1566.25" y="2695" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52944..52946; continuous reads; 6 coalesced events</title></rect>
+<rect x="1566.25" y="2747" width="10.49" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52944..52946; continuous reads; 6 coalesced events</title></rect>
+<rect x="1581.98" y="2695" width="5.24" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52947..52948; continuous reads; 2 coalesced events</title></rect>
+<rect x="1581.98" y="2747" width="5.24" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52947..52948; continuous reads; 2 coalesced events</title></rect>
+<rect x="1608.19" y="2695" width="5.24" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 52952..52953; continuous reads; 2 coalesced events</title></rect>
+<rect x="1608.19" y="2747" width="5.24" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.W.Read: cycles 52952..52953; continuous reads; 2 coalesced events</title></rect>
+<text x="42" y="3199" class="panel">o_proj: first reduction window</text>
+<text x="1755" y="3199" text-anchor="end" class="sub">cycles 63108..63420 (312 cycles)</text>
+<line x1="245.00" y1="3217" x2="245.00" y2="3438" class="grid"/>
+<text x="245.00" y="3210" text-anchor="middle" class="tick">63108</text>
+<line x1="547.00" y1="3217" x2="547.00" y2="3438" class="grid"/>
+<text x="547.00" y="3210" text-anchor="middle" class="tick">63170</text>
+<line x1="849.00" y1="3217" x2="849.00" y2="3438" class="grid"/>
+<text x="849.00" y="3210" text-anchor="middle" class="tick">63233</text>
+<line x1="1151.00" y1="3217" x2="1151.00" y2="3438" class="grid"/>
+<text x="1151.00" y="3210" text-anchor="middle" class="tick">63295</text>
+<line x1="1453.00" y1="3217" x2="1453.00" y2="3438" class="grid"/>
+<text x="1453.00" y="3210" text-anchor="middle" class="tick">63358</text>
+<line x1="1755.00" y1="3217" x2="1755.00" y2="3438" class="grid"/>
+<text x="1755.00" y="3210" text-anchor="middle" class="tick">63420</text>
+<rect x="245" y="3217" width="1510" height="24" class="lane"/>
+<text x="233" y="3234" text-anchor="end" class="row">MEM.E.Read</text>
+<rect x="245" y="3243" width="1510" height="24" class="lane"/>
+<text x="233" y="3260" text-anchor="end" class="row">VXM.ALU0-7</text>
+<rect x="245" y="3269" width="1510" height="24" class="lane"/>
+<text x="233" y="3286" text-anchor="end" class="row">VXM.ALU8-15</text>
+<rect x="245" y="3295" width="1510" height="24" class="lane"/>
+<text x="233" y="3312" text-anchor="end" class="row">MXM.E0.Load</text>
+<rect x="245" y="3321" width="1510" height="24" class="lane"/>
+<text x="233" y="3338" text-anchor="end" class="row">MXM.E1.Load</text>
+<rect x="245" y="3347" width="1510" height="24" class="lane"/>
+<text x="233" y="3364" text-anchor="end" class="row">MXM.E0.Compute</text>
+<rect x="245" y="3373" width="1510" height="24" class="lane"/>
+<text x="233" y="3390" text-anchor="end" class="row">MXM.E1.Compute</text>
+<rect x="245" y="3399" width="1510" height="24" class="lane"/>
+<text x="233" y="3416" text-anchor="end" class="row">MEM.E.Accumulate</text>
+<rect x="245.00" y="3220" width="72.60" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 63108..63123; continuous reads; 64 coalesced events</title></rect>
+<text x="281.30" y="3233" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="288.56" y="3246" width="38.72" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU0-7: cycles 63117..63125; dequant mul; 8 coalesced events</title></rect>
+<rect x="293.40" y="3272" width="38.72" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU8-15: cycles 63118..63126; dequant cast FP16; 8 coalesced events</title></rect>
+<rect x="356.31" y="3298" width="19.36" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Load: cycles 63131..63135; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="375.67" y="3324" width="19.36" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Load: cycles 63135..63139; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="404.71" y="3220" width="159.71" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 63141..63174; continuous reads; 8 coalesced events</title></rect>
+<text x="484.57" y="3233" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="443.43" y="3350" width="154.87" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 63149..63181; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="520.87" y="3363" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act...</text>
+<rect x="443.43" y="3376" width="154.87" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 63149..63181; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="520.87" y="3389" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act...</text>
+<rect x="467.63" y="3402" width="159.71" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 63154..63187; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="547.48" y="3415" text-anchor="middle" class="bar" pointer-events="none">continuous accumulate...</text>
+<rect x="588.62" y="3220" width="159.71" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 63179..63212; continuous reads; 8 coalesced events</title></rect>
+<text x="668.48" y="3233" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="627.34" y="3350" width="154.87" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 63187..63219; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="704.78" y="3363" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act...</text>
+<rect x="627.34" y="3376" width="154.87" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 63187..63219; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="704.78" y="3389" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act...</text>
+<rect x="651.54" y="3402" width="159.71" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 63192..63225; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="731.39" y="3415" text-anchor="middle" class="bar" pointer-events="none">continuous accumulate...</text>
+<rect x="772.53" y="3220" width="159.71" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 63217..63250; continuous reads; 8 coalesced events</title></rect>
+<text x="852.39" y="3233" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="811.25" y="3350" width="154.87" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 63225..63257; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="888.69" y="3363" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act...</text>
+<rect x="811.25" y="3376" width="154.87" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 63225..63257; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="888.69" y="3389" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act...</text>
+<rect x="835.45" y="3402" width="159.71" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 63230..63263; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="915.30" y="3415" text-anchor="middle" class="bar" pointer-events="none">continuous accumulate...</text>
+<rect x="956.44" y="3220" width="159.71" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 63255..63288; continuous reads; 8 coalesced events</title></rect>
+<text x="1036.30" y="3233" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="995.16" y="3350" width="154.87" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 63263..63295; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1072.60" y="3363" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act...</text>
+<rect x="995.16" y="3376" width="154.87" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 63263..63295; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1072.60" y="3389" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act...</text>
+<rect x="1019.36" y="3402" width="159.71" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 63268..63301; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1099.21" y="3415" text-anchor="middle" class="bar" pointer-events="none">continuous accumulate...</text>
+<rect x="1183.91" y="3220" width="72.60" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 63302..63317; continuous reads; 64 coalesced events</title></rect>
+<text x="1220.21" y="3233" text-anchor="middle" class="bar" pointer-events="none">continuou...</text>
+<rect x="1227.47" y="3246" width="38.72" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU0-7: cycles 63311..63319; dequant mul; 8 coalesced events</title></rect>
+<rect x="1232.31" y="3272" width="38.72" height="18" rx="2" fill="#ed996d" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>VXM.ALU8-15: cycles 63312..63320; dequant cast FP16; 8 coalesced events</title></rect>
+<rect x="1295.22" y="3298" width="19.36" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Load: cycles 63325..63329; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="1314.58" y="3324" width="19.36" height="18" rx="2" fill="#91b7e5" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Load: cycles 63329..63333; IW buffer=0; 4 coalesced events</title></rect>
+<rect x="1343.62" y="3220" width="159.71" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 63335..63368; continuous reads; 8 coalesced events</title></rect>
+<text x="1423.48" y="3233" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="1382.34" y="3350" width="154.87" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 63343..63375; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1459.78" y="3363" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act...</text>
+<rect x="1382.34" y="3376" width="154.87" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 63343..63375; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1459.78" y="3389" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act...</text>
+<rect x="1406.54" y="3402" width="159.71" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 63348..63381; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1486.39" y="3415" text-anchor="middle" class="bar" pointer-events="none">continuous accumulate...</text>
+<rect x="1527.53" y="3220" width="159.71" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 63373..63406; continuous reads; 8 coalesced events</title></rect>
+<text x="1607.39" y="3233" text-anchor="middle" class="bar" pointer-events="none">continuous reads x8</text>
+<rect x="1566.25" y="3350" width="154.87" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 63381..63413; Compute buffer=0 act=E0 out=W0</title></rect>
+<text x="1643.69" y="3363" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act...</text>
+<rect x="1566.25" y="3376" width="154.87" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 63381..63413; Compute buffer=0 act=E2 out=W4</title></rect>
+<text x="1643.69" y="3389" text-anchor="middle" class="bar" pointer-events="none">Compute buffer=0 act...</text>
+<rect x="1590.45" y="3402" width="159.71" height="18" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Accumulate: cycles 63386..63419; continuous accumulates -&gt; SRAM; 4 coalesced events</title></rect>
+<text x="1670.30" y="3415" text-anchor="middle" class="bar" pointer-events="none">continuous accumulate...</text>
+<rect x="1711.44" y="3220" width="43.56" height="18" rx="2" fill="#8fc8a7" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MEM.E.Read: cycles 63411..63444; continuous reads; 8 coalesced events</title></rect>
+<rect x="1750.16" y="3350" width="4.84" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E0.Compute: cycles 63419..63451; Compute buffer=0 act=E0 out=W0</title></rect>
+<rect x="1750.16" y="3376" width="4.84" height="18" rx="2" fill="#6f9fd8" stroke="#52606c" stroke-width="0.7" opacity="0.92"><title>MXM.E1.Compute: cycles 63419..63451; Compute buffer=0 act=E2 out=W4</title></rect>
+</svg>

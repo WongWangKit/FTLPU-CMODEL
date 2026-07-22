@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <string>
 
 namespace ftlpu::test {
 
@@ -31,7 +32,12 @@ inline void enqueue_alu_at(
     std::size_t cycle,
     VxmLaneAluInstruction instruction)
 {
-    if (cycle < cursors[alu]) throw std::logic_error("offline VXM ALU queue schedule overlaps itself");
+    if (cycle < cursors[alu]) {
+        throw std::logic_error(
+            "offline VXM ALU" + std::to_string(alu)
+            + " requests cycle " + std::to_string(cycle)
+            + " but its cursor is " + std::to_string(cursors[alu]));
+    }
     icu.enqueue_vxm_nop(alu, cycle - cursors[alu]);
     icu.enqueue_vxm(alu, instruction);
     cursors[alu] = cycle + 1;

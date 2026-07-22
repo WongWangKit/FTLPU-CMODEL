@@ -22,6 +22,11 @@ enum class SxmShiftSource {
     SouthShifted,
 };
 
+enum class SxmWeightLayout {
+    VectorColumns,
+    MatrixColumns,
+};
+
 struct SxmStreamId {
     std::size_t stream{0};
 };
@@ -49,6 +54,7 @@ struct SxmInstruction {
     std::size_t shift_distance{1};
     LaneMap lane_map{};
     PermuteMap permute_map{};
+    SxmWeightLayout weight_layout{SxmWeightLayout::VectorColumns};
     StreamList src_streams{};
     StreamList dst_streams{};
 
@@ -91,11 +97,16 @@ struct SxmInstruction {
         return instruction;
     }
 
-    static SxmInstruction Permute(StreamList srcs, StreamList dsts, PermuteMap map)
+    static SxmInstruction Permute(
+        StreamList srcs,
+        StreamList dsts,
+        PermuteMap map,
+        SxmWeightLayout weight_layout = SxmWeightLayout::VectorColumns)
     {
         SxmInstruction instruction{};
         instruction.opcode = SxmOpcode::Permute;
         instruction.permute_map = map;
+        instruction.weight_layout = weight_layout;
         instruction.src_streams = std::move(srcs);
         instruction.dst_streams = std::move(dsts);
         return instruction;

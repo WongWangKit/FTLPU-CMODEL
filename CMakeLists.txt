@@ -42,7 +42,8 @@ ftlpu_add_test(mxm_control_slice_test tests/mxm/control_slice_test.cpp)
 ftlpu_add_test(w8a16_projection_test tests/integration/w8a16_projection_test.cpp)
 ftlpu_add_test(w8a16_swiglu_test tests/integration/w8a16_swiglu_test.cpp)
 ftlpu_add_test(dual_hemisphere_w8a16_swiglu_test tests/integration/dual_hemisphere_w8a16_swiglu_test.cpp)
-ftlpu_add_test(smollm2_kv_projection_test tests/integration/smollm2_kv_projection_test.cpp)
+ftlpu_add_test(rmsnorm_test tests/integration/rmsnorm_test.cpp)
+ftlpu_add_test(smollm2_attention_test tests/integration/smollm2_attention_test.cpp)
 
 ftlpu_add_test(vxm_alu_test tests/vxm/alu_test.cpp)
 ftlpu_add_test(vxm_lane_test tests/vxm/lane_test.cpp)
@@ -51,6 +52,7 @@ ftlpu_add_test(vxm_slice_test tests/vxm/slice_test.cpp)
 
 ftlpu_add_test(sxm_test tests/sxm/sxm_test.cpp)
 ftlpu_add_test(sxm_attention_transpose_test tests/sxm/attention_transpose_test.cpp)
+ftlpu_add_test(sxm_mem_transpose_test tests/integration/sxm_mem_transpose_test.cpp)
 
 ftlpu_add_test(icu_test tests/icu/icu_test.cpp)
 

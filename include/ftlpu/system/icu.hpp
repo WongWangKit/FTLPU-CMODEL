@@ -566,6 +566,11 @@ private:
         os << mem_opcode_name(instruction.opcode)
            << " address=" << instruction.address
            << " stream=" << instruction.stream;
+        if (instruction.opcode == MemOpcode::Accumulate) {
+            os << " destination="
+               << (instruction.accumulator_destination == MemAccumulatorDestination::Sram
+                       ? "sram" : "stream");
+        }
         if (instruction.opcode == MemOpcode::Gather || instruction.opcode == MemOpcode::Scatter) {
             os << " map_stream=" << instruction.map_stream;
         }
@@ -576,7 +581,8 @@ private:
     {
         std::ostringstream os;
         if (instruction.opcode == MxmControlOpcode::IW) {
-            os << "IW b" << instruction.weight_buffer;
+            os << "IW b" << instruction.weight_buffer
+               << " col=" << instruction.weight_column;
         } else {
             os << "Compute b" << instruction.weight_buffer
                << " stream=" << instruction.activation_stream_base
@@ -587,14 +593,22 @@ private:
 
     static std::string describe_sxm(const SxmInstruction& instruction)
     {
+        const auto describe_streams = [](const SxmInstruction::StreamList& streams) {
+            auto result = std::ostringstream {};
+            if (streams.empty()) return result.str();
+            const auto first = StreamId::from_packed(streams.front().stream);
+            const auto last = StreamId::from_packed(streams.back().stream);
+            const auto direction = first.direction() == StreamDirection::East ? 'E' : 'W';
+            result << direction << first.index();
+            if (streams.size() > 1) result << ".." << direction << last.index();
+            result << " (" << streams.size() << ')';
+            return result.str();
+        };
+
         std::ostringstream os;
         os << (instruction.opcode == SxmOpcode::Transpose ? "Transpose" : "Permute");
-        if (!instruction.src_streams.empty()) {
-            os << " src=E" << StreamId::from_packed(instruction.src_streams[0].stream).index();
-        }
-        if (!instruction.dst_streams.empty()) {
-            os << " dst=E" << StreamId::from_packed(instruction.dst_streams[0].stream).index();
-        }
+        if (!instruction.src_streams.empty()) os << " src=" << describe_streams(instruction.src_streams);
+        if (!instruction.dst_streams.empty()) os << " dst=" << describe_streams(instruction.dst_streams);
         return os.str();
     }
 

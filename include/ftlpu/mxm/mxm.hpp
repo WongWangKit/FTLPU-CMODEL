@@ -121,6 +121,11 @@ public:
             }
             const auto data = collect_activation(mem, tile, stream_base);
             const auto row = next_row_for_tile_[weight_buffer][tile]++;
+            if (row >= hw::kMxmRows) {
+                throw std::logic_error(
+                    "MXM Compute block exceeded the physical row count; "
+                    "insert an idle issue cycle or switch weight buffers between blocks");
+            }
             east_pipeline_[0][tile].push_back(ActivationEvent {tile, row, weight_buffer, output_stream_base, data});
             if (os != nullptr && (!log_tile.has_value() || *log_tile == tile)) {
                 *os << "  MXM" << mxm_id << " consume activation tile=" << tile

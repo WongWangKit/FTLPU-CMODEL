@@ -13,7 +13,8 @@ bool same_mem(const ftlpu::MemInstruction& lhs, const ftlpu::MemInstruction& rhs
     return lhs.opcode == rhs.opcode
         && lhs.address == rhs.address
         && lhs.stream == rhs.stream
-        && lhs.map_stream == rhs.map_stream;
+        && lhs.map_stream == rhs.map_stream
+        && lhs.accumulator_destination == rhs.accumulator_destination;
 }
 
 bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlInstruction& rhs)
@@ -21,7 +22,8 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
     return lhs.opcode == rhs.opcode
         && lhs.weight_buffer == rhs.weight_buffer
         && lhs.stream_base == rhs.stream_base
-        && lhs.activation_stream_base == rhs.activation_stream_base;
+        && lhs.activation_stream_base == rhs.activation_stream_base
+        && lhs.weight_column == rhs.weight_column;
 }
 
 bool same_vxm(const ftlpu::VxmLaneAluInstruction& lhs, const ftlpu::VxmLaneAluInstruction& rhs)
@@ -64,7 +66,10 @@ bool verify_mem_codec()
         ftlpu::MemInstruction::Write(ftlpu::hw::kSramDepthRows - 1, 63),
         ftlpu::MemInstruction::Gather(7, 55),
         ftlpu::MemInstruction::Scatter(36, 12),
-        ftlpu::MemInstruction::Accumulate(6143, ftlpu::StreamId::West(28)),
+        ftlpu::MemInstruction::Accumulate(
+            6143,
+            ftlpu::StreamId::West(28),
+            ftlpu::MemAccumulatorDestination::Stream),
     };
 
     for (const auto& instruction : instructions) {
@@ -75,18 +80,27 @@ bool verify_mem_codec()
         }
     }
 
-    return require_throws(
+    if (!require_throws(
         [] {
             ftlpu::isa::encode_mem_instruction(
                 ftlpu::MemInstruction::Read(ftlpu::hw::kSramDepthRows, 0));
         },
-        "MEM codec should reject row addresses outside the 8192-row bank");
+        "MEM codec should reject row addresses outside the 8192-row bank")) {
+        return false;
+    }
+    return require_throws(
+        [] {
+            const auto encoded_read = ftlpu::isa::encode_mem_instruction(
+                ftlpu::MemInstruction::Read(0, 0));
+            ftlpu::isa::decode_mem_instruction(encoded_read | (1u << 28));
+        },
+        "MEM codec should reject an accumulator destination on Read");
 }
 
 bool verify_mxm_codec()
 {
     const ftlpu::MxmControlInstruction instructions[] {
-        ftlpu::MxmControlInstruction::IW(1),
+        ftlpu::MxmControlInstruction::IW(1, 3),
         ftlpu::MxmControlInstruction::Compute(1, 30, 20),
     };
 
