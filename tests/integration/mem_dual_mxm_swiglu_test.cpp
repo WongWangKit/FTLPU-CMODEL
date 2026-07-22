@@ -594,7 +594,11 @@ void enqueue_mxm_sequence(
     }
     icu.enqueue_mxm_nop(mxm, first_cycle);
     icu.enqueue_mxm(mxm, instruction);
-    icu.enqueue_mxm_repeat(mxm, count - 1);
+    if (instruction.opcode == ftlpu::MxmControlOpcode::Compute) {
+        icu.enqueue_mxm_compute_repeat(mxm, count - 1);
+    } else {
+        icu.enqueue_mxm_load_repeat(mxm, count - 1);
+    }
 }
 
 void load_dual_mxm_from_mem(
@@ -1198,8 +1202,8 @@ private:
     }
 
     std::array<std::vector<ScheduledInstruction<ftlpu::MemInstruction>>, ftlpu::InstructionControlUnit::kMemQueues> mem_{};
-    std::array<std::vector<ScheduledInstruction<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmQueues> mxm_load_{};
-    std::array<std::vector<ScheduledInstruction<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmQueues> mxm_compute_{};
+    std::array<std::vector<ScheduledInstruction<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmUnitCount> mxm_load_{};
+    std::array<std::vector<ScheduledInstruction<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmUnitCount> mxm_compute_{};
     std::array<std::vector<ScheduledInstruction<ftlpu::VxmLaneAluInstruction>>, ftlpu::InstructionControlUnit::kVxmQueues> vxm_{};
     std::size_t last_cycle_{0};
 };

@@ -1,24 +1,44 @@
-#include "ftlpu/mem/tile_array.hpp"
-#include "ftlpu/icu/icu.hpp"
 #include "ftlpu/core/instruction_pipeline.hpp"
-#include <cassert>
+#include "ftlpu/icu/icu.hpp"
+
 #include <iostream>
-#include <memory>
 #include <sstream>
-#include <string>
-int main(){
-ftlpu::IcuUnit<ftlpu::MemInstruction> icu;
-icu.load({ftlpu::IcuInstruction::Dispatch(),ftlpu::IcuInstruction::Nop(2),ftlpu::IcuInstruction::Dispatch(),ftlpu::IcuInstruction::Repeat(1,3)},
-         {ftlpu::MemInstruction::Read(0,1),ftlpu::MemInstruction::Write(320,2)});
-icu.notify();
-ftlpu::NorthboundInstructionPipeline pipe;
-std::ostringstream log;
-for(int c=0;c<30;++c){
-  auto i=icu.tick();if(i)pipe.issue_south(*i);
-  pipe.tick(log);
-  if(icu.done())break; }
-auto t=log.str();
-assert(t.find("Read a=0 s=1")!=std::string::npos);
-assert(t.find("Write a=320 s=2")!=std::string::npos);
-assert(t.find("NOP")==std::string::npos);
-std::cout<<"OK: ICU drives NorthboundInstructionPipeline\n";return 0;}
+#include <stdexcept>
+
+int main()
+{
+    using Control = ftlpu::IcuControlInstruction;
+    ftlpu::SliceIcu<ftlpu::MemInstruction> icu;
+    icu.load({
+        ftlpu::MemInstruction::Read(0, ftlpu::StreamId::East(1)),
+        Control::Sync(),
+        ftlpu::MemInstruction::Write(20, ftlpu::StreamId::East(2)),
+    });
+
+    ftlpu::NorthboundInstructionPipeline mem_pipeline;
+    std::ostringstream trace;
+    bool read_dispatched = false;
+    bool write_dispatched = false;
+
+    for (std::size_t cycle = 0; cycle < 10; ++cycle) {
+        if (cycle == 4) {
+            icu.notify();
+            trace << "runtime notifies MEM IQ\n";
+        }
+
+        if (const auto instruction = icu.tick(); instruction.has_value()) {
+            mem_pipeline.issue_south(*instruction);
+            read_dispatched |= instruction->opcode == ftlpu::MemOpcode::Read;
+            write_dispatched |= instruction->opcode == ftlpu::MemOpcode::Write;
+        }
+        mem_pipeline.tick(trace);
+    }
+
+    if (!read_dispatched || !write_dispatched || !icu.done()) {
+        throw std::logic_error("unified MEM IQ did not complete Read/Sync/Write");
+    }
+
+    std::cout << trace.str();
+    std::cout << "OK: one MEM IQ preserves Read -> Sync -> Write program order\n";
+    return 0;
+}

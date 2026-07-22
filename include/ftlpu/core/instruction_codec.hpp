@@ -1,9 +1,9 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
+#include "ftlpu/icu/icu.hpp"
 #include "ftlpu/mem/slice.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
-#include "ftlpu/system/icu.hpp"
 #include "ftlpu/vxm/lane.hpp"
 
 #include <array>

@@ -1,45 +1,60 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 namespace ftlpu {
 
-enum class IcuOpcode {
-    Dispatch,
+enum class IcuControlOpcode : std::uint8_t {
+    Fetch,
     Nop,
     Repeat,
     Sync,
     Notify,
 };
 
-struct IcuInstruction {
-    IcuOpcode opcode{IcuOpcode::Dispatch};
-    std::size_t repeat_count{1};
-    std::size_t repeat_interval{1};
+struct IcuRepeat {
+    std::size_t count{0};
+    std::size_t interval{1};
+    std::int64_t address_stride{0};
+};
 
-    static IcuInstruction Dispatch()
+struct IcuControlInstruction {
+    IcuControlOpcode opcode{IcuControlOpcode::Fetch};
+    std::size_t count{0};
+    std::size_t interval{1};
+    std::int64_t address_stride{0};
+
+    static constexpr IcuControlInstruction Fetch() noexcept
     {
-        return IcuInstruction{IcuOpcode::Dispatch, 0, 0};
+        return IcuControlInstruction {IcuControlOpcode::Fetch};
     }
 
-    static IcuInstruction Nop(std::size_t count)
+    static constexpr IcuControlInstruction Nop(std::size_t cycles) noexcept
     {
-        return IcuInstruction{IcuOpcode::Nop, count, 0};
+        return IcuControlInstruction {IcuControlOpcode::Nop, cycles};
     }
 
-    static IcuInstruction Repeat(std::size_t count, std::size_t interval = 1)
+    static constexpr IcuControlInstruction Repeat(
+        std::size_t count,
+        std::size_t interval = 1,
+        std::int64_t address_stride = 0) noexcept
     {
-        return IcuInstruction{IcuOpcode::Repeat, count, interval};
+        return IcuControlInstruction {
+            IcuControlOpcode::Repeat,
+            count,
+            interval,
+            address_stride};
     }
 
-    static IcuInstruction Sync()
+    static constexpr IcuControlInstruction Sync() noexcept
     {
-        return IcuInstruction{IcuOpcode::Sync, 0, 0};
+        return IcuControlInstruction {IcuControlOpcode::Sync};
     }
 
-    static IcuInstruction Notify()
+    static constexpr IcuControlInstruction Notify() noexcept
     {
-        return IcuInstruction{IcuOpcode::Notify, 0, 0};
+        return IcuControlInstruction {IcuControlOpcode::Notify};
     }
 };
 

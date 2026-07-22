@@ -18,6 +18,7 @@ public:
     }
 
     constexpr std::uint64_t value() const noexcept { return value_; }
+    constexpr bool valid() const noexcept { return value_ != 0; }
 
     friend constexpr bool operator==(DmaTransferId, DmaTransferId) = default;
 
@@ -38,7 +39,6 @@ enum class DmaPurpose : std::uint8_t {
 };
 
 struct DmaDescriptor {
-    DmaTransferId id{};
     DmaDirection direction{DmaDirection::HostToMemory};
     DmaPurpose purpose{DmaPurpose::General};
     HostBufferId host_buffer{};

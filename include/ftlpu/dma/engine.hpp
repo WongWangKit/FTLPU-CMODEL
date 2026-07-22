@@ -6,6 +6,7 @@
 #include "ftlpu/dma/global_memory.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <optional>
 #include <stdexcept>
@@ -41,11 +42,14 @@ public:
 
     void reset()
     {
+        // Transfer IDs remain monotonic across reset so stale Runtime handles
+        // cannot alias newly submitted work.
         cycle_ = 0;
         queue_.clear();
         active_.reset();
         last_beat_.reset();
-        completions_.clear();
+        completion_queue_.clear();
+        completion_history_.clear();
     }
 
     std::size_t cycle() const noexcept { return cycle_; }
@@ -65,15 +69,37 @@ public:
         return last_beat_;
     }
 
-    const std::vector<Completion>& completions() const noexcept
+    bool completion_ready() const noexcept
     {
-        return completions_;
+        return !completion_queue_.empty();
     }
 
-    void enqueue(DmaDescriptor descriptor)
+    Completion pop_completion()
+    {
+        if (completion_queue_.empty()) {
+            throw std::logic_error("DMA completion queue is empty");
+        }
+        auto completion = completion_queue_.front();
+        completion_queue_.pop_front();
+        return completion;
+    }
+
+    const std::vector<Completion>& completion_history() const noexcept
+    {
+        return completion_history_;
+    }
+
+    DmaTransferId enqueue(DmaDescriptor descriptor)
     {
         validate(descriptor);
-        queue_.push_back(std::move(descriptor));
+        if (next_transfer_id_ == 0) {
+            throw std::overflow_error("DMA transfer ID space is exhausted");
+        }
+
+        const auto id = DmaTransferId(next_transfer_id_);
+        queue_.push_back(PendingTransfer {id, std::move(descriptor)});
+        ++next_transfer_id_;
+        return id;
     }
 
     // Move at most one 320-byte vector and advance one DMA cycle. Returns true
@@ -82,7 +108,10 @@ public:
     {
         last_beat_.reset();
         if (!active_.has_value() && !queue_.empty()) {
-            active_ = ActiveTransfer {std::move(queue_.front()), 0};
+            active_ = ActiveTransfer {
+                queue_.front().id,
+                std::move(queue_.front().descriptor),
+                0};
             queue_.pop_front();
         }
 
@@ -110,7 +139,7 @@ public:
         }
 
         last_beat_ = BeatTrace {
-            active.descriptor.id,
+            active.id,
             active.descriptor.direction,
             active.descriptor.purpose,
             active.descriptor.host_buffer,
@@ -121,12 +150,14 @@ public:
 
         ++active.vector_index;
         if (active.vector_index == active.descriptor.vector_count) {
-            completions_.push_back(Completion {
-                active.descriptor.id,
+            const auto completion = Completion {
+                active.id,
                 active.descriptor.direction,
                 active.descriptor.purpose,
                 active.descriptor.vector_count,
-            });
+            };
+            completion_queue_.push_back(completion);
+            completion_history_.push_back(completion);
             active_.reset();
         }
 
@@ -135,7 +166,13 @@ public:
     }
 
 private:
+    struct PendingTransfer {
+        DmaTransferId id{};
+        DmaDescriptor descriptor{};
+    };
+
     struct ActiveTransfer {
+        DmaTransferId id{};
         DmaDescriptor descriptor{};
         std::size_t vector_index{0};
     };
@@ -207,10 +244,12 @@ private:
 
     HostMemorySpace& host_;
     GlobalMemoryAddressSpace& memory_;
-    std::deque<DmaDescriptor> queue_{};
+    std::deque<PendingTransfer> queue_{};
     std::optional<ActiveTransfer> active_{};
     std::optional<BeatTrace> last_beat_{};
-    std::vector<Completion> completions_{};
+    std::deque<Completion> completion_queue_{};
+    std::vector<Completion> completion_history_{};
+    std::uint64_t next_transfer_id_{1};
     std::size_t cycle_{0};
 };
 

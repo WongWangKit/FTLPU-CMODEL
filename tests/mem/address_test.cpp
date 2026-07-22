@@ -51,14 +51,16 @@ int main()
     static_assert(bank0_word10.advance_words(100)
         == ftlpu::MemLocalWordAddress13::FromFields(0, 110));
     static_assert(bank0_word10.advance_words(0) == bank0_word10);
-    assert(throws([] {
-        (void)ftlpu::MemLocalWordAddress13::FromFields(0, 4095).next_word();
-    }));
+    static_assert(ftlpu::MemLocalWordAddress13::FromFields(0, 4095).next_word()
+        == ftlpu::MemLocalWordAddress13::FromFields(1, 0));
+    static_assert(ftlpu::MemLocalWordAddress13::FromFields(0, 4090).advance_words(6)
+        == ftlpu::MemLocalWordAddress13::FromFields(1, 0));
     assert(throws([] {
         (void)ftlpu::MemLocalWordAddress13::FromFields(1, 4095).next_word();
     }));
     assert(throws([] {
-        (void)ftlpu::MemLocalWordAddress13::FromFields(0, 4090).advance_words(6);
+        (void)ftlpu::MemLocalWordAddress13::FromFields(0, 4095)
+            .advance_words(ftlpu::hw::kSramWordsPerBank + 1);
     }));
 
     const auto global = ftlpu::MemGlobalAddress24::FromFields(1, 43, local_byte);

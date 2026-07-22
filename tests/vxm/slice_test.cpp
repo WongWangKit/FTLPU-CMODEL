@@ -1,4 +1,4 @@
-#include "ftlpu/system/icu.hpp"
+#include "ftlpu/icu/icu.hpp"
 #include "ftlpu/vxm/slice.hpp"
 
 #include <cassert>

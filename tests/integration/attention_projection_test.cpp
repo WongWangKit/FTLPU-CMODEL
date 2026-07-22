@@ -204,8 +204,8 @@ private:
     }
 
     std::array<std::vector<Event<ftlpu::MemInstruction>>, ftlpu::InstructionControlUnit::kMemQueues> mem_{};
-    std::array<std::vector<Event<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmQueues> mxm_load_{};
-    std::array<std::vector<Event<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmQueues> mxm_compute_{};
+    std::array<std::vector<Event<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmUnitCount> mxm_load_{};
+    std::array<std::vector<Event<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmUnitCount> mxm_compute_{};
     std::array<std::vector<Event<ftlpu::VxmLaneAluInstruction>>, ftlpu::InstructionControlUnit::kVxmQueues> vxm_{};
 };
 

@@ -104,10 +104,16 @@ public:
 
     constexpr MemLocalWordAddress13 advance_words(std::size_t count) const
     {
-        if (count > hw::kSramWordsPerBank - 1 - word()) {
-            throw std::out_of_range("MEM word address advance crosses a bank boundary");
+        constexpr auto kWordsPerSlice =
+            hw::kSramBanksPerTileBlock * hw::kSramWordsPerBank;
+        const auto linear_word = bank() * hw::kSramWordsPerBank + word();
+        if (count > kWordsPerSlice - 1 - linear_word) {
+            throw std::out_of_range("MEM word address advance exceeds the two-bank slice capacity");
         }
-        return FromFields(bank(), word() + count);
+        const auto advanced = linear_word + count;
+        return FromFields(
+            advanced / hw::kSramWordsPerBank,
+            advanced % hw::kSramWordsPerBank);
     }
 
     constexpr MemSliceByteAddress17 slice_byte_address(
