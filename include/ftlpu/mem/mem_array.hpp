@@ -155,12 +155,14 @@ public:
         std::size_t bank{0};
         std::size_t word{0};
         StreamPayloadSegment16 bytes{};
+        std::uint64_t vector_tag{0};
     };
 
     struct InstructionTrace {
         std::size_t mem_slice{0};
         std::size_t tile{0};
         MemInstruction instruction{};
+        std::uint64_t issue_tag{0};
     };
 
     explicit MemArrayModel(
@@ -187,8 +189,14 @@ public:
                 slot.reset();
             }
         }
+        for (auto& slice : instruction_tag_rows_) {
+            for (auto& tag : slice) {
+                tag.reset();
+            }
+        }
         executed_mem_.clear();
         executed_instructions_.clear();
+        next_issue_tag_ = 1;
     }
 
     void clear_sram()
@@ -215,7 +223,11 @@ public:
     void enqueue_instruction(std::size_t mem_slice, MemInstruction instruction)
     {
         check_mem_slice(mem_slice);
-        instruction_queues_[mem_slice].push_back(std::move(instruction));
+        if (next_issue_tag_ == 0) {
+            throw std::overflow_error("MEM issue tag space is exhausted");
+        }
+        instruction_queues_[mem_slice].push_back(
+            InstructionToken {std::move(instruction), next_issue_tag_++});
     }
 
     void set_sram_byte(
@@ -307,6 +319,15 @@ public:
         return instruction_rows_[mem_slice][tile];
     }
 
+    std::optional<std::uint64_t> issue_tag_at(
+        std::size_t mem_slice,
+        std::size_t tile) const
+    {
+        check_mem_slice(mem_slice);
+        check_tile(tile);
+        return instruction_tag_rows_[mem_slice][tile];
+    }
+
     const std::vector<MemTransfer>& executed_transfers() const noexcept
     {
         return executed_mem_;
@@ -346,6 +367,11 @@ public:
     }
 
 private:
+    struct InstructionToken {
+        MemInstruction instruction{};
+        std::uint64_t issue_tag{0};
+    };
+
     static void check_mem_slice(std::size_t mem_slice)
     {
         if (mem_slice >= hw::kMemSliceColumns) {
@@ -422,7 +448,8 @@ private:
                 || instruction_queues_[mem_slice].empty()) {
                 continue;
             }
-            instruction_rows_[mem_slice][0] = instruction_queues_[mem_slice].front();
+            instruction_rows_[mem_slice][0] = instruction_queues_[mem_slice].front().instruction;
+            instruction_tag_rows_[mem_slice][0] = instruction_queues_[mem_slice].front().issue_tag;
             instruction_queues_[mem_slice].pop_front();
         }
     }
@@ -436,11 +463,15 @@ private:
                     continue;
                 }
 
+                const auto issue_tag = instruction_tag_rows_[mem_slice][tile];
+                if (!issue_tag.has_value()) {
+                    throw std::logic_error("MEM instruction lost its stable issue tag");
+                }
                 executed_instructions_.push_back(
-                    InstructionTrace {mem_slice, tile, *instruction});
+                    InstructionTrace {mem_slice, tile, *instruction, *issue_tag});
                 switch (instruction->opcode) {
                 case MemOpcode::Read:
-                    execute_read(fabric, mem_slice, tile, *instruction);
+                    execute_read(fabric, mem_slice, tile, *instruction, *issue_tag);
                     break;
                 case MemOpcode::Write:
                     execute_write(fabric, mem_slice, tile, *instruction);
@@ -457,13 +488,13 @@ private:
         StreamRegisterFabric& fabric,
         std::size_t mem_slice,
         std::size_t tile,
-        const MemInstruction& instruction)
+        const MemInstruction& instruction,
+        std::uint64_t issue_tag)
     {
         const auto stream = instruction.stream_id();
         const auto sr_column = ports_.output_column(mem_slice, stream.direction());
         const auto bytes =
             sram_.slice(mem_slice).tile_block(tile).read_word(instruction.address);
-        const auto vector_tag = static_cast<std::uint64_t>(cycle_) * hw::kTileRows + tile;
 
         StreamOutputPort output(
             fabric,
@@ -474,7 +505,7 @@ private:
             tile,
             stream.index(),
             bytes,
-            vector_tag);
+            issue_tag);
 
         executed_mem_.push_back(MemTransfer {
             MemTransfer::Kind::LoadSramToStream,
@@ -486,6 +517,7 @@ private:
             instruction.address.bank(),
             instruction.address.word(),
             bytes,
+            issue_tag,
         });
     }
 
@@ -530,6 +562,12 @@ private:
     void advance_instructions()
     {
         for (auto& mem_slice : instruction_rows_) {
+            for (std::size_t tile = hw::kTileRows - 1; tile > 0; --tile) {
+                mem_slice[tile] = mem_slice[tile - 1];
+            }
+            mem_slice[0].reset();
+        }
+        for (auto& mem_slice : instruction_tag_rows_) {
             for (std::size_t tile = hw::kTileRows - 1; tile > 0; --tile) {
                 mem_slice[tile] = mem_slice[tile - 1];
             }
@@ -607,12 +645,15 @@ private:
     MemStreamPortMap ports_;
     MissingStreamPolicy missing_stream_policy_{MissingStreamPolicy::Error};
     SramArray sram_{};
-    std::array<std::deque<MemInstruction>, hw::kMemSliceColumns> instruction_queues_{};
+    std::array<std::deque<InstructionToken>, hw::kMemSliceColumns> instruction_queues_{};
     std::array<std::array<InstructionSlot, hw::kTileRows>, hw::kMemSliceColumns>
         instruction_rows_{};
+    std::array<std::array<std::optional<std::uint64_t>, hw::kTileRows>, hw::kMemSliceColumns>
+        instruction_tag_rows_{};
     std::vector<MemTransfer> executed_mem_{};
     std::vector<InstructionTrace> executed_instructions_{};
     std::size_t cycle_{0};
+    std::uint64_t next_issue_tag_{1};
 };
 
 } // namespace ftlpu

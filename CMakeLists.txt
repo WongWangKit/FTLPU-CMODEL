@@ -33,6 +33,7 @@ ftlpu_add_test(mem_sram_test tests/mem/sram_test.cpp)
 ftlpu_add_test(mem_array_separated_test tests/mem/mem_array_separated_test.cpp)
 ftlpu_add_test(tile_array_test tests/mem/tile_array_test.cpp)
 ftlpu_add_test(vector_roundtrip_test tests/mem/vector_roundtrip_test.cpp)
+ftlpu_add_test(mem_instruction_vector_tag_test tests/mem/instruction_vector_tag_test.cpp)
 
 ftlpu_add_test(stream_topology_test tests/system/stream_topology_test.cpp)
 
