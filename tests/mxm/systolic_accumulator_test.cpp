@@ -55,14 +55,18 @@ struct RunResult {
     std::size_t last_output_cycle{0};
 };
 
-RunResult run_k_block(
+RunResult run_adjacent_k_blocks(
     ftlpu::Mxm& mxm,
     ftlpu::StreamRegisterFabric& fabric,
-    ftlpu::MxmControlInstruction instruction)
+    ftlpu::MxmControlInstruction first,
+    ftlpu::MxmControlInstruction second)
 {
-    mxm.control().issue_south(instruction);
+    // No bubble: the second block enters tile 0 while the first block is
+    // still advancing through tiles 1..19.
+    mxm.control().issue_south(first);
+    mxm.control().issue_south(second);
     RunResult result{};
-    constexpr std::size_t kCycles = 2 * ftlpu::hw::kMxmSupercellsPerPlane + 4;
+    constexpr std::size_t kCycles = 2 * ftlpu::hw::kMxmSupercellsPerPlane + 5;
     for (std::size_t cycle = 0; cycle < kCycles; ++cycle) {
         stage_uniform_activation(fabric, 1);
         fabric.begin_cycle();
@@ -95,25 +99,19 @@ int main()
     load_uniform_weight_buffer(*mxm, 0, 1);
     load_uniform_weight_buffer(*mxm, 1, 2);
 
-    // First 320-wide K block: 16 lanes * 20 supercell rows = 320.
-    const auto retained = run_k_block(
+    // Two adjacent K=320 blocks.  The first retains 320 in acc0; on the very
+    // next cycle the second starts and adds 640 before reducing 960 to SR.
+    const auto reduced = run_adjacent_k_blocks(
         *mxm,
         *fabric,
         ftlpu::MxmControlInstruction::ComputeToAccumulator(
-            0, 0, 0, 0, false, false, true));
-    assert(retained.outputs == 0);
-    assert(mxm->accumulator_value(0, 0, 0) == 320);
-
-    // Second K block uses the other weight buffer, but the same independent
-    // accumulator bank.  320 + (2 * 320) = 960, then reduce to SR.
-    const auto reduced = run_k_block(
-        *mxm,
-        *fabric,
+            0, 0, 0, 0, false, false, true),
         ftlpu::MxmControlInstruction::ComputeToAccumulator(
             1, 0, 0, 0, true, true, true));
     assert(reduced.outputs == ftlpu::hw::kMxmSupercellsPerPlane);
-    assert(reduced.first_output_cycle == ftlpu::hw::kMxmSupercellsPerPlane - 1);
-    assert(reduced.last_output_cycle == 2 * ftlpu::hw::kMxmSupercellsPerPlane - 2);
+    assert(reduced.first_output_cycle == ftlpu::hw::kMxmSupercellsPerPlane);
+    assert(reduced.last_output_cycle == 2 * ftlpu::hw::kMxmSupercellsPerPlane - 1);
+    assert(mxm->accumulator_value(0, 0, 0) == 960);
     assert(mxm->accumulator_value(0, 0, 319) == 960);
 
     return 0;

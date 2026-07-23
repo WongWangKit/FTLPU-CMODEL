@@ -181,7 +181,9 @@ public:
         for (auto& cursor : next_row_for_tile_) {
             cursor.fill(0);
         }
-        compute_active_by_accumulator_.fill(false);
+        for (auto& bank : compute_active_by_accumulator_tile_) {
+            bank.fill(false);
+        }
         last_outputs_.clear();
         active_ = false;
     }
@@ -230,7 +232,8 @@ public:
             active_ = true;
         }
 
-        auto current_compute_active_by_accumulator = std::array<bool, kAccumulatorBanks> {};
+        auto current_compute_active_by_accumulator_tile =
+            std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, kAccumulatorBanks> {};
         for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
             if (!control_.compute_active(tile)) {
                 continue;
@@ -238,12 +241,17 @@ public:
             const auto pulse = control_.compute_pulse(tile).value();
             check_weight_buffer(pulse.weight_buffer);
             check_accumulator_bank(pulse.accumulator_bank);
-            current_compute_active_by_accumulator[pulse.accumulator_bank] = true;
+            current_compute_active_by_accumulator_tile[pulse.accumulator_bank][tile] = true;
 
-            const auto begins_block = tile == 0
-                && (pulse.start_of_k_block
-                    || !compute_active_by_accumulator_[pulse.accumulator_bank]);
-            if (begins_block) {
+            const auto begins_at_tile = pulse.start_of_k_block
+                || !compute_active_by_accumulator_tile_[pulse.accumulator_bank][tile];
+            if (begins_at_tile) {
+                // The block boundary travels with the instruction.  Reset only
+                // the cursor of the tile currently seeing that boundary; later
+                // tiles may still be processing the preceding K block.
+                next_row_for_tile_[pulse.accumulator_bank][tile] = 0;
+            }
+            if (tile == 0 && begins_at_tile) {
                 begin_k_block(pulse.accumulator_bank, pulse.accumulate);
             }
             const auto data = collect_activation(fabric, tile, pulse.activation_stream_base);
@@ -300,7 +308,7 @@ public:
         if (active_ && pipelines_empty()) {
             active_ = false;
         }
-        compute_active_by_accumulator_ = current_compute_active_by_accumulator;
+        compute_active_by_accumulator_tile_ = current_compute_active_by_accumulator_tile;
     }
 
     bool computing_cell(std::size_t tile, std::size_t column_block) const
@@ -416,7 +424,6 @@ private:
     void begin_k_block(std::size_t accumulator_bank, bool accumulate)
     {
         check_accumulator_bank(accumulator_bank);
-        next_row_for_tile_[accumulator_bank].fill(0);
         if (!accumulate) {
             if (pipeline_uses_accumulator(accumulator_bank)) {
                 throw std::logic_error(
@@ -621,7 +628,8 @@ private:
         north_pipeline_{};
     std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane> last_computing_{};
     std::array<std::array<std::size_t, hw::kMxmSupercellsPerPlane>, kAccumulatorBanks> next_row_for_tile_{};
-    std::array<bool, kAccumulatorBanks> compute_active_by_accumulator_{};
+    std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, kAccumulatorBanks>
+        compute_active_by_accumulator_tile_{};
     std::array<std::array<std::array<std::int32_t, hw::kMxmColumns>, hw::kMxmRows>, kAccumulatorBanks>
         accumulator_banks_{};
     std::vector<ColumnOutput> last_outputs_{};
