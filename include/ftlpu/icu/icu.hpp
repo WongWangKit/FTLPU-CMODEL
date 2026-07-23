@@ -70,6 +70,10 @@ public:
 
     void load(std::vector<Entry> program)
     {
+        if (program.size() * hw::kEncodedInstructionPacketBytes
+            > hw::kIcuIqCapacityBytes) {
+            throw StaticScheduleError("ICU IQ program exceeds modeled capacity");
+        }
         iq_.assign(
             std::make_move_iterator(program.begin()),
             std::make_move_iterator(program.end()));
@@ -79,6 +83,7 @@ public:
 
     void enqueue(Entry entry)
     {
+        require_capacity_for(hw::kEncodedInstructionPacketBytes);
         iq_.push_back(std::move(entry));
     }
 
@@ -156,12 +161,56 @@ public:
     bool running() const { return !done(); }
     std::size_t cycle() const noexcept { return cycle_; }
     std::size_t fetch_count() const noexcept { return fetch_count_; }
+    std::size_t iq_occupancy() const noexcept { return iq_.size(); }
+    std::size_t occupancy_bytes() const noexcept
+    {
+        return iq_.size() * hw::kEncodedInstructionPacketBytes;
+    }
+    std::size_t reserved_bytes() const noexcept { return reserved_bytes_; }
+    std::size_t free_bytes() const noexcept
+    {
+        return hw::kIcuIqCapacityBytes - occupancy_bytes() - reserved_bytes_;
+    }
+    std::size_t pending_issue_cycles() const noexcept
+    {
+        if (repeat_remaining_ == 0) {
+            return nop_remaining_;
+        }
+        return nop_remaining_ + repeat_cooldown_ + 1
+            + (repeat_remaining_ - 1) * repeat_interval_;
+    }
+
+    void reserve_fetch()
+    {
+        reserve_bytes(hw::kIcuFetchBufferBytes);
+    }
+
+    void release_fetch_reservation()
+    {
+        if (reserved_bytes_ < hw::kIcuFetchBufferBytes) {
+            throw std::logic_error("ICU has no 640-byte Ifetch reservation to release");
+        }
+        reserved_bytes_ -= hw::kIcuFetchBufferBytes;
+    }
     std::size_t queued_count() const noexcept
     {
         return iq_.size() + repeat_remaining_ + nop_remaining_;
     }
 
 private:
+    void require_capacity_for(std::size_t bytes) const
+    {
+        if (bytes > free_bytes()) {
+            throw StaticScheduleError("ICU IQ capacity exceeded by static schedule");
+        }
+    }
+
+    void reserve_bytes(std::size_t bytes)
+    {
+        require_capacity_for(bytes);
+        reserved_bytes_ += bytes;
+    }
+
     void clear_runtime_state()
     {
         last_dispatched_.reset();
@@ -175,6 +224,7 @@ private:
         notification_tokens_ = 0;
         notify_emitted_ = false;
         fetch_count_ = 0;
+        reserved_bytes_ = 0;
     }
 
     std::optional<FuncInstruction> execute_control(
@@ -262,6 +312,7 @@ private:
     std::size_t notification_tokens_{0};
     bool notify_emitted_{false};
     std::size_t fetch_count_{0};
+    std::size_t reserved_bytes_{0};
     std::size_t cycle_{0};
 };
 

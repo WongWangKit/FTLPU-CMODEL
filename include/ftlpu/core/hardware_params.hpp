@@ -47,6 +47,17 @@ constexpr std::size_t kMxmAccumulatorBanks = 2;
 constexpr std::size_t kMxmLoadStreamsPerCycle = 16;
 constexpr std::size_t kMxmLoadBytesPerCycle = kLanesPerTile * kMxmLoadStreamsPerCycle * kStreamRegisterBytes;
 
+// CModel scheduling/storage parameters.  These values make the model finite
+// and testable; they are not claims about finalized hardware capacities.
+constexpr std::size_t kEncodedInstructionPacketBytes = 16;
+constexpr std::size_t kIcuFetchVectorCount = 2;
+constexpr std::size_t kIcuFetchBufferBytes =
+    kIcuFetchVectorCount * kPhysicalVectorBytes;
+constexpr std::size_t kIcuFetchPackets =
+    kIcuFetchBufferBytes / kEncodedInstructionPacketBytes;
+constexpr std::size_t kIcuIqCapacityBytes = 64 * 1024;
+constexpr std::size_t kIcuBarrierLatencyCycles = 35;
+
 constexpr std::size_t kSxmConcurrentStreamOps = 16;
 
 constexpr std::size_t kHemispheres = 2;
@@ -90,6 +101,9 @@ static_assert(kMxmRows == kMxmSupercellRows * kMxmSupercellsPerPlane);
 static_assert(kMxmColumns == kMxmSupercellColumns * kMxmSupercellsPerPlane);
 static_assert(kMxmLoadStreamsPerCycle == kMxmSupercellColumns);
 static_assert(kMxmLoadBytesPerCycle == 256);
+static_assert(kIcuFetchBufferBytes == 640);
+static_assert(kIcuFetchPackets == 40);
+static_assert(kIcuIqCapacityBytes >= kIcuFetchBufferBytes);
 static_assert(kSxmConcurrentStreamOps == 16);
 static_assert(kSramBankBytes == 64 * 1024);
 static_assert(kSramTileBlockBytes == 128 * 1024);

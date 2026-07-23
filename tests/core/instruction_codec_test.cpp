@@ -1,4 +1,5 @@
 #include "ftlpu/core/instruction_codec.hpp"
+#include "ftlpu/core/instruction_packet.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -92,6 +93,15 @@ bool verify_mem_codec()
                 ftlpu::MemInstruction::Read(ftlpu::hw::kMemLocalWordAddressCount, 0));
         },
         "MEM codec should reject addresses outside the 13-bit local word range");
+}
+
+bool same_icu(const ftlpu::IcuControlInstruction& lhs, const ftlpu::IcuControlInstruction& rhs)
+{
+    return lhs.opcode == rhs.opcode
+        && lhs.count == rhs.count
+        && lhs.interval == rhs.interval
+        && lhs.address_stride == rhs.address_stride
+        && lhs.source_stream == rhs.source_stream;
 }
 
 bool verify_mxm_codec()
@@ -189,7 +199,7 @@ bool verify_icu_command_codec()
         return false;
     }
 
-    const auto repeat = ftlpu::InstructionControlUnit::Repeat {7, 3, -16};
+    const auto repeat = ftlpu::IcuRepeat {7, 3, -16};
     const auto decoded = ftlpu::isa::decode_icu_repeat(ftlpu::isa::encode_icu_repeat(repeat));
     if (!require(
             decoded.count == repeat.count
@@ -199,11 +209,58 @@ bool verify_icu_command_codec()
         return false;
     }
 
+    const ftlpu::IcuControlInstruction controls[] {
+        ftlpu::IcuControlInstruction::Fetch(ftlpu::StreamId::West(17)),
+        ftlpu::IcuControlInstruction::Nop(65535),
+        ftlpu::IcuControlInstruction::Repeat(31, 7, -32),
+        ftlpu::IcuControlInstruction::Sync(),
+        ftlpu::IcuControlInstruction::Notify(),
+    };
+    for (const auto& control : controls) {
+        const auto decoded_control = ftlpu::isa::decode_icu_control_instruction(
+            ftlpu::isa::encode_icu_control_instruction(control));
+        if (!require(same_icu(control, decoded_control), "ICU control round-trip failed")) {
+            return false;
+        }
+    }
+
     return require_throws(
         [] {
-            ftlpu::isa::encode_icu_repeat(ftlpu::InstructionControlUnit::Repeat {1, 1, 2048});
+            ftlpu::isa::encode_icu_repeat(ftlpu::IcuRepeat {1, 1, 2048});
         },
-        "ICU Repeat codec should reject strides wider than signed 12 bits");
+        "ICU Repeat codec should reject strides wider than signed 12 bits")
+        && require_throws(
+            [] { (void)ftlpu::isa::encode_icu_nop(65536); },
+            "ICU NOP codec should reject counts wider than 16 bits");
+}
+
+bool verify_instruction_packets()
+{
+    const auto mem = ftlpu::MemInstruction::Read(123, ftlpu::StreamId::West(7));
+    const auto mxm = ftlpu::MxmControlInstruction::Compute(1, 3, 8);
+    auto vxm = ftlpu::VxmLaneAluInstruction {
+        ftlpu::VxmAluOpcode::Add,
+        ftlpu::VxmLaneOperand::StreamInt32(4),
+        ftlpu::VxmLaneOperand::Imm(2.0f),
+    };
+    const auto control = ftlpu::IcuControlInstruction::Fetch(ftlpu::StreamId::East(11));
+
+    const auto mem_packet = ftlpu::isa::encode_packet(mem);
+    const auto mxm_packet = ftlpu::isa::encode_packet(mxm);
+    const auto vxm_packet = ftlpu::isa::encode_packet(vxm);
+    const auto control_packet = ftlpu::isa::encode_packet(control);
+    if (!require(same_mem(mem, ftlpu::isa::decode_mem_packet(mem_packet)), "MEM packet round-trip failed")
+        || !require(same_mxm(mxm, ftlpu::isa::decode_mxm_packet(mxm_packet)), "MXM packet round-trip failed")
+        || !require(same_vxm(vxm, ftlpu::isa::decode_vxm_packet(vxm_packet)), "VXM packet round-trip failed")
+        || !require(same_icu(control, ftlpu::isa::decode_icu_packet(control_packet)), "ICU packet round-trip failed")) {
+        return false;
+    }
+    for (std::size_t byte = 8; byte < mem_packet.bytes.size(); ++byte) {
+        if (!require(mem_packet.bytes[byte] == 0, "short instruction packet padding is not zero")) {
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -221,6 +278,9 @@ try
         return 1;
     }
     if (!verify_icu_command_codec()) {
+        return 1;
+    }
+    if (!verify_instruction_packets()) {
         return 1;
     }
     return 0;

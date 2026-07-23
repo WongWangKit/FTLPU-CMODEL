@@ -112,6 +112,38 @@ int main()
         icu.load({Control::Repeat(1)});
         (void)icu.tick();
     }));
+
+    // IQ capacity is finite and measured in encoded 16-byte program packets.
+    {
+        Icu icu;
+        constexpr auto kEntries =
+            ftlpu::hw::kIcuIqCapacityBytes / ftlpu::hw::kEncodedInstructionPacketBytes;
+        for (std::size_t entry = 0; entry < kEntries; ++entry) {
+            icu.enqueue(TestInstruction {8, entry});
+        }
+        assert(icu.iq_occupancy() == kEntries);
+        assert(icu.occupancy_bytes() == ftlpu::hw::kIcuIqCapacityBytes);
+        assert(icu.free_bytes() == 0);
+        assert(throws([&] { icu.enqueue(TestInstruction {9, 0}); }));
+    }
+
+    // A Fetch reserves one complete 640-byte block before any stream data is
+    // accepted; reservations participate in the same finite capacity check.
+    {
+        Icu icu;
+        constexpr auto kPrefillEntries =
+            (ftlpu::hw::kIcuIqCapacityBytes - ftlpu::hw::kIcuFetchBufferBytes)
+            / ftlpu::hw::kEncodedInstructionPacketBytes;
+        for (std::size_t entry = 0; entry < kPrefillEntries; ++entry) {
+            icu.enqueue(TestInstruction {10, entry});
+        }
+        icu.reserve_fetch();
+        assert(icu.reserved_bytes() == ftlpu::hw::kIcuFetchBufferBytes);
+        assert(icu.free_bytes() == 0);
+        assert(throws([&] { icu.reserve_fetch(); }));
+        icu.release_fetch_reservation();
+        assert(icu.reserved_bytes() == 0);
+    }
     assert(throws([] {
         Icu icu;
         icu.load({TestInstruction {7, 0}, Control::Repeat(1, 0)});

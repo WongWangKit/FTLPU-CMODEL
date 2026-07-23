@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
-#include "ftlpu/icu/icu.hpp"
+#include "ftlpu/icu/instruction.hpp"
 #include "ftlpu/mem/slice.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
 #include "ftlpu/vxm/lane.hpp"
@@ -34,8 +34,9 @@ namespace isa {
 //         [23] output valid, [29:24] output stream.
 //   word1 lhs immediate literal, word2 rhs immediate literal.
 // ICU queue command 32b:
-//   NOP    [1:0] opcode, [31:2] cycle count.
-//   Repeat [1:0] opcode, [11:2] count, [19:12] interval,
+//   Fetch  [2:0] opcode, [8:3] packed source StreamId.
+//   NOP    [2:0] opcode, [18:3] 16-bit cycle count.
+//   Repeat [2:0] opcode, [11:3] count, [19:12] interval,
 //          [31:20] signed MEM address stride.
 using EncodedMemInstruction = std::uint32_t;
 using EncodedMxmInstruction = std::uint32_t;
@@ -46,9 +47,12 @@ struct EncodedVxmInstruction {
 };
 
 enum class IcuCommandOpcode : std::uint8_t {
-    Instruction = 0,
+    Fetch = 0,
+    Instruction = Fetch,
     Nop = 1,
     Repeat = 2,
+    Sync = 3,
+    Notify = 4,
 };
 
 namespace detail {
@@ -362,39 +366,95 @@ inline VxmLaneAluInstruction decode_vxm_instruction(const EncodedVxmInstruction&
     return instruction;
 }
 
-inline EncodedIcuCommand encode_icu_nop(std::size_t cycles)
+inline EncodedIcuCommand encode_icu_control_instruction(
+    const IcuControlInstruction& instruction)
 {
-    constexpr std::uint64_t kCountMask = 0x3fffffffull;
-    detail::require_unsigned_fit(cycles, kCountMask, "ICU NOP cycle count does not fit encoded command");
-    return static_cast<std::uint32_t>(
-        static_cast<std::uint64_t>(IcuCommandOpcode::Nop)
-        | (static_cast<std::uint64_t>(cycles) << 2));
-}
-
-inline EncodedIcuCommand encode_icu_repeat(const InstructionControlUnit::Repeat& repeat)
-{
-    constexpr std::uint64_t kCountMask = 0x3ffull;
+    constexpr std::uint64_t kNopCountMask = 0xffffull;
+    constexpr std::uint64_t kRepeatCountMask = 0x1ffull;
     constexpr std::uint64_t kIntervalMask = 0xffull;
     constexpr auto kStrideMin = static_cast<std::int64_t>(-2048);
     constexpr auto kStrideMax = static_cast<std::int64_t>(2047);
-    detail::require_unsigned_fit(repeat.count, kCountMask, "ICU Repeat count does not fit encoded command");
-    detail::require_unsigned_fit(repeat.interval, kIntervalMask, "ICU Repeat interval does not fit encoded command");
-    detail::require_signed_fit(
-        repeat.address_stride,
-        kStrideMin,
-        kStrideMax,
-        "ICU Repeat address stride does not fit encoded command");
+    const auto opcode = static_cast<std::uint32_t>(instruction.opcode);
 
-    return static_cast<std::uint32_t>(
-        static_cast<std::uint64_t>(IcuCommandOpcode::Repeat)
-        | (static_cast<std::uint64_t>(repeat.count) << 2)
-        | (static_cast<std::uint64_t>(repeat.interval) << 12)
-        | (static_cast<std::uint64_t>(static_cast<std::uint16_t>(repeat.address_stride) & 0x0fffu) << 20));
+    switch (instruction.opcode) {
+    case IcuControlOpcode::Fetch:
+        detail::require_unsigned_fit(
+            instruction.source_stream.packed(), hw::kStreams - 1,
+            "ICU Fetch stream does not fit encoded command");
+        return opcode
+            | (static_cast<std::uint32_t>(instruction.source_stream.packed()) << 3);
+    case IcuControlOpcode::Nop:
+        detail::require_unsigned_fit(
+            instruction.count, kNopCountMask,
+            "ICU NOP cycle count does not fit 16-bit encoded command");
+        return opcode | (static_cast<std::uint32_t>(instruction.count) << 3);
+    case IcuControlOpcode::Repeat:
+        detail::require_unsigned_fit(
+            instruction.count, kRepeatCountMask,
+            "ICU Repeat count does not fit encoded command");
+        detail::require_unsigned_fit(
+            instruction.interval, kIntervalMask,
+            "ICU Repeat interval does not fit encoded command");
+        detail::require_signed_fit(
+            instruction.address_stride, kStrideMin, kStrideMax,
+            "ICU Repeat address stride does not fit encoded command");
+        return opcode
+            | (static_cast<std::uint32_t>(instruction.count) << 3)
+            | (static_cast<std::uint32_t>(instruction.interval) << 12)
+            | ((static_cast<std::uint32_t>(instruction.address_stride) & 0x0fffu) << 20);
+    case IcuControlOpcode::Sync:
+    case IcuControlOpcode::Notify:
+        return opcode;
+    }
+    throw std::logic_error("unknown ICU control opcode");
+}
+
+inline IcuControlInstruction decode_icu_control_instruction(EncodedIcuCommand command)
+{
+    const auto opcode = static_cast<IcuControlOpcode>(command & 0x7u);
+    switch (opcode) {
+    case IcuControlOpcode::Fetch:
+        detail::require_reserved_zero(command, 0x000001ffu, "encoded ICU Fetch has non-zero reserved bits");
+        return IcuControlInstruction::Fetch(
+            StreamId::from_packed(static_cast<std::size_t>((command >> 3) & 0x3fu)));
+    case IcuControlOpcode::Nop:
+        detail::require_reserved_zero(command, 0x0007ffffu, "encoded ICU NOP has non-zero reserved bits");
+        return IcuControlInstruction::Nop(
+            static_cast<std::size_t>((command >> 3) & 0xffffu));
+    case IcuControlOpcode::Repeat: {
+        auto stride = static_cast<std::int32_t>((command >> 20) & 0x0fffu);
+        if ((stride & 0x800) != 0) {
+            stride |= ~0x0fff;
+        }
+        return IcuControlInstruction::Repeat(
+            static_cast<std::size_t>((command >> 3) & 0x1ffu),
+            static_cast<std::size_t>((command >> 12) & 0xffu),
+            stride);
+    }
+    case IcuControlOpcode::Sync:
+        detail::require_reserved_zero(command, 0x7u, "encoded ICU Sync has non-zero reserved bits");
+        return IcuControlInstruction::Sync();
+    case IcuControlOpcode::Notify:
+        detail::require_reserved_zero(command, 0x7u, "encoded ICU Notify has non-zero reserved bits");
+        return IcuControlInstruction::Notify();
+    }
+    throw std::logic_error("unknown encoded ICU control opcode");
+}
+
+inline EncodedIcuCommand encode_icu_nop(std::size_t cycles)
+{
+    return encode_icu_control_instruction(IcuControlInstruction::Nop(cycles));
+}
+
+inline EncodedIcuCommand encode_icu_repeat(const IcuRepeat& repeat)
+{
+    return encode_icu_control_instruction(
+        IcuControlInstruction::Repeat(repeat.count, repeat.interval, repeat.address_stride));
 }
 
 inline IcuCommandOpcode decode_icu_command_opcode(EncodedIcuCommand command)
 {
-    return static_cast<IcuCommandOpcode>(command & 0x3u);
+    return static_cast<IcuCommandOpcode>(command & 0x7u);
 }
 
 inline std::size_t decode_icu_nop_cycles(EncodedIcuCommand command)
@@ -402,23 +462,16 @@ inline std::size_t decode_icu_nop_cycles(EncodedIcuCommand command)
     if (decode_icu_command_opcode(command) != IcuCommandOpcode::Nop) {
         throw std::logic_error("encoded ICU command is not NOP");
     }
-    return static_cast<std::size_t>((command >> 2) & 0x3fffffffull);
+    return decode_icu_control_instruction(command).count;
 }
 
-inline InstructionControlUnit::Repeat decode_icu_repeat(EncodedIcuCommand command)
+inline IcuRepeat decode_icu_repeat(EncodedIcuCommand command)
 {
     if (decode_icu_command_opcode(command) != IcuCommandOpcode::Repeat) {
         throw std::logic_error("encoded ICU command is not Repeat");
     }
-    auto stride = static_cast<std::int32_t>((command >> 20) & 0x0fffu);
-    if ((stride & 0x800) != 0) {
-        stride |= ~0x0fff;
-    }
-    return InstructionControlUnit::Repeat {
-        static_cast<std::size_t>((command >> 2) & 0x3ffull),
-        static_cast<std::size_t>((command >> 12) & 0xffull),
-        stride,
-    };
+    const auto decoded = decode_icu_control_instruction(command);
+    return IcuRepeat {decoded.count, decoded.interval, decoded.address_stride};
 }
 
 } // namespace isa
