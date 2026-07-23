@@ -132,6 +132,7 @@ public:
         }
         mem_.begin_cycle();
         icu_.evaluate_fetches(mem_.stream_fabric(), fetch_ports_);
+        icu_.evaluate_mem_local_fetches(mem_.memory_model());
         icu_.dispatch(mem_, vxm_, mxms_, sinks.icu);
         tick_mxm_controls(sinks);
         tick_mxm_datapaths(sinks);

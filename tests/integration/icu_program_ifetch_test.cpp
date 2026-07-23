@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -80,12 +81,15 @@ int main()
         assert(nop.count == 0);
     }
 
-    // Two complete blocks keep the MXM load IQ supplied while the second
-    // 640-byte Ifetch is in flight.
+    // The first fetched block contains Fetch #2 itself. Nothing after the
+    // initial bootstrap Fetch is directly inserted into the MXM IQ by C++.
+    const auto kInstructionStream = ftlpu::StreamId::East(31);
     ftlpu::ProgramImage image;
     ftlpu::ProgramSection section {
         ftlpu::IcuLocation::MxmLoad(0), {}, 0, "two MXM load blocks"};
-    for (std::size_t packet = 0;
+    section.packets.push_back(ftlpu::program::encode_packet(
+        ftlpu::IcuControlInstruction::Fetch(kInstructionStream)));
+    for (std::size_t packet = 1;
          packet < 2 * ftlpu::hw::kIcuFetchPackets;
          ++packet) {
         section.packets.push_back(ftlpu::program::encode_packet(
@@ -107,18 +111,44 @@ int main()
     assert(first_local.bank() == 0 && first_local.word() == 4094);
     assert(second_local.bank() == 1 && second_local.word() == 0);
 
+    // This is the MEM ICU's own program. It is DMA-loaded into the same local
+    // MEM slice and later fetched without injecting Read instructions.
+    ftlpu::ProgramImage mem_loader_image;
+    mem_loader_image.add_section(ftlpu::build_mem_icu_loader_section(
+        40,
+        kInstructionStream,
+        {
+            {layout.placements()[0], 0, true},
+            {layout.placements()[1], 35, false},
+        }));
+    const auto mem_loader_layout = ftlpu::ProgramSramLayout::Build(
+        mem_loader_image,
+        ftlpu::MemGlobalAddress24::FromFields(
+            0,
+            40,
+            ftlpu::MemLocalWordAddress13::FromFields(1, 100)
+                .slice_byte_address()));
+    assert(mem_loader_layout.placements().size() == 1);
+    assert(mem_loader_layout.placements()[0].target
+        == ftlpu::IcuLocation::Mem(40));
+
     auto system = std::make_unique<ftlpu::TspSliceSystem>();
     ftlpu::GlobalMemoryAddressSpace global_memory;
     global_memory.bind_hemisphere(0, system->mem().memory_model());
     ftlpu::HostMemorySpace host;
     const auto program_buffer = host.register_buffer(layout.host_bytes());
+    const auto mem_loader_buffer =
+        host.register_buffer(mem_loader_layout.host_bytes());
     ftlpu::DmaEngine dma(host, global_memory);
-    const auto descriptors = layout.make_dma_descriptors(program_buffer);
-    assert(descriptors.size() == 2);
-    assert(descriptors[0].purpose == ftlpu::DmaPurpose::Program);
-    assert(descriptors[0].vector_count == 2);
-    assert(descriptors[1].vector_count == 2);
+    auto descriptors = layout.make_dma_descriptors(program_buffer);
+    const auto loader_descriptors =
+        mem_loader_layout.make_dma_descriptors(mem_loader_buffer);
+    descriptors.insert(
+        descriptors.end(), loader_descriptors.begin(), loader_descriptors.end());
+    assert(descriptors.size() == 3);
     for (const auto& descriptor : descriptors) {
+        assert(descriptor.purpose == ftlpu::DmaPurpose::Program);
+        assert(descriptor.vector_count == 2);
         const auto local = descriptor.memory_address.slice_byte_address()
                                .local_word_address();
         assert(local.word() + descriptor.vector_count
@@ -128,42 +158,25 @@ int main()
     while (!dma.idle()) {
         assert(dma.tick());
     }
-    assert(dma.completion_history().size() == 2);
+    assert(dma.completion_history().size() == 3);
 
-    const auto kInstructionStream = ftlpu::StreamId::East(31);
-    auto preamble = ftlpu::BootstrapPreambleBuilder::ForProgramBlock(
+    auto preamble = ftlpu::BootstrapPreambleBuilder::ForAutonomousMem(
+        mem_loader_layout.placements()[0],
         layout.placements()[0],
-        kInstructionStream,
-        ftlpu::IcuLocation::Mem(0));
-    // One resident instruction behind Fetch proves that frontend collection
-    // and existing-IQ dispatch overlap. It remains bootstrap state, not part
-    // of the DMA-loaded program body.
-    preamble.entries.insert(
-        preamble.entries.begin() + 3,
-        ftlpu::BootstrapEntry {
-            ftlpu::IcuLocation::MxmLoad(0),
-            ftlpu::MxmControlInstruction::IW(1)});
+        kInstructionStream);
+    assert(preamble.mem_local_bootstraps.size() == 1);
+    assert(preamble.entries.size() == 2);
+    for (const auto& entry : preamble.entries) {
+        assert(!std::holds_alternative<ftlpu::MemInstruction>(entry.instruction));
+        assert(!std::holds_alternative<ftlpu::MxmControlInstruction>(entry.instruction));
+    }
     ftlpu::load_bootstrap_preamble(system->icu(), preamble);
-
-    // Schedule the second SRAM block to appear exactly when Fetch #2 reaches
-    // the head. The first decoded block is already behind Fetch #2, so the IQ
-    // does not drain while the second frontend transaction runs.
-    system->icu().enqueue_mxm_control(
-        0,
-        ftlpu::InstructionControlUnit::MxmIcuPort::Load,
-        ftlpu::IcuControlInstruction::Fetch(kInstructionStream));
-    system->icu().enqueue_mem_control(
-        40, ftlpu::IcuControlInstruction::Nop(35));
-    system->icu().enqueue_mem(
-        40, ftlpu::MemInstruction::Read(second_local, kInstructionStream));
-    system->icu().enqueue_mem(
-        40,
-        ftlpu::MemInstruction::Read(
-            second_local.next_word(), kInstructionStream));
+    assert(system->icu().mem_local_fetch_active(40));
+    assert(system->icu().mem_iq(40).iq_occupancy() == 0);
 
     auto& target_iq = system->icu().mxm_iq(
         0, ftlpu::InstructionControlUnit::MxmIcuPort::Load);
-    bool overlap_observed = false;
+    bool mem_local_bootstrap_completed = false;
     bool sync_block_observed = false;
     bool first_fetch_committed = false;
     bool second_fetch_started = false;
@@ -177,9 +190,16 @@ int main()
         provide_mxm0_weight_streams(*system);
         system->tick(ftlpu::TspSliceSystem::LogSinks {});
 
+        if (cycle == 0) {
+            const auto* state = system->icu().mem_local_fetch_state(40);
+            assert(state != nullptr && state->next_vector == 1);
+            assert(system->icu().mem_iq(40).iq_occupancy() == 0);
+        }
         if (cycle == 1) {
-            overlap_observed = target_iq.fetch_active()
-                && target_iq.iq_occupancy() == 2;
+            mem_local_bootstrap_completed =
+                !system->icu().mem_local_fetch_active(40)
+                && system->icu().mem_iq(40).iq_occupancy()
+                    == ftlpu::hw::kIcuFetchPackets;
         }
         sync_block_observed = sync_block_observed
             || target_iq.blocked_on_sync();
@@ -191,7 +211,7 @@ int main()
         if (was_active && !target_iq.fetch_active()
             && old_fetch_count == 1) {
             first_fetch_committed = true;
-            assert(target_iq.iq_occupancy() >= 42);
+            assert(target_iq.iq_occupancy() >= 41);
         }
         if (target_iq.fetch_count() == 2 && target_iq.fetch_active()) {
             second_fetch_started = true;
@@ -212,7 +232,7 @@ int main()
         }
     }
 
-    assert(overlap_observed);
+    assert(mem_local_bootstrap_completed);
     assert(sync_block_observed);
     assert(sync_release_cycle >= ftlpu::hw::kIcuBarrierLatencyCycles);
     assert(first_fetch_committed);

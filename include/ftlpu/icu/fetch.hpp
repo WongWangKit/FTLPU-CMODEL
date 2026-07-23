@@ -3,6 +3,7 @@
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/instruction_packet.hpp"
 #include "ftlpu/core/stream.hpp"
+#include "ftlpu/mem/address.hpp"
 
 #include <array>
 #include <bitset>
@@ -181,6 +182,16 @@ struct IcuFetchState {
     StreamId source_stream{};
     IcuFetchBuffer buffer{};
     bool iq_reserved{false};
+};
+
+// A MEM ICU can bootstrap its own IQ from the SRAM in the same MEM slice.
+// One 320-byte vector is read per cycle; two vectors form the same 640-byte,
+// 40-packet unit used by stream-facing Ifetch.
+struct MemIcuLocalFetchState {
+    MemLocalWordAddress13 base_address{};
+    std::size_t next_vector{0};
+    IcuFetchBuffer::PacketArray packets{};
+    bool completion_staged{false};
 };
 
 } // namespace ftlpu

@@ -185,7 +185,24 @@ public:
             return;
         }
 
-        const auto packets = fetch_state_->buffer.packets();
+        stage_fetched_packets(fetch_state_->buffer.packets());
+    }
+
+    // Starts a non-stream packet transfer, currently used only by a MEM ICU
+    // reading the SRAM physically local to its functional slice.
+    void begin_local_fetch()
+    {
+        begin_fetch_reservation();
+    }
+
+    void stage_fetched_packets(const IcuFetchBuffer::PacketArray& packets)
+    {
+        if (!fetch_reservation_active_) {
+            throw std::logic_error("ICU packet fetch has no active IQ reservation");
+        }
+        if (!pending_fetch_entries_.empty()) {
+            throw std::logic_error("ICU packet fetch already has a pending completion");
+        }
         pending_fetch_entries_.reserve(packets.size());
         for (const auto& packet : packets) {
             pending_fetch_entries_.push_back(
@@ -198,7 +215,7 @@ public:
         if (pending_fetch_entries_.empty()) {
             return;
         }
-        if (!fetch_state_.has_value() || !fetch_state_->iq_reserved) {
+        if (!fetch_reservation_active_) {
             throw std::logic_error("ICU fetch completion has no active IQ reservation");
         }
         if (pending_fetch_entries_.size() != hw::kIcuFetchPackets) {
@@ -211,9 +228,10 @@ public:
         }
         pending_fetch_entries_.clear();
         fetch_state_.reset();
+        fetch_reservation_active_ = false;
     }
 
-    bool fetch_active() const noexcept { return fetch_state_.has_value(); }
+    bool fetch_active() const noexcept { return fetch_reservation_active_; }
     bool fetch_complete_pending_commit() const noexcept
     {
         return !pending_fetch_entries_.empty();
@@ -255,7 +273,7 @@ public:
     bool done() const
     {
         return iq_.empty() && nop_remaining_ == 0 && repeat_remaining_ == 0
-            && !fetch_state_.has_value() && pending_fetch_entries_.empty();
+            && !fetch_reservation_active_ && pending_fetch_entries_.empty();
     }
 
     bool running() const { return !done(); }
@@ -327,6 +345,18 @@ private:
         reserved_bytes_ = 0;
         pending_fetch_entries_.clear();
         fetch_state_.reset();
+        fetch_reservation_active_ = false;
+    }
+
+    void begin_fetch_reservation()
+    {
+        if (fetch_reservation_active_) {
+            throw StaticScheduleError(
+                "one SliceIcu cannot have two active instruction fetches");
+        }
+        reserve_fetch();
+        fetch_reservation_active_ = true;
+        ++fetch_count_;
     }
 
     std::optional<FuncInstruction> execute_control(
@@ -334,14 +364,10 @@ private:
     {
         switch (control.opcode) {
         case IcuControlOpcode::Fetch:
-            if (fetch_state_.has_value()) {
-                throw StaticScheduleError("one SliceIcu cannot have two active Ifetch operations");
-            }
-            reserve_fetch();
+            begin_fetch_reservation();
             fetch_state_ = IcuFetchState {control.source_stream, {}, true};
             fetch_state_->buffer.reset();
             iq_.pop_front();
-            ++fetch_count_;
             return std::nullopt;
         case IcuControlOpcode::Nop:
             iq_.pop_front();
@@ -423,6 +449,7 @@ private:
     std::size_t reserved_bytes_{0};
     std::size_t cycle_{0};
     std::optional<IcuFetchState> fetch_state_{};
+    bool fetch_reservation_active_{false};
     std::vector<Entry> pending_fetch_entries_{};
 };
 
@@ -451,6 +478,7 @@ public:
     {
         reset_all(vxm_iqs_);
         reset_all(mem_iqs_);
+        for (auto& fetch : mem_local_fetches_) fetch.reset();
         for (auto& ports : mxm_iqs_) reset_all(ports);
         barrier_events_.clear();
         cycle_ = 0;
@@ -700,10 +728,78 @@ public:
         }
     }
 
+    // Minimal reset/bootstrap state for a MEM ICU: the address points into
+    // that same MEM slice's SRAM. No MEM Read instruction is injected by C++.
+    void bootstrap_mem_icu_from_local_sram(
+        std::size_t mem_slice,
+        MemLocalWordAddress13 base_address)
+    {
+        check_mem_queue(mem_slice);
+        if (base_address.word() + hw::kIcuFetchVectorCount
+            > hw::kSramWordsPerBank) {
+            throw StaticScheduleError(
+                "MEM ICU local bootstrap block cannot cross an SRAM bank");
+        }
+        if (mem_local_fetches_[mem_slice].has_value()) {
+            throw StaticScheduleError(
+                "MEM ICU already has an active local SRAM bootstrap fetch");
+        }
+        mem_iqs_[mem_slice].begin_local_fetch();
+        mem_local_fetches_[mem_slice] = MemIcuLocalFetchState {
+            base_address, 0, {}, false};
+    }
+
+    void evaluate_mem_local_fetches(const MemArrayModel& memory)
+    {
+        for (std::size_t mem_slice = 0; mem_slice < kMemQueues; ++mem_slice) {
+            auto& state_slot = mem_local_fetches_[mem_slice];
+            if (!state_slot.has_value() || state_slot->completion_staged) {
+                continue;
+            }
+            auto& state = *state_slot;
+            const auto vector = memory.read_sram_vector(
+                mem_slice,
+                state.base_address.advance_words(state.next_vector));
+            for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+                auto& packet = state.packets[
+                    state.next_vector * hw::kTileRows + tile];
+                for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                    packet.bytes[lane] = vector[tile][lane];
+                }
+            }
+            ++state.next_vector;
+            if (state.next_vector == hw::kIcuFetchVectorCount) {
+                mem_iqs_[mem_slice].stage_fetched_packets(state.packets);
+                state.completion_staged = true;
+            }
+        }
+    }
+
+    bool mem_local_fetch_active(std::size_t mem_slice) const
+    {
+        check_mem_queue(mem_slice);
+        return mem_local_fetches_[mem_slice].has_value();
+    }
+
+    const MemIcuLocalFetchState* mem_local_fetch_state(
+        std::size_t mem_slice) const
+    {
+        check_mem_queue(mem_slice);
+        const auto& state = mem_local_fetches_[mem_slice];
+        return state.has_value() ? &*state : nullptr;
+    }
+
     void commit_fetches()
     {
         for (auto& iq : vxm_iqs_) iq.commit_fetch();
-        for (auto& iq : mem_iqs_) iq.commit_fetch();
+        for (std::size_t mem_slice = 0; mem_slice < kMemQueues; ++mem_slice) {
+            const auto local_completion = mem_local_fetches_[mem_slice].has_value()
+                && mem_local_fetches_[mem_slice]->completion_staged;
+            mem_iqs_[mem_slice].commit_fetch();
+            if (local_completion) {
+                mem_local_fetches_[mem_slice].reset();
+            }
+        }
         for (auto& ports : mxm_iqs_) {
             for (auto& iq : ports) iq.commit_fetch();
         }
@@ -878,6 +974,8 @@ private:
 
     std::array<SliceIcu<VxmLaneAluInstruction>, kVxmQueues> vxm_iqs_{};
     std::array<SliceIcu<MemInstruction>, kMemQueues> mem_iqs_{};
+    std::array<std::optional<MemIcuLocalFetchState>, kMemQueues>
+        mem_local_fetches_{};
     std::array<
         std::array<SliceIcu<MxmControlInstruction>, kMxmIcusPerUnit>,
         kMxmUnitCount> mxm_iqs_{};
