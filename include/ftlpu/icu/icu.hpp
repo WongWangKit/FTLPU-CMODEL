@@ -1,6 +1,8 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
+#include "ftlpu/core/stream_port.hpp"
+#include "ftlpu/icu/fetch.hpp"
 #include "ftlpu/icu/instruction.hpp"
 #include "ftlpu/mem/tile_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
@@ -16,6 +18,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -51,6 +54,29 @@ inline MemInstruction apply_icu_repeat_stride(
     return instruction;
 }
 
+template <typename FuncInstruction>
+IqEntry<FuncInstruction> decode_icu_fetch_packet(
+    const isa::EncodedInstructionPacket& packet)
+{
+    if (isa::packet_kind(packet) == isa::InstructionPacketKind::IcuControl) {
+        return IqEntry<FuncInstruction> {
+            std::in_place_type<IcuControlInstruction>,
+            isa::decode_icu_packet(packet)};
+    }
+    if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+        return IqEntry<FuncInstruction> {
+            std::in_place_type<FuncInstruction>, isa::decode_mem_packet(packet)};
+    } else if constexpr (std::is_same_v<FuncInstruction, MxmControlInstruction>) {
+        return IqEntry<FuncInstruction> {
+            std::in_place_type<FuncInstruction>, isa::decode_mxm_packet(packet)};
+    } else if constexpr (std::is_same_v<FuncInstruction, VxmLaneAluInstruction>) {
+        return IqEntry<FuncInstruction> {
+            std::in_place_type<FuncInstruction>, isa::decode_vxm_packet(packet)};
+    } else {
+        throw std::logic_error("ICU Ifetch decoder does not support this functional instruction type");
+    }
+}
+
 } // namespace detail
 
 // One program-ordered instruction queue for one functional slice.  ICU
@@ -64,6 +90,8 @@ public:
     void reset()
     {
         iq_.clear();
+        pending_fetch_entries_.clear();
+        fetch_state_.reset();
         clear_runtime_state();
         cycle_ = 0;
     }
@@ -97,7 +125,9 @@ public:
         enqueue(Entry {std::in_place_type<IcuControlInstruction>, instruction});
     }
 
-    std::optional<FuncInstruction> tick()
+    // Dispatch consumes only the current IQ state.  Instructions decoded by
+    // evaluate_fetch remain invisible until commit_fetch is called.
+    std::optional<FuncInstruction> dispatch()
     {
         ++cycle_;
         notify_emitted_ = false;
@@ -122,6 +152,75 @@ public:
 
         const auto control = std::get<IcuControlInstruction>(iq_.front());
         return execute_control(control);
+    }
+
+    std::optional<FuncInstruction> tick()
+    {
+        return dispatch();
+    }
+
+    void evaluate_fetch(StreamRegisterFabric& fabric, std::size_t column)
+    {
+        if (!fetch_state_.has_value() || !pending_fetch_entries_.empty()) {
+            return;
+        }
+        if (!fabric.cycle_open()) {
+            throw std::logic_error("ICU evaluate_fetch requires an open SR cycle");
+        }
+        if (column >= fabric.column_count()) {
+            throw std::out_of_range("ICU fetch port maps outside the stream fabric");
+        }
+
+        const auto stream = fetch_state_->source_stream;
+        StreamInputPort input(fabric, column, stream.direction(), "ICU Ifetch");
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+            if (!input.segment_valid(tile, stream.index())) {
+                continue;
+            }
+            fetch_state_->buffer.accept_segment(
+                tile,
+                input.consume_segment(tile, stream.index()));
+        }
+        if (!fetch_state_->buffer.complete()) {
+            return;
+        }
+
+        const auto packets = fetch_state_->buffer.packets();
+        pending_fetch_entries_.reserve(packets.size());
+        for (const auto& packet : packets) {
+            pending_fetch_entries_.push_back(
+                detail::decode_icu_fetch_packet<FuncInstruction>(packet));
+        }
+    }
+
+    void commit_fetch()
+    {
+        if (pending_fetch_entries_.empty()) {
+            return;
+        }
+        if (!fetch_state_.has_value() || !fetch_state_->iq_reserved) {
+            throw std::logic_error("ICU fetch completion has no active IQ reservation");
+        }
+        if (pending_fetch_entries_.size() != hw::kIcuFetchPackets) {
+            throw std::logic_error("ICU fetch completion must contain exactly 40 packets");
+        }
+        release_fetch_reservation();
+        for (auto& entry : pending_fetch_entries_) {
+            // Reservation guaranteed this space at Fetch issue time.
+            iq_.push_back(std::move(entry));
+        }
+        pending_fetch_entries_.clear();
+        fetch_state_.reset();
+    }
+
+    bool fetch_active() const noexcept { return fetch_state_.has_value(); }
+    bool fetch_complete_pending_commit() const noexcept
+    {
+        return !pending_fetch_entries_.empty();
+    }
+    const IcuFetchState* fetch_state() const noexcept
+    {
+        return fetch_state_.has_value() ? &*fetch_state_ : nullptr;
     }
 
     // Supplies one incoming synchronization notification. Tokens are retained
@@ -155,7 +254,8 @@ public:
 
     bool done() const
     {
-        return iq_.empty() && nop_remaining_ == 0 && repeat_remaining_ == 0;
+        return iq_.empty() && nop_remaining_ == 0 && repeat_remaining_ == 0
+            && !fetch_state_.has_value() && pending_fetch_entries_.empty();
     }
 
     bool running() const { return !done(); }
@@ -225,6 +325,8 @@ private:
         notify_emitted_ = false;
         fetch_count_ = 0;
         reserved_bytes_ = 0;
+        pending_fetch_entries_.clear();
+        fetch_state_.reset();
     }
 
     std::optional<FuncInstruction> execute_control(
@@ -232,6 +334,12 @@ private:
     {
         switch (control.opcode) {
         case IcuControlOpcode::Fetch:
+            if (fetch_state_.has_value()) {
+                throw StaticScheduleError("one SliceIcu cannot have two active Ifetch operations");
+            }
+            reserve_fetch();
+            fetch_state_ = IcuFetchState {control.source_stream, {}, true};
+            fetch_state_->buffer.reset();
             iq_.pop_front();
             ++fetch_count_;
             return std::nullopt;
@@ -314,6 +422,8 @@ private:
     std::size_t fetch_count_{0};
     std::size_t reserved_bytes_{0};
     std::size_t cycle_{0};
+    std::optional<IcuFetchState> fetch_state_{};
+    std::vector<Entry> pending_fetch_entries_{};
 };
 
 // Whole-system ICU wiring. Each array element is one SliceIcu and therefore
@@ -494,6 +604,35 @@ public:
     {
         check_mxm_queue(mxm);
         return mxm_iqs_[mxm][static_cast<std::size_t>(port)];
+    }
+
+    // Fetch frontend is intentionally separate from dispatch so a system can
+    // read current SR state before functional slices write next SR state.
+    void evaluate_fetches(
+        StreamRegisterFabric& fabric,
+        const IcuFetchPortMap& ports)
+    {
+        for (std::size_t alu = 0; alu < kVxmQueues; ++alu) {
+            vxm_iqs_[alu].evaluate_fetch(fabric, ports.column(IcuLocation::Vxm(alu)));
+        }
+        for (std::size_t column = 0; column < kMemQueues; ++column) {
+            mem_iqs_[column].evaluate_fetch(fabric, ports.column(IcuLocation::Mem(column)));
+        }
+        for (std::size_t mxm = 0; mxm < kMxmUnitCount; ++mxm) {
+            mxm_iqs_[mxm][static_cast<std::size_t>(MxmIcuPort::Load)].evaluate_fetch(
+                fabric, ports.column(IcuLocation::MxmLoad(mxm)));
+            mxm_iqs_[mxm][static_cast<std::size_t>(MxmIcuPort::Compute)].evaluate_fetch(
+                fabric, ports.column(IcuLocation::MxmCompute(mxm)));
+        }
+    }
+
+    void commit_fetches()
+    {
+        for (auto& iq : vxm_iqs_) iq.commit_fetch();
+        for (auto& iq : mem_iqs_) iq.commit_fetch();
+        for (auto& ports : mxm_iqs_) {
+            for (auto& iq : ports) iq.commit_fetch();
+        }
     }
 
     void dispatch_vxm(VxmSlice& vxm, std::ostream* os = nullptr)

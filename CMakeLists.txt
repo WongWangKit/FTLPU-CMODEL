@@ -56,6 +56,7 @@ ftlpu_add_test(vxm_slice_test tests/vxm/slice_test.cpp)
 ftlpu_add_test(sxm_test tests/sxm/sxm_test.cpp)
 
 ftlpu_add_test(icu_test tests/icu/icu_test.cpp)
+ftlpu_add_test(icu_fetch_test tests/icu/fetch_test.cpp)
 
 ftlpu_add_test(c2c_test tests/c2c/c2c_test.cpp)
 ftlpu_add_test(dma_test tests/dma/dma_test.cpp)
