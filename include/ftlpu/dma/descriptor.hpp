@@ -36,6 +36,7 @@ enum class DmaPurpose : std::uint8_t {
     Model,
     InputTensor,
     OutputTensor,
+    Program,
 };
 
 struct DmaDescriptor {

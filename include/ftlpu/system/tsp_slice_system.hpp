@@ -19,13 +19,25 @@ class TspSliceSystem {
 public:
     static constexpr std::size_t kMxmCount = 2;
 
-    TspSliceSystem()
+    explicit TspSliceSystem(
+        std::size_t barrier_latency_cycles = hw::kIcuBarrierLatencyCycles)
+        : icu_(barrier_latency_cycles)
     {
         constexpr auto kMxmBoundary = hw::kMemBoundaryStreamRegisterColumns - 1;
         for (std::size_t mxm = 0; mxm < kMxmCount; ++mxm) {
             mxms_[mxm].set_stream_ports(MxmStreamPortMap::AtBoundary(
                 kMxmBoundary,
                 mxm * hw::kMxmLoadStreamsPerCycle));
+            fetch_ports_.map(IcuLocation::MxmLoad(mxm), kMxmBoundary);
+            fetch_ports_.map(IcuLocation::MxmCompute(mxm), kMxmBoundary);
+        }
+        for (std::size_t mem_slice = 0;
+             mem_slice < hw::kMemSliceColumns;
+             ++mem_slice) {
+            fetch_ports_.map(
+                IcuLocation::Mem(mem_slice),
+                mem_.memory_model().ports().output_column(
+                    mem_slice, StreamDirection::East));
         }
     }
 
@@ -97,6 +109,16 @@ public:
         return icu_;
     }
 
+    IcuFetchPortMap& icu_fetch_ports() noexcept
+    {
+        return fetch_ports_;
+    }
+
+    const IcuFetchPortMap& icu_fetch_ports() const noexcept
+    {
+        return fetch_ports_;
+    }
+
     void tick(std::ostream& os)
     {
         LogSinks sinks {&os, &os, &os, &os, &os};
@@ -108,19 +130,22 @@ public:
         if (sinks.system != nullptr) {
             *sinks.system << "system cycle " << cycle_ << '\n';
         }
-        icu_.dispatch(mem_, vxm_, mxms_, sinks.icu);
         mem_.begin_cycle();
+        icu_.evaluate_fetches(mem_.stream_fabric(), fetch_ports_);
+        icu_.dispatch(mem_, vxm_, mxms_, sinks.icu);
         tick_mxm_controls(sinks);
         tick_mxm_datapaths(sinks);
         vxm_.prepare_cycle();
         transfer_mem_west_to_vxm(sinks);
         vxm_.tick(sinks.vxm, sinks.vxm_log_tile);
         transfer_vxm_to_mem_east(sinks);
+        icu_.advance_barrier_events();
         if (sinks.mem != nullptr) {
             mem_.tick(*sinks.mem, sinks.mem_log_tile);
         } else {
             mem_.tick();
         }
+        icu_.commit_fetches();
         ++cycle_;
     }
 
@@ -276,6 +301,7 @@ private:
     VxmSlice vxm_{};
     std::array<Mxm, kMxmCount> mxms_{};
     InstructionControlUnit icu_{};
+    IcuFetchPortMap fetch_ports_{};
     std::size_t cycle_{0};
 };
 

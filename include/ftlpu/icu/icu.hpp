@@ -441,12 +441,42 @@ public:
     static constexpr std::size_t kMxmUnitCount = 2;
     static constexpr std::size_t kMxmIcusPerUnit = 2;
 
+    explicit InstructionControlUnit(
+        std::size_t barrier_latency_cycles = hw::kIcuBarrierLatencyCycles)
+        : barrier_latency_cycles_(barrier_latency_cycles)
+    {
+    }
+
     void reset()
     {
         reset_all(vxm_iqs_);
         reset_all(mem_iqs_);
         for (auto& ports : mxm_iqs_) reset_all(ports);
+        barrier_events_.clear();
         cycle_ = 0;
+    }
+
+    // Location is topology/control-plane state and is deliberately not
+    // encoded in Fetch itself.
+    void enqueue_control(
+        IcuLocation location,
+        IcuControlInstruction instruction)
+    {
+        switch (location.kind) {
+        case IcuLocationKind::Mem:
+            enqueue_mem_control(location.index, instruction);
+            return;
+        case IcuLocationKind::Vxm:
+            enqueue_vxm_control(location.index, instruction);
+            return;
+        case IcuLocationKind::MxmLoad:
+            enqueue_mxm_control(location.unit, MxmIcuPort::Load, instruction);
+            return;
+        case IcuLocationKind::MxmCompute:
+            enqueue_mxm_control(location.unit, MxmIcuPort::Compute, instruction);
+            return;
+        }
+        throw std::logic_error("unknown ICU location kind");
     }
 
     void enqueue_nop(std::size_t cycles)
@@ -567,6 +597,50 @@ public:
     void notify_vxm(std::size_t alu) { vxm_iq(alu).notify(); }
     void notify_mem(std::size_t column) { mem_iq(column).notify(); }
     void notify_mxm(std::size_t mxm, MxmIcuPort port) { mxm_iq(mxm, port).notify(); }
+
+    // Called once after this cycle's dispatch/evaluate phase.  Notify is a
+    // chip-wide event: after the modeled barrier latency, every SliceIcu gets
+    // one token and any Sync at a queue head can retire on its next dispatch.
+    void advance_barrier_events()
+    {
+        for (auto& remaining : barrier_events_) {
+            if (remaining > 0) {
+                --remaining;
+            }
+        }
+        while (!barrier_events_.empty() && barrier_events_.front() == 0) {
+            barrier_events_.pop_front();
+            broadcast_notification();
+        }
+
+        const auto emitted = take_emitted_notifications();
+        for (std::size_t event = 0; event < emitted; ++event) {
+            if (barrier_latency_cycles_ == 0) {
+                broadcast_notification();
+            } else {
+                barrier_events_.push_back(barrier_latency_cycles_);
+            }
+        }
+    }
+
+    void broadcast_notification()
+    {
+        for (auto& iq : vxm_iqs_) iq.notify();
+        for (auto& iq : mem_iqs_) iq.notify();
+        for (auto& ports : mxm_iqs_) {
+            for (auto& iq : ports) iq.notify();
+        }
+    }
+
+    std::size_t barrier_latency_cycles() const noexcept
+    {
+        return barrier_latency_cycles_;
+    }
+
+    std::size_t pending_barrier_event_count() const noexcept
+    {
+        return barrier_events_.size();
+    }
 
     SliceIcu<VxmLaneAluInstruction>& vxm_iq(std::size_t alu)
     {
@@ -697,6 +771,17 @@ public:
     std::size_t cycle() const noexcept { return cycle_; }
 
 private:
+    std::size_t take_emitted_notifications()
+    {
+        std::size_t count = 0;
+        for (auto& iq : vxm_iqs_) count += iq.take_notify() ? 1 : 0;
+        for (auto& iq : mem_iqs_) count += iq.take_notify() ? 1 : 0;
+        for (auto& ports : mxm_iqs_) {
+            for (auto& iq : ports) count += iq.take_notify() ? 1 : 0;
+        }
+        return count;
+    }
+
     template <typename QueueArray>
     static void reset_all(QueueArray& queues)
     {
@@ -796,6 +881,8 @@ private:
     std::array<
         std::array<SliceIcu<MxmControlInstruction>, kMxmIcusPerUnit>,
         kMxmUnitCount> mxm_iqs_{};
+    std::size_t barrier_latency_cycles_{hw::kIcuBarrierLatencyCycles};
+    std::deque<std::size_t> barrier_events_{};
     std::size_t cycle_{0};
 };
 

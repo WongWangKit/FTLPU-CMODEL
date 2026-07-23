@@ -61,6 +61,7 @@ ftlpu_add_test(icu_fetch_test tests/icu/fetch_test.cpp)
 
 ftlpu_add_test(c2c_test tests/c2c/c2c_test.cpp)
 ftlpu_add_test(dma_test tests/dma/dma_test.cpp)
+ftlpu_add_test(icu_program_ifetch_test tests/integration/icu_program_ifetch_test.cpp)
 
 
 ftlpu_add_demo(northbound_pipeline_demo examples/core/northbound_pipeline_demo.cpp)
