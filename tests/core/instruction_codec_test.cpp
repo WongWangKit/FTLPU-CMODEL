@@ -14,7 +14,9 @@ bool same_mem(const ftlpu::MemInstruction& lhs, const ftlpu::MemInstruction& rhs
         && lhs.address == rhs.address
         && lhs.stream == rhs.stream
         && lhs.map_stream == rhs.map_stream
-        && lhs.accumulator_destination == rhs.accumulator_destination;
+        && lhs.accumulator_destination == rhs.accumulator_destination
+        && lhs.write_address == rhs.write_address
+        && lhs.write_stream == rhs.write_stream;
 }
 
 bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlInstruction& rhs)
@@ -64,6 +66,7 @@ bool verify_mem_codec()
     const ftlpu::MemInstruction instructions[] {
         ftlpu::MemInstruction::Read(4096, 45),
         ftlpu::MemInstruction::Write(ftlpu::hw::kSramDepthRows - 1, 63),
+        ftlpu::MemInstruction::ReadWrite(4095, 7, 4096, 55),
         ftlpu::MemInstruction::Gather(7, 55),
         ftlpu::MemInstruction::Scatter(36, 12),
         ftlpu::MemInstruction::Accumulate(

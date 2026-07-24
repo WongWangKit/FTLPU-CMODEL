@@ -35,7 +35,7 @@ DEFAULT_WINDOWS = (
     Window(37440, 37880, "Softmax: pipelined P1 max, P2 exp/sum, and P3 normalize/cast"),
     Window(52288, 52692, "Post-softmax P layout: packed x16 blocks at II=4"),
     Window(52692, 52980, "P x V: passive cross-hemisphere streams, V IW, and direct P replay"),
-    Window(63108, 63420, "o_proj: first reduction window"),
+    Window(63108, 63420, "o_proj: first four-MXM reduction wave"),
 )
 
 
@@ -64,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         default=[],
         metavar="START:END:TITLE",
         help="Cycle window to render; may be repeated.",
+    )
+    parser.add_argument("--title", default="SmolLM2 Attention: Exact ICU Schedule Windows")
+    parser.add_argument(
+        "--subtitle",
+        default="Bars are tile0 instruction issue intervals; MXM/SXM drain tails are omitted. Hover for cycle, resource, slice/stream/address, and repeat details.",
     )
     return parser.parse_args()
 
@@ -122,7 +127,7 @@ def event_color(event: Event) -> str:
     resource = event.resource
     if resource.startswith("MEM"):
         if resource.endswith(".Accumulate"):
-            destination = "Stream" if "dst=stream+clear" in event.detail else "Sram"
+            destination = "Stream" if accumulator_stream_destination(event.detail) else "Sram"
             return COLORS["MEM.Accumulate." + destination]
         return COLORS["MEM." + resource.rsplit(".", 1)[-1]]
     if resource.startswith("SXM"):
@@ -136,13 +141,17 @@ def event_color(event: Event) -> str:
     return COLORS["MXM.Tail"]
 
 
+def accumulator_stream_destination(detail: str) -> bool:
+    return "dst=stream+clear" in detail or "-> stream + clear" in detail
+
+
 def detail_class(event: Event) -> str:
     if event.resource.startswith("MEM"):
         if event.resource.endswith(".Read"):
             return "continuous reads"
         if event.resource.endswith(".Write"):
             return "continuous writes"
-        destination = "stream + clear" if "dst=stream+clear" in event.detail else "SRAM"
+        destination = "stream + clear" if accumulator_stream_destination(event.detail) else "SRAM"
         return f"continuous accumulates -> {destination}"
     if event.resource.endswith(".Load"):
         return re.sub(r" column=\d+", "", event.detail)
@@ -157,6 +166,9 @@ def coalesce(events: list[Event]) -> list[tuple[Event, int]]:
     merged: list[tuple[Event, int]] = []
     for (resource, detail), group in grouped.items():
         ordered = sorted(group, key=lambda event: (event.start, event.end))
+        if resource.endswith(".Compute"):
+            merged.extend((Event(event.start, event.end, resource, detail), 1) for event in ordered)
+            continue
         start = ordered[0].start
         end = ordered[0].end
         count = 1
@@ -176,7 +188,13 @@ def esc(value: str) -> str:
     return html.escape(value, quote=True)
 
 
-def render(events: list[Event], windows: tuple[Window, ...], output: Path) -> None:
+def render(
+    events: list[Event],
+    windows: tuple[Window, ...],
+    output: Path,
+    title: str = "SmolLM2 Attention: Exact ICU Schedule Windows",
+    subtitle: str = "Bars are tile0 instruction issue intervals; MXM/SXM drain tails are omitted. Hover for cycle, resource, slice/stream/address, and repeat details.",
+) -> None:
     width = 1800
     left = 245
     right = 45
@@ -208,8 +226,8 @@ def render(events: list[Event], windows: tuple[Window, ...], output: Path) -> No
         ".lane{fill:#fafbfc;stroke:#e1e6eb;stroke-width:1}",
         "</style>",
         '<rect width="100%" height="100%" fill="#fff"/>',
-        '<text x="42" y="43" class="title">SmolLM2 Attention: Exact ICU Schedule Windows</text>',
-        '<text x="42" y="69" class="sub">Bars are tile0 instruction issue intervals; MXM/SXM drain tails are omitted. Hover for cycle, resource, slice/stream/address, and repeat details.</text>',
+        f'<text x="42" y="43" class="title">{esc(title)}</text>',
+        f'<text x="42" y="69" class="sub">{esc(subtitle)}</text>',
         '<rect x="42" y="82" width="18" height="12" rx="2" fill="#c5a3d9" stroke="#52606c" stroke-width="0.7"/>',
         '<text x="68" y="93" class="sub">Accumulator -&gt; SRAM (keep partial sum)</text>',
         '<rect x="340" y="82" width="18" height="12" rx="2" fill="#e16b6f" stroke="#52606c" stroke-width="0.7"/>',
@@ -272,7 +290,7 @@ def render(events: list[Event], windows: tuple[Window, ...], output: Path) -> No
 def main() -> None:
     args = parse_args()
     windows = parse_windows(args.window)
-    render(load_events(args.input, windows), windows, args.output)
+    render(load_events(args.input, windows), windows, args.output, args.title, args.subtitle)
 
 
 if __name__ == "__main__":

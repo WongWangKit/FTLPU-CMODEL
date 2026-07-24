@@ -12,12 +12,12 @@
 namespace ftlpu {
 
 // One SRAM storage block owned by one MEM functional slice. It contains 8192
-// rows (two 4096-row banks), and every row spans all configured tiles:
+// rows (two logical 4096-row banks), and every row spans all configured tiles:
 //
-//   8192 rows * (4 tiles * 16 bytes) = 512 KiB.
+//   8192 rows * (4 tiles * 8 bytes) = 256 KiB.
 //
 // MEM instructions address rows.  As an instruction travels through a tile,
-// that tile reads or writes its own contiguous 16-byte portion of the row.
+// that tile reads or writes its own contiguous 8-byte portion of the row.
 class SramBank {
 public:
     static constexpr std::size_t kRows = hw::kSramDepthRows;

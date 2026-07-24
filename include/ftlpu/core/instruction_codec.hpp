@@ -19,10 +19,11 @@ namespace isa {
 
 // FTLPU hardware ISA encoding for the modeled slice.
 //
-// MEM 32b:
+// MEM instruction word (32b normally, 41b for ReadWrite):
 //   [2:0] opcode, [8:3] stream, [14:9] map stream,
 //   [27:15] slice-local SRAM word address, copied from software address bits [16:4],
 //   [28] accumulator destination (0=SRAM, 1=west stream).
+//   ReadWrite repurposes [14:9] as write stream and [40:28] as write address.
 // MXM control 32b:
 //   IW      [1:0] opcode, [2] weight buffer, [4:3] weight column.
 //   Compute [1:0] opcode, [2] weight buffer, [8:3] activation stream base,
@@ -37,7 +38,7 @@ namespace isa {
 //   NOP    [1:0] opcode, [31:2] cycle count.
 //   Repeat [1:0] opcode, [11:2] count, [19:12] interval,
 //          [31:20] signed MEM address stride.
-using EncodedMemInstruction = std::uint32_t;
+using EncodedMemInstruction = std::uint64_t;
 using EncodedMxmInstruction = std::uint32_t;
 using EncodedIcuCommand = std::uint32_t;
 
@@ -110,14 +111,32 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
         kStreamMask,
         "MEM stream does not fit encoded instruction");
     detail::require_unsigned_fit(
-        static_cast<std::uint64_t>(instruction.map_stream),
-        kStreamMask,
-        "MEM map stream does not fit encoded instruction");
-    detail::require_unsigned_fit(
         static_cast<std::uint64_t>(instruction.address),
         kAddressMask,
         "MEM row address does not fit encoded instruction");
 
+    if (instruction.opcode == MemOpcode::ReadWrite) {
+        if (instruction.address == instruction.write_address) {
+            throw std::logic_error("MEM ReadWrite encodes identical read and write addresses");
+        }
+        detail::require_unsigned_fit(
+            static_cast<std::uint64_t>(instruction.write_stream),
+            kStreamMask,
+            "MEM write stream does not fit encoded instruction");
+        detail::require_unsigned_fit(
+            static_cast<std::uint64_t>(instruction.write_address),
+            kAddressMask,
+            "MEM write row address does not fit encoded instruction");
+        return static_cast<std::uint64_t>(instruction.opcode)
+            | (static_cast<std::uint64_t>(instruction.stream) << 3)
+            | (static_cast<std::uint64_t>(instruction.write_stream) << 9)
+            | (static_cast<std::uint64_t>(instruction.address) << 15)
+            | (static_cast<std::uint64_t>(instruction.write_address) << 28);
+    }
+    detail::require_unsigned_fit(
+        static_cast<std::uint64_t>(instruction.map_stream),
+        kStreamMask,
+        "MEM map stream does not fit encoded instruction");
     detail::require_unsigned_fit(
         static_cast<std::uint64_t>(instruction.accumulator_destination),
         0x1,
@@ -126,7 +145,7 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
         && instruction.accumulator_destination != MemAccumulatorDestination::Sram) {
         throw std::logic_error("only MEM Accumulate may select a stream destination");
     }
-    return static_cast<std::uint32_t>(
+    return static_cast<std::uint64_t>(
         static_cast<std::uint64_t>(instruction.opcode)
         | (static_cast<std::uint64_t>(instruction.stream) << 3)
         | (static_cast<std::uint64_t>(instruction.map_stream) << 9)
@@ -136,12 +155,20 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
 
 inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
 {
-    constexpr std::uint64_t kUsedMask = 0x1fffffffull;
-    detail::require_reserved_zero(word, kUsedMask, "encoded MEM instruction has non-zero reserved bits");
     const auto opcode = static_cast<MemOpcode>(detail::low_bits(word, 0, 0x7));
     const auto stream = static_cast<std::size_t>(detail::low_bits(word, 3, 0x3f));
-    const auto map_stream = static_cast<std::size_t>(detail::low_bits(word, 9, 0x3f));
     const auto address = static_cast<std::size_t>(detail::low_bits(word, 15, 0x1fff));
+    if (opcode == MemOpcode::ReadWrite) {
+        constexpr std::uint64_t kReadWriteMask = (std::uint64_t {1} << 41) - 1;
+        detail::require_reserved_zero(
+            word, kReadWriteMask, "encoded MEM ReadWrite instruction has non-zero reserved bits");
+        const auto write_stream = static_cast<std::size_t>(detail::low_bits(word, 9, 0x3f));
+        const auto write_address = static_cast<std::size_t>(detail::low_bits(word, 28, 0x1fff));
+        return MemInstruction::ReadWrite(address, stream, write_address, write_stream);
+    }
+    constexpr std::uint64_t kUsedMask = 0x1fffffffull;
+    detail::require_reserved_zero(word, kUsedMask, "encoded MEM instruction has non-zero reserved bits");
+    const auto map_stream = static_cast<std::size_t>(detail::low_bits(word, 9, 0x3f));
     const auto accumulator_destination = static_cast<MemAccumulatorDestination>(
         detail::low_bits(word, 28, 0x1));
     if (opcode != MemOpcode::Accumulate
@@ -153,6 +180,8 @@ inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
         return MemInstruction::Read(address, stream);
     case MemOpcode::Write:
         return MemInstruction::Write(address, stream);
+    case MemOpcode::ReadWrite:
+        break;
     case MemOpcode::Gather:
         return MemInstruction::Gather(stream, map_stream);
     case MemOpcode::Scatter:

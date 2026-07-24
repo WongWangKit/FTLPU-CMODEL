@@ -119,13 +119,12 @@ public:
             if (tile == 0 && !compute_active_by_buffer_[weight_buffer]) {
                 reset_buffer_state(weight_buffer);
             }
-            const auto data = collect_activation(mem, tile, stream_base);
-            const auto row = next_row_for_tile_[weight_buffer][tile]++;
-            if (row >= hw::kMxmRows) {
-                throw std::logic_error(
-                    "MXM Compute block exceeded the physical row count; "
-                    "insert an idle issue cycle or switch weight buffers between blocks");
+            const auto absolute_row = next_row_for_tile_[weight_buffer][tile]++;
+            const auto row = absolute_row % hw::kMxmRows;
+            if (tile == 0 && absolute_row >= hw::kMxmRows) {
+                reset_accumulator_row(weight_buffer, row);
             }
+            const auto data = collect_activation(mem, tile, stream_base);
             east_pipeline_[0][tile].push_back(ActivationEvent {tile, row, weight_buffer, output_stream_base, data});
             if (os != nullptr && (!log_tile.has_value() || *log_tile == tile)) {
                 *os << "  MXM" << mxm_id << " consume activation tile=" << tile
@@ -209,6 +208,16 @@ private:
         for (auto& row : contribution_counts_[weight_buffer]) {
             row.fill(0.0f);
         }
+    }
+
+    void reset_accumulator_row(std::size_t weight_buffer, std::size_t row)
+    {
+        check_weight_buffer(weight_buffer);
+        if (row >= hw::kMxmRows) {
+            throw std::out_of_range("MXM accumulator row is outside the physical row set");
+        }
+        accumulators_[weight_buffer][row].fill(0.0f);
+        contribution_counts_[weight_buffer][row].fill(0);
     }
 
     static ActivationData collect_activation(TileArrayModel& mem, std::size_t tile, std::size_t stream_base)

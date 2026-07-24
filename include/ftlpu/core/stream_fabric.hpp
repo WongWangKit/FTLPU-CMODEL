@@ -190,11 +190,11 @@ public:
                 + std::to_string(tile) + ", lane " + std::to_string(lane));
         }
 
-        auto& flag = select(consumed_[column].lanes[tile][lane], stream);
-        if (flag) {
-            throw std::logic_error("stream cell was consumed more than once in the same cycle");
-        }
-        flag = true;
+        // Consumption is a broadcast read. Multiple functional units may
+        // observe the same current-cycle cell; the shared flag only suppresses
+        // passive forwarding after at least one consumer has read it.
+        auto& consumed = select(consumed_[column].lanes[tile][lane], stream);
+        consumed = true;
     }
 
     void consume_segment(
@@ -210,7 +210,8 @@ public:
 
     // Passive SR-to-SR transfer.  Functional slices should first mark any
     // consumed cells and stage their outputs; then the system stages enabled
-    // links.  A consumed value does not continue downstream.
+    // links. Multiple consumers may read a cell, but a value consumed by any
+    // functional unit does not continue downstream.
     void stage_link(const Link& link)
     {
         require_open_cycle();

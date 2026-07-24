@@ -4,7 +4,6 @@
 #include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/mem/tile_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
-#include "ftlpu/mxm/performance_monitor.hpp"
 #include "ftlpu/sxm/slice.hpp"
 #include "ftlpu/system/icu.hpp"
 #include "ftlpu/vxm/slice.hpp"
@@ -136,14 +135,6 @@ public:
         return cycle_;
     }
 
-    const MxmPerformanceMonitor& mxm_performance(std::size_t mxm) const
-    {
-        if (mxm >= kMxmCount) {
-            throw std::out_of_range("MXM performance index is outside the system");
-        }
-        return mxm_performance_[mxm];
-    }
-
 private:
     static SxmStreamPortMap make_sxm_port_map()
     {
@@ -209,7 +200,6 @@ private:
             const auto hemisphere = hemisphere_index(mxm_hemisphere(mxm));
             mxms_[mxm].tick_datapath(
                 mems_[hemisphere], local_mxm_index(mxm), sinks.mxm, sinks.mxm_log_tile);
-            mxm_performance_[mxm].sample(mxms_[mxm]);
         }
     }
 
@@ -382,7 +372,6 @@ private:
     VxmSlice vxm_{};
     std::array<SxmSlice, hw::kHemispheres> sxms_;
     std::array<Mxm, kMxmCount> mxms_{};
-    std::array<MxmPerformanceMonitor, kMxmCount> mxm_performance_{};
     InstructionControlUnit icu_{};
     std::size_t cycle_{0};
 };

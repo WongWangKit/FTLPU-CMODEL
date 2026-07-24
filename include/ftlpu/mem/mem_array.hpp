@@ -309,7 +309,7 @@ private:
     static void check_lane(std::size_t lane)
     {
         if (lane >= hw::kLanesPerTile) {
-            throw std::out_of_range("lane is outside the 16-byte MEM tile segment");
+            throw std::out_of_range("lane is outside the 8-byte MEM tile segment");
         }
     }
 
@@ -325,6 +325,8 @@ private:
             return "Read";
         case MemOpcode::Write:
             return "Write";
+        case MemOpcode::ReadWrite:
+            return "ReadWrite";
         case MemOpcode::Gather:
             return "Gather";
         case MemOpcode::Scatter:
@@ -342,6 +344,11 @@ private:
         case MemOpcode::Read:
         case MemOpcode::Write:
             os << "(a=" << instruction.address << ",s=" << instruction.stream << ")";
+            break;
+        case MemOpcode::ReadWrite:
+            os << "(ra=" << instruction.address << ",rs=" << instruction.stream
+               << ",wa=" << instruction.write_address << ",ws=" << instruction.write_stream
+               << ")";
             break;
         case MemOpcode::Accumulate:
             os << "(a=" << instruction.address << ",s=" << instruction.stream
@@ -386,6 +393,9 @@ private:
                     break;
                 case MemOpcode::Write:
                     execute_write(fabric, mem_slice, tile, *instruction);
+                    break;
+                case MemOpcode::ReadWrite:
+                    execute_read_write(fabric, mem_slice, tile, *instruction);
                     break;
                 case MemOpcode::Accumulate:
                     execute_accumulate(fabric, mem_slice, tile, *instruction);
@@ -466,6 +476,27 @@ private:
             instruction.address,
             bytes,
         });
+    }
+
+    void execute_read_write(
+        StreamRegisterFabric& fabric,
+        std::size_t mem_slice,
+        std::size_t tile,
+        const MemInstruction& instruction)
+    {
+        if (instruction.address == instruction.write_address) {
+            throw std::logic_error("MEM ReadWrite requires distinct read and write addresses");
+        }
+        execute_read(
+            fabric,
+            mem_slice,
+            tile,
+            MemInstruction::Read(instruction.address, instruction.stream_id()));
+        execute_write(
+            fabric,
+            mem_slice,
+            tile,
+            MemInstruction::Write(instruction.write_address, instruction.write_stream_id()));
     }
 
     void execute_accumulate(

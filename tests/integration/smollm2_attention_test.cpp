@@ -33,6 +33,8 @@ constexpr std::size_t kMxm0AccumulatorLatency = 6;
 constexpr std::size_t kMxm1AccumulatorLatency = 5;
 constexpr std::size_t kMxmInputBlockIssueCycles =
     kTile + 2 * (ftlpu::hw::kTileRows - 1);
+constexpr std::size_t kOProjWeightStreamBase = 8;
+constexpr std::size_t kOProjContextStreamBase = 16;
 constexpr std::size_t kRopeWriteLatency = 2;
 constexpr std::size_t kCastWriteLatency = 1;
 constexpr std::array<std::size_t, 8> kWeightSlices {0, 4, 8, 12, 16, 20, 24, 28};
@@ -44,19 +46,24 @@ constexpr std::array<std::size_t, 4> kRopeTableSlices {4, 5, 6, 7};
 constexpr std::array<std::size_t, 4> kKeyReplicaSlices {4, 5, 6, 7};
 constexpr std::array<std::size_t, 4> kScaledScoreSlices {8, 9, 10, 11};
 constexpr std::array<std::size_t, 4> kExpScoreSlices {12, 13, 14, 15};
+constexpr std::array<std::size_t, 4> kCausalMaskSlices {16, 17, 18, 19};
 constexpr std::array<std::size_t, 8> kContextSlices {20, 21, 22, 23, 24, 25, 26, 27};
 constexpr std::array<std::size_t, 4> kAttentionOutputSlices {28, 29, 30, 31};
 constexpr std::size_t kRopeTableAddressBase = 7000;
 constexpr std::size_t kScoreAddressBase = 3000;
 constexpr std::size_t kContextAccumulatorAddressBase = 2000;
 constexpr std::size_t kOutputAccumulatorAddressBase = 2200;
+constexpr std::size_t kOProjWeightAddressBase = 4600;
 constexpr std::size_t kProbabilityPackAddressBase = 6000;
 constexpr std::size_t kQueryIwAddressBase = 7600;
 constexpr std::size_t kValuePackAddressBase = 7800;
+constexpr std::size_t kCausalMaskAddressBase = 8128;
 constexpr std::size_t kProbabilityDiagonalAddressBase = kRopeTableAddressBase;
 constexpr std::size_t kMemToSxmLatency = 12;
 constexpr std::size_t kMemToMxmLatency = 13;
 constexpr float kAttentionScale = 1.0f / 8.0f;
+constexpr float kCausalMaskValue = -1.0e9f;
+constexpr float kOProjAbsoluteTolerance = 1.0e-1f;
 constexpr std::size_t kSoftmaxOutputStream = 8;
 constexpr std::array<std::array<std::size_t, 16>, 2> kQueryIwSlices {{
     {{0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 32, 33}},
@@ -75,13 +82,20 @@ static_assert(kQueryWidth == 18 * kTile);
 static_assert(kRopeTableAddressBase + kSeqLen <= ftlpu::hw::kSramDepthRows);
 static_assert(kScoreAddressBase + kQueryHeads * (kSeqLen / kTile) * kSeqLen
     <= ftlpu::hw::kSramDepthRows);
-static_assert(kOutputAccumulatorAddressBase + kSeqLen <= ftlpu::hw::kSramDepthRows);
+static_assert(kOutputAccumulatorAddressBase
+        + (kHidden / (2 * kTile)) * kSeqLen
+    <= ftlpu::hw::kSramDepthRows);
+static_assert(kOProjWeightAddressBase
+        + (kHidden / (2 * kTile)) * (kHidden / kTile) * 8
+    <= kProbabilityPackAddressBase);
 static_assert(kProbabilityPackAddressBase
         + kQueryHeads * (kSeqLen / kTile)
             * (kSeqLen / ftlpu::hw::kLanesPerTile)
     <= kRopeTableAddressBase);
 static_assert(kQueryIwAddressBase
         + kQueryHeads * (kSeqLen / kTile) * ftlpu::hw::kTileRows
+    <= ftlpu::hw::kSramDepthRows);
+static_assert(kCausalMaskAddressBase + kTile - 1
     <= ftlpu::hw::kSramDepthRows);
 static_assert(kProbabilityDiagonalAddressBase
         + kQueryHeads * (kSeqLen / kTile) * (kSeqLen / kTile)
@@ -340,9 +354,10 @@ public:
             "VXM.ALU" + std::to_string(alu_base + 3), "duplicate FP16 pair 1");
     }
 
-    void softmax_scale_max_at(
+    void softmax_scale_mask_max_at(
         std::size_t cycle,
         bool first_key,
+        std::optional<float> immediate_mask,
         ftlpu::Hemisphere hemisphere)
     {
         const auto instruction = [&](ftlpu::VxmAluOpcode opcode,
@@ -356,15 +371,26 @@ public:
         ftlpu::test::enqueue_alu_at(icu_, vxm_, 0, cycle, instruction(
             ftlpu::VxmAluOpcode::Multiply,
             ftlpu::VxmLaneOperand::StreamFloat32(32),
-            ftlpu::VxmLaneOperand::Imm(kAttentionScale),
+            ftlpu::VxmLaneOperand::Imm(kAttentionScale)));
+        ftlpu::test::enqueue_alu_at(icu_, vxm_, 7, cycle + 1, instruction(
+            ftlpu::VxmAluOpcode::Add,
+            ftlpu::VxmLaneOperand::Alu(0),
+            immediate_mask.has_value()
+                ? ftlpu::VxmLaneOperand::Imm(*immediate_mask)
+                : ftlpu::VxmLaneOperand::StreamFloat32(36),
             kSoftmaxOutputStream));
-        ftlpu::test::enqueue_alu_at(icu_, vxm_, 1, cycle + 1, instruction(
+        ftlpu::test::enqueue_alu_at(icu_, vxm_, 1, cycle + 2, instruction(
             first_key ? ftlpu::VxmAluOpcode::Pass : ftlpu::VxmAluOpcode::Max,
-            first_key ? ftlpu::VxmLaneOperand::Alu(0) : ftlpu::VxmLaneOperand::Alu(1),
-            first_key ? ftlpu::VxmLaneOperand::Imm(0.0f) : ftlpu::VxmLaneOperand::Alu(0)));
-        end_cycle_ = std::max(end_cycle_, cycle + 2);
-        trace(cycle, cycle + 1, "VXM.ALU0", "softmax P1 scale -> E8");
-        trace(cycle + 1, cycle + 2, "VXM.ALU1", first_key ? "softmax P1 max init" : "softmax P1 recurrent max");
+            first_key ? ftlpu::VxmLaneOperand::Alu(7) : ftlpu::VxmLaneOperand::Alu(1),
+            first_key ? ftlpu::VxmLaneOperand::Imm(0.0f) : ftlpu::VxmLaneOperand::Alu(7)));
+        end_cycle_ = std::max(end_cycle_, cycle + 3);
+        trace(cycle, cycle + 1, "VXM.ALU0", "softmax P1 scale");
+        trace(cycle + 1, cycle + 2, "VXM.ALU7",
+            immediate_mask.has_value()
+                ? "softmax P1 add causal immediate -> E8"
+                : "softmax P1 add causal vector -> E8");
+        trace(cycle + 2, cycle + 3, "VXM.ALU1",
+            first_key ? "softmax P1 max init" : "softmax P1 recurrent max");
     }
 
     void softmax_exp_sum_at(
@@ -488,6 +514,34 @@ public:
         end_cycle_ = std::max(end_cycle_, cycle + 1);
     }
 
+    void distribute_o_proj_context_at(
+        std::size_t cycle,
+        std::size_t input_stream_base,
+        ftlpu::Hemisphere source_hemisphere)
+    {
+        const auto remote_hemisphere = source_hemisphere == ftlpu::Hemisphere::East
+            ? ftlpu::Hemisphere::West
+            : ftlpu::Hemisphere::East;
+        const auto pass = [&](std::size_t alu, std::size_t byte,
+                              std::size_t output_stream,
+                              ftlpu::Hemisphere output_hemisphere) {
+            ftlpu::test::enqueue_alu_at(icu_, vxm_, alu, cycle, {
+                ftlpu::VxmAluOpcode::Pass,
+                ftlpu::VxmLaneOperand::StreamInt8(
+                    ftlpu::hw::kEastStreams + input_stream_base + byte),
+                ftlpu::VxmLaneOperand::Imm(0.0f),
+                1.0f, 0, ftlpu::VxmCastTarget::Int8, output_stream,
+                source_hemisphere, output_hemisphere});
+        };
+        for (std::size_t byte = 0; byte < 2; ++byte) {
+            pass(2 + byte, byte, 2 + byte, source_hemisphere);
+            pass(4 + byte, byte, byte, remote_hemisphere);
+            pass(6 + byte, byte, 2 + byte, remote_hemisphere);
+        }
+        end_cycle_ = std::max(end_cycle_, cycle + 1);
+        trace(cycle, cycle + 1, "VXM.ALU2-7", "distribute o_proj context");
+    }
+
     void sxm_transpose_at(
         ftlpu::Hemisphere hemisphere,
         std::size_t cycle,
@@ -589,6 +643,7 @@ private:
         switch (opcode) {
         case ftlpu::MemOpcode::Read: return "Read";
         case ftlpu::MemOpcode::Write: return "Write";
+        case ftlpu::MemOpcode::ReadWrite: return "ReadWrite";
         case ftlpu::MemOpcode::Gather: return "Gather";
         case ftlpu::MemOpcode::Scatter: return "Scatter";
         case ftlpu::MemOpcode::Accumulate: return "Accumulate";
@@ -807,8 +862,7 @@ std::size_t attention_output_address(std::size_t output_block, std::size_t token
 
 std::size_t output_accumulator_address(std::size_t output_pair, std::size_t token)
 {
-    static_cast<void>(output_pair);
-    return kOutputAccumulatorAddressBase + token;
+    return kOutputAccumulatorAddressBase + output_pair * kSeqLen + token;
 }
 
 ftlpu::SxmInstruction::StreamList sxm_streams(std::initializer_list<std::size_t> streams)
@@ -907,6 +961,33 @@ void initialize_rope_tables(ftlpu::TspSliceSystem& system)
                     system.initialize_mem_sram_lane_byte(
                         hemisphere, kRopeTableSlices[3], tile, rope_table_address(token), lane,
                         sin_bits >> 8);
+                }
+            }
+        }
+    }
+}
+
+void initialize_causal_masks(ftlpu::TspSliceSystem& system)
+{
+    for (std::size_t hemisphere_index = 0; hemisphere_index < ftlpu::hw::kHemispheres;
+         ++hemisphere_index) {
+        const auto hemisphere = static_cast<ftlpu::Hemisphere>(hemisphere_index);
+        for (std::size_t local_key = 1; local_key < kTile; ++local_key) {
+            const auto address = kCausalMaskAddressBase + local_key - 1;
+            for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+                for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+                    const auto query_lane = tile * ftlpu::hw::kLanesPerTile + lane;
+                    const auto mask = local_key <= query_lane ? 0.0f : kCausalMaskValue;
+                    const auto bits = std::bit_cast<std::uint32_t>(mask);
+                    for (std::size_t byte = 0; byte < kCausalMaskSlices.size(); ++byte) {
+                        system.initialize_mem_sram_lane_byte(
+                            hemisphere,
+                            kCausalMaskSlices[byte],
+                            tile,
+                            address,
+                            lane,
+                            static_cast<std::uint8_t>(bits >> (8 * byte)));
+                    }
                 }
             }
         }
@@ -1027,13 +1108,16 @@ float read_context(
     const ftlpu::TspSliceSystem& system,
     std::size_t query_head,
     std::size_t token,
-    std::size_t dimension)
+    std::size_t dimension,
+    bool duplicate = false)
 {
     const auto hemisphere = context_hemisphere(query_head);
     const auto local = dimension % kTile;
     const auto tile = local / ftlpu::hw::kLanesPerTile;
     const auto lane = local % ftlpu::hw::kLanesPerTile;
-    const auto slice = dimension < kTile ? kContextSlices[0] : kContextSlices[2];
+    const auto slice = dimension < kTile
+        ? kContextSlices[duplicate ? 4 : 0]
+        : kContextSlices[duplicate ? 6 : 2];
     const auto low = system.read_mem_sram_lane_byte(
         hemisphere, slice, tile, context_address(query_head, token), lane);
     const auto high = system.read_mem_sram_lane_byte(
@@ -1114,6 +1198,7 @@ int main() try
     auto system = ftlpu::TspSliceSystem {};
     initialize_inputs(system, input);
     initialize_rope_tables(system);
+    initialize_causal_masks(system);
     auto schedule = OfflineSchedule(system.icu());
 
     std::size_t phase_start = 0;
@@ -1588,6 +1673,9 @@ int main() try
             : ftlpu::hw::kEastAccumulatorMemSliceBase;
         for (std::size_t key = 0; key < kSeqLen; ++key) {
             const auto vxm_cycle = softmax_cycle + key * kSoftmaxKeyStride;
+            const auto query_block = work.query_block;
+            const auto key_block = key / kTile;
+            const auto local_key = key % kTile;
             for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
                 const auto slice = accumulator_base + byte;
                 schedule.mem_at(
@@ -1597,11 +1685,27 @@ int main() try
                         score_address(work.query_head, work.query_block, key),
                         ftlpu::StreamId::West(byte)));
             }
-            schedule.softmax_scale_max_at(vxm_cycle, key == 0, work.hemisphere);
+            auto immediate_mask = std::optional<float> {0.0f};
+            if (key_block > query_block) {
+                immediate_mask = kCausalMaskValue;
+            } else if (key_block == query_block && local_key != 0) {
+                immediate_mask = std::nullopt;
+                for (std::size_t byte = 0; byte < kCausalMaskSlices.size(); ++byte) {
+                    const auto slice = kCausalMaskSlices[byte];
+                    schedule.mem_at(
+                        mem_queue(work.hemisphere, slice),
+                        vxm_cycle + 1 - west_read_latency(slice),
+                        ftlpu::MemInstruction::Read(
+                            kCausalMaskAddressBase + local_key - 1,
+                            ftlpu::StreamId::West(4 + byte)));
+                }
+            }
+            schedule.softmax_scale_mask_max_at(
+                vxm_cycle, key == 0, immediate_mask, work.hemisphere);
             for (const auto slice : kScaledScoreSlices) {
                 schedule.mem_at(
                     mem_queue(work.hemisphere, slice),
-                    vxm_cycle + 1 + slice / ftlpu::hw::kMemSlicesPerGroup,
+                    vxm_cycle + 2 + slice / ftlpu::hw::kMemSlicesPerGroup,
                     ftlpu::MemInstruction::Write(
                         key,
                         ftlpu::StreamId::East(kSoftmaxOutputStream + slice % 4)));
@@ -2005,76 +2109,89 @@ int main() try
     }
     phase_markers.emplace_back("P x V end", phase_start);
 
-    // Context stays in the hemisphere where P x V produced it.  o_proj reads
-    // local context directly, while a non-local half is routed through VXM on
-    // the exact cycles its East MXM consumer needs it; no remote MEM copy is
-    // materialized.
+    // Context stays in the hemisphere where P x V produced it. Each o_proj
+    // wave owns one output pair and uses its hemisphere-local MXM pair.
+    // Remote context crosses the passive VXM bridge on W16..W19 -> E16..E19.
     phase_start += 16;
     phase_markers.emplace_back("context route ready", phase_start);
-    weight_address = std::max(weight_address, std::size_t {5000});
+    weight_address = std::max(weight_address, kOProjWeightAddressBase);
 
     // Concat(head contexts) is represented by the MEM address layout.  Each
-    // reduction block reads the corresponding head half, duplicates it onto
-    // both MXM activation pairs, and accumulates the 576-wide O projection.
+    // reduction block reads the corresponding head half, broadcasts it to up
+    // to four MXMs, and accumulates the 576-wide O projection.
     for (std::size_t output_pair = 0;
          output_pair < kHidden / (2 * kTile);
          ++output_pair) {
         const auto output_hemisphere = output_pair % ftlpu::hw::kHemispheres == 0
             ? ftlpu::Hemisphere::East
             : ftlpu::Hemisphere::West;
+        const auto west_output_pair = std::optional<std::size_t> {};
         for (std::size_t reduction_block = 0;
              reduction_block < kHidden / kTile;
              ++reduction_block) {
             const auto dequant_start = phase_start + 10;
-            for (std::size_t pulse = 0; pulse < 8; ++pulse) {
-                const auto mxm = pulse / 4;
-                const auto block = 3 - pulse % 4;
-                const auto cycle = dequant_start + pulse;
-                auto instruction = ftlpu::test::DequantSpec {};
-                instruction.input_stream_base = ftlpu::hw::kEastStreams;
-                instruction.output_stream_base = mxm * 16;
-                instruction.input_hemisphere = output_hemisphere;
-                instruction.output_hemisphere = output_hemisphere;
-                for (std::size_t stream = 0;
-                     stream < ftlpu::hw::kLanesPerTile;
-                     ++stream) {
-                    const auto column = output_pair * 2 * kTile + mxm * kTile
-                        + block * ftlpu::hw::kLanesPerTile + stream;
-                    instruction.scales[stream] = output_scales[column];
-                    const auto slice = kWeightSlices[stream];
-                    for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
-                        for (std::size_t lane = 0;
-                             lane < ftlpu::hw::kLanesPerTile;
-                             ++lane) {
-                            const auto hidden = reduction_block * kTile
-                                + tile * ftlpu::hw::kLanesPerTile + lane;
-                            system.initialize_mem_sram_lane_byte(
-                                output_hemisphere,
-                                slice,
-                                tile,
-                                weight_address,
-                                lane,
-                                static_cast<std::uint8_t>(
-                                    output_weights[hidden * kHidden + column]));
+            const auto weight_hemisphere_count = west_output_pair.has_value() ? 2u : 1u;
+            for (std::size_t destination = 0;
+                 destination < weight_hemisphere_count;
+                 ++destination) {
+                const auto weight_hemisphere = output_hemisphere;
+                const auto weight_output_pair = destination == 0
+                    ? output_pair
+                    : *west_output_pair;
+                for (std::size_t pulse = 0; pulse < 8; ++pulse) {
+                    const auto mxm = pulse / 4;
+                    const auto block = 3 - pulse % 4;
+                    const auto cycle = dequant_start + destination * 8 + pulse;
+                    auto instruction = ftlpu::test::DequantSpec {};
+                    instruction.input_stream_base =
+                        ftlpu::hw::kEastStreams + kOProjWeightStreamBase;
+                    instruction.output_stream_base = mxm * 16;
+                    instruction.input_hemisphere = weight_hemisphere;
+                    instruction.output_hemisphere = weight_hemisphere;
+                    for (std::size_t stream = 0;
+                         stream < ftlpu::hw::kLanesPerTile;
+                         ++stream) {
+                        const auto column = weight_output_pair * 2 * kTile + mxm * kTile
+                            + block * ftlpu::hw::kLanesPerTile + stream;
+                        instruction.scales[stream] = output_scales[column];
+                        const auto slice = kWeightSlices[stream];
+                        for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+                            for (std::size_t lane = 0;
+                                 lane < ftlpu::hw::kLanesPerTile;
+                                 ++lane) {
+                                const auto hidden = reduction_block * kTile
+                                    + tile * ftlpu::hw::kLanesPerTile + lane;
+                                system.initialize_mem_sram_lane_byte(
+                                    weight_hemisphere,
+                                    slice,
+                                    tile,
+                                    weight_address,
+                                    lane,
+                                    static_cast<std::uint8_t>(
+                                        output_weights[hidden * kHidden + column]));
+                            }
                         }
+                        schedule.mem_at(
+                            mem_queue(weight_hemisphere, slice),
+                            cycle - west_read_latency(slice),
+                            ftlpu::MemInstruction::Read(
+                                weight_address,
+                                ftlpu::StreamId::West(
+                                    kOProjWeightStreamBase + stream)));
                     }
-                    schedule.mem_at(
-                        mem_queue(output_hemisphere, slice),
-                        cycle - west_read_latency(slice),
-                        ftlpu::MemInstruction::Read(
-                            weight_address, ftlpu::StreamId::West(stream)));
+                    schedule.dequant_at(cycle, instruction);
+                    schedule.mxm_load_at(
+                            ftlpu::InstructionControlUnit::mxm_queue(
+                            weight_hemisphere, mxm),
+                        cycle + kWeightToIwLatency,
+                        0,
+                        block);
+                    ++weight_address;
                 }
-                schedule.dequant_at(cycle, instruction);
-                schedule.mxm_load_at(
-                        ftlpu::InstructionControlUnit::mxm_queue(
-                        output_hemisphere, mxm),
-                    cycle + kWeightToIwLatency,
-                    0,
-                    block);
-                ++weight_address;
             }
 
-            const auto first_compute = dequant_start + 32;
+            const auto first_compute = dequant_start + 32
+                + (west_output_pair.has_value() ? 8 : 0);
             const auto context_head = reduction_block / (kHeadDim / kTile);
             const auto context_half = reduction_block % (kHeadDim / kTile);
             const auto context_source = context_hemisphere(context_head);
@@ -2091,7 +2208,37 @@ int main() try
                     kContextSlices[4 + context_half * 2],
                     kContextSlices[4 + context_half * 2 + 1],
                 };
-                if (context_source == output_hemisphere) {
+                if (west_output_pair.has_value()) {
+                    const auto route_cycle = compute_cycle - kMemToMxmLatency;
+                    for (std::size_t byte = 0; byte < 2; ++byte) {
+                        const auto slice = input_slices[byte];
+                        schedule.mem_repeat_at(
+                            mem_queue(context_source, slice),
+                            compute_cycle - east_read_to_mxm_latency(slice),
+                            ftlpu::MemInstruction::Read(
+                                input_address, ftlpu::StreamId::East(byte)),
+                            kTile, 1);
+                    }
+                    constexpr auto kVxmToMxmRegisterLatency = 1;
+                    const auto vxm_route_cycle = route_cycle - kVxmToMxmRegisterLatency;
+                    for (std::size_t byte = 0; byte < 2; ++byte) {
+                        const auto slice = input_slices[2 + byte];
+                        schedule.mem_repeat_at(
+                            mem_queue(context_source, slice),
+                            vxm_route_cycle - west_read_latency(slice),
+                            ftlpu::MemInstruction::Read(
+                                input_address,
+                                ftlpu::StreamId::West(
+                                    kOProjContextStreamBase + byte)),
+                            kTile, 1);
+                    }
+                    for (std::size_t offset = 0; offset < kTile; ++offset) {
+                        schedule.distribute_o_proj_context_at(
+                            vxm_route_cycle + offset,
+                            kOProjContextStreamBase,
+                            context_source);
+                    }
+                } else if (context_source == output_hemisphere) {
                     for (std::size_t byte = 0; byte < input_slices.size(); ++byte) {
                         schedule.mem_repeat_at(
                             mem_queue(context_source, input_slices[byte]),
@@ -2108,45 +2255,68 @@ int main() try
                             mem_queue(context_source, slice),
                             route_cycle - west_read_latency(slice),
                             ftlpu::MemInstruction::Read(
-                                input_address, ftlpu::StreamId::West(byte)),
+                                input_address,
+                                ftlpu::StreamId::West(
+                                    kOProjContextStreamBase + byte)),
                             kTile, 1);
                     }
-                    for (std::size_t offset = 0; offset < kTile; ++offset) {
-                        schedule.route_byte_streams_at(
-                            route_cycle + offset, 0, 0, input_slices.size(),
-                            context_source, output_hemisphere,
-                            "route context to o_proj");
-                    }
                 }
-                const auto destination = reduction_block + 1 == kHidden / kTile
+                const auto activation_stream = context_source == output_hemisphere
+                    ? 0
+                    : kOProjContextStreamBase;
+                const auto destination =
+                    reduction_block + 1 == kHidden / kTile
                     ? ftlpu::MemAccumulatorDestination::Stream
                     : ftlpu::MemAccumulatorDestination::Sram;
-                schedule.mem_repeat_at(
-                    mem_queue(output_hemisphere,
-                        ftlpu::hw::kWestAccumulatorMemSliceBase),
-                    compute_cycle + kMxm0AccumulatorLatency,
-                    ftlpu::MemInstruction::Accumulate(
-                        output_accumulator_address(
-                            output_pair, token_block * kTile),
-                        ftlpu::StreamId::West(0), destination),
-                    kTile, 1);
-                schedule.mem_repeat_at(
-                    mem_queue(output_hemisphere,
-                        ftlpu::hw::kEastAccumulatorMemSliceBase),
-                    compute_cycle + kMxm1AccumulatorLatency,
-                    ftlpu::MemInstruction::Accumulate(
-                        output_accumulator_address(
-                            output_pair, token_block * kTile),
-                        ftlpu::StreamId::West(4), destination),
-                    kTile, 1);
+                if (reduction_block == 0) {
+                    for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+                        schedule.mem_repeat_at(
+                            mem_queue(output_hemisphere,
+                                ftlpu::hw::kWestAccumulatorMemSliceBase + byte),
+                            compute_cycle + kMxm0AccumulatorLatency,
+                            ftlpu::MemInstruction::Write(
+                                output_accumulator_address(
+                                    output_pair, token_block * kTile),
+                                ftlpu::StreamId::West(byte)),
+                            kTile, 1);
+                        schedule.mem_repeat_at(
+                            mem_queue(output_hemisphere,
+                                ftlpu::hw::kEastAccumulatorMemSliceBase + byte),
+                            compute_cycle + kMxm1AccumulatorLatency,
+                            ftlpu::MemInstruction::Write(
+                                output_accumulator_address(
+                                    output_pair, token_block * kTile),
+                                ftlpu::StreamId::West(4 + byte)),
+                            kTile, 1);
+                    }
+                } else {
+                    schedule.mem_repeat_at(
+                        mem_queue(output_hemisphere,
+                            ftlpu::hw::kWestAccumulatorMemSliceBase),
+                        compute_cycle + kMxm0AccumulatorLatency,
+                        ftlpu::MemInstruction::Accumulate(
+                            output_accumulator_address(
+                                output_pair, token_block * kTile),
+                            ftlpu::StreamId::West(0), destination),
+                        kTile, 1);
+                    schedule.mem_repeat_at(
+                        mem_queue(output_hemisphere,
+                            ftlpu::hw::kEastAccumulatorMemSliceBase),
+                        compute_cycle + kMxm1AccumulatorLatency,
+                        ftlpu::MemInstruction::Accumulate(
+                            output_accumulator_address(
+                                output_pair, token_block * kTile),
+                            ftlpu::StreamId::West(4), destination),
+                        kTile, 1);
+                }
                 schedule.mxm_compute_at(
                         ftlpu::InstructionControlUnit::mxm_queue(
                         output_hemisphere, 0),
-                    compute_cycle, 0, 0);
+                    compute_cycle, activation_stream, 0);
                 schedule.mxm_compute_at(
                         ftlpu::InstructionControlUnit::mxm_queue(
                         output_hemisphere, 1),
-                    compute_cycle, 2, 4);
+                    compute_cycle, activation_stream + 2, 4);
                 if (destination == ftlpu::MemAccumulatorDestination::Stream) {
                     constexpr auto kOutputToVxmLatency = kMxm0AccumulatorLatency
                         + (ftlpu::hw::kWestAccumulatorMemSliceBase
@@ -2171,6 +2341,61 @@ int main() try
                                         output_pair * 2 + byte / 2, token),
                                     ftlpu::StreamId::East(
                                         kSoftmaxOutputStream + byte)));
+                        }
+                    }
+                }
+                if (west_output_pair.has_value()) {
+                    constexpr auto west_hemisphere = ftlpu::Hemisphere::West;
+                    schedule.mem_repeat_at(
+                        mem_queue(west_hemisphere,
+                            ftlpu::hw::kWestAccumulatorMemSliceBase),
+                        compute_cycle + kMxm0AccumulatorLatency,
+                        ftlpu::MemInstruction::Accumulate(
+                            output_accumulator_address(
+                                *west_output_pair, token_block * kTile),
+                            ftlpu::StreamId::West(0), destination),
+                        kTile, 1);
+                    schedule.mem_repeat_at(
+                        mem_queue(west_hemisphere,
+                            ftlpu::hw::kEastAccumulatorMemSliceBase),
+                        compute_cycle + kMxm1AccumulatorLatency,
+                        ftlpu::MemInstruction::Accumulate(
+                            output_accumulator_address(
+                                *west_output_pair, token_block * kTile),
+                            ftlpu::StreamId::West(4), destination),
+                        kTile, 1);
+                    schedule.mxm_compute_at(
+                            ftlpu::InstructionControlUnit::mxm_queue(
+                            west_hemisphere, 0),
+                        compute_cycle, 0, 0);
+                    schedule.mxm_compute_at(
+                            ftlpu::InstructionControlUnit::mxm_queue(
+                            west_hemisphere, 1),
+                        compute_cycle, 2, 4);
+                    if (destination == ftlpu::MemAccumulatorDestination::Stream) {
+                        constexpr auto kOutputToVxmLatency = kMxm0AccumulatorLatency
+                            + (ftlpu::hw::kWestAccumulatorMemSliceBase
+                                / ftlpu::hw::kMemSlicesPerGroup + 1);
+                        for (std::size_t offset = 0; offset < kTile; ++offset) {
+                            const auto token = token_block * kTile + offset;
+                            const auto vxm_cycle = compute_cycle
+                                + kOutputToVxmLatency + offset;
+                            schedule.cast_pair_to_at(
+                                vxm_cycle, west_hemisphere, kSoftmaxOutputStream, 8);
+                            for (std::size_t byte = 0;
+                                 byte < kAttentionOutputSlices.size();
+                                 ++byte) {
+                                const auto slice = kAttentionOutputSlices[byte];
+                                schedule.mem_at(
+                                    mem_queue(west_hemisphere, slice),
+                                    vxm_cycle + 1
+                                        + slice / ftlpu::hw::kMemSlicesPerGroup,
+                                    ftlpu::MemInstruction::Write(
+                                        attention_output_address(
+                                            *west_output_pair * 2 + byte / 2, token),
+                                        ftlpu::StreamId::East(
+                                            kSoftmaxOutputStream + byte)));
+                            }
                         }
                     }
                 }
@@ -2204,13 +2429,6 @@ int main() try
         } catch (const std::exception& ex) {
             throw std::runtime_error(
                 "system cycle " + std::to_string(cycle) + ": " + ex.what());
-        }
-    }
-
-    if (report_schedule) {
-        for (std::size_t mxm = 0; mxm < ftlpu::TspSliceSystem::kMxmCount; ++mxm) {
-            system.mxm_performance(mxm).print(
-                std::cout, "mxm" + std::to_string(mxm));
         }
     }
 
@@ -2274,6 +2492,10 @@ int main() try
             auto logits = std::array<float, kSeqLen> {};
             auto maximum = -std::numeric_limits<float>::infinity();
             for (std::size_t key_token = 0; key_token < kSeqLen; ++key_token) {
+                if (key_token > query_token) {
+                    logits[key_token] = kCausalMaskValue;
+                    continue;
+                }
                 auto score = 0.0f;
                 for (std::size_t dimension = 0; dimension < kHeadDim; ++dimension) {
                     score += golden_outputs[static_cast<std::size_t>(Projection::Query)][
@@ -2285,9 +2507,13 @@ int main() try
                 maximum = std::max(maximum, logits[key_token]);
             }
             auto sum = 0.0f;
-            for (auto& value : logits) {
-                value = std::exp(value - maximum);
-                sum += value;
+            for (std::size_t key_token = 0; key_token < kSeqLen; ++key_token) {
+                if (key_token > query_token) {
+                    logits[key_token] = 0.0f;
+                    continue;
+                }
+                logits[key_token] = std::exp(logits[key_token] - maximum);
+                sum += logits[key_token];
             }
             for (std::size_t key_token = 0; key_token < kSeqLen; ++key_token) {
                 const auto expected = ftlpu::Fp16::from_float(
@@ -2296,6 +2522,13 @@ int main() try
                     query_head, query_token, key_token)] = expected;
                 const auto actual = read_probability(
                     system, query_head, query_token, key_token);
+                if (key_token > query_token && actual != 0.0f) {
+                    std::cerr << "causal mask mismatch at head=" << query_head
+                              << " query=" << query_token
+                              << " key=" << key_token
+                              << " future probability=" << actual << '\n';
+                    return 1;
+                }
                 if (std::fabs(actual - expected) > 2.0e-3f) {
                     std::cerr << "softmax mismatch at head=" << query_head
                               << " query=" << query_token
@@ -2324,6 +2557,16 @@ int main() try
                 contexts[query_token * kHidden + query_head * kHeadDim + dimension] = expected;
                 const auto actual = read_context(
                     system, query_head, query_token, dimension);
+                const auto duplicate = read_context(
+                    system, query_head, query_token, dimension, true);
+                if (duplicate != actual) {
+                    std::cerr << "context duplicate mismatch at head=" << query_head
+                              << " query=" << query_token
+                              << " dimension=" << dimension
+                              << " primary=" << actual
+                              << " duplicate=" << duplicate << '\n';
+                    return 1;
+                }
                 if (std::fabs(actual - expected) > 5.0e-3f) {
                     std::cerr << "context mismatch at head=" << query_head
                               << " query=" << query_token
@@ -2355,7 +2598,7 @@ int main() try
             }
         }
     }
-    if (max_o_proj_error > 7.0e-2f) {
+    if (max_o_proj_error > kOProjAbsoluteTolerance) {
         std::cerr << "o_proj max mismatch at token=" << max_o_proj_token
                   << " column=" << max_o_proj_column
                   << " actual=" << max_o_proj_actual
@@ -2364,8 +2607,9 @@ int main() try
         return 1;
     }
 
-    std::cout << "SmolLM2 attention passed: Q/K/V projection, RoPE, scaled softmax, "
-              << "GQA context, and o_proj[128,576] verified; scheduled_cycles="
+    std::cout << "SmolLM2 causal attention passed: Q/K/V projection, RoPE, masked "
+              << "scaled softmax, GQA context, and o_proj[128,576] verified; "
+              << "causal_mask_vectors=" << kTile - 1 << "; scheduled_cycles="
               << schedule.end_cycle() + 16 << '\n';
     return 0;
 }

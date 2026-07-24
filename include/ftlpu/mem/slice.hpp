@@ -14,6 +14,7 @@ namespace ftlpu {
 enum class MemOpcode {
     Read,
     Write,
+    ReadWrite,
     Gather,
     Scatter,
     Accumulate,
@@ -36,6 +37,9 @@ struct MemInstruction {
     std::size_t stream{0};
     std::size_t map_stream{0};
     MemAccumulatorDestination accumulator_destination{MemAccumulatorDestination::Sram};
+    // Second SRAM port fields, used only by ReadWrite.
+    std::size_t write_address{0};
+    std::size_t write_stream{0};
 
     StreamId stream_id() const
     {
@@ -65,6 +69,39 @@ struct MemInstruction {
     static MemInstruction Write(std::size_t address, std::size_t packed_stream)
     {
         return Write(address, StreamId::from_packed(packed_stream));
+    }
+
+    StreamId write_stream_id() const
+    {
+        return StreamId::from_packed(write_stream);
+    }
+
+    static MemInstruction ReadWrite(
+        std::size_t read_address,
+        StreamId read_stream,
+        std::size_t write_address,
+        StreamId write_stream)
+    {
+        if (read_address == write_address) {
+            throw std::invalid_argument("MEM ReadWrite requires distinct read and write addresses");
+        }
+        auto instruction = MemInstruction {MemOpcode::ReadWrite, read_address, read_stream.packed(), 0};
+        instruction.write_address = write_address;
+        instruction.write_stream = write_stream.packed();
+        return instruction;
+    }
+
+    static MemInstruction ReadWrite(
+        std::size_t read_address,
+        std::size_t read_packed_stream,
+        std::size_t write_address,
+        std::size_t write_packed_stream)
+    {
+        return ReadWrite(
+            read_address,
+            StreamId::from_packed(read_packed_stream),
+            write_address,
+            StreamId::from_packed(write_packed_stream));
     }
 
     static MemInstruction Accumulate(
@@ -126,7 +163,7 @@ struct MemStreamWord {
 };
 
 // Small generic scalar MEM helper retained for unit-level experimentation.
-// The full 20x44 MEM functional-slice model is MemArrayModel in mem_array.hpp.
+// The full 4x44 MEM functional-slice model is MemArrayModel in mem_array.hpp.
 template <typename T>
 class MemSlice {
 public:

@@ -550,6 +550,8 @@ private:
             return "Read";
         case MemOpcode::Write:
             return "Write";
+        case MemOpcode::ReadWrite:
+            return "ReadWrite";
         case MemOpcode::Gather:
             return "Gather";
         case MemOpcode::Scatter:
@@ -566,6 +568,10 @@ private:
         os << mem_opcode_name(instruction.opcode)
            << " address=" << instruction.address
            << " stream=" << instruction.stream;
+        if (instruction.opcode == MemOpcode::ReadWrite) {
+            os << " write_address=" << instruction.write_address
+               << " write_stream=" << instruction.write_stream;
+        }
         if (instruction.opcode == MemOpcode::Accumulate) {
             os << " destination="
                << (instruction.accumulator_destination == MemAccumulatorDestination::Sram

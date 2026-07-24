@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
-  <title id="title">Offline dual-hemisphere W8A16 SwiGLU pipeline</title>
-  <desc id="desc">The complete ICU schedule for gate and up projection followed by a pipelined VXM SwiGLU pass.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1120" viewBox="0 0 1600 1120" role="img" aria-labelledby="title desc">
+  <title id="title">Offline dual-hemisphere W8A16 FFN pipeline</title>
+  <desc id="desc">The complete ICU schedule for gate/up projection, pipelined VXM SwiGLU, and down projection.</desc>
   <style>
     text { font-family: "Segoe UI", Arial, sans-serif; fill: #17212b; letter-spacing: 0; }
     .title { font-size: 28px; font-weight: 700; }
@@ -24,65 +24,57 @@
     .west { fill: none; stroke: #765f9f; stroke-width: 2; }
   </style>
 
-  <rect width="1600" height="980" fill="#ffffff"/>
-  <text x="42" y="45" class="title">Dual-hemisphere W8A16 SwiGLU pipeline</text>
-  <text x="42" y="71" class="subtitle">X[128,576] fp16 x Wgate/Wup[576,1536] int8 -&gt; gate/up fp32 -&gt; SwiGLU[128,1536] fp16</text>
+  <rect width="1600" height="1120" fill="#ffffff"/>
+  <text x="42" y="45" class="title">Dual-hemisphere W8A16 FFN pipeline</text>
+  <text x="42" y="71" class="subtitle">X[128,576] -&gt; gate/up[128,1536] -&gt; SwiGLU[128,1536] -&gt; down[128,576] fp16</text>
 
   <text x="42" y="112" class="section">Complete offline ICU workload</text>
-  <text x="307" y="112" class="small">24 output pairs x 18 K tiles x 234 cycles, then 24 x 128 x 2 pipelined SwiGLU issues</text>
+  <text x="307" y="112" class="small">gate/up + fused SwiGLU: 59,674 cycles | down: 31,143 cycles | total: 90,817 cycles</text>
   <rect x="42" y="130" width="1516" height="166" rx="6" class="panel"/>
   <line x1="235" y1="166" x2="1515" y2="166" class="axis"/>
   <line x1="235" y1="158" x2="235" y2="280" class="grid"/>
-  <line x1="1438" y1="158" x2="1438" y2="280" class="grid"/>
-  <line x1="1511" y1="158" x2="1511" y2="280" class="grid"/>
+  <line x1="1076" y1="158" x2="1076" y2="280" class="grid"/>
+  <line x1="1515" y1="158" x2="1515" y2="280" class="grid"/>
   <text x="228" y="153" class="small">0</text>
-  <text x="1405" y="153" class="small">101,088</text>
-  <text x="1478" y="153" class="small">107,261</text>
+  <text x="1043" y="153" class="small">59,674</text>
+  <text x="1482" y="153" class="small">90,817</text>
   <text x="42" y="200" class="label">East hemisphere</text>
-  <rect x="235" y="181" width="1203" height="27" rx="3" class="gate"/>
-  <rect x="1438" y="181" width="73" height="27" rx="3" class="vxm"/>
-  <text x="785" y="199" text-anchor="middle" class="bar">MXM0 gate + MXM1 up projection, alternating 32-column tiles</text>
-  <text x="1474" y="199" text-anchor="middle" class="bar">SwiGLU</text>
+  <rect x="235" y="181" width="841" height="27" rx="3" class="gate"/>
+  <rect x="1076" y="181" width="439" height="27" rx="3" class="gate"/>
+  <text x="655" y="199" text-anchor="middle" class="bar">MXM0 gate + MXM1 up; final reduction streams into VXM SwiGLU</text>
+  <text x="1295" y="199" text-anchor="middle" class="bar">MXM0/1 down, wave-local II=128</text>
   <text x="42" y="242" class="label">West hemisphere</text>
-  <rect x="235" y="223" width="1203" height="27" rx="3" class="up"/>
-  <rect x="1438" y="223" width="73" height="27" rx="3" class="vxm"/>
-  <text x="785" y="241" text-anchor="middle" class="bar">Same schedule in parallel for the adjacent 32 columns</text>
-  <text x="1474" y="241" text-anchor="middle" class="bar">SwiGLU</text>
-  <rect x="1511" y="181" width="4" height="69" class="idle"/>
-  <text x="875" y="274" text-anchor="middle" class="small">SwiGLU starts at cycle 101,104; final MEM write ends at 107,261; system drain ends at 107,277.</text>
+  <rect x="235" y="223" width="841" height="27" rx="3" class="up"/>
+  <rect x="1076" y="223" width="346" height="27" rx="3" class="up"/>
+  <rect x="1422" y="223" width="93" height="27" rx="3" class="idle"/>
+  <text x="655" y="241" text-anchor="middle" class="bar">East/West row blocks alternate through the shared VXM pipeline</text>
+  <text x="1249" y="241" text-anchor="middle" class="bar">MXM2/3 down, wave-local II=128</text>
+  <text x="875" y="274" text-anchor="middle" class="small">The standalone SwiGLU readback pass is eliminated; final FFN write and drain end at cycle 90,817.</text>
 
-  <text x="42" y="337" class="section">One projection K tile: S .. S+234</text>
-  <text x="335" y="337" class="small">Both hemispheres work concurrently; VXM dequant is staggered because all 16 ALU queues are shared.</text>
+  <text x="42" y="337" class="section">Steady-state projection K tile: S .. S+128</text>
+  <text x="390" y="337" class="small">Compute K while VXM dequant and IW fill K+1 in the alternate weight buffer.</text>
   <rect x="42" y="354" width="1516" height="390" rx="6" class="panel"/>
   <line x1="235" y1="388" x2="1515" y2="388" class="axis"/>
   <g class="small">
-    <text x="231" y="379">0</text><text x="444" y="379">40</text><text x="663" y="379">80</text>
-    <text x="879" y="379">120</text><text x="1098" y="379">160</text><text x="1316" y="379">200</text><text x="1494" y="379">234</text>
+    <text x="231" y="379">0</text><text x="547" y="379">32</text><text x="867" y="379">64</text>
+    <text x="1187" y="379">96</text><text x="1494" y="379">128</text>
   </g>
   <g class="grid">
-    <line x1="235" y1="388" x2="235" y2="722"/><line x1="454" y1="388" x2="454" y2="722"/>
-    <line x1="673" y1="388" x2="673" y2="722"/><line x1="891" y1="388" x2="891" y2="722"/>
-    <line x1="1110" y1="388" x2="1110" y2="722"/><line x1="1329" y1="388" x2="1329" y2="722"/>
+    <line x1="235" y1="388" x2="235" y2="722"/><line x1="555" y1="388" x2="555" y2="722"/>
+    <line x1="875" y1="388" x2="875" y2="722"/><line x1="1195" y1="388" x2="1195" y2="722"/>
     <line x1="1515" y1="388" x2="1515" y2="722"/>
   </g>
 
-  <text x="58" y="423" class="label">MEM weight Read</text>
-  <rect x="240" y="404" width="126" height="25" rx="3" class="memr"/>
-  <text x="303" y="421" text-anchor="middle" class="bar">W8, 8 slices</text>
-  <text x="58" y="460" class="label">VXM Dequant</text>
-  <rect x="290" y="441" width="44" height="25" rx="3" class="vxm"/>
-  <text x="312" y="458" text-anchor="middle" class="bar">East</text>
-  <rect x="334" y="441" width="44" height="25" rx="3" class="vxm" opacity="0.76"/>
-  <text x="356" y="458" text-anchor="middle" class="bar">West</text>
-  <text x="389" y="458" class="small">c10..25</text>
-  <text x="58" y="497" class="label">MXM0 IW gate</text>
-  <rect x="366" y="478" width="22" height="25" rx="2" class="gate"/>
-  <rect x="410" y="478" width="22" height="25" rx="2" class="gate" opacity="0.72"/>
-  <text x="449" y="495" class="small">buffer0, four pulses per hemisphere</text>
-  <text x="58" y="534" class="label">MXM1 IW up</text>
-  <rect x="388" y="515" width="22" height="25" rx="2" class="up"/>
-  <rect x="432" y="515" width="22" height="25" rx="2" class="up" opacity="0.72"/>
-  <text x="469" y="532" class="small">buffer0, four pulses per hemisphere</text>
+  <text x="58" y="423" class="label">MEM next W Read</text>
+  <rect x="235" y="404" width="80" height="25" rx="3" class="memr"/><rect x="555" y="404" width="80" height="25" rx="3" class="memr"/>
+  <text x="275" y="421" text-anchor="middle" class="bar">MXM0</text><text x="595" y="421" text-anchor="middle" class="bar">MXM1</text>
+  <text x="58" y="460" class="label">VXM Dequant K+1</text>
+  <rect x="255" y="441" width="80" height="25" rx="3" class="vxm"/><rect x="575" y="441" width="80" height="25" rx="3" class="vxm"/>
+  <text x="295" y="458" text-anchor="middle" class="bar">E then W</text><text x="615" y="458" text-anchor="middle" class="bar">E then W</text>
+  <text x="58" y="497" class="label">MXM0 IW K+1</text>
+  <rect x="395" y="478" width="80" height="25" rx="2" class="gate"/><text x="435" y="495" text-anchor="middle" class="bar">alt buffer</text>
+  <text x="58" y="534" class="label">MXM1 IW K+1</text>
+  <rect x="715" y="515" width="80" height="25" rx="2" class="up"/><text x="755" y="532" text-anchor="middle" class="bar">alt buffer</text>
 
   <text x="58" y="571" class="label">MEM X Read</text>
   <text x="58" y="608" class="label">MXM0 gate Compute</text>
@@ -90,49 +82,61 @@
   <text x="58" y="682" class="label">ACC group9 gate</text>
   <text x="58" y="719" class="label">ACC group10 up</text>
   <g>
-    <rect x="437" y="552" width="175" height="25" rx="3" class="memr"/>
-    <rect x="464" y="589" width="175" height="25" rx="3" class="gate"/>
-    <rect x="464" y="626" width="175" height="25" rx="3" class="up"/>
-    <rect x="497" y="663" width="175" height="25" rx="3" class="accg"/>
-    <rect x="491" y="700" width="175" height="25" rx="3" class="accu"/>
-    <text x="524" y="569" text-anchor="middle" class="bar">32 X vectors</text>
-    <text x="551" y="606" text-anchor="middle" class="bar">row block 0</text>
-    <text x="551" y="643" text-anchor="middle" class="bar">row block 0</text>
+    <rect x="235" y="552" width="320" height="25" rx="3" class="memr"/>
+    <rect x="235" y="589" width="320" height="25" rx="3" class="gate"/>
+    <rect x="235" y="626" width="320" height="25" rx="3" class="up"/>
+    <rect x="295" y="663" width="320" height="25" rx="3" class="accg"/>
+    <rect x="285" y="700" width="320" height="25" rx="3" class="accu"/>
+    <text x="395" y="569" text-anchor="middle" class="bar">32 X vectors</text>
+    <text x="395" y="606" text-anchor="middle" class="bar">row block 0, shared activation E16..E17</text>
+    <text x="395" y="643" text-anchor="middle" class="bar">row block 0, shared activation E16..E17</text>
   </g>
-  <g transform="translate(263,0)">
-    <rect x="437" y="552" width="175" height="25" rx="3" class="memr"/><rect x="464" y="589" width="175" height="25" rx="3" class="gate"/>
-    <rect x="464" y="626" width="175" height="25" rx="3" class="up"/><rect x="497" y="663" width="175" height="25" rx="3" class="accg"/><rect x="491" y="700" width="175" height="25" rx="3" class="accu"/>
-    <text x="551" y="606" text-anchor="middle" class="bar">row block 1</text><text x="551" y="643" text-anchor="middle" class="bar">row block 1</text>
+  <g transform="translate(320,0)">
+    <rect x="235" y="552" width="320" height="25" rx="3" class="memr"/><rect x="235" y="589" width="320" height="25" rx="3" class="gate"/>
+    <rect x="235" y="626" width="320" height="25" rx="3" class="up"/><rect x="295" y="663" width="320" height="25" rx="3" class="accg"/><rect x="285" y="700" width="320" height="25" rx="3" class="accu"/>
+    <text x="395" y="606" text-anchor="middle" class="bar">row block 1, shared E0..E1</text><text x="395" y="643" text-anchor="middle" class="bar">row block 1, shared E0..E1</text>
   </g>
-  <g transform="translate(525,0)">
-    <rect x="437" y="552" width="175" height="25" rx="3" class="memr"/><rect x="464" y="589" width="175" height="25" rx="3" class="gate"/>
-    <rect x="464" y="626" width="175" height="25" rx="3" class="up"/><rect x="497" y="663" width="175" height="25" rx="3" class="accg"/><rect x="491" y="700" width="175" height="25" rx="3" class="accu"/>
-    <text x="551" y="606" text-anchor="middle" class="bar">row block 2</text><text x="551" y="643" text-anchor="middle" class="bar">row block 2</text>
+  <g transform="translate(640,0)">
+    <rect x="235" y="552" width="320" height="25" rx="3" class="memr"/><rect x="235" y="589" width="320" height="25" rx="3" class="gate"/>
+    <rect x="235" y="626" width="320" height="25" rx="3" class="up"/><rect x="295" y="663" width="320" height="25" rx="3" class="accg"/><rect x="285" y="700" width="320" height="25" rx="3" class="accu"/>
+    <text x="395" y="606" text-anchor="middle" class="bar">row block 2</text><text x="395" y="643" text-anchor="middle" class="bar">row block 2</text>
   </g>
-  <g transform="translate(788,0)">
-    <rect x="437" y="552" width="175" height="25" rx="3" class="memr"/><rect x="464" y="589" width="175" height="25" rx="3" class="gate"/>
-    <rect x="464" y="626" width="175" height="25" rx="3" class="up"/><rect x="497" y="663" width="175" height="25" rx="3" class="accg"/><rect x="491" y="700" width="175" height="25" rx="3" class="accu"/>
-    <text x="551" y="606" text-anchor="middle" class="bar">row block 3</text><text x="551" y="643" text-anchor="middle" class="bar">row block 3</text>
+  <g transform="translate(960,0)">
+    <rect x="235" y="552" width="320" height="25" rx="3" class="memr"/><rect x="235" y="589" width="320" height="25" rx="3" class="gate"/>
+    <rect x="235" y="626" width="320" height="25" rx="3" class="up"/><rect x="295" y="663" width="320" height="25" rx="3" class="accg"/><rect x="285" y="700" width="320" height="25" rx="3" class="accu"/>
+    <text x="395" y="606" text-anchor="middle" class="bar">row block 3</text><text x="395" y="643" text-anchor="middle" class="bar">row block 3</text>
   </g>
 
-  <text x="42" y="786" class="section">Final SwiGLU block: 64 columns x 128 rows</text>
-  <text x="410" y="786" class="small">256 issue cycles; East and West alternate each cycle and the six VXM stages remain full.</text>
+  <text x="42" y="786" class="section">Final K reduction + fused SwiGLU: 64 columns x 128 rows</text>
+  <text x="530" y="786" class="small">East and West 32-row blocks alternate; accumulator output enters VXM without MEM readback.</text>
   <rect x="42" y="803" width="1516" height="122" rx="6" class="panel"/>
-  <text x="58" y="842" class="label">MEM ACC Read</text>
+  <text x="58" y="842" class="label">MEM ACC Stream</text>
   <rect x="235" y="823" width="1090" height="25" rx="3" class="memr"/>
-  <text x="780" y="840" text-anchor="middle" class="bar">gate fp32 on W0..W3 + up fp32 on W4..W7</text>
+  <text x="780" y="840" text-anchor="middle" class="bar">final accumulate + clear: gate W0..W3, up W4..W7</text>
   <text x="58" y="879" class="label">VXM SwiGLU</text>
   <rect x="291" y="860" width="1090" height="25" rx="3" class="vxm"/>
   <text x="836" y="877" text-anchor="middle" class="bar">Mul(gate,up) -&gt; Sigmoid path -&gt; Mul -&gt; Cast fp16; one vector issued every cycle</text>
   <text x="58" y="916" class="label">MEM output Write</text>
   <rect x="362" y="897" width="1090" height="25" rx="3" class="memw"/>
-  <text x="907" y="914" text-anchor="middle" class="bar">E0/E1 -&gt; slices 29/30, latency 13 cycles</text>
+  <text x="907" y="914" text-anchor="middle" class="bar">E0/E1 -&gt; slices 29/30 in both hemispheres, latency 13 cycles</text>
 
-  <rect x="42" y="948" width="13" height="13" class="memr"/><text x="62" y="959" class="small">MEM Read</text>
-  <rect x="141" y="948" width="13" height="13" class="gate"/><text x="161" y="959" class="small">MXM0 gate</text>
-  <rect x="252" y="948" width="13" height="13" class="up"/><text x="272" y="959" class="small">MXM1 up</text>
-  <rect x="356" y="948" width="13" height="13" class="accg"/><text x="376" y="959" class="small">ACC gate</text>
-  <rect x="459" y="948" width="13" height="13" class="accu"/><text x="479" y="959" class="small">ACC up</text>
-  <rect x="548" y="948" width="13" height="13" class="vxm"/><text x="568" y="959" class="small">VXM</text>
-  <rect x="624" y="948" width="13" height="13" class="memw"/><text x="644" y="959" class="small">MEM Write</text>
+  <text x="42" y="966" class="section">Down projection data path</text>
+  <rect x="42" y="983" width="1516" height="82" rx="6" class="panel"/>
+  <text x="58" y="1015" class="label">SwiGLU MEM</text><rect x="235" y="997" width="210" height="25" rx="3" class="memr"/>
+  <text x="340" y="1014" text-anchor="middle" class="bar">local W16/W17 copy per hemisphere</text>
+  <text x="468" y="1015" class="label">Local fanout</text><rect x="570" y="997" width="210" height="25" rx="3" class="vxm"/>
+  <text x="675" y="1014" text-anchor="middle" class="bar">shared E8..E9, E12..E13, or E16..E17</text>
+  <text x="803" y="1015" class="label">4 x MXM</text><rect x="875" y="997" width="210" height="25" rx="3" class="gate"/>
+  <text x="980" y="1014" text-anchor="middle" class="bar">48 K-block reductions</text>
+  <text x="1110" y="1015" class="label">Final cast</text><rect x="1190" y="997" width="210" height="25" rx="3" class="memw"/>
+  <text x="1295" y="1014" text-anchor="middle" class="bar">FP32 -&gt; FP16 -&gt; MEM</text>
+  <text x="58" y="1051" class="small">Ping-pong IW keeps each 48-reduction wave at II=128; wave boundaries drain output and seed the next group.</text>
+
+  <rect x="42" y="1090" width="13" height="13" class="memr"/><text x="62" y="1101" class="small">MEM Read</text>
+  <rect x="141" y="1090" width="13" height="13" class="gate"/><text x="161" y="1101" class="small">MXM0 / down</text>
+  <rect x="276" y="1090" width="13" height="13" class="up"/><text x="296" y="1101" class="small">MXM1 / down</text>
+  <rect x="411" y="1090" width="13" height="13" class="accg"/><text x="431" y="1101" class="small">ACC group9</text>
+  <rect x="526" y="1090" width="13" height="13" class="accu"/><text x="546" y="1101" class="small">ACC group10</text>
+  <rect x="655" y="1090" width="13" height="13" class="vxm"/><text x="675" y="1101" class="small">VXM</text>
+  <rect x="731" y="1090" width="13" height="13" class="memw"/><text x="751" y="1101" class="small">MEM Write</text>
 </svg>

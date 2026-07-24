@@ -24,8 +24,8 @@ schedule still passes the complete numerical golden check.
 | P replay layout | 0 | 1,582 | explicit stage |
 | P x V | 31,392 | 10,856 | -65.4% |
 | Context route | 824 | 16 | -98.1% |
-| o_proj | 48,412 | 31,654 | -34.6% |
-| **Total** | **166,913** | **96,388** | **-42.3%** |
+| o_proj | 48,412 | 18,166 | -62.5% |
+| **Total** | **166,913** | **81,273** | **-51.3%** |
 
 P3 writes packed x16 directly, removing the former two-slice output and VXM
 repacking pass. SXM converts P to its persistent replay layout immediately after
@@ -43,8 +43,10 @@ phase: V projection writes the packed MEM layout as its architectural output.
 - Softmax P3 writes P blocks into 16 streams directly. SXM transposes them after
   softmax and writes ordinary MEM. P x V then replays one FP16 query vector per
   cycle on two streams without invoking SXM for P.
-- Context stays in its producer hemisphere. o_proj routes a remote half on
-  demand instead of materializing a cross-hemisphere MEM copy.
+- Context stays in its producer hemisphere. During a four-MXM o_proj wave, one
+  stored FP16 copy feeds source-local MXM0 directly. The second copy enters
+  VXM, which distributes it to source-local MXM1 and both remote MXMs. No
+  cross-hemisphere MEM copy is materialized.
 
 ## Validated Scheduling Changes
 
@@ -87,46 +89,54 @@ The system samples every MXM on every tick. The validated workload reports:
 
 | MXM | Array utilization | Active-cycle density |
 |---|---:|---:|
-| East MXM0 | 39.99% | 84.21% |
-| East MXM1 | 35.14% | 84.21% |
-| West MXM0 | 14.54% | 84.21% |
-| West MXM1 | 12.12% | 84.21% |
+| East MXM0 | 46.62% | 84.21% |
+| East MXM1 | 46.62% | 84.21% |
+| West MXM0 | 32.76% | 84.21% |
+| West MXM1 | 32.76% | 84.21% |
 
-Combined array utilization is about 25.45%. Active-cycle density is already
+Combined array utilization is about 39.69%. Active-cycle density is already
 high, so the largest remaining gains come from eliminating idle regions and
 balancing work across hemispheres, not from changing the supercell MAC loop.
 
-## Highest-Priority Remaining Overlaps
+## Current State and Remaining Overlaps
 
-### 1. Extend the validated dual-MXM QK schedule to projection and o_proj
+### 1. Remaining: extend four-MXM scheduling to Q/K/V projection
 
 QK now uses all four MXMs whenever both hemispheres have assigned query work.
 RoPE writes each Q head's two 32-value reduction blocks directly into IW-ready
 SRAM layouts spanning 32 MEM slices. Each local MXM receives an independent
 query block and holds its two reduction blocks in weight buffers 0 and 1.
-Because one stream register has a single consumer, K is replicated into the
-released RoPE-table slices: local MXM0 reads original K and local MXM1 reads the
-replica. The two arrays accumulate independent complete score tiles in their
-separate MEM accumulator groups.
+The current schedule replicates K into the released RoPE-table slices, so local
+MXM0 reads original K and local MXM1 reads the replica. The stream fabric now
+supports same-cycle broadcast consumption, so a future schedule can remove this
+replica when both MXMs consume the same register column and stream. The two
+arrays accumulate independent complete score tiles in their separate MEM
+accumulator groups.
 
 The recurrent softmax max/sum state and its temporary SRAM streams remain
 serial, so VXM drains the completed score tiles one at a time. This preserves
 the exact softmax semantics while removing the MXM-side QK serialization.
 
-Projection and o_proj still prepare one reduction at a time and can apply the
-same technique after their weight and activation SRAM lifetimes are separated.
+o_proj now groups adjacent output-column pairs into one wave: East MXM0/1
+compute the even pair while West MXM0/1 compute the odd pair. Nine output pairs
+therefore execute in five waves. The final wave has only the East pair, which
+explains the remaining East/West utilization difference.
+
+Projection still prepares one reduction at a time and can apply the same
+technique after its weight and activation SRAM lifetimes are separated.
 
 Required work:
 
-- extend the independent-work scheduler to projection and o_proj;
+- extend the independent-work scheduler to projection;
 - allocate weight SRAM slices that do not conflict with simultaneous activation
   reads or result writes;
 - keep a buffer live until the final column wavefront has left the MXM.
 
-This removes most of the repeated 42-cycle weight preparation prefix from
-projection and o_proj reduction blocks.
+This would remove most of the repeated 42-cycle weight-preparation prefix from
+Q/K/V projection reduction blocks. The equivalent o_proj change is already
+complete.
 
-### 2. Partition the remaining VXM work by hemisphere
+### 2. Remaining: partition shared VXM work by hemisphere
 
 Projection post-processing is now partitioned: RoPE needs six ALUs per
 hemisphere, so East uses ALU0..5 and West uses ALU8..13. This removes the
@@ -152,7 +162,7 @@ This reduces V matrix loads from 72 to 24. Each load consumes packed V x16 from
 MEM and uses the SXM single-buffer transpose/permute path to write the four explicit
 IW columns directly.
 
-### 4. Pipeline the three softmax passes
+### 4. Remaining: pipeline the three softmax passes
 
 Pass 3 now writes FP16 probabilities directly into the packed x16 layout, and
 the old VXM repacking loop is gone. P transpose currently starts after the full
@@ -172,7 +182,7 @@ After stream remapping, pass 3 of block N can overlap pass 2 of block N+1, and
 both can overlap QK/pass 1 for a later block if its hemisphere and ALU bank are
 available.
 
-### 5. Start consumers as soon as producer data is complete
+### 5. Remaining: start consumers as soon as producer data is complete
 
 The single global `phase_start` acts as a full-chip barrier. Replace it with
 data-ready events:
@@ -187,12 +197,14 @@ data-ready events:
 This is a list-scheduling problem over independent ICU queues rather than a
 sequence of global phases.
 
-### 6. Completed: split o_proj across both hemispheres
+### 6. Completed: run o_proj on all four MXMs
 
-Output-column pairs alternate between hemispheres. Context remains in the
-hemisphere that produced it, while a non-local half is routed through VXM on
-the exact cycles its MXM consumer needs it. No remote context MEM copy is
-materialized.
+Each full wave assigns one output-column pair to each hemisphere, so all four
+MXMs issue Compute together. Context remains in the hemisphere that produced
+it. One existing MEM copy feeds local MXM0 directly; the other is read on
+`W16..W17` and VXM distributes it to local MXM1 plus both remote MXMs. Weight
+dequant uses `W8..W15`, keeping it disjoint from fixed MXM result streams
+`W0..W7`. No remote context MEM copy is materialized.
 
 ### 7. Completed: tile-pipelined SXM transpose buffer
 
@@ -205,11 +217,12 @@ next block in the same cycle, so blocks using the same 16-stream destination
 run at `II=4` with one buffer. Changing the Permute destination, such as MXM0
 `E0..E15` to MXM1 `E16..E31`, first drains the three-cycle northbound tail.
 
-### 8. Completed: independent accumulator address regions
+### 8. Completed: safe accumulator lifetimes
 
-Context accumulator addresses include the query head, and output accumulation
-uses independent rows for its active output blocks. Live partial sums are no
-longer aliased by the next head or output pair.
+Context accumulator addresses include the query head. During o_proj, each
+hemisphere has only one active output pair, and its two local MXMs use the two
+physical accumulator groups. The final reduction emits each sum with
+`stream+clear` before that hemisphere reuses the row for its next pair.
 
 ## SRAM and Stream Allocation
 
