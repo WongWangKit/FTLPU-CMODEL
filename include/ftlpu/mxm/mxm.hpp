@@ -3,7 +3,6 @@
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/fp16.hpp"
 #include "ftlpu/mem/tile_array.hpp"
-#include "ftlpu/mxm/accumulator.hpp"
 #include "ftlpu/mxm/array.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
 
@@ -67,16 +66,6 @@ public:
         return control_;
     }
 
-    MxmAccumulator& accumulator() noexcept
-    {
-        return accumulator_;
-    }
-
-    const MxmAccumulator& accumulator() const noexcept
-    {
-        return accumulator_;
-    }
-
     void reset_datapath()
     {
         for (auto& column : east_pipeline_) {
@@ -100,7 +89,6 @@ public:
         for (auto& cursor : next_row_for_tile_) {
             cursor.fill(0);
         }
-        accumulator_.clear();
         compute_active_by_buffer_.fill(false);
         last_outputs_.clear();
         active_ = false;
@@ -126,7 +114,6 @@ public:
             const auto weight_buffer = control_.compute_weight_buffer(tile).value_or(0);
             const auto stream_base = control_.compute_activation_stream_base(tile).value_or(0);
             const auto output_stream_base = control_.output_stream_base(tile).value_or(0);
-            const auto compute = control_.compute_pulse(tile).value();
             check_weight_buffer(weight_buffer);
             current_compute_active_by_buffer[weight_buffer] = true;
             if (tile == 0 && !compute_active_by_buffer_[weight_buffer]) {
@@ -138,15 +125,7 @@ public:
                 reset_accumulator_row(weight_buffer, row);
             }
             const auto data = collect_activation(mem, tile, stream_base);
-            east_pipeline_[0][tile].push_back(ActivationEvent {
-                tile,
-                row,
-                weight_buffer,
-                output_stream_base,
-                compute.accumulator_address,
-                compute.accumulator_row_stride,
-                compute.accumulator_destination,
-                data});
+            east_pipeline_[0][tile].push_back(ActivationEvent {tile, row, weight_buffer, output_stream_base, data});
             if (os != nullptr && (!log_tile.has_value() || *log_tile == tile)) {
                 *os << "  MXM" << mxm_id << " consume activation tile=" << tile
                     << " row=" << row
@@ -176,17 +155,6 @@ public:
         east_pipeline_ = std::move(next_pipeline);
         last_computing_ = computing;
 
-        for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
-            const auto read = control_.accumulator_read_pulse(tile);
-            if (!read.has_value()) continue;
-            const auto values = accumulator_.read(read->address, tile);
-            emit_stream_values(
-                mem, tile, read->stream_base, read->address, values);
-            if (read->clear) {
-                accumulator_.clear_segment(read->address, tile);
-            }
-        }
-
         if (active_ && pipelines_empty()) {
             active_ = false;
         }
@@ -213,10 +181,6 @@ private:
         std::size_t row{0};
         std::size_t weight_buffer{0};
         std::size_t output_stream_base{0};
-        std::size_t accumulator_address{0};
-        std::size_t accumulator_row_stride{1};
-        MxmAccumulatorDestination accumulator_destination{
-            MxmAccumulatorDestination::Stream};
         ActivationData data{};
     };
 
@@ -321,35 +285,6 @@ private:
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             const auto value = accumulators_[event.weight_buffer][event.row][global_column_base + lane];
             output.values[lane] = value;
-        }
-        const auto address = event.accumulator_address
-            + event.row * event.accumulator_row_stride;
-        accumulator_.accumulate(address, column_block, output.values);
-        if (event.accumulator_destination == MxmAccumulatorDestination::Sram) {
-            return;
-        }
-
-        const auto accumulated = accumulator_.read(address, column_block);
-        emit_stream_values(
-            mem,
-            column_block,
-            event.output_stream_base,
-            event.row,
-            accumulated);
-        accumulator_.clear_segment(address, column_block);
-        output.values = accumulated;
-        last_outputs_.push_back(output);
-    }
-
-    static void emit_stream_values(
-        TileArrayModel& mem,
-        std::size_t column_block,
-        std::size_t stream_base,
-        std::uint64_t vector_tag,
-        const ResultValues& values)
-    {
-        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            const auto value = values[lane];
             const auto raw = std::bit_cast<std::uint32_t>(value);
             const std::array<std::uint8_t, 4> bytes {
                 static_cast<std::uint8_t>(raw & 0xffu),
@@ -361,13 +296,14 @@ private:
                 mem.set_west_stream_cell(
                     column_block,
                     lane,
-                    stream_base + byte,
+                    event.output_stream_base + byte,
                     StreamCell::Valid(
                         bytes[byte],
                         lane + 1 == hw::kLanesPerTile,
-                        vector_tag));
+                        event.row));
             }
         }
+        last_outputs_.push_back(output);
     }
 
     bool pipelines_empty() const
@@ -383,7 +319,6 @@ private:
     }
 
     MxmArray array_{};
-    MxmAccumulator accumulator_{};
     MxmControlSlice control_;
     bool active_{false};
     std::array<std::array<std::deque<ActivationEvent>, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>

@@ -110,26 +110,21 @@ int main()
 
     IntUnitGroup sxm;
     IntUnitGroup::StreamState inputs{};
-    for (std::size_t row = 0; row < ftlpu::hw::kLanesPerTile; ++row) {
-        for (std::size_t plane = 0; plane < 2; ++plane) {
-            const auto stream = row * 2 + plane;
-            set_input(inputs, stream, lane_vector(
-                static_cast<std::int32_t>(plane * 1000 + row * 100)));
-        }
+    for (std::size_t stream = 0; stream < ftlpu::hw::kLanesPerTile; ++stream) {
+        set_input(inputs, stream, lane_vector(static_cast<std::int32_t>(stream * 100)));
     }
 
-    sxm.issue(ftlpu::SxmInstruction::Transpose(
-        stream_range(0, 16), stream_range(16, 16)));
+    sxm.issue(ftlpu::SxmInstruction::Transpose(stream_range(0, 8), stream_range(8, 8)));
     auto evaluation = sxm.evaluate(inputs);
     sxm.complete_cycle();
-    assert(evaluation.produced[16]);
-    assert(evaluation.outputs[16][3]->data == 300);
-    assert(evaluation.outputs[30][3]->data == 307);
+    assert(evaluation.produced[8]);
+    assert(evaluation.outputs[8][3]->data == 300);
+    assert(evaluation.outputs[15][3]->data == 307);
 
     auto chained_map = ftlpu::Distribute16::identity_map();
     chained_map[0] = 3;
     sxm.issue(ftlpu::SxmInstruction::Distribute(
-        ftlpu::SxmStreamId {16},
+        ftlpu::SxmStreamId {8},
         ftlpu::SxmStreamId {40},
         chained_map));
     evaluation = sxm.evaluate(evaluation.outputs);
@@ -221,28 +216,97 @@ int main()
     assert(fabric.cell(1, 0, 0, east1).data == 7);
     assert(fabric.cell(1, ftlpu::hw::kTileRows - 1, 0, east1).data == 31);
 
-    // The physical SXM path has one width: eight FP16 values represented by
-    // sixteen byte streams. The former two-stream serial mode is rejected.
-    ftlpu::SxmSlice physical_sxm(ftlpu::SxmStreamPortMap::SameDirection(0, 1));
-    caught = false;
-    try {
-        physical_sxm.issue(ftlpu::SxmInstruction::Transpose(
-            stream_range(0, 2), stream_range(2, 2)));
+    // FP16 transpose accepts one low/high byte-stream row per cycle into one
+    // buffer.  Tile t sees logical row r at physical cycle r+t.
+    ftlpu::StreamRegisterFabric transpose_fabric(2);
+    ftlpu::SxmSlice streaming_transpose(ftlpu::SxmStreamPortMap::SameDirection(0, 1));
+    const auto low_in = ftlpu::StreamId::East(0);
+    const auto high_in = ftlpu::StreamId::East(1);
+    const auto low_out = ftlpu::StreamId::East(2);
+    const auto high_out = ftlpu::StreamId::East(3);
+    const auto routed_low_out = ftlpu::StreamId::East(4);
+    const auto routed_high_out = ftlpu::StreamId::East(5);
+    const auto transpose_instruction = ftlpu::SxmInstruction::Transpose(
+        {{low_in.packed()}, {high_in.packed()}},
+        {{low_out.packed()}, {high_out.packed()}});
+
+    // Transpose control is a four-tile south-to-north wave.  Data capture is
+    // therefore enabled in tile n exactly n cycles after ICU issues it.
+    ftlpu::StreamRegisterFabric transpose_control_fabric(2);
+    ftlpu::SxmSlice transpose_control(ftlpu::SxmStreamPortMap::SameDirection(0, 1));
+    transpose_control.issue(transpose_instruction);
+    for (std::size_t cycle = 0; cycle < ftlpu::hw::kTileRows; ++cycle) {
+        transpose_control_fabric.begin_cycle();
+        transpose_control.evaluate(transpose_control_fabric);
+        transpose_control_fabric.commit_cycle();
+        for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+            const auto expected = tile == cycle + 1;
+            assert(transpose_control.transpose_instruction_at(tile).has_value() == expected);
+        }
     }
-    catch (const std::invalid_argument&) {
-        caught = true;
+
+    const auto transpose_value = [](
+                                     std::size_t block,
+                                     std::size_t plane,
+                                     std::size_t tile,
+                                     std::size_t row,
+                                     std::size_t lane) {
+        return static_cast<std::uint8_t>(
+            block * 101 + plane * 43 + tile * 17 + row * 8 + lane);
+    };
+
+    constexpr auto kLastCaptureCycle =
+        ftlpu::hw::kLanesPerTile + ftlpu::hw::kTileRows - 2;
+    constexpr auto kPermuteStart = kLastCaptureCycle + 2;
+    constexpr auto kTestCycles = kPermuteStart + ftlpu::hw::kLanesPerTile;
+    for (std::size_t cycle = 0; cycle < kTestCycles; ++cycle) {
+        for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+            if (cycle < tile) continue;
+            const auto row = cycle - tile;
+            if (row >= ftlpu::hw::kLanesPerTile) continue;
+            for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+                transpose_fabric.initialize_cell(
+                    0, tile, lane, low_in,
+                    ftlpu::StreamCell::Valid(
+                        transpose_value(0, 0, tile, row, lane),
+                        lane + 1 == ftlpu::hw::kLanesPerTile));
+                transpose_fabric.initialize_cell(
+                    0, tile, lane, high_in,
+                    ftlpu::StreamCell::Valid(
+                        transpose_value(0, 1, tile, row, lane),
+                        lane + 1 == ftlpu::hw::kLanesPerTile));
+            }
+        }
+        if (cycle < ftlpu::hw::kLanesPerTile) {
+            streaming_transpose.issue(transpose_instruction);
+        }
+        if (cycle >= kPermuteStart) {
+            streaming_transpose.issue(ftlpu::SxmInstruction::Permute(
+                {{low_out.packed()}, {high_out.packed()}},
+                {{routed_low_out.packed()}, {routed_high_out.packed()}},
+                ftlpu::Permute320::identity_map()));
+        }
+
+        transpose_fabric.begin_cycle();
+        streaming_transpose.evaluate(transpose_fabric);
+        transpose_fabric.commit_cycle();
+
+        if (cycle < kPermuteStart) {
+            assert(!transpose_fabric.segment_valid(1, 0, low_out));
+            assert(!transpose_fabric.segment_valid(1, 0, high_out));
+            continue;
+        }
+
+        const auto column = cycle - kPermuteStart;
+        for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+            for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+                assert(transpose_fabric.cell(1, tile, lane, routed_low_out).data
+                    == transpose_value(0, 0, tile, lane, column));
+                assert(transpose_fabric.cell(1, tile, lane, routed_high_out).data
+                    == transpose_value(0, 1, tile, lane, column));
+            }
+        }
     }
-    assert(caught);
-    caught = false;
-    try {
-        physical_sxm.issue(ftlpu::SxmInstruction::Permute(
-            stream_range(0, 2), stream_range(2, 2),
-            ftlpu::Permute320::identity_map()));
-    }
-    catch (const std::invalid_argument&) {
-        caught = true;
-    }
-    assert(caught);
 
     // A parallel FP16 beat carries all eight low/high row pairs.  Transpose
     // produces the canonical block.  Permute exchanges complete 8x8 blocks

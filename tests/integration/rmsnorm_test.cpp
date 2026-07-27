@@ -215,34 +215,56 @@ int main() try
     schedule.vxm_at(5, kNormalizeStart + 3, alu_instruction(
         ftlpu::VxmAluOpcode::Divide, ftlpu::VxmLaneOperand::Imm(1.0f),
         ftlpu::VxmLaneOperand::Alu(4)));
-    constexpr std::size_t kScaleStart = kNormalizeStart + 4;
     for (std::size_t column = 0; column < kHidden; ++column) {
-        const auto x_cycle = kScaleStart + column;
-        const auto gamma_cycle = x_cycle + 1;
+        const auto cycle = kNormalizeStart + column;
+        const auto tail_delay = column + 1 == kHidden ? std::size_t {1} : std::size_t {0};
+        const auto data_cycle = cycle + tail_delay;
         for (std::size_t byte = 0; byte < kInputSlices.size(); ++byte) {
             const auto slice = kInputSlices[byte];
             schedule.mem_at(
-                mem_queue(slice), x_cycle - west_read_latency(slice),
+                mem_queue(slice), cycle - west_read_latency(slice) + 1 + tail_delay,
                 ftlpu::MemInstruction::Read(kInputAddressBase + column, ftlpu::StreamId::West(byte)));
         }
         for (std::size_t byte = 0; byte < kGammaSlices.size(); ++byte) {
             const auto slice = kGammaSlices[byte];
             schedule.mem_at(
-                mem_queue(slice), gamma_cycle - west_read_latency(slice),
+                mem_queue(slice), cycle - west_read_latency(slice) + 2,
                 ftlpu::MemInstruction::Read(kGammaAddress + column, ftlpu::StreamId::West(2 + byte)));
         }
-        schedule.vxm_at(6, x_cycle, alu_instruction(
-            ftlpu::VxmAluOpcode::Multiply,
-            ftlpu::VxmLaneOperand::StreamFloat16(32),
+        schedule.vxm_at(6, data_cycle, alu_instruction(
+            ftlpu::VxmAluOpcode::Pass, ftlpu::VxmLaneOperand::StreamFloat16(32),
+            ftlpu::VxmLaneOperand::Imm(0.0f)));
+        schedule.vxm_at(7, data_cycle + 1, alu_instruction(
+            ftlpu::VxmAluOpcode::Pass, ftlpu::VxmLaneOperand::Alu(6),
+            ftlpu::VxmLaneOperand::Imm(0.0f)));
+        schedule.vxm_at(8, data_cycle + 2, alu_instruction(
+            ftlpu::VxmAluOpcode::Pass, ftlpu::VxmLaneOperand::Alu(7),
+            ftlpu::VxmLaneOperand::Imm(0.0f)));
+        schedule.vxm_at(9, data_cycle + 3, alu_instruction(
+            ftlpu::VxmAluOpcode::Pass, ftlpu::VxmLaneOperand::Alu(8),
+            ftlpu::VxmLaneOperand::Imm(0.0f)));
+        schedule.vxm_at(10, data_cycle, alu_instruction(
+            ftlpu::VxmAluOpcode::Pass, ftlpu::VxmLaneOperand::StreamFloat16(34),
+            ftlpu::VxmLaneOperand::Imm(0.0f)));
+        schedule.vxm_at(11, data_cycle + 1, alu_instruction(
+            ftlpu::VxmAluOpcode::Pass, ftlpu::VxmLaneOperand::Alu(10),
+            ftlpu::VxmLaneOperand::Imm(0.0f)));
+        schedule.vxm_at(12, data_cycle + 2, alu_instruction(
+            ftlpu::VxmAluOpcode::Pass, ftlpu::VxmLaneOperand::Alu(11),
+            ftlpu::VxmLaneOperand::Imm(0.0f)));
+        schedule.vxm_at(13, data_cycle + 3, alu_instruction(
+            ftlpu::VxmAluOpcode::Pass, ftlpu::VxmLaneOperand::Alu(12),
+            ftlpu::VxmLaneOperand::Imm(0.0f)));
+        schedule.vxm_at(14, data_cycle + 5, alu_instruction(
+            ftlpu::VxmAluOpcode::Multiply, ftlpu::VxmLaneOperand::Alu(9),
             ftlpu::VxmLaneOperand::Alu(5)));
-        schedule.vxm_at(7, gamma_cycle, alu_instruction(
-            ftlpu::VxmAluOpcode::Multiply, ftlpu::VxmLaneOperand::Alu(6),
-            ftlpu::VxmLaneOperand::StreamFloat16(34),
-            ftlpu::VxmCastTarget::Float16, 0));
+        schedule.vxm_at(15, data_cycle + 6, alu_instruction(
+            ftlpu::VxmAluOpcode::Multiply, ftlpu::VxmLaneOperand::Alu(14),
+            ftlpu::VxmLaneOperand::Alu(13), ftlpu::VxmCastTarget::Float16, 0));
         for (std::size_t byte = 0; byte < kOutputSlices.size(); ++byte) {
             const auto slice = kOutputSlices[byte];
             schedule.mem_at(
-                mem_queue(slice), gamma_cycle + 1 + slice / ftlpu::hw::kMemSlicesPerGroup,
+                mem_queue(slice), data_cycle + 7 + slice / ftlpu::hw::kMemSlicesPerGroup,
                 ftlpu::MemInstruction::Write(kOutputAddressBase + column, ftlpu::StreamId::East(byte)));
         }
     }

@@ -3,7 +3,6 @@
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/stream.hpp"
 
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -71,8 +70,8 @@ public:
         if (cycle_open_) {
             throw std::logic_error("stream-register cycle is already open");
         }
-        // commit_cycle() leaves the staging state clean. Do not rescan the
-        // complete fabric a second time at the start of every cycle.
+        clear_columns(next_);
+        clear_consumed();
         cycle_open_ = true;
     }
 
@@ -86,21 +85,21 @@ public:
         return select(current_[column].lanes[tile][lane], stream);
     }
 
-    StreamTileSegment segment(std::size_t column, std::size_t tile, StreamId stream) const
+    StreamSegment16 segment(std::size_t column, std::size_t tile, StreamId stream) const
     {
         check_column(column);
         check_tile(tile);
-        StreamTileSegment result{};
+        StreamSegment16 result{};
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             result[lane] = cell(column, tile, lane, stream);
         }
         return result;
     }
 
-    StreamSliceVector vector(std::size_t column, StreamId stream) const
+    StreamVector320 vector(std::size_t column, StreamId stream) const
     {
         check_column(column);
-        StreamSliceVector result{};
+        StreamVector320 result{};
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
             result[tile] = segment(column, tile, stream);
         }
@@ -147,7 +146,7 @@ public:
         std::size_t column,
         std::size_t tile,
         StreamId stream,
-        const StreamTileSegment& values,
+        const StreamSegment16& values,
         const char* producer = "functional slice")
     {
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
@@ -159,7 +158,7 @@ public:
         std::size_t column,
         std::size_t tile,
         StreamId stream,
-        const StreamPayloadTileSegment& values,
+        const StreamPayloadSegment16& values,
         std::uint64_t vector_tag = 0,
         const char* producer = "functional slice")
     {
@@ -329,12 +328,30 @@ private:
 
     static void clear_columns(std::vector<StreamRegisterColumn>& columns)
     {
-        std::fill(columns.begin(), columns.end(), StreamRegisterColumn {});
+        for (auto& column : columns) {
+            for (auto& tile : column.lanes) {
+                for (auto& lane : tile) {
+                    for (auto& cell : lane.east) {
+                        cell.reset();
+                    }
+                    for (auto& cell : lane.west) {
+                        cell.reset();
+                    }
+                }
+            }
+        }
     }
 
     void clear_consumed()
     {
-        std::fill(consumed_.begin(), consumed_.end(), ColumnConsumeMask {});
+        for (auto& column : consumed_) {
+            for (auto& tile : column.lanes) {
+                for (auto& lane : tile) {
+                    lane.east.fill(false);
+                    lane.west.fill(false);
+                }
+            }
+        }
     }
 
     bool is_consumed(

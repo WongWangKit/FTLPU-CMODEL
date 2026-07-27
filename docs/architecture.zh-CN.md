@@ -19,16 +19,15 @@
 | Stream-register column | 每侧 13 个（`sreg0..sreg12`） |
 | 每 lane stream | 32 条 eastward + 32 条 westward |
 | Stream-register 位宽 | 1 byte |
-| SRAM 容量 | 每 slice 2 MiB，全芯片 176 MiB |
+| SRAM 容量 | 每 slice 256 KiB，全芯片 22 MiB |
 | MXM | 共 4 个，每侧 2 个 |
 | MXM 阵列 | 32 x 32 FP16 乘法、FP32 累加 |
 | VXM | 中心 1 个 slice，每 lane 16 个 ALU |
 | SXM | 每侧 1 个四-tile slice |
 
-一个 MEM slice 拥有一个 `65536 x 32-byte` SRAM block。每个 row 横跨 4 个
-tile；指令波到达某个 tile 时，该 tile 只访问自己的 8-byte segment。两个
-hemisphere 共 88 个同构 slice，总容量为 `88 x 2 MiB = 176 MiB`，不再划分
-logical bank。
+一个 MEM slice 拥有一个 `8192 x 32-byte` SRAM block，逻辑上分成两个
+4096-row bank。每个 row 横跨 4 个 tile；指令波到达某个 tile 时，该 tile 只访问
+自己的 8-byte segment。
 
 ## 2. 完整芯片拓扑
 
@@ -83,15 +82,20 @@ tile。workload 必须在每个 tile 对齐数据和控制，测试不能直接�
 ### 组织方式
 
 每个 hemisphere 有 44 个 MEM slice column，每个 slice 一条指令队列。相邻四个
-slice 组成一个 group，位于两个 stream-register boundary 之间。全部 44 个 slice
-都是同构 SRAM，不再有专用 accumulator group。
+slice 组成一个 group，位于两个 stream-register boundary 之间。group9 和 group10
+对应 slice `36..39`、`40..43`，既保留普通 SRAM 功能，也支持 FP32 accumulation。
 
-每个 slice 是单端口：同一拍即使地址不同，也不能同时 Read 和 Write。
+每个 slice 是单端口：同一拍即使地址不同，也不能同时 Read 和 Write。Accumulator
+操作会在该 tile/周期占用整组四个 slice。
 
 ### 指令
 
 - `Read(address, stream)` 读取 tile-local 8-byte SRAM segment，写入一条 stream；
 - `Write(address, stream)` 消费一条 8-byte stream segment 并写入 SRAM；
+- `Accumulate(address, west_stream_base, destination)` 消费连续四条 west stream
+  组成 FP32，与四-slice SRAM 值相加，然后：
+  - 写回 SRAM；或
+  - 从相同四条 west stream 输出，并清零该 SRAM slot；
 - `Gather`/`Scatter` 已编码，但因为尚未实现 address-stream datapath，执行时会拒绝。
 
 一条指令波最终经过四个 tile，因此完整指令波以四个错拍的 8-byte segment 搬运
@@ -102,15 +106,16 @@ slice 组成一个 group，位于两个 stream-register boundary 之间。全部
 参考的公开风格软件地址为：
 
 ```text
-[39:27] chip
-[26]    hemisphere
-[25:20] slice
-[19:4]  slice 内 row offset
+[39:24] chip
+[23]    hemisphere
+[22:17] slice
+[16]    logical SRAM bank
+[15:4]  4096-row bank 内的 row offset
 [3:0]   软件 byte offset
 ```
 
-`MemInstruction::address` 只保存对应软件位 `[19:4]` 的 16-bit slice-local row，
-范围为 `0..65535`。测试的初始化/结果 API 另外指定 tile 和 lane byte。
+`MemInstruction::address` 只保存对应软件位 `[16:4]` 的 13-bit slice-local row，
+范围为 `0..8191`。测试的初始化/结果 API 另外指定 tile 和 lane byte。
 
 ## 5. MXM
 
@@ -183,9 +188,7 @@ feedback 计算 `sum(x^2)`，并在 `x`、`gamma` 流过时保留 inverse RMS。
 
 每个 SXM 有四个 tile row。Transpose 指令每拍从南向北推进一个 tile，使每个 tile
 捕获与自身匹配的对角波前。FP16 low/high byte 作为两个 plane，tile-local Transpose
-完成一个 `8 x 8` block 的行列交换。Transpose 和 Permute 只有一种物理宽度：
-16 条 byte stream 输入、16 条 byte stream 输出，一拍携带全部 8 行 FP16 数据；
-不再支持原来的 2-stream 串行模式。
+完成一个 `8 x 8` block 的行列交换。
 
 Transpose 输出先打一拍，再由 Permute 消费。Permute 在 4 个 superlane、32 个 lane
 之间重排完整 block。当前实现使用一个 transpose buffer；相同 destination 的 block
@@ -221,8 +224,7 @@ ICU 共拥有 116 条独立 queue：
 - 四个 32-bit word 的 VXM ALU 指令；
 - 32-bit ICU NOP/Repeat command。
 
-SXM 指令使用固定的 13 x 32-bit packet 编码，包含 header、16 个输入/输出
-stream selector、tile 内 lane map 和完整跨 tile permute map。字段范围和保留位由
+SXM 指令仍是 C++ control object，尚无二进制 codec。字段范围和保留位由
 `tests/core/instruction_codec_test.cpp` 验证。
 
 ## 9. 调度模式
@@ -250,15 +252,14 @@ load queue 都是显式调度资源。
 
 ### Accumulator 生命周期
 
-每个 MXM 内置一个 1 MiB FP32 accumulator，包含 8192 行、每行 32 个 FP32。
-非最终 `Compute` 把部分和保留在对应 MXM accumulator；最终 `Compute` 或
-`AccumulatorRead` 可以把指定 segment 输出到 stream 并清零。只有最终结果输出并
-清零后，地址才可复用。
+非最终 reduction 使用 `Accumulate(..., SRAM)`；最终 reduction 使用
+`Accumulate(..., Stream)`，输出并清零 slot。只有最终 stream result 发出后，地址
+才可复用。
 
 ### 单端口 MEM
 
-地址不同也不能消除 slice 冲突。只要 Read、Write 占用同一物理 slice，其时间窗口
-就必须错开。
+地址不同也不能消除 slice 冲突。只要 Read、Write、Accumulate 占用同一物理 slice，
+其时间窗口就必须错开。
 
 ## 10. 已验证整系统 Workload
 
@@ -271,7 +272,7 @@ A[128,576] fp16 x W[576,1536] int8 -> C[128,1536] fp32
 ```
 
 权重采用按输出列的 W8 对称 scale。VXM 反量化权重，MXM0/1 计算相邻 output block，
-两个 MXM 本地 accumulator 累加 18 个 K tile。全部 196,608 个输出与考虑 FP16
+两个 MEM accumulator group 累加 18 个 K tile。全部 196,608 个输出与考虑 FP16
 舍入的 scalar golden model 比较。
 
 ### 完整 FFN
@@ -298,9 +299,8 @@ SwiGLU 结果在两个 MEM hemisphere 都保存一份。down projection 读取�
 
 `rmsnorm_test` 完全通过 MEM 和 VXM 计算 `[32,32]` FP16 RMSNorm。ALU0 每拍对一个
 hidden column 求平方，ALU1 通过 feedback 在 32 个物理 lane 中并行累加
-`sum(x^2)`。随后 VXM 计算 inverse RMS 并将其保留在 ALU 中。MEM 让每个 `x`
-vector 比对应的 `gamma` 早一拍到达，两个 multiply ALU 可以直接消费，不再需要
-Pass stage。该测试不使用 MXM 或 MEM accumulator。
+`sum(x^2)`。随后 VXM 计算 inverse RMS，并应用到流入的 `x` 和 `gamma`。该测试
+不使用 MXM 或 MEM accumulator。
 
 ### SmolLM2 Attention
 
@@ -314,7 +314,7 @@ Q/K/V projection -> Q/K RoPE -> QK score -> scaled 三-pass softmax
 配置为 sequence length 128、hidden size 576、9 个 query head、3 个 KV head、
 head dimension 64。QK、P x V 和 o_proj 在 stream/accumulator 资源允许时把独立
 work 分配到四个 MXM。SXM 为 attention replay 准备 packed/transpose layout。
-完整 numerical golden 在 94,761 个调度周期通过。
+完整 numerical golden 在 81,273 个调度周期通过。
 
 各 phase 时序、MXM 利用率和后续 overlap 机会见
 [attention_pipeline_optimization.md](attention_pipeline_optimization.md)。
@@ -333,13 +333,14 @@ work 分配到四个 MXM。SXM 为 attention replay 准备 packed/transpose layo
 详细图由 `scripts/render_schedule_trace.py` 和
 `scripts/render_swiglu_schedule_trace.py` 生成。Accumulator 颜色为：
 
-- 紫色：partial sum 保留在 MXM accumulator；
+- 紫色：partial sum 保留在 SRAM；
 - 红色：最终结果送流并清零 slot。
 
 ## 12. 已知限制
 
 - 模型不与私有 Groq 硬件或 ISA bit-accurate；
 - Gather/Scatter 尚无 address-stream 执行 datapath；
+- SXM 尚无二进制指令 codec；
 - 离线 schedule 仍在 integration test 内构造，没有独立编译器或可复用 program
   文件格式；
 - 资源分配仍使用 workload-specific SRAM slice 和 stream ID，没有通用 allocator；

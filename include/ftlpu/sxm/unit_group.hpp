@@ -140,8 +140,7 @@ private:
             require_stream_count(instruction, 1);
             break;
         case SxmOpcode::Transpose:
-            require_stream_count(
-                instruction, 2 * hw::kLanesPerTile);
+            require_stream_count(instruction, hw::kLanesPerTile);
             break;
         case SxmOpcode::ShiftSelect:
         case SxmOpcode::Permute:
@@ -229,19 +228,15 @@ private:
         Evaluation& result,
         const SxmInstruction& instruction)
     {
-        for (std::size_t plane = 0; plane < 2; ++plane) {
-            Matrix16 input{};
-            for (std::size_t row = 0; row < hw::kLanesPerTile; ++row) {
-                const auto stream = row * 2 + plane;
-                input[row] = read_vector(inputs, instruction.src_streams[stream]);
-                mark_consumed(result, instruction.src_streams[stream]);
-            }
+        Matrix16 input{};
+        for (std::size_t stream = 0; stream < hw::kLanesPerTile; ++stream) {
+            input[stream] = read_vector(inputs, instruction.src_streams[stream]);
+            mark_consumed(result, instruction.src_streams[stream]);
+        }
 
-            const auto output = Transpose16x16::apply(input);
-            for (std::size_t row = 0; row < hw::kLanesPerTile; ++row) {
-                const auto stream = row * 2 + plane;
-                write_vector(result, instruction.dst_streams[stream], output[row]);
-            }
+        const auto output = Transpose16x16::apply(input);
+        for (std::size_t stream = 0; stream < hw::kLanesPerTile; ++stream) {
+            write_vector(result, instruction.dst_streams[stream], output[stream]);
         }
     }
 

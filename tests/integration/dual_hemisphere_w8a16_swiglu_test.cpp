@@ -241,10 +241,7 @@ public:
         std::size_t cycle,
         std::size_t activation,
         std::size_t output,
-        std::size_t weight_buffer,
-        std::size_t accumulator_address,
-        std::size_t accumulator_stride,
-        ftlpu::MxmAccumulatorDestination destination)
+        std::size_t weight_buffer = 0)
     {
         require_available(mxm_compute_[mxm], cycle, "MXM compute " + std::to_string(mxm));
         pad(mxm_compute_[mxm], cycle, [&](std::size_t count) {
@@ -253,12 +250,7 @@ public:
         icu_.enqueue_mxm(
             mxm,
             ftlpu::MxmControlInstruction::Compute(
-                weight_buffer,
-                activation,
-                output,
-                accumulator_address,
-                accumulator_stride,
-                destination));
+                weight_buffer, activation, output));
         icu_.enqueue_mxm_compute_repeat(mxm, kTile - 1, 1);
         advance(mxm_compute_[mxm], cycle + kTile);
         trace(cycle, cycle + kTile, mxm_name(mxm) + ".Compute",
@@ -298,6 +290,7 @@ private:
         case ftlpu::MemOpcode::ReadWrite: return "ReadWrite";
         case ftlpu::MemOpcode::Gather: return "Gather";
         case ftlpu::MemOpcode::Scatter: return "Scatter";
+        case ftlpu::MemOpcode::Accumulate: return "Accumulate";
         }
         return "Unknown";
     }
@@ -350,6 +343,11 @@ private:
         if (end > start + 1) {
             detail += " count=" + std::to_string(end - start)
                 + " stride=" + std::to_string(stride);
+        }
+        if (instruction.opcode == ftlpu::MemOpcode::Accumulate) {
+            detail += instruction.accumulator_destination
+                    == ftlpu::MemAccumulatorDestination::Stream
+                ? " dst=stream+clear" : " dst=sram";
         }
         trace(start, end,
             std::string("MEM.") + (hemisphere == 0 ? "E." : "W.")
@@ -655,30 +653,46 @@ int main() try
                             kTile,
                             1);
                     }
-                    const auto accumulator_destination = final_reduction
-                        ? ftlpu::MxmAccumulatorDestination::Stream
-                        : ftlpu::MxmAccumulatorDestination::Sram;
+                    schedule.mem_repeat_at(
+                        mem_queue(hemisphere, ftlpu::hw::kWestAccumulatorMemSliceBase),
+                        compute_cycle + kGateAccumulatorLatency,
+                        ftlpu::MemInstruction::Accumulate(
+                            accumulator_address,
+                            ftlpu::StreamId::West(0),
+                            final_reduction
+                                ? ftlpu::MemAccumulatorDestination::Stream
+                                : ftlpu::MemAccumulatorDestination::Sram),
+                        kTile,
+                        kIntermediate / kTile);
+                    schedule.mem_repeat_at(
+                        mem_queue(hemisphere, ftlpu::hw::kEastAccumulatorMemSliceBase),
+                        compute_cycle + kUpAccumulatorLatency,
+                        ftlpu::MemInstruction::Accumulate(
+                            accumulator_address,
+                            ftlpu::StreamId::West(4),
+                            final_reduction
+                                ? ftlpu::MemAccumulatorDestination::Stream
+                                : ftlpu::MemAccumulatorDestination::Sram),
+                        kTile,
+                        kIntermediate / kTile);
                     schedule.mxm_compute_at(
                         ftlpu::InstructionControlUnit::mxm_queue(hemisphere, 0),
                         compute_cycle,
                         activation_stream_base,
                         0,
-                        weight_buffer,
-                        accumulator_address,
-                        kIntermediate / kTile,
-                        accumulator_destination);
+                        weight_buffer);
                     schedule.mxm_compute_at(
                         ftlpu::InstructionControlUnit::mxm_queue(hemisphere, 1),
                         compute_cycle,
                         activation_stream_base,
                         4,
-                        weight_buffer,
-                        accumulator_address,
-                        kIntermediate / kTile,
-                        accumulator_destination);
+                        weight_buffer);
 
                     if (final_reduction) {
-                        constexpr auto kAccumulatorToVxmLatency = 16;
+                        constexpr auto kAccumulatorToVxmLatency =
+                            kGateAccumulatorLatency
+                            + (ftlpu::hw::kWestAccumulatorMemSliceBase
+                                / ftlpu::hw::kMemSlicesPerGroup + 1);
                         for (std::size_t offset = 0; offset < kTile; ++offset) {
                             const auto row = row_block * kTile + offset;
                             const auto vxm_cycle = compute_cycle
@@ -859,31 +873,31 @@ int main() try
                 const auto accumulator_address = kDownAccumulatorAddressBase
                     + wave * kRows + row_block * kTile;
                 const auto destination = reduction_block + 1 == kIntermediate / kTile
-                    ? ftlpu::MxmAccumulatorDestination::Stream
-                    : ftlpu::MxmAccumulatorDestination::Sram;
+                    ? ftlpu::MemAccumulatorDestination::Stream
+                    : ftlpu::MemAccumulatorDestination::Sram;
                 for (std::size_t hemisphere_index = 0;
                      hemisphere_index < destination_count;
                      ++hemisphere_index) {
                     const auto hemisphere = static_cast<ftlpu::Hemisphere>(hemisphere_index);
+                    schedule.mem_repeat_at(
+                        mem_queue(hemisphere, ftlpu::hw::kWestAccumulatorMemSliceBase),
+                        compute_cycle + kGateAccumulatorLatency,
+                        ftlpu::MemInstruction::Accumulate(
+                            accumulator_address, ftlpu::StreamId::West(0), destination),
+                        kTile, 1);
+                    schedule.mem_repeat_at(
+                        mem_queue(hemisphere, ftlpu::hw::kEastAccumulatorMemSliceBase),
+                        compute_cycle + kUpAccumulatorLatency,
+                        ftlpu::MemInstruction::Accumulate(
+                            accumulator_address, ftlpu::StreamId::West(4), destination),
+                        kTile, 1);
                     schedule.mxm_compute_at(
                         ftlpu::InstructionControlUnit::mxm_queue(hemisphere, 0),
-                        compute_cycle,
-                        activation_base,
-                        0,
-                        weight_buffer,
-                        accumulator_address,
-                        1,
-                        destination);
+                        compute_cycle, activation_base, 0, weight_buffer);
                     schedule.mxm_compute_at(
                         ftlpu::InstructionControlUnit::mxm_queue(hemisphere, 1),
-                        compute_cycle,
-                        activation_base,
-                        4,
-                        weight_buffer,
-                        accumulator_address,
-                        1,
-                        destination);
-                    if (destination == ftlpu::MxmAccumulatorDestination::Stream) {
+                        compute_cycle, activation_base, 4, weight_buffer);
+                    if (destination == ftlpu::MemAccumulatorDestination::Stream) {
                         for (std::size_t offset = 0; offset < kTile; ++offset) {
                             const auto row = row_block * kTile + offset;
                             const auto cast_cycle = compute_cycle

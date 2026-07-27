@@ -17,11 +17,17 @@ enum class MemOpcode {
     ReadWrite,
     Gather,
     Scatter,
+    Accumulate,
+};
+
+enum class MemAccumulatorDestination {
+    Sram,
+    Stream,
 };
 
 struct MemInstruction {
     MemOpcode opcode{MemOpcode::Read};
-    // SRAM row address (0..65535), not a byte address.
+    // SRAM row address (0..8191), not a byte address.
     std::size_t address{0};
 
     // Packed ISA selector retained for codec compatibility:
@@ -30,6 +36,7 @@ struct MemInstruction {
     // Architectural code should call stream_id()/map_stream_id().
     std::size_t stream{0};
     std::size_t map_stream{0};
+    MemAccumulatorDestination accumulator_destination{MemAccumulatorDestination::Sram};
     // Second SRAM port fields, used only by ReadWrite.
     std::size_t write_address{0};
     std::size_t write_stream{0};
@@ -95,6 +102,28 @@ struct MemInstruction {
             StreamId::from_packed(read_packed_stream),
             write_address,
             StreamId::from_packed(write_packed_stream));
+    }
+
+    static MemInstruction Accumulate(
+        std::size_t address,
+        StreamId stream,
+        MemAccumulatorDestination destination = MemAccumulatorDestination::Sram)
+    {
+        if (stream.direction() != StreamDirection::West) {
+            throw std::invalid_argument("MEM Accumulate requires a west stream base");
+        }
+        if (stream.index() + sizeof(float) > hw::kWestStreams) {
+            throw std::out_of_range("MEM Accumulate FP32 input exceeds west streams");
+        }
+        return MemInstruction {MemOpcode::Accumulate, address, stream.packed(), 0, destination};
+    }
+
+    static MemInstruction Accumulate(
+        std::size_t address,
+        std::size_t packed_stream,
+        MemAccumulatorDestination destination = MemAccumulatorDestination::Sram)
+    {
+        return Accumulate(address, StreamId::from_packed(packed_stream), destination);
     }
 
     static MemInstruction Gather(StreamId stream, StreamId map_stream)

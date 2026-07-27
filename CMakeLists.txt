@@ -6,11 +6,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(ftlpu_cmodel STATIC
-    src/mem/sram.cpp
-    src/mxm/accumulator.cpp
-)
-target_include_directories(ftlpu_cmodel PUBLIC include)
+add_library(ftlpu_cmodel INTERFACE)
+target_include_directories(ftlpu_cmodel INTERFACE include)
 
 enable_testing()
 
@@ -32,6 +29,7 @@ ftlpu_add_test(stream_port_test tests/stream/stream_port_test.cpp)
 
 ftlpu_add_test(mem_slice_test tests/mem/slice_test.cpp)
 ftlpu_add_test(mem_array_separated_test tests/mem/mem_array_separated_test.cpp)
+ftlpu_add_test(mem_accumulator_test tests/mem/accumulator_test.cpp)
 ftlpu_add_test(tile_array_test tests/mem/tile_array_test.cpp)
 ftlpu_add_test(vector_roundtrip_test tests/mem/vector_roundtrip_test.cpp)
 
@@ -41,22 +39,11 @@ ftlpu_add_test(full_chip_topology_test tests/system/full_chip_topology_test.cpp)
 ftlpu_add_test(mxm_supercell_test tests/mxm/supercell_test.cpp)
 ftlpu_add_test(mxm_array_test tests/mxm/array_test.cpp)
 ftlpu_add_test(mxm_control_slice_test tests/mxm/control_slice_test.cpp)
-ftlpu_add_test(mxm_accumulator_test tests/mxm/accumulator_test.cpp)
 ftlpu_add_test(w8a16_projection_test tests/integration/w8a16_projection_test.cpp)
 ftlpu_add_test(w8a16_swiglu_test tests/integration/w8a16_swiglu_test.cpp)
 ftlpu_add_test(dual_hemisphere_w8a16_swiglu_test tests/integration/dual_hemisphere_w8a16_swiglu_test.cpp)
 ftlpu_add_test(rmsnorm_test tests/integration/rmsnorm_test.cpp)
 ftlpu_add_test(smollm2_attention_test tests/integration/smollm2_attention_test.cpp)
-
-# These workloads saturate the simulator's CPU and memory paths. Running them
-# concurrently is substantially slower than scheduling them one at a time.
-set_tests_properties(
-    w8a16_projection_test
-    w8a16_swiglu_test
-    dual_hemisphere_w8a16_swiglu_test
-    smollm2_attention_test
-    PROPERTIES RUN_SERIAL TRUE
-)
 
 ftlpu_add_test(vxm_alu_test tests/vxm/alu_test.cpp)
 ftlpu_add_test(vxm_lane_test tests/vxm/lane_test.cpp)

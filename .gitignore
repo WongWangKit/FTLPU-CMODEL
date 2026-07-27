@@ -1,11 +1,4 @@
 build*/
 out/
-logs/
 *.user
 *.log
-*.exe
-*.pdb
-*.obj
-*.ilk
-*.dtmp
-.$*

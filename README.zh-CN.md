@@ -17,8 +17,8 @@ bit-accurate。当前目标是提供一个可验证的数据流调度目标，�
 | 向量形态 | 4 个 tile/superlane x 8 lane = 32 个元素 |
 | Stream | 32 条 eastward + 32 条 westward，每个寄存器 1 byte |
 | MEM | 每个 hemisphere 44 个 slice，全芯片 88 条 ICU queue |
-| SRAM | 每个 slice 2 MiB，每侧 88 MiB，全芯片 176 MiB |
-| Accumulator | 每个 MXM 内置一个 1 MiB FP32 accumulator |
+| SRAM | 每个 slice 256 KiB，每侧 11 MiB，全芯片 22 MiB |
+| Accumulator | 每侧两个四-slice FP32 accumulator group |
 | MXM | 四个 32 x 32 FP16 GEMM 阵列，每侧两个 |
 | MXM 权重 | 每个 supercell 两个对等 buffer，由 `IW`/`Compute` 选择 |
 | VXM | 中心一个 slice，每个 lane 有 16 个独立控制的 ALU |
@@ -65,7 +65,7 @@ MEM、MXM、VXM 和 SXM 指令必须在正确周期与 stream operand 相遇。�
 完整 FFN 使用四个 MXM，当前调度为 90,817 拍。gate/up 的最终 reduction 会把
 accumulator 结果直接送入共享 VXM SwiGLU 流水线。SmolLM2 attention 使用
 sequence length 128、hidden size 576、9 个 query head、3 个 KV head 和
-64 维 head，完整验证调度为 94,761 拍。
+64 维 head，完整验证调度为 81,273 拍。
 
 ## 构建
 
@@ -128,15 +128,14 @@ python scripts\render_schedule_trace.py `
   docs\smollm2_attention_schedule_detail.svg
 ```
 
-详细图中，紫色 accumulator 条带表示 partial sum 保留在 MXM 本地 accumulator；红色表示最终
+详细图中，紫色 accumulator 条带表示 partial sum 保留在 SRAM；红色表示最终
 `stream+clear`。
 
 ## 仓库布局
 
 - `include/ftlpu/core/`：硬件常量、stream、FP16 和 ISA codec。
-- `include/ftlpu/mem/`：同构 SRAM slice 和 MEM 指令流水线。
-- `include/ftlpu/mxm/`：supercell、阵列、控制 slice、GEMM datapath 和 MXM 本地
-  accumulator。
+- `include/ftlpu/mem/`：SRAM、MEM 指令流水线和 accumulator。
+- `include/ftlpu/mxm/`：supercell、阵列、控制 slice 和 GEMM datapath。
 - `include/ftlpu/vxm/`：ALU、lane、superlane 和中心 VXM slice。
 - `include/ftlpu/sxm/`：Shift/Distribute/Transpose/Permute 模型。
 - `include/ftlpu/system/`：ICU、stream topology 和完整芯片集成。

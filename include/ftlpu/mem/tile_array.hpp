@@ -249,7 +249,7 @@ private:
         // Functional slices read current SR state, consume operands and stage
         // results into next state.  No functional slice can see another
         // slice's same-cycle result through an SR boundary.
-        mem_.evaluate(streams_, os != nullptr);
+        mem_.evaluate(streams_);
         if (sxm != nullptr) {
             sxm->evaluate(streams_);
         }
@@ -294,7 +294,7 @@ private:
         StreamId stream{StreamId::East(0)};
     };
 
-    static void print_hex_bytes(std::ostream& os, const StreamPayloadTileSegment& bytes)
+    static void print_hex_bytes(std::ostream& os, const StreamPayloadSegment16& bytes)
     {
         const auto old_flags = os.flags();
         const auto old_fill = os.fill();
@@ -310,7 +310,7 @@ private:
         std::size_t tile,
         std::size_t reg_column,
         StreamId stream,
-        StreamPayloadTileSegment& bytes) const
+        StreamPayloadSegment16& bytes) const
     {
         bool any = false;
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
@@ -333,7 +333,7 @@ private:
                 bool any = false;
 
                 for (std::size_t stream = 0; stream < hw::kEastStreams; ++stream) {
-                    StreamPayloadTileSegment bytes{};
+                    StreamPayloadSegment16 bytes{};
                     if (collect_stream_bytes(tile, reg, StreamId::East(stream), bytes)) {
                         any = true;
                         os << " E" << stream << "=0x";
@@ -342,7 +342,7 @@ private:
                 }
 
                 for (std::size_t stream = 0; stream < hw::kWestStreams; ++stream) {
-                    StreamPayloadTileSegment bytes{};
+                    StreamPayloadSegment16 bytes{};
                     if (collect_stream_bytes(tile, reg, StreamId::West(stream), bytes)) {
                         any = true;
                         os << " W" << stream << "=0x";

@@ -135,9 +135,21 @@ std::size_t result_address(std::size_t row, std::size_t column)
 
 float read_result(const ftlpu::TspSliceSystem& system, std::size_t row, std::size_t column)
 {
-    const auto mxm = (column / kTile) % 2;
-    return system.mxm_unit(mxm).accumulator().value(
-        result_address(row, column), column % kTile);
+    const auto local_column = column % kTile;
+    const auto tile = local_column / ftlpu::hw::kLanesPerTile;
+    const auto lane = local_column % ftlpu::hw::kLanesPerTile;
+    const auto group_base = column % (2 * kTile) < kTile
+        ? ftlpu::hw::kWestAccumulatorMemSliceBase
+        : ftlpu::hw::kEastAccumulatorMemSliceBase;
+    std::uint32_t raw = 0;
+    for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+        raw |= static_cast<std::uint32_t>(system.read_mem_sram_lane_byte(
+            group_base + byte,
+            tile,
+            result_address(row, column),
+            lane)) << (byte * 8);
+    }
+    return std::bit_cast<float>(raw);
 }
 
 void initialize_activations(ftlpu::TspSliceSystem& system, const std::vector<float>& activations)
@@ -239,26 +251,24 @@ int run_test()
                         ftlpu::MemInstruction::Read(address, ftlpu::StreamId::East(byte)),
                         kTile, 1);
                 }
-                schedule.mxm_compute_repeat_at(
-                    0,
-                    compute_cycle,
-                    ftlpu::MxmControlInstruction::Compute(
-                        0,
-                        0,
-                        0,
+                schedule.mem_repeat_at(
+                    ftlpu::hw::kWestAccumulatorMemSliceBase,
+                    compute_cycle + kWestAccumulatorLatency,
+                    ftlpu::MemInstruction::Accumulate(
                         result_address(mb * kTile, n_base),
-                        kIntermediate / kTile,
-                        ftlpu::MxmAccumulatorDestination::Sram));
-                schedule.mxm_compute_repeat_at(
-                    1,
-                    compute_cycle,
-                    ftlpu::MxmControlInstruction::Compute(
-                        0,
-                        2,
-                        4,
+                        ftlpu::StreamId::West(0)),
+                    kTile,
+                    kIntermediate / kTile);
+                schedule.mem_repeat_at(
+                    ftlpu::hw::kEastAccumulatorMemSliceBase,
+                    compute_cycle + kEastAccumulatorLatency,
+                    ftlpu::MemInstruction::Accumulate(
                         result_address(mb * kTile, n_base + kTile),
-                        kIntermediate / kTile,
-                        ftlpu::MxmAccumulatorDestination::Sram));
+                        ftlpu::StreamId::West(4)),
+                    kTile,
+                    kIntermediate / kTile);
+                schedule.mxm_compute_repeat_at(0, compute_cycle, ftlpu::MxmControlInstruction::Compute(0, 0, 0));
+                schedule.mxm_compute_repeat_at(1, compute_cycle, ftlpu::MxmControlInstruction::Compute(0, 2, 4));
             }
             phase_start = first_compute + (kSeqLen / kTile) * kComputeBlockCycles;
         }
