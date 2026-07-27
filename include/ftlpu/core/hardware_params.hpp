@@ -20,13 +20,6 @@ constexpr std::size_t kStreamRegisterBytes = 1;
 constexpr std::size_t kMemSliceColumns = 44;
 constexpr std::size_t kMemSlicesPerGroup = 4;
 constexpr std::size_t kMemGroups = kMemSliceColumns / kMemSlicesPerGroup;
-constexpr std::size_t kAccumulatorMemGroupCount = 2;
-constexpr std::size_t kWestAccumulatorMemGroup = kMemGroups - 2;
-constexpr std::size_t kEastAccumulatorMemGroup = kMemGroups - 1;
-constexpr std::size_t kWestAccumulatorMemSliceBase =
-    kWestAccumulatorMemGroup * kMemSlicesPerGroup;
-constexpr std::size_t kEastAccumulatorMemSliceBase =
-    kEastAccumulatorMemGroup * kMemSlicesPerGroup;
 constexpr std::size_t kMemBoundaryStreamRegisterColumns = kMemGroups + 1;
 constexpr std::size_t kSxmToMxmStreamRegisterColumns = 1;
 constexpr std::size_t kSystemStreamRegisterColumns =
@@ -62,18 +55,20 @@ constexpr std::size_t kMxmWeightBytesPerValue = 2;
 constexpr std::size_t kMxmLoadStreamsPerCycle = kMxmSupercellColumns * kMxmWeightBytesPerValue;
 constexpr std::size_t kMxmActivationStreamsPerVector = 2;
 constexpr std::size_t kMxmLoadBytesPerCycle = kLanesPerTile * kMxmLoadStreamsPerCycle * kStreamRegisterBytes;
+constexpr std::size_t kMxmAccumulatorRows = 8192;
+constexpr std::size_t kMxmAccumulatorBytes =
+    kMxmAccumulatorRows * kMxmColumns * sizeof(float);
 
 constexpr std::size_t kSxmConcurrentStreamOps = 16;
 
 constexpr std::size_t kHemispheres = 2;
 constexpr std::size_t kPublicSramBlocks = 88;
 constexpr std::size_t kModeledSramBlocks = kPublicSramBlocks / kHemispheres;
-// One vector-wide SRAM block, split into two address banks, is owned by each
-// MEM slice.
+// One vector-wide SRAM is owned by each MEM slice.
 constexpr std::size_t kSramBlocksPerSlice = 1;
 constexpr std::size_t kSramBlocks = kModeledSramBlocks;
 constexpr std::size_t kSramRowBytes = kPhysicalVectorBytes;
-constexpr std::size_t kSramDepthRows = 8192;
+constexpr std::size_t kSramDepthRows = 65536;
 // Compatibility alias for code that historically called a vector row a word.
 constexpr std::size_t kSramDepthWords = kSramDepthRows;
 constexpr std::size_t kSramBlockBytes = kSramRowBytes * kSramDepthRows;
@@ -82,9 +77,6 @@ constexpr std::size_t kPublicTotalSramBytes = kPublicSramBlocks * kSramBlockByte
 
 static_assert(kPhysicalVectorBytes == 32);
 static_assert(kMemSliceColumns % kMemSlicesPerGroup == 0);
-static_assert(kAccumulatorMemGroupCount == 2);
-static_assert(kWestAccumulatorMemSliceBase == 36);
-static_assert(kEastAccumulatorMemSliceBase == 40);
 static_assert(kMemBoundaryStreamRegisterColumns == 12);
 static_assert(kSystemStreamRegisterColumns == 13);
 static_assert(kMemEastBoundaryStreamRegisterColumn == 11);
@@ -101,9 +93,10 @@ static_assert(kMxmRows == kMxmSupercellRows * kMxmSupercellsPerPlane);
 static_assert(kMxmColumns == kMxmSupercellColumns * kMxmSupercellsPerPlane);
 static_assert(kMxmLoadStreamsPerCycle == 16);
 static_assert(kMxmLoadBytesPerCycle == 128);
+static_assert(kMxmAccumulatorBytes == 1024 * 1024);
 static_assert(kSxmConcurrentStreamOps == 16);
-static_assert(kSramBlockBytes == 256 * 1024);
-static_assert(kTotalSramBytes == 11 * 1024 * 1024);
-static_assert(kPublicTotalSramBytes == 22 * 1024 * 1024);
+static_assert(kSramBlockBytes == 2 * 1024 * 1024);
+static_assert(kTotalSramBytes == 88 * 1024 * 1024);
+static_assert(kPublicTotalSramBytes == 176 * 1024 * 1024);
 
 } // namespace ftlpu::hw

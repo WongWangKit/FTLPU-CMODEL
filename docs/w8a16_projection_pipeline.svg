@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1320" height="810" viewBox="0 0 1320 810" role="img" aria-labelledby="title desc">
-  <title id="title">Offline ICU W8A16 projection pipeline with two accumulator groups</title>
-  <desc id="desc">MXM0 and MXM1 compute in parallel and write to independent four-slice MEM accumulator groups.</desc>
+  <title id="title">Offline ICU W8A16 projection pipeline with MXM-local accumulators</title>
+  <desc id="desc">MXM0 and MXM1 compute in parallel and retain partial sums in their independent local accumulators.</desc>
   <style>
     text { font-family: "Segoe UI", Arial, sans-serif; fill: #17202a; letter-spacing: 0; }
     .title { font-size: 25px; font-weight: 650; }

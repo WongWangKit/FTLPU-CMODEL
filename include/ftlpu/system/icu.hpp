@@ -121,10 +121,10 @@ public:
     void enqueue_mxm(std::size_t mxm, MxmControlInstruction instruction)
     {
         check_mxm_queue(mxm);
-        if (instruction.opcode == MxmControlOpcode::Compute) {
-            mxm_compute_queues_[mxm].push_instruction(instruction);
-        } else {
+        if (instruction.opcode == MxmControlOpcode::IW) {
             mxm_load_queues_[mxm].push_instruction(instruction);
+        } else {
+            mxm_compute_queues_[mxm].push_instruction(instruction);
         }
     }
 
@@ -556,8 +556,6 @@ private:
             return "Gather";
         case MemOpcode::Scatter:
             return "Scatter";
-        case MemOpcode::Accumulate:
-            return "Accumulate";
         }
         return "?";
     }
@@ -572,11 +570,6 @@ private:
             os << " write_address=" << instruction.write_address
                << " write_stream=" << instruction.write_stream;
         }
-        if (instruction.opcode == MemOpcode::Accumulate) {
-            os << " destination="
-               << (instruction.accumulator_destination == MemAccumulatorDestination::Sram
-                       ? "sram" : "stream");
-        }
         if (instruction.opcode == MemOpcode::Gather || instruction.opcode == MemOpcode::Scatter) {
             os << " map_stream=" << instruction.map_stream;
         }
@@ -589,9 +582,13 @@ private:
         if (instruction.opcode == MxmControlOpcode::IW) {
             os << "IW b" << instruction.weight_buffer
                << " col=" << instruction.weight_column;
-        } else {
+        } else if (instruction.opcode == MxmControlOpcode::Compute) {
             os << "Compute b" << instruction.weight_buffer
                << " stream=" << instruction.activation_stream_base
+               << " acc=" << instruction.accumulator_address
+               << " out=" << instruction.stream_base;
+        } else {
+            os << "AccumulatorRead address=" << instruction.accumulator_address
                << " out=" << instruction.stream_base;
         }
         return os.str();

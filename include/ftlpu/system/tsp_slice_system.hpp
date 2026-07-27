@@ -15,6 +15,7 @@
 #include <ostream>
 #include <stdexcept>
 #include <streambuf>
+#include <string>
 
 namespace ftlpu {
 
@@ -93,6 +94,16 @@ public:
         return icu_;
     }
 
+    Mxm& mxm_unit(std::size_t mxm)
+    {
+        return mxms_.at(mxm);
+    }
+
+    const Mxm& mxm_unit(std::size_t mxm) const
+    {
+        return mxms_.at(mxm);
+    }
+
     void tick(std::ostream& os)
     {
         LogSinks sinks {&os, &os, &os, &os, &os};
@@ -101,18 +112,77 @@ public:
 
     void tick(LogSinks sinks)
     {
+        begin_cycle_phase(sinks);
+        dispatch_phase(sinks);
+        mxm_phase(sinks);
+        vxm_phase(sinks);
+        mem_sxm_commit_phase(sinks);
+        end_cycle_phase();
+    }
+
+    std::size_t cycle() const
+    {
+        return cycle_;
+    }
+
+private:
+    enum class CyclePhase {
+        Idle,
+        Begun,
+        Dispatched,
+        MxmEvaluated,
+        VxmEvaluated,
+        MemSxmCommitted,
+    };
+
+    void require_phase(CyclePhase expected, const char* operation) const
+    {
+        if (phase_ != expected) {
+            throw std::logic_error(
+                std::string("TSP cycle phase violation while ") + operation);
+        }
+    }
+
+    void begin_cycle_phase(LogSinks sinks)
+    {
+        require_phase(CyclePhase::Idle, "beginning cycle");
         if (sinks.system != nullptr) {
             *sinks.system << "system cycle " << cycle_ << '\n';
         }
+        phase_ = CyclePhase::Begun;
+    }
+
+    void dispatch_phase(LogSinks sinks)
+    {
+        require_phase(CyclePhase::Begun, "dispatching ICU instructions");
         icu_.dispatch(mems_, vxm_, sxms_, mxms_, sinks.icu);
+        phase_ = CyclePhase::Dispatched;
+    }
+
+    void mxm_phase(LogSinks sinks)
+    {
+        require_phase(CyclePhase::Dispatched, "evaluating MXM");
         tick_mxm_controls(sinks);
         tick_mxm_datapaths(sinks);
+        phase_ = CyclePhase::MxmEvaluated;
+    }
+
+    void vxm_phase(LogSinks sinks)
+    {
+        require_phase(CyclePhase::MxmEvaluated, "evaluating VXM");
         vxm_.prepare_cycle();
         transfer_mem_edges_to_vxm(sinks);
         transfer_unconsumed_streams_across_vxm(sinks);
         vxm_.tick(sinks.vxm, sinks.vxm_log_tile);
         transfer_vxm_to_mem_edges(sinks);
+        phase_ = CyclePhase::VxmEvaluated;
+    }
+
+    void mem_sxm_commit_phase(LogSinks sinks)
+    {
+        require_phase(CyclePhase::VxmEvaluated, "committing MEM and SXM");
         for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
+            sxms_[hemisphere].set_trace_enabled(sinks.sxm != nullptr);
             if (sinks.mem != nullptr) {
                 *sinks.mem << "mem." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
                            << " cycle " << cycle_ << '\n';
@@ -127,15 +197,15 @@ public:
                 sxms_[hemisphere].log_cycle(*sinks.sxm);
             }
         }
-        ++cycle_;
+        phase_ = CyclePhase::MemSxmCommitted;
     }
 
-    std::size_t cycle() const
+    void end_cycle_phase()
     {
-        return cycle_;
+        require_phase(CyclePhase::MemSxmCommitted, "ending cycle");
+        ++cycle_;
+        phase_ = CyclePhase::Idle;
     }
-
-private:
     static SxmStreamPortMap make_sxm_port_map()
     {
         return SxmStreamPortMap::BetweenColumns(
@@ -374,6 +444,7 @@ private:
     std::array<Mxm, kMxmCount> mxms_{};
     InstructionControlUnit icu_{};
     std::size_t cycle_{0};
+    CyclePhase phase_{CyclePhase::Idle};
 };
 
 } // namespace ftlpu

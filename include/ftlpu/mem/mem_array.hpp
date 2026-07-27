@@ -145,8 +145,6 @@ public:
         enum class Kind {
             StoreStreamToSram,
             LoadSramToStream,
-            AccumulateStreamIntoSram,
-            AccumulateStreamToStream,
         };
 
         Kind kind{Kind::StoreStreamToSram};
@@ -155,7 +153,7 @@ public:
         std::size_t sr_column{0};
         StreamId stream{StreamId::East(0)};
         std::size_t address{0};
-        StreamPayloadSegment16 bytes{};
+        StreamPayloadTileSegment bytes{};
     };
 
     struct InstructionTrace {
@@ -211,7 +209,7 @@ public:
         std::uint8_t value)
     {
         check_mem_slice(mem_slice);
-        sram_.bank(mem_slice).set_byte(row, byte_offset, value);
+        sram_.slice(mem_slice).set_byte(row, byte_offset, value);
     }
 
     std::uint8_t sram_byte(
@@ -220,7 +218,7 @@ public:
         std::size_t byte_offset) const
     {
         check_mem_slice(mem_slice);
-        return sram_.bank(mem_slice).byte(row, byte_offset);
+        return sram_.slice(mem_slice).byte(row, byte_offset);
     }
 
     void set_sram_lane_byte(
@@ -266,7 +264,7 @@ public:
     // Evaluate one MEM cycle against the current SR state.  This method never
     // propagates or commits the SR fabric: the owning system performs one
     // global fabric commit after all functional slices have evaluated.
-    void evaluate(StreamRegisterFabric& fabric)
+    void evaluate(StreamRegisterFabric& fabric, bool capture_trace = true)
     {
         ports_.validate_for(fabric);
         if (!fabric.cycle_open()) {
@@ -276,6 +274,7 @@ public:
         executed_mem_.clear();
         executed_instructions_.clear();
         dispatch_from_queues();
+        capture_trace_ = capture_trace;
         execute_current_instructions(fabric);
         advance_instructions();
         ++cycle_;
@@ -331,8 +330,6 @@ private:
             return "Gather";
         case MemOpcode::Scatter:
             return "Scatter";
-        case MemOpcode::Accumulate:
-            return "Accumulate";
         }
         return "Unknown";
     }
@@ -348,13 +345,6 @@ private:
         case MemOpcode::ReadWrite:
             os << "(ra=" << instruction.address << ",rs=" << instruction.stream
                << ",wa=" << instruction.write_address << ",ws=" << instruction.write_stream
-               << ")";
-            break;
-        case MemOpcode::Accumulate:
-            os << "(a=" << instruction.address << ",s=" << instruction.stream
-               << ",dst="
-               << (instruction.accumulator_destination == MemAccumulatorDestination::Sram
-                       ? "sram" : "stream")
                << ")";
             break;
         case MemOpcode::Gather:
@@ -385,8 +375,10 @@ private:
                     continue;
                 }
 
-                executed_instructions_.push_back(
-                    InstructionTrace {mem_slice, tile, *instruction});
+                if (capture_trace_) {
+                    executed_instructions_.push_back(
+                        InstructionTrace {mem_slice, tile, *instruction});
+                }
                 switch (instruction->opcode) {
                 case MemOpcode::Read:
                     execute_read(fabric, mem_slice, tile, *instruction);
@@ -396,9 +388,6 @@ private:
                     break;
                 case MemOpcode::ReadWrite:
                     execute_read_write(fabric, mem_slice, tile, *instruction);
-                    break;
-                case MemOpcode::Accumulate:
-                    execute_accumulate(fabric, mem_slice, tile, *instruction);
                     break;
                 case MemOpcode::Gather:
                 case MemOpcode::Scatter:
@@ -417,7 +406,7 @@ private:
         const auto stream = instruction.stream_id();
         const auto sr_column = ports_.output_column(mem_slice, stream.direction());
         const auto physical_address = instruction.address;
-        const auto bytes = sram_.bank(mem_slice).read_segment(tile, physical_address);
+        const auto bytes = sram_.slice(mem_slice).read_segment(tile, physical_address);
         const auto vector_tag = static_cast<std::uint64_t>(cycle_) * hw::kTileRows + tile;
 
         StreamOutputPort output(
@@ -431,15 +420,17 @@ private:
             bytes,
             vector_tag);
 
-        executed_mem_.push_back(MemTransfer {
-            MemTransfer::Kind::LoadSramToStream,
-            mem_slice,
-            tile,
-            sr_column,
-            stream,
-            physical_address,
-            bytes,
-        });
+        if (capture_trace_) {
+            executed_mem_.push_back(MemTransfer {
+                MemTransfer::Kind::LoadSramToStream,
+                mem_slice,
+                tile,
+                sr_column,
+                stream,
+                physical_address,
+                bytes,
+            });
+        }
     }
 
     void execute_write(
@@ -450,7 +441,7 @@ private:
     {
         const auto stream = instruction.stream_id();
         const auto sr_column = ports_.input_column(mem_slice, stream.direction());
-        StreamPayloadSegment16 bytes{};
+        StreamPayloadTileSegment bytes{};
         StreamInputPort input(
             fabric,
             sr_column,
@@ -466,16 +457,18 @@ private:
             throw std::logic_error("MEM Write reached an invalid stream segment");
         }
 
-        sram_.bank(mem_slice).write_segment(tile, instruction.address, bytes);
-        executed_mem_.push_back(MemTransfer {
-            MemTransfer::Kind::StoreStreamToSram,
-            mem_slice,
-            tile,
-            sr_column,
-            stream,
-            instruction.address,
-            bytes,
-        });
+        sram_.slice(mem_slice).write_segment(tile, instruction.address, bytes);
+        if (capture_trace_) {
+            executed_mem_.push_back(MemTransfer {
+                MemTransfer::Kind::StoreStreamToSram,
+                mem_slice,
+                tile,
+                sr_column,
+                stream,
+                instruction.address,
+                bytes,
+            });
+        }
     }
 
     void execute_read_write(
@@ -499,102 +492,6 @@ private:
             MemInstruction::Write(instruction.write_address, instruction.write_stream_id()));
     }
 
-    void execute_accumulate(
-        StreamRegisterFabric& fabric,
-        std::size_t mem_slice,
-        std::size_t tile,
-        const MemInstruction& instruction)
-    {
-        const auto kGroupBase = mem_slice;
-        if (kGroupBase != hw::kWestAccumulatorMemSliceBase
-            && kGroupBase != hw::kEastAccumulatorMemSliceBase) {
-            throw std::logic_error("MEM Accumulate must issue on one of the two accumulator group base queues");
-        }
-        for (std::size_t byte = 1; byte < sizeof(float); ++byte) {
-            if (instruction_rows_[kGroupBase + byte][tile].has_value()) {
-                throw std::logic_error("MEM Accumulate conflicts with another instruction in its four-slice group");
-            }
-        }
-
-        const auto stream = instruction.stream_id();
-        if (stream.direction() != StreamDirection::West
-            || stream.index() + sizeof(float) > hw::kWestStreams) {
-            throw std::logic_error("MEM Accumulate requires four consecutive west streams");
-        }
-        const auto sr_column = ports_.input_column(kGroupBase, StreamDirection::West);
-        std::array<StreamPayloadSegment16, sizeof(float)> stream_bytes{};
-        for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
-            StreamInputPort input(fabric, sr_column, StreamDirection::West, "MEM Accumulate");
-            if (!input.segment_valid(tile, stream.index() + byte)) {
-                throw std::logic_error("MEM Accumulate reached an invalid FP32 stream segment");
-            }
-            const auto segment = input.consume_segment(tile, stream.index() + byte);
-            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                stream_bytes[byte][lane] = segment[lane].data;
-            }
-        }
-
-        std::array<StreamPayloadSegment16, sizeof(float)> memory_bytes{};
-        std::array<StreamPayloadSegment16, sizeof(float)> result_bytes{};
-        for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
-            memory_bytes[byte] = sram_.bank(kGroupBase + byte).read_segment(tile, instruction.address);
-        }
-        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            std::uint32_t memory_raw = 0;
-            std::uint32_t stream_raw = 0;
-            for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
-                memory_raw |= static_cast<std::uint32_t>(memory_bytes[byte][lane]) << (byte * 8);
-                stream_raw |= static_cast<std::uint32_t>(stream_bytes[byte][lane]) << (byte * 8);
-            }
-            const auto result = std::bit_cast<float>(memory_raw) + std::bit_cast<float>(stream_raw);
-            const auto result_raw = std::bit_cast<std::uint32_t>(result);
-            for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
-                result_bytes[byte][lane] = static_cast<std::uint8_t>((result_raw >> (byte * 8)) & 0xffu);
-            }
-        }
-
-        if (instruction.accumulator_destination == MemAccumulatorDestination::Sram) {
-            for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
-                sram_.bank(kGroupBase + byte).write_segment(tile, instruction.address, result_bytes[byte]);
-                executed_mem_.push_back(MemTransfer {
-                    MemTransfer::Kind::AccumulateStreamIntoSram,
-                    kGroupBase + byte,
-                    tile,
-                    sr_column,
-                    StreamId::West(stream.index() + byte),
-                    instruction.address,
-                    result_bytes[byte],
-                });
-            }
-            return;
-        }
-
-        const auto output_column = ports_.boundary_column(
-            kGroupBase / hw::kMemSlicesPerGroup);
-        const auto vector_tag = static_cast<std::uint64_t>(cycle_) * hw::kTileRows + tile;
-        StreamOutputPort output(fabric, output_column, StreamDirection::West, "MEM Accumulate");
-        for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
-            output.write_payload_segment(
-                tile,
-                stream.index() + byte,
-                result_bytes[byte],
-                vector_tag);
-            sram_.bank(kGroupBase + byte).write_segment(
-                tile,
-                instruction.address,
-                StreamPayloadSegment16 {});
-            executed_mem_.push_back(MemTransfer {
-                MemTransfer::Kind::AccumulateStreamToStream,
-                kGroupBase + byte,
-                tile,
-                output_column,
-                StreamId::West(stream.index() + byte),
-                instruction.address,
-                result_bytes[byte],
-            });
-        }
-    }
-
     void advance_instructions()
     {
         for (auto& mem_slice : instruction_rows_) {
@@ -605,7 +502,7 @@ private:
         }
     }
 
-    static void print_hex_bytes(std::ostream& os, const StreamPayloadSegment16& bytes)
+    static void print_hex_bytes(std::ostream& os, const StreamPayloadTileSegment& bytes)
     {
         const auto old_flags = os.flags();
         const auto old_fill = os.fill();
@@ -664,10 +561,7 @@ private:
             os << "    c" << transfer.mem_slice << ".t" << transfer.tile << ' '
                << (transfer.kind == MemTransfer::Kind::StoreStreamToSram
                        ? "store"
-                       : transfer.kind == MemTransfer::Kind::LoadSramToStream
-                           ? "load"
-                           : transfer.kind == MemTransfer::Kind::AccumulateStreamToStream
-                               ? "acc-out" : "acc")
+                       : "load")
                << ' ' << direction_name(transfer.stream.direction()) << transfer.stream.index()
                << " addr=" << transfer.address << " bytes=0x";
             print_hex_bytes(os, transfer.bytes);
@@ -684,6 +578,7 @@ private:
     std::vector<MemTransfer> executed_mem_{};
     std::vector<InstructionTrace> executed_instructions_{};
     std::size_t cycle_{0};
+    bool capture_trace_{true};
 };
 
 } // namespace ftlpu

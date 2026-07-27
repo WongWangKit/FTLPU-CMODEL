@@ -93,12 +93,42 @@ public:
         advance(mxm_load_[mxm], cycle + 1);
     }
 
-    void mxm_compute_repeat_at(std::size_t mxm, std::size_t cycle, std::size_t activation, std::size_t output)
+    void mxm_compute_repeat_at(
+        std::size_t mxm,
+        std::size_t cycle,
+        std::size_t activation,
+        std::size_t output,
+        std::size_t accumulator_address,
+        std::size_t accumulator_stride)
     {
         pad(mxm_compute_[mxm], cycle, [&](std::size_t n) { icu_.enqueue_mxm_compute_nop(mxm, n); });
-        icu_.enqueue_mxm(mxm, ftlpu::MxmControlInstruction::Compute(0, activation, output));
+        icu_.enqueue_mxm(
+            mxm,
+            ftlpu::MxmControlInstruction::Compute(
+                0,
+                activation,
+                output,
+                accumulator_address,
+                accumulator_stride,
+                ftlpu::MxmAccumulatorDestination::Sram));
         icu_.enqueue_mxm_compute_repeat(mxm, kTile - 1, 1);
         advance(mxm_compute_[mxm], cycle + kTile);
+    }
+
+    void mxm_accumulator_read_at(
+        std::size_t mxm,
+        std::size_t cycle,
+        std::size_t address,
+        std::size_t output)
+    {
+        pad(mxm_compute_[mxm], cycle, [&](std::size_t n) {
+            icu_.enqueue_mxm_compute_nop(mxm, n);
+        });
+        icu_.enqueue_mxm(
+            mxm,
+            ftlpu::MxmControlInstruction::AccumulatorRead(
+                address, output, false));
+        advance(mxm_compute_[mxm], cycle + 1);
     }
 
     std::size_t end_cycle() const { return end_cycle_; }
@@ -185,23 +215,13 @@ float read_swiglu(
 
 float read_accumulator(
     const ftlpu::TspSliceSystem& system,
-    std::size_t group_base,
+    std::size_t mxm,
     std::size_t row,
     std::size_t column)
 {
     const auto n_base = column / kTile * kTile;
-    const auto local_column = column % kTile;
-    const auto tile = local_column / ftlpu::hw::kLanesPerTile;
-    const auto lane = local_column % ftlpu::hw::kLanesPerTile;
-    std::uint32_t raw = 0;
-    for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
-        raw |= static_cast<std::uint32_t>(system.read_mem_sram_lane_byte(
-            group_base + byte,
-            tile,
-            accumulator_address(row, n_base),
-            lane)) << (byte * 8);
-    }
-    return std::bit_cast<float>(raw);
+    return system.mxm_unit(mxm).accumulator().value(
+        accumulator_address(row, n_base), column % kTile);
 }
 
 } // namespace
@@ -301,24 +321,20 @@ int main()
                         kTile,
                         1);
                 }
-                schedule.mem_repeat_at(
-                    ftlpu::hw::kWestAccumulatorMemSliceBase,
-                    compute_cycle + kGateAccumulatorLatency,
-                    ftlpu::MemInstruction::Accumulate(
-                        accumulator_address(mb * kTile, n_base),
-                        ftlpu::StreamId::West(0)),
-                    kTile,
+                schedule.mxm_compute_repeat_at(
+                    0,
+                    compute_cycle,
+                    0,
+                    0,
+                    accumulator_address(mb * kTile, n_base),
                     kIntermediate / kTile);
-                schedule.mem_repeat_at(
-                    ftlpu::hw::kEastAccumulatorMemSliceBase,
-                    compute_cycle + kUpAccumulatorLatency,
-                    ftlpu::MemInstruction::Accumulate(
-                        accumulator_address(mb * kTile, n_base),
-                        ftlpu::StreamId::West(4)),
-                    kTile,
+                schedule.mxm_compute_repeat_at(
+                    1,
+                    compute_cycle,
+                    2,
+                    4,
+                    accumulator_address(mb * kTile, n_base),
                     kIntermediate / kTile);
-                schedule.mxm_compute_repeat_at(0, compute_cycle, 0, 0);
-                schedule.mxm_compute_repeat_at(1, compute_cycle, 2, 4);
             }
             phase_start = first_compute + (kSeqLen / kTile) * kComputeBlockCycles;
         }
@@ -329,18 +345,8 @@ int main()
         for (std::size_t row = 0; row < kSeqLen; ++row) {
             const auto cycle = swish_start + (n_base / kTile) * kSeqLen + row;
             const auto acc_address = accumulator_address(row, n_base);
-            for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
-                const auto gate_slice = ftlpu::hw::kWestAccumulatorMemSliceBase + byte;
-                const auto up_slice = ftlpu::hw::kEastAccumulatorMemSliceBase + byte;
-                schedule.mem_at(
-                    gate_slice,
-                    cycle - west_read_latency(gate_slice),
-                    ftlpu::MemInstruction::Read(acc_address, ftlpu::StreamId::West(byte)));
-                schedule.mem_at(
-                    up_slice,
-                    cycle - west_read_latency(up_slice),
-                    ftlpu::MemInstruction::Read(acc_address, ftlpu::StreamId::West(4 + byte)));
-            }
+            schedule.mxm_accumulator_read_at(0, cycle - 13, acc_address, 0);
+            schedule.mxm_accumulator_read_at(1, cycle - 13, acc_address, 4);
             schedule.swish_at(cycle, ftlpu::test::SwishSpec {32, 36, 0});
             schedule.mem_at(
                 kOutputLowSlice,
@@ -369,9 +375,9 @@ int main()
                 }
             }
             const auto gate = read_accumulator(
-                *system, ftlpu::hw::kWestAccumulatorMemSliceBase, m, n);
+                *system, 0, m, n);
             const auto up = read_accumulator(
-                *system, ftlpu::hw::kEastAccumulatorMemSliceBase, m, n);
+                *system, 1, m, n);
             if (std::fabs(gate - projected[0]) > 1.0e-5f
                 || std::fabs(up - projected[1]) > 1.0e-5f) {
                 std::cerr << "offline projection mismatch before SwiGLU at (" << m << ',' << n << ")\n";

@@ -150,14 +150,21 @@ struct StreamCell {
     }
 };
 
-// Spatial views of one logical stream.  StreamVector320 is a legacy-named
-// logical/debug aggregation, not an atomic transfer. Hardware-facing slices act
-// on one StreamSegment16 at one tile row per cycle; northbound instruction
-// staggering can skew the twenty segments across columns and cycles.
-using StreamSegment16 = std::array<StreamCell, hw::kLanesPerTile>;
-using StreamVector320 = std::array<StreamSegment16, hw::kTileRows>;
-using StreamPayloadSegment16 = std::array<std::uint8_t, hw::kLanesPerTile>;
-using StreamPayloadVector320 = std::array<StreamPayloadSegment16, hw::kTileRows>;
+// Spatial views of one logical stream. A vector is a logical/debug aggregation,
+// not an atomic transfer. Hardware-facing slices act on one tile segment per
+// cycle; northbound instruction staggering can skew segments across cycles.
+using StreamTileSegment = std::array<StreamCell, hw::kLanesPerTile>;
+using StreamSliceVector = std::array<StreamTileSegment, hw::kTileRows>;
+using StreamPayloadTileSegment = std::array<std::uint8_t, hw::kLanesPerTile>;
+using StreamPayloadSliceVector =
+    std::array<StreamPayloadTileSegment, hw::kTileRows>;
+
+// Source compatibility for workloads outside this repository. New code should
+// use the topology-neutral names above.
+using StreamSegment16 = StreamTileSegment;
+using StreamVector320 = StreamSliceVector;
+using StreamPayloadSegment16 = StreamPayloadTileSegment;
+using StreamPayloadVector320 = StreamPayloadSliceVector;
 
 template <typename T>
 class StreamRegister {

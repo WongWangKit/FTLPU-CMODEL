@@ -17,8 +17,8 @@ provide a concrete target for dataflow scheduling and future compiler work.
 | Vector shape | 4 tiles/superlanes x 8 lanes = 32 elements |
 | Streams | 32 eastward + 32 westward streams, one byte per register |
 | MEM | 44 slices per hemisphere, 88 ICU queues total |
-| SRAM | 256 KiB per slice, 11 MiB per hemisphere, 22 MiB total |
-| Accumulators | Two four-slice FP32 accumulator groups per hemisphere |
+| SRAM | 2 MiB per slice, 88 MiB per hemisphere, 176 MiB total |
+| Accumulators | One 1 MiB FP32 accumulator inside each MXM |
 | MXM | Four 32 x 32 FP16 GEMM arrays, two per hemisphere |
 | MXM weights | Two peer buffers per supercell, selected by `IW`/`Compute` |
 | VXM | One central slice, 16 independently controlled ALUs per lane |
@@ -68,7 +68,7 @@ The full FFN uses all four MXMs and currently schedules 90,817 cycles. Its final
 gate/up reduction streams accumulator results directly into the shared VXM
 SwiGLU pipeline. The complete SmolLM2 attention workload uses sequence length
 128, hidden size 576, 9 query heads, 3 KV heads, and head dimension 64; its
-validated schedule is 81,273 cycles.
+validated schedule is 94,761 cycles.
 
 ## Build
 
@@ -100,6 +100,9 @@ build-vs2026\Release\smollm2_attention_test.exe
 Whole-system logging is disabled by default because per-cycle traces are
 expensive. Small tests and demos can provide `TspSliceSystem::LogSinks` for
 separate ICU, MEM, MXM, VXM, SXM, and system logs.
+The no-log path skips MEM/VXM/SXM trace construction. SRAM preserves its full
+2 MiB-per-slice address space while allocating backing storage lazily in 4 KiB
+pages, so sparse workloads do not eagerly reserve all 176 MiB.
 
 ## Schedule Diagrams
 
@@ -133,13 +136,14 @@ python scripts\render_schedule_trace.py `
 ```
 
 Accumulator bars in detailed diagrams use purple for partial sums retained in
-SRAM and red for final `stream+clear` operations.
+an MXM-local accumulator and red for final `stream+clear` operations.
 
 ## Repository Layout
 
 - `include/ftlpu/core/`: hardware constants, streams, FP16, and ISA codec.
-- `include/ftlpu/mem/`: SRAM, MEM instruction pipelines, and accumulators.
-- `include/ftlpu/mxm/`: supercells, arrays, control slices, and GEMM datapath.
+- `include/ftlpu/mem/`: homogeneous SRAM slices and MEM instruction pipelines.
+- `include/ftlpu/mxm/`: supercells, arrays, control slices, GEMM datapath, and
+  MXM-local accumulators.
 - `include/ftlpu/vxm/`: ALU, lane, superlane, and central VXM slice.
 - `include/ftlpu/sxm/`: Shift/Distribute/Transpose/Permute models.
 - `include/ftlpu/system/`: ICU, stream topology, and full-chip integration.

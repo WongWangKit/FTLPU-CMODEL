@@ -20,6 +20,12 @@ namespace ftlpu {
 enum class MxmControlOpcode {
     IW = 0,
     Compute = 1,
+    AccumulatorRead = 2,
+};
+
+enum class MxmAccumulatorDestination {
+    Sram = 0,
+    Stream = 1,
 };
 
 struct MxmControlInstruction {
@@ -28,6 +34,11 @@ struct MxmControlInstruction {
     std::size_t stream_base{0};
     std::size_t activation_stream_base{0};
     std::size_t weight_column{0};
+    std::size_t accumulator_address{0};
+    std::size_t accumulator_row_stride{1};
+    MxmAccumulatorDestination accumulator_destination{
+        MxmAccumulatorDestination::Stream};
+    bool accumulator_clear{true};
 
     static MxmControlInstruction IW(
         std::size_t weight_buffer = 0,
@@ -42,7 +53,11 @@ struct MxmControlInstruction {
     static MxmControlInstruction Compute(
         std::size_t weight_buffer = 0,
         std::size_t activation_stream_base = 0,
-        std::size_t stream_base = 0)
+        std::size_t stream_base = 0,
+        std::size_t accumulator_address = 0,
+        std::size_t accumulator_row_stride = 1,
+        MxmAccumulatorDestination accumulator_destination =
+            MxmAccumulatorDestination::Stream)
     {
         check_weight_buffer(weight_buffer);
         check_activation_stream_base(activation_stream_base);
@@ -52,7 +67,26 @@ struct MxmControlInstruction {
             weight_buffer,
             stream_base,
             activation_stream_base,
-            0};
+            0,
+            accumulator_address,
+            accumulator_row_stride,
+            accumulator_destination,
+            true};
+    }
+
+    static MxmControlInstruction AccumulatorRead(
+        std::size_t accumulator_address,
+        std::size_t stream_base = 0,
+        bool clear = true)
+    {
+        check_accumulator_address(accumulator_address);
+        check_stream_base(stream_base);
+        auto instruction = MxmControlInstruction {};
+        instruction.opcode = MxmControlOpcode::AccumulatorRead;
+        instruction.stream_base = stream_base;
+        instruction.accumulator_address = accumulator_address;
+        instruction.accumulator_clear = clear;
+        return instruction;
     }
 
     static void check_weight_buffer(std::size_t weight_buffer)
@@ -82,6 +116,13 @@ struct MxmControlInstruction {
             throw std::out_of_range("MXM output stream base must leave room for four FP32 byte streams");
         }
     }
+
+    static void check_accumulator_address(std::size_t address)
+    {
+        if (address >= hw::kMxmAccumulatorRows) {
+            throw std::out_of_range("MXM accumulator address is outside the 1 MiB SRAM");
+        }
+    }
 };
 
 class MxmControlSlice {
@@ -95,6 +136,16 @@ public:
         std::size_t weight_buffer{0};
         std::size_t activation_stream_base{0};
         std::size_t stream_base{0};
+        std::size_t accumulator_address{0};
+        std::size_t accumulator_row_stride{1};
+        MxmAccumulatorDestination accumulator_destination{
+            MxmAccumulatorDestination::Stream};
+    };
+
+    struct AccumulatorReadPulse {
+        std::size_t address{0};
+        std::size_t stream_base{0};
+        bool clear{true};
     };
 
     explicit MxmControlSlice(MxmArray& array)
@@ -119,6 +170,9 @@ public:
         for (auto& pulse : compute_pulse_details_) {
             pulse.reset();
         }
+        for (auto& pulse : accumulator_read_pulse_details_) {
+            pulse.reset();
+        }
         for (auto& buffer : loaded_cells_) {
             for (auto& row : buffer) {
                 row.fill(false);
@@ -135,10 +189,10 @@ public:
     void issue_south(MxmControlInstruction instruction)
     {
         check_instruction(instruction);
-        if (instruction.opcode == MxmControlOpcode::Compute) {
-            compute_instruction_queue_.push_back(instruction);
-        } else {
+        if (instruction.opcode == MxmControlOpcode::IW) {
             load_instruction_queue_.push_back(instruction);
+        } else {
+            compute_instruction_queue_.push_back(instruction);
         }
     }
 
@@ -212,6 +266,19 @@ public:
             : std::nullopt;
     }
 
+    std::optional<ComputePulse> compute_pulse(std::size_t tile) const
+    {
+        check_tile(tile);
+        return compute_pulse_details_[tile];
+    }
+
+    std::optional<AccumulatorReadPulse> accumulator_read_pulse(
+        std::size_t tile) const
+    {
+        check_tile(tile);
+        return accumulator_read_pulse_details_[tile];
+    }
+
     void tick(std::ostream& os, bool print_matrix = true, std::optional<std::size_t> log_tile = std::nullopt)
     {
         tick(os, nullptr, print_matrix, log_tile);
@@ -255,6 +322,16 @@ private:
         MxmControlInstruction::check_weight_buffer(instruction.weight_buffer);
         if (instruction.opcode == MxmControlOpcode::Compute) {
             MxmControlInstruction::check_activation_stream_base(instruction.activation_stream_base);
+            MxmControlInstruction::check_stream_base(instruction.stream_base);
+            MxmControlInstruction::check_accumulator_address(
+                instruction.accumulator_address);
+            if (instruction.accumulator_row_stride == 0) {
+                throw std::invalid_argument(
+                    "MXM accumulator row stride must be at least one");
+            }
+        } else if (instruction.opcode == MxmControlOpcode::AccumulatorRead) {
+            MxmControlInstruction::check_accumulator_address(
+                instruction.accumulator_address);
             MxmControlInstruction::check_stream_base(instruction.stream_base);
         } else {
             MxmControlInstruction::check_column(instruction.weight_column);
@@ -322,6 +399,9 @@ private:
         for (auto& pulse : compute_pulse_details_) {
             pulse.reset();
         }
+        for (auto& pulse : accumulator_read_pulse_details_) {
+            pulse.reset();
+        }
         bool any = false;
         bool any_logged = false;
         for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
@@ -369,18 +449,44 @@ private:
             const auto& compute_instruction = compute_instruction_rows_[tile];
             if (compute_instruction.has_value()) {
                 any = true;
-                if (!log_tile.has_value() || tile == *log_tile) {
+                const auto should_log = !log_tile.has_value() || tile == *log_tile;
+                if (should_log) {
                     any_logged = true;
-                    os << "  tile " << tile << " Compute b" << compute_instruction->weight_buffer
-                       << " stream=" << compute_instruction->activation_stream_base
-                       << " out=" << compute_instruction->stream_base << '\n';
                 }
-                compute_pulses_[tile] = true;
-                compute_pulse_details_[tile] = ComputePulse {
-                    compute_instruction->weight_buffer,
-                    compute_instruction->activation_stream_base,
-                    compute_instruction->stream_base,
-                };
+                if (compute_instruction->opcode == MxmControlOpcode::Compute) {
+                    if (should_log) {
+                        os << "  tile " << tile << " Compute b"
+                           << compute_instruction->weight_buffer
+                           << " stream=" << compute_instruction->activation_stream_base
+                           << " acc=" << compute_instruction->accumulator_address
+                           << " out=" << compute_instruction->stream_base << '\n';
+                    }
+                    compute_pulses_[tile] = true;
+                    compute_pulse_details_[tile] = ComputePulse {
+                        compute_instruction->weight_buffer,
+                        compute_instruction->activation_stream_base,
+                        compute_instruction->stream_base,
+                        compute_instruction->accumulator_address,
+                        compute_instruction->accumulator_row_stride,
+                        compute_instruction->accumulator_destination,
+                    };
+                } else if (
+                    compute_instruction->opcode
+                    == MxmControlOpcode::AccumulatorRead) {
+                    if (should_log) {
+                        os << "  tile " << tile << " AccumulatorRead address="
+                           << compute_instruction->accumulator_address
+                           << " out=" << compute_instruction->stream_base
+                           << (compute_instruction->accumulator_clear
+                                   ? " clear" : " retain")
+                           << '\n';
+                    }
+                    accumulator_read_pulse_details_[tile] =
+                        AccumulatorReadPulse {
+                            compute_instruction->accumulator_address,
+                            compute_instruction->stream_base,
+                            compute_instruction->accumulator_clear};
+                }
             }
         }
 
@@ -432,6 +538,8 @@ private:
     std::array<WeightInputSlot, hw::kMxmSupercellsPerPlane> weight_inputs_{};
     std::array<bool, hw::kMxmSupercellsPerPlane> compute_pulses_{};
     std::array<std::optional<ComputePulse>, hw::kMxmSupercellsPerPlane> compute_pulse_details_{};
+    std::array<std::optional<AccumulatorReadPulse>, hw::kMxmSupercellsPerPlane>
+        accumulator_read_pulse_details_{};
     std::array<
         std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>,
         MxmSupercell::kWeightBuffers> loaded_cells_{};

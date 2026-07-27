@@ -20,15 +20,16 @@ The central vector shape is:
 | Stream-register columns | 13 per hemisphere (`sreg0..sreg12`) |
 | Streams per lane | 32 eastward + 32 westward |
 | Stream-register width | 1 byte |
-| SRAM capacity | 256 KiB per slice, 22 MiB full chip |
+| SRAM capacity | 2 MiB per slice, 176 MiB full chip |
 | MXM units | 4 total, 2 per hemisphere |
 | MXM array | 32 x 32 FP16 multiply with FP32 accumulation |
 | VXM | 1 central slice, 16 ALUs per lane |
 | SXM | 1 four-tile slice per hemisphere |
 
-One MEM slice owns an `8192 x 32-byte` SRAM block. It is logically split into
-two 4096-row banks. Each row spans all four tiles; one tile accesses its local
-8-byte segment when the instruction wave reaches that tile.
+One MEM slice owns a `65536 x 32-byte` SRAM block. Each row spans all four
+tiles; one tile accesses its local 8-byte segment when the instruction wave
+reaches that tile. The model has 88 homogeneous slices across two hemispheres,
+for `88 x 2 MiB = 176 MiB` total SRAM. There is no logical bank subdivision.
 
 ## 2. Full-Chip Topology
 
@@ -70,6 +71,10 @@ MEM, MXM control, and SXM Transpose instructions enter tile 0 at the south edge
 and advance north by one tile per cycle. Workloads must align data and control
 at every tile. Tests do not directly manipulate an in-flight tile.
 
+VXM follows the same offline-scheduling contract. An issued ALU instruction
+must find every stream or prior-ALU operand in that cycle. A missing operand is
+a static schedule error; the model does not insert an implicit queue stall.
+
 `TspSliceSystem::tick()` performs one complete system cycle:
 
 1. ICU dispatches the next command from every queue.
@@ -86,23 +91,17 @@ starts, they call only `tick()` until the offline schedule completes.
 ### Organization
 
 Each hemisphere has 44 MEM slice columns and one instruction queue per slice.
-Four adjacent slices form a group between two stream-register boundaries.
-Groups 9 and 10, slices `36..39` and `40..43`, retain normal SRAM behavior and
-also implement FP32 accumulation.
+Four adjacent slices form a group between two stream-register boundaries. All
+44 slices are homogeneous SRAM; no MEM group has accumulator behavior.
 
 A MEM instruction is a single-port operation for its slice. A slice cannot read
-and write in the same cycle, even at different addresses. An accumulator
-operation reserves all four slices in its group for that tile and cycle.
+and write in the same cycle, even at different addresses.
 
 ### Instructions
 
 - `Read(address, stream)` reads the tile-local 8-byte SRAM segment and writes it
   to one stream ID.
 - `Write(address, stream)` consumes one 8-byte stream segment and stores it.
-- `Accumulate(address, west_stream_base, destination)` consumes four consecutive
-  west streams as FP32, adds the selected four-slice SRAM value, and either:
-  - writes the sum back to SRAM; or
-  - emits the sum on the same four west streams and clears the SRAM slot.
 - `Gather` and `Scatter` are encoded but intentionally reject execution because
   the address-stream datapath is not modeled yet.
 
@@ -114,16 +113,15 @@ moves one 32-byte physical vector row as four skewed 8-byte segments.
 The public-style software address layout used as reference is:
 
 ```text
-[39:24] chip
-[23]    hemisphere
-[22:17] slice
-[16]    logical SRAM bank
-[15:4]  row offset within the 4096-row bank
+[39:27] chip
+[26]    hemisphere
+[25:20] slice
+[19:4]  row offset within the slice
 [3:0]   software byte offset
 ```
 
-`MemInstruction::address` stores only the 13-bit slice-local row field
-corresponding to software bits `[16:4]`, giving rows `0..8191`. The test
+`MemInstruction::address` stores only the 16-bit slice-local row field
+corresponding to software bits `[19:4]`, giving rows `0..65535`. The test
 initialization/result APIs expose tile and lane byte selection separately.
 
 ## 5. MXM
@@ -207,7 +205,9 @@ streams; west streams take the symmetric register hop without transformation.
 Each SXM has four tile rows. A Transpose instruction advances south to north one
 tile per cycle so each tile captures its matching diagonal wavefront. FP16 low
 and high bytes are two planes. Tile-local Transpose exchanges rows and columns
-of an `8 x 8` block.
+of an `8 x 8` block. Transpose and Permute have one physical width only:
+16 byte streams in and 16 byte streams out. One beat therefore carries all
+eight FP16 rows; the former two-stream serial mode is not supported.
 
 Transpose output is registered for one cycle before Permute may consume it.
 Permute rearranges complete blocks across four superlanes/32 lanes. The current
@@ -245,7 +245,9 @@ The compact model codec currently covers:
 - VXM ALU instructions encoded as four 32-bit words;
 - 32-bit ICU NOP/Repeat commands.
 
-SXM instructions are C++ control objects and do not yet have a binary codec.
+SXM instructions use a fixed 13 x 32-bit packet encoding. The packet carries
+the header, 16 source and destination stream selectors, the intra-tile lane
+map, and the full cross-tile permute map.
 Reserved bits and field ranges are validated by
 `tests/core/instruction_codec_test.cpp`.
 
@@ -275,15 +277,16 @@ and MXM load queues are all explicit scheduling resources.
 
 ### Accumulator Lifetime
 
-Non-final reductions use `Accumulate(..., SRAM)`. Final reductions use
-`Accumulate(..., Stream)`, which emits and clears the slot. Address reuse is
-legal only after the final stream result has been issued.
+Each MXM owns a 1 MiB FP32 accumulator with 8192 rows of 32 values. Non-final
+`Compute` instructions retain their sums in the selected MXM accumulator.
+Final `Compute` or `AccumulatorRead` instructions emit the selected segment to
+streams and may clear it. Address reuse is legal only after the final result has
+been emitted and cleared.
 
 ### Single-Port MEM
 
-Different addresses do not remove a slice conflict. Read, Write, and
-Accumulate windows must be disjoint whenever they reserve the same physical
-slice.
+Different addresses do not remove a slice conflict. Read and Write windows must
+be disjoint whenever they reserve the same physical slice.
 
 ## 10. Validated Whole-System Workloads
 
@@ -296,7 +299,7 @@ A[128,576] fp16 x W[576,1536] int8 -> C[128,1536] fp32
 ```
 
 Weights use symmetric per-output-column W8 scales. VXM dequantizes weights,
-MXM0/1 compute adjacent output blocks, and the two MEM accumulator groups sum
+MXM0/1 compute adjacent output blocks, and their MXM-local accumulators sum
 18 K tiles. All 196,608 outputs are compared against an FP16-aware scalar
 golden model.
 
@@ -327,8 +330,9 @@ and verifies all 73,728 output values.
 `rmsnorm_test` computes `[32,32]` FP16 RMSNorm entirely through MEM and VXM.
 ALU0 squares one hidden column per cycle; ALU1 recurrently accumulates
 `sum(x^2)` independently in all 32 physical lanes. VXM then computes inverse
-RMS and applies it to streamed `x` and `gamma`. No MXM or MEM accumulator is
-used.
+RMS and keeps it resident in an ALU. MEM schedules each `x` vector one cycle
+before its matching `gamma`, so two multiply ALUs consume them directly without
+Pass stages. No MXM or MEM accumulator is used.
 
 ### SmolLM2 Attention
 
@@ -343,7 +347,7 @@ The configuration is sequence length 128, hidden size 576, 9 query heads,
 3 KV heads, and head dimension 64. QK, P x V, and o_proj use independent work
 across all four MXMs where stream and accumulator resources allow. SXM prepares
 packed/transpose layouts for attention replay. The complete numerical golden
-check passes at 81,273 scheduled cycles.
+check passes at 94,761 scheduled cycles.
 
 See [attention_pipeline_optimization.md](attention_pipeline_optimization.md) for
 phase timing, measured MXM utilization, and remaining overlap opportunities.
@@ -353,6 +357,9 @@ phase timing, measured MXM utilization, and remaining overlap opportunities.
 Long regressions disable logging by default because per-cycle stream dumps
 dominate wall time. `TspSliceSystem::LogSinks` can independently capture ICU,
 MEM, MXM, VXM, SXM, and system logs.
+With all sinks null, MEM transfer traces, VXM operand strings, and SXM event
+strings are not constructed. SRAM uses sparse 4 KiB backing pages while
+preserving the complete architectural address space.
 
 Schedule CSV export is controlled by:
 
@@ -363,14 +370,13 @@ Schedule CSV export is controlled by:
 Detailed diagrams are generated by `scripts/render_schedule_trace.py` and
 `scripts/render_swiglu_schedule_trace.py`. Accumulator colors are:
 
-- purple: retain partial sum in SRAM;
+- purple: retain partial sum in the MXM accumulator;
 - red: emit final sum to stream and clear the slot.
 
 ## 12. Known Limitations
 
 - The model is not bit-accurate to private Groq hardware or ISA.
 - Gather/Scatter lack the address-stream execution datapath.
-- SXM has no binary instruction codec yet.
 - Offline schedules are still constructed inside integration tests; there is
   no standalone compiler or reusable program file format.
 - Resource allocation uses workload-specific SRAM slices and stream IDs rather

@@ -14,7 +14,6 @@ bool same_mem(const ftlpu::MemInstruction& lhs, const ftlpu::MemInstruction& rhs
         && lhs.address == rhs.address
         && lhs.stream == rhs.stream
         && lhs.map_stream == rhs.map_stream
-        && lhs.accumulator_destination == rhs.accumulator_destination
         && lhs.write_address == rhs.write_address
         && lhs.write_stream == rhs.write_stream;
 }
@@ -25,7 +24,11 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
         && lhs.weight_buffer == rhs.weight_buffer
         && lhs.stream_base == rhs.stream_base
         && lhs.activation_stream_base == rhs.activation_stream_base
-        && lhs.weight_column == rhs.weight_column;
+        && lhs.weight_column == rhs.weight_column
+        && lhs.accumulator_address == rhs.accumulator_address
+        && lhs.accumulator_row_stride == rhs.accumulator_row_stride
+        && lhs.accumulator_destination == rhs.accumulator_destination
+        && lhs.accumulator_clear == rhs.accumulator_clear;
 }
 
 bool same_vxm(const ftlpu::VxmLaneAluInstruction& lhs, const ftlpu::VxmLaneAluInstruction& rhs)
@@ -69,10 +72,6 @@ bool verify_mem_codec()
         ftlpu::MemInstruction::ReadWrite(4095, 7, 4096, 55),
         ftlpu::MemInstruction::Gather(7, 55),
         ftlpu::MemInstruction::Scatter(36, 12),
-        ftlpu::MemInstruction::Accumulate(
-            6143,
-            ftlpu::StreamId::West(28),
-            ftlpu::MemAccumulatorDestination::Stream),
     };
 
     for (const auto& instruction : instructions) {
@@ -88,23 +87,24 @@ bool verify_mem_codec()
             ftlpu::isa::encode_mem_instruction(
                 ftlpu::MemInstruction::Read(ftlpu::hw::kSramDepthRows, 0));
         },
-        "MEM codec should reject row addresses outside the 8192-row bank")) {
+        "MEM codec should reject row addresses outside the 65536-row SRAM")) {
         return false;
     }
-    return require_throws(
-        [] {
-            const auto encoded_read = ftlpu::isa::encode_mem_instruction(
-                ftlpu::MemInstruction::Read(0, 0));
-            ftlpu::isa::decode_mem_instruction(encoded_read | (1u << 28));
-        },
-        "MEM codec should reject an accumulator destination on Read");
+    return true;
 }
 
 bool verify_mxm_codec()
 {
     const ftlpu::MxmControlInstruction instructions[] {
         ftlpu::MxmControlInstruction::IW(1, 3),
-        ftlpu::MxmControlInstruction::Compute(1, 30, 20),
+        ftlpu::MxmControlInstruction::Compute(
+            1,
+            30,
+            20,
+            4095,
+            48,
+            ftlpu::MxmAccumulatorDestination::Sram),
+        ftlpu::MxmControlInstruction::AccumulatorRead(7000, 16, false),
     };
 
     for (const auto& instruction : instructions) {
@@ -173,6 +173,30 @@ bool verify_icu_command_codec()
         "ICU Repeat codec should reject strides wider than signed 12 bits");
 }
 
+bool verify_sxm_codec()
+{
+    auto src = ftlpu::SxmInstruction::StreamList {};
+    auto dst = ftlpu::SxmInstruction::StreamList {};
+    for (std::size_t stream = 0; stream < 16; ++stream) {
+        src.push_back(ftlpu::SxmStreamId {stream});
+        dst.push_back(ftlpu::SxmStreamId {32 + stream});
+    }
+    auto map = ftlpu::SxmInstruction::PermuteMap {};
+    for (std::size_t lane = 0; lane < map.size(); ++lane) {
+        map[lane] = map.size() - lane - 1;
+    }
+    const auto instruction =
+        ftlpu::SxmInstruction::Permute(std::move(src), std::move(dst), map);
+    const auto decoded =
+        ftlpu::isa::decode_sxm_instruction(ftlpu::isa::encode_sxm_instruction(instruction));
+    return require(
+        decoded.opcode == instruction.opcode
+            && decoded.src_streams == instruction.src_streams
+            && decoded.dst_streams == instruction.dst_streams
+            && decoded.permute_map == instruction.permute_map,
+        "SXM instruction codec round-trip failed");
+}
+
 } // namespace
 
 int main()
@@ -188,6 +212,9 @@ try
         return 1;
     }
     if (!verify_icu_command_codec()) {
+        return 1;
+    }
+    if (!verify_sxm_codec()) {
         return 1;
     }
     return 0;
