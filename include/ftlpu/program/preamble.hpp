@@ -4,6 +4,7 @@
 #include "ftlpu/program/sram_layout.hpp"
 
 #include <cstddef>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -27,6 +28,7 @@ struct BootstrapEntry {
 struct MemIcuLocalBootstrap {
     std::size_t mem_slice{0};
     MemLocalWordAddress13 program_address{};
+    Hemisphere hemisphere{Hemisphere::East};
 };
 
 // Directly loaded bootstrap state is intentionally small. The MEM loader
@@ -41,6 +43,7 @@ struct MemIcuReadRequest {
     ProgramBlockPlacement block{};
     std::size_t delay_before_cycles{0};
     bool notify_after{false};
+    std::optional<StreamId> instruction_stream{};
 };
 
 // Builds the small program that a MEM ICU will fetch from its own local SRAM.
@@ -62,7 +65,10 @@ inline ProgramSection build_mem_icu_loader_section(
         }
         const auto local = request.block.memory_address.slice_byte_address()
                                .local_word_address();
-        if (local.bank() != local.next_word().bank()) {
+        const auto request_stream =
+            request.instruction_stream.value_or(instruction_stream);
+        if (local.bank()
+            != local.advance_words(hw::kIcuFetchVectorCount - 1).bank()) {
             throw StaticScheduleError(
                 "MEM ICU loader program block cannot cross an SRAM bank");
         }
@@ -70,10 +76,13 @@ inline ProgramSection build_mem_icu_loader_section(
             section.packets.push_back(program::encode_packet(
                 IcuControlInstruction::Nop(request.delay_before_cycles)));
         }
-        section.packets.push_back(program::encode_packet(
-            MemInstruction::Read(local, instruction_stream)));
-        section.packets.push_back(program::encode_packet(
-            MemInstruction::Read(local.next_word(), instruction_stream)));
+        for (std::size_t vector = 0;
+             vector < hw::kIcuFetchVectorCount;
+             ++vector) {
+            section.packets.push_back(program::encode_packet(
+                MemInstruction::Read(
+                    local.advance_words(vector), request_stream)));
+        }
         if (request.notify_after) {
             section.packets.push_back(program::encode_packet(
                 IcuControlInstruction::Notify()));
@@ -101,14 +110,18 @@ public:
         const auto loader_address = mem_loader.memory_address
                                         .slice_byte_address()
                                         .local_word_address();
-        if (loader_address.bank() != loader_address.next_word().bank()) {
+        if (loader_address.bank()
+            != loader_address.advance_words(
+                hw::kIcuFetchVectorCount - 1).bank()) {
             throw StaticScheduleError(
                 "MEM ICU local bootstrap block cannot cross an SRAM bank");
         }
 
         BootstrapPreamble preamble;
         preamble.mem_local_bootstraps.push_back(MemIcuLocalBootstrap {
-            mem_loader.target.index, loader_address});
+            mem_loader.target.index,
+            loader_address,
+            static_cast<Hemisphere>(mem_loader.target.unit)});
         preamble.entries = {
             {target_block.target,
              IcuControlInstruction::Fetch(instruction_stream)},
@@ -126,7 +139,8 @@ public:
     {
         const auto local = block.memory_address.slice_byte_address()
                                .local_word_address();
-        if (local.bank() != local.next_word().bank()) {
+        if (local.bank()
+            != local.advance_words(hw::kIcuFetchVectorCount - 1).bank()) {
             throw std::logic_error("bootstrap program block unexpectedly crosses an SRAM bank");
         }
         if (notifier == block.target) {
@@ -135,14 +149,24 @@ public:
         }
 
         BootstrapPreamble preamble;
-        const auto mem = IcuLocation::Mem(block.memory_address.mem_slice());
+        const auto mem = IcuLocation::Mem(
+            static_cast<Hemisphere>(
+                block.memory_address.hemisphere()),
+            block.memory_address.mem_slice());
         preamble.entries = {
-            {mem, MemInstruction::Read(local, instruction_stream)},
-            {mem, MemInstruction::Read(local.next_word(), instruction_stream)},
             {block.target, IcuControlInstruction::Fetch(instruction_stream)},
             {block.target, IcuControlInstruction::Sync()},
             {notifier, IcuControlInstruction::Notify()},
         };
+        for (std::size_t vector = hw::kIcuFetchVectorCount;
+             vector-- > 0;) {
+            preamble.entries.insert(
+                preamble.entries.begin(),
+                BootstrapEntry {
+                    mem,
+                    MemInstruction::Read(
+                        local.advance_words(vector), instruction_stream)});
+        }
         return preamble;
     }
 };
@@ -153,7 +177,9 @@ inline void load_bootstrap_preamble(
 {
     for (const auto& bootstrap : preamble.mem_local_bootstraps) {
         icu.bootstrap_mem_icu_from_local_sram(
-            bootstrap.mem_slice, bootstrap.program_address);
+            bootstrap.hemisphere,
+            bootstrap.mem_slice,
+            bootstrap.program_address);
     }
     for (const auto& entry : preamble.entries) {
         std::visit(
@@ -166,7 +192,10 @@ inline void load_bootstrap_preamble(
                         throw StaticScheduleError(
                             "bootstrap MEM instruction targets a non-MEM ICU");
                     }
-                    icu.enqueue_mem(entry.location.index, instruction);
+                    icu.enqueue_mem(
+                        static_cast<Hemisphere>(entry.location.unit),
+                        entry.location.index,
+                        instruction);
                 } else if constexpr (std::is_same_v<T, MxmControlInstruction>) {
                     const auto load = instruction.opcode == MxmControlOpcode::IW;
                     if ((load && entry.location.kind != IcuLocationKind::MxmLoad)

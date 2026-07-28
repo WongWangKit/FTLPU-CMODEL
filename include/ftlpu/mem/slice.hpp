@@ -16,11 +16,19 @@ enum class MemOpcode {
     Write,
     Gather,
     Scatter,
+    ReadWrite,
+    Accumulate,
+};
+
+enum class MemAccumulatorDestination {
+    Sram,
+    Stream,
 };
 
 struct MemInstruction {
     MemOpcode opcode{MemOpcode::Read};
-    // 13-bit word address: bank in bit 12 and word offset in bits 11:0.
+    // Slice-local word address; its configured width is exposed by
+    // MemLocalWordAddress13::kBits (the type name is legacy compatibility).
     MemLocalWordAddress13 address{};
 
     // Packed ISA selector retained for codec compatibility:
@@ -29,6 +37,11 @@ struct MemInstruction {
     // Architectural code should call stream_id()/map_stream_id().
     std::size_t stream{0};
     std::size_t map_stream{0};
+    MemAccumulatorDestination accumulator_destination{
+        MemAccumulatorDestination::Sram};
+    // Independent second-port fields, used only by ReadWrite.
+    MemLocalWordAddress13 write_address{};
+    std::size_t write_stream{0};
 
     StreamId stream_id() const
     {
@@ -43,6 +56,11 @@ struct MemInstruction {
     static MemInstruction Read(MemLocalWordAddress13 address, StreamId stream)
     {
         return MemInstruction {MemOpcode::Read, address, stream.packed(), 0};
+    }
+
+    StreamId write_stream_id() const
+    {
+        return StreamId::from_packed(write_stream);
     }
 
     static MemInstruction Read(std::size_t address, StreamId stream)
@@ -78,6 +96,95 @@ struct MemInstruction {
     static MemInstruction Write(std::size_t address, std::size_t packed_stream)
     {
         return Write(address, StreamId::from_packed(packed_stream));
+    }
+
+    static MemInstruction ReadWrite(
+        MemLocalWordAddress13 read_address,
+        StreamId read_stream,
+        MemLocalWordAddress13 destination,
+        StreamId destination_stream)
+    {
+        if (read_address == destination) {
+            throw std::invalid_argument(
+                "MEM ReadWrite requires distinct read and write addresses");
+        }
+        auto instruction = MemInstruction {
+            MemOpcode::ReadWrite,
+            read_address,
+            read_stream.packed(),
+            0};
+        instruction.write_address = destination;
+        instruction.write_stream = destination_stream.packed();
+        return instruction;
+    }
+
+    static MemInstruction ReadWrite(
+        std::size_t read_address,
+        StreamId read_stream,
+        std::size_t destination,
+        StreamId destination_stream)
+    {
+        return ReadWrite(
+            MemLocalWordAddress13(read_address),
+            read_stream,
+            MemLocalWordAddress13(destination),
+            destination_stream);
+    }
+
+    static MemInstruction ReadWrite(
+        std::size_t read_address,
+        std::size_t read_packed_stream,
+        std::size_t destination,
+        std::size_t destination_packed_stream)
+    {
+        return ReadWrite(
+            read_address,
+            StreamId::from_packed(read_packed_stream),
+            destination,
+            StreamId::from_packed(destination_packed_stream));
+    }
+
+    static MemInstruction Accumulate(
+        MemLocalWordAddress13 address,
+        StreamId stream,
+        MemAccumulatorDestination destination =
+            MemAccumulatorDestination::Sram)
+    {
+        if (stream.direction() != StreamDirection::West) {
+            throw std::invalid_argument(
+                "MEM Accumulate requires a west stream base");
+        }
+        if (stream.index() + sizeof(float) > hw::kWestStreams) {
+            throw std::out_of_range(
+                "MEM Accumulate FP32 input exceeds west streams");
+        }
+        auto instruction = MemInstruction {
+            MemOpcode::Accumulate,
+            address,
+            stream.packed(),
+            0};
+        instruction.accumulator_destination = destination;
+        return instruction;
+    }
+
+    static MemInstruction Accumulate(
+        std::size_t address,
+        StreamId stream,
+        MemAccumulatorDestination destination =
+            MemAccumulatorDestination::Sram)
+    {
+        return Accumulate(
+            MemLocalWordAddress13(address), stream, destination);
+    }
+
+    static MemInstruction Accumulate(
+        std::size_t address,
+        std::size_t packed_stream,
+        MemAccumulatorDestination destination =
+            MemAccumulatorDestination::Sram)
+    {
+        return Accumulate(
+            address, StreamId::from_packed(packed_stream), destination);
     }
 
     static MemInstruction Gather(StreamId stream, StreamId map_stream)

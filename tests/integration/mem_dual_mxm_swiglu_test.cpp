@@ -1,8 +1,11 @@
-#include "ftlpu/system/tsp_slice_system.hpp"
+#include "ftlpu/dma/dma.hpp"
 #include "ftlpu/mxm/performance_monitor.hpp"
+#include "ftlpu/program/program.hpp"
+#include "ftlpu/system/tsp_slice_system.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
@@ -601,6 +604,156 @@ void enqueue_mxm_sequence(
     }
 }
 
+ftlpu::MemGlobalAddress24 program_data_address(
+    std::size_t mem_slice,
+    std::size_t linear_word = 0)
+{
+    return ftlpu::MemGlobalAddress24::FromFields(
+        ftlpu::hemisphere_index(
+            ftlpu::Hemisphere::East),
+        mem_slice,
+        ftlpu::MemLocalWordAddress13(
+            linear_word).slice_byte_address());
+}
+
+void set_program_data_lane(
+    std::vector<std::uint8_t>& bytes,
+    std::size_t word,
+    std::size_t tile,
+    std::size_t lane,
+    std::uint8_t value)
+{
+    bytes.at(
+        word * ftlpu::hw::kPhysicalVectorBytes
+        + tile * kLanes + lane) = value;
+}
+
+void append_offline_ffn_data(
+    ftlpu::ProgramImage& image)
+{
+    const auto weight_word_count =
+        weight_address(
+            kMatrixCount - 1,
+            kPasses - 1,
+            kBlocks - 1)
+        + 1;
+    for (std::size_t mem_slice = 0;
+         mem_slice < 2 * kLoadStreams;
+         ++mem_slice) {
+        auto bytes = std::vector<std::uint8_t>(
+            weight_word_count
+                * ftlpu::hw::kPhysicalVectorBytes,
+            0);
+        const auto stream =
+            mem_slice % kLoadStreams;
+        for (std::size_t matrix_id = 0;
+             matrix_id < kMatrixCount;
+             ++matrix_id) {
+            for (std::size_t pass = 0;
+                 pass < kPasses;
+                 ++pass) {
+                for (std::size_t tile = 0;
+                     tile < kBlocks;
+                     ++tile) {
+                    for (std::size_t column_block = 0;
+                         column_block < kBlocks;
+                         ++column_block) {
+                        const auto word =
+                            weight_address(
+                                matrix_id,
+                                pass,
+                                column_block);
+                        for (std::size_t lane = 0;
+                             lane < kLanes;
+                             ++lane) {
+                            const auto global_k =
+                                matrix_id
+                                        == kDownMatrix
+                                ? pass * kKPerPass
+                                    + tile * kLanes
+                                    + lane
+                                : tile * kLanes
+                                    + lane;
+                            const auto column =
+                                matrix_id
+                                        == kDownMatrix
+                                ? column_block
+                                        * kLoadStreams
+                                    + stream
+                                : pass * kColumns
+                                    + column_block
+                                        * kLoadStreams
+                                    + stream;
+                            set_program_data_lane(
+                                bytes,
+                                word,
+                                tile,
+                                lane,
+                                static_cast<std::uint8_t>(
+                                    weight_value(
+                                        matrix_id,
+                                        global_k,
+                                        column)));
+                        }
+                    }
+                }
+            }
+        }
+        image.add_data_section(
+            ftlpu::ProgramDataSection {
+                "ffn_weight_stream_"
+                    + std::to_string(mem_slice),
+                ftlpu::DmaPurpose::Model,
+                program_data_address(mem_slice),
+                std::move(bytes),
+                {
+                    kMatrixCount,
+                    kPasses,
+                    kKPerPass,
+                    kColumns,
+                },
+                "W8 gate/up/down packed by MXM load stream",
+            });
+    }
+
+    const auto activation_word_count =
+        vector_row_address(
+            kActivationRows - 1, 0)
+        + 1;
+    auto activations =
+        std::vector<std::uint8_t>(
+            activation_word_count
+                * ftlpu::hw::kPhysicalVectorBytes,
+            0);
+    for (std::size_t row = 0;
+         row < kActivationRows;
+         ++row) {
+        const auto word =
+            vector_row_address(row, 0);
+        for (std::size_t k = 0;
+             k < kKPerPass;
+             ++k) {
+            set_program_data_lane(
+                activations,
+                word,
+                k / kLanes,
+                k % kLanes,
+                static_cast<std::uint8_t>(
+                    activation_value(row, k)));
+        }
+    }
+    image.add_data_section(
+        ftlpu::ProgramDataSection {
+            "ffn_activation",
+            ftlpu::DmaPurpose::InputTensor,
+            program_data_address(
+                kActivationMemColumn),
+            std::move(activations),
+            {kActivationRows, kKPerPass},
+            "W8 activation matrix with scheduled word stride",
+        });
+}
+
 void load_dual_mxm_from_mem(
     ftlpu::TspSliceSystem& system,
     std::size_t matrix0,
@@ -1117,95 +1270,45 @@ std::size_t count_nonzero(const MatrixI8& matrix)
         }));
 }
 
-template <typename Instruction>
-struct ScheduledInstruction {
-    std::size_t cycle{0};
-    Instruction instruction{};
-};
-
 class OfflineIcuProgram {
 public:
     void emit_mem(std::size_t cycle, std::size_t column, ftlpu::MemInstruction instruction)
     {
-        mem_[column].push_back(ScheduledInstruction<ftlpu::MemInstruction> {cycle, instruction});
-        last_cycle_ = std::max(last_cycle_, cycle);
+        schedule_.mem_at(
+            cycle,
+            column,
+            std::move(instruction));
     }
 
     void emit_mxm(std::size_t cycle, std::size_t mxm, ftlpu::MxmControlInstruction instruction)
     {
-        if (instruction.opcode == ftlpu::MxmControlOpcode::Compute) {
-            mxm_compute_[mxm].push_back(ScheduledInstruction<ftlpu::MxmControlInstruction> {cycle, instruction});
-        } else {
-            mxm_load_[mxm].push_back(ScheduledInstruction<ftlpu::MxmControlInstruction> {cycle, instruction});
-        }
-        last_cycle_ = std::max(last_cycle_, cycle);
+        schedule_.mxm_at(
+            cycle,
+            mxm,
+            std::move(instruction));
     }
 
     void emit_vxm(std::size_t cycle, std::size_t alu, ftlpu::VxmLaneAluInstruction instruction)
     {
-        vxm_[alu].push_back(ScheduledInstruction<ftlpu::VxmLaneAluInstruction> {cycle, instruction});
-        last_cycle_ = std::max(last_cycle_, cycle);
+        schedule_.vxm_at(
+            cycle,
+            alu,
+            std::move(instruction));
     }
 
-    void load_into(ftlpu::InstructionControlUnit& icu)
+    void append_to(ftlpu::ProgramImage& image) const
     {
-        for (std::size_t column = 0; column < mem_.size(); ++column) {
-            load_queue(mem_[column], "mem" + std::to_string(column), [&](std::size_t nop) { icu.enqueue_mem_nop(column, nop); }, [&](auto instruction) {
-                icu.enqueue_mem(column, instruction);
-            });
-        }
-        for (std::size_t mxm = 0; mxm < mxm_load_.size(); ++mxm) {
-            load_queue(
-                mxm_load_[mxm],
-                "mxm" + std::to_string(mxm) + ".load",
-                [&](std::size_t nop) { icu.enqueue_mxm_load_nop(mxm, nop); },
-                [&](auto instruction) { icu.enqueue_mxm(mxm, instruction); });
-            load_queue(
-                mxm_compute_[mxm],
-                "mxm" + std::to_string(mxm) + ".compute",
-                [&](std::size_t nop) { icu.enqueue_mxm_compute_nop(mxm, nop); },
-                [&](auto instruction) { icu.enqueue_mxm(mxm, instruction); });
-        }
-        for (std::size_t alu = 0; alu < vxm_.size(); ++alu) {
-            load_queue(vxm_[alu], "vxm" + std::to_string(alu), [&](std::size_t nop) { icu.enqueue_vxm_nop(alu, nop); }, [&](auto instruction) {
-                icu.enqueue_vxm(alu, instruction);
-            });
-        }
+        schedule_.append_to(
+            image, "W8A16 FFN");
     }
 
     std::size_t last_cycle() const
     {
-        return last_cycle_;
+        return schedule_.last_cycle();
     }
 
 private:
-    template <typename Instruction, typename NopFn, typename EmitFn>
-    static void load_queue(std::vector<ScheduledInstruction<Instruction>>& events, const std::string& name, NopFn nop, EmitFn emit)
-    {
-        std::sort(events.begin(), events.end(), [](const auto& lhs, const auto& rhs) {
-            return lhs.cycle < rhs.cycle;
-        });
-        auto cursor = std::size_t {0};
-        for (const auto& event : events) {
-            if (event.cycle < cursor) {
-                std::ostringstream os;
-                os << "offline ICU program has two instructions in one queue cycle"
-                   << " queue=" << name
-                   << " event_cycle=" << event.cycle
-                   << " cursor=" << cursor;
-                throw std::logic_error(os.str());
-            }
-            nop(event.cycle - cursor);
-            emit(event.instruction);
-            cursor = event.cycle + 1;
-        }
-    }
-
-    std::array<std::vector<ScheduledInstruction<ftlpu::MemInstruction>>, ftlpu::InstructionControlUnit::kMemQueues> mem_{};
-    std::array<std::vector<ScheduledInstruction<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmUnitCount> mxm_load_{};
-    std::array<std::vector<ScheduledInstruction<ftlpu::MxmControlInstruction>>, ftlpu::InstructionControlUnit::kMxmUnitCount> mxm_compute_{};
-    std::array<std::vector<ScheduledInstruction<ftlpu::VxmLaneAluInstruction>>, ftlpu::InstructionControlUnit::kVxmQueues> vxm_{};
-    std::size_t last_cycle_{0};
+    ftlpu::program::StaticSchedule schedule_{};
 };
 
 enum class OfflinePostOp {
@@ -1885,7 +1988,6 @@ int run_offline_icu_ffn_test()
         0,
     };
 
-    auto system = std::make_unique<ftlpu::TspSliceSystem>();
     const auto enable_logs = ffn_logs_enabled();
     const auto log_dir = std::filesystem::path("logs")
 #ifdef FTLPU_EARLY_MXM_COMPUTE_TEST
@@ -1901,9 +2003,6 @@ int run_offline_icu_ffn_test()
         std::cerr << "failed to open " << log_dir.string() << " log files\n";
         return 1;
     }
-
-    stage_weight_matrices(system->mem());
-    stage_activation_matrix(system->mem());
 
     const auto load0 = initial_weight_load_schedule(0);
     const auto gemm0_start = load0.done();
@@ -1999,10 +2098,77 @@ int run_offline_icu_ffn_test()
     emit_offline_weight_iw_mxm(program, down_load.mxm1_iw_start, 1, phases[2].weight_buffer, kDownMatrix, 1);
     emit_offline_weight_iw_mxm(program, down_load.mxm0_iw_start, 0, phases[2].weight_buffer, kDownMatrix, 0);
     emit_offline_compute_phase(program, phases[2], swiglu_params, down_params);
-    program.load_into(system->icu());
+
+    auto workload = ftlpu::ProgramImage(
+        ftlpu::ProgramImageHeader {
+            ftlpu::ProgramImageHeader::kMagic,
+            1,
+            "W8A16 SwiGLU FFN",
+            "ProgramImage -> DMA -> local SRAM -> bootstrap -> "
+            "IFetch -> finite IQ -> MEM/MXM/VXM -> MEM",
+        });
+    program.append_to(workload);
+    append_offline_ffn_data(workload);
+    const auto launched =
+        ftlpu::program::AutonomousProgramBuilder::
+            Build(workload);
+
+    auto system =
+        std::make_unique<ftlpu::TspSliceSystem>();
+    ftlpu::GlobalMemoryAddressSpace memory;
+    for (std::size_t hemisphere = 0;
+         hemisphere < ftlpu::hw::kHemispheres;
+         ++hemisphere) {
+        memory.bind_hemisphere(
+            hemisphere,
+            system
+                ->mem(static_cast<ftlpu::Hemisphere>(
+                    hemisphere))
+                .memory_model());
+    }
+    ftlpu::HostMemorySpace host;
+    const auto host_buffer =
+        host.register_buffer(
+            launched.layout.host_bytes());
+    ftlpu::DmaEngine dma(host, memory);
+    const auto descriptors =
+        launched.layout.make_dma_descriptors(
+            host_buffer);
+    for (const auto& descriptor : descriptors) {
+        assert(dma.enqueue(descriptor).valid());
+    }
+    while (!dma.idle()) {
+        assert(dma.tick());
+    }
+    std::size_t dma_completions = 0;
+    while (dma.completion_ready()) {
+        assert(dma.pop_completion().id.valid());
+        ++dma_completions;
+    }
+    assert(dma_completions == descriptors.size());
+    ftlpu::load_bootstrap_preamble(
+        system->icu(), launched.preamble);
+    for (std::size_t cycle = 0;
+         cycle < launched.schedule_epoch_cycle;
+         ++cycle) {
+        try {
+            system->tick({});
+        } catch (const std::exception& error) {
+            std::cerr
+                << "FFN autonomous startup failed at cycle "
+                << cycle << ": " << error.what()
+                << '\n';
+            system->icu().print_diagnostic_status(
+                std::cerr);
+            return 1;
+        }
+    }
 
     if (logs.enabled) {
-        logs.icu << "offline ICU FFN program loaded before cycle 0\n";
+        logs.icu
+            << "FFN schedule entered through ProgramImage/DMA/"
+               "bootstrap/IFetch; schedule_epoch="
+            << launched.schedule_epoch_cycle << '\n';
 #ifdef FTLPU_EARLY_MXM_COMPUTE_TEST
         logs.icu << "  schedule=early_mxm_compute p1 compute starts as soon as the compute queue is free\n";
 #else

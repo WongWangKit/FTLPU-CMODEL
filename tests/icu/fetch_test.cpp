@@ -31,14 +31,27 @@ void stage_vector(
     std::size_t tile_count = ftlpu::hw::kTileRows)
 {
     for (std::size_t tile = 0; tile < tile_count; ++tile) {
-        const auto& packet = packets[vector * ftlpu::hw::kTileRows + tile];
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+            const auto block_byte =
+                vector * ftlpu::hw::kPhysicalVectorBytes
+                + tile * ftlpu::hw::kLanesPerTile
+                + lane;
+            const auto& packet = packets[
+                block_byte
+                / ftlpu::hw::kEncodedInstructionPacketBytes];
             fabric.initialize_cell(
                 0,
                 tile,
                 lane,
                 stream,
-                ftlpu::StreamCell::Valid(packet.bytes[lane], lane == 15, tag));
+                ftlpu::StreamCell::Valid(
+                    packet.bytes[
+                        block_byte
+                        % ftlpu::hw::
+                            kEncodedInstructionPacketBytes],
+                    lane + 1
+                        == ftlpu::hw::kLanesPerTile,
+                    tag));
         }
     }
 }
@@ -66,7 +79,7 @@ int main()
     icu.load({ftlpu::IcuControlInstruction::Fetch(stream), already_queued});
 
     // Fetch retires and reserves 640 bytes.  The following old IQ entry can
-    // dispatch while the frontend receives the two vectors.
+    // dispatch while the frontend receives the configured vectors.
     assert(!icu.dispatch().has_value());
     assert(icu.fetch_active());
     assert(icu.reserved_bytes() == ftlpu::hw::kIcuFetchBufferBytes);
@@ -81,14 +94,32 @@ int main()
     assert(icu.fetch_active());
     assert(!icu.fetch_complete_pending_commit());
 
-    stage_vector(*fabric, packets, 1, stream, 101);
-    fabric->begin_cycle();
-    icu.evaluate_fetch(*fabric, 0);
-    assert(icu.fetch_complete_pending_commit());
-    // Decoded next-state is not dispatch-visible in its completion cycle.
-    assert(!icu.dispatch().has_value());
-    fabric->commit_cycle();
-    icu.commit_fetch();
+    for (std::size_t vector = 1;
+         vector < ftlpu::hw::kIcuFetchVectorCount;
+         ++vector) {
+        stage_vector(
+            *fabric,
+            packets,
+            vector,
+            stream,
+            100 + vector);
+        fabric->begin_cycle();
+        icu.evaluate_fetch(*fabric, 0);
+        const auto last =
+            vector + 1
+            == ftlpu::hw::kIcuFetchVectorCount;
+        assert(
+            icu.fetch_complete_pending_commit()
+            == last);
+        if (last) {
+            // Decoded next-state is not dispatch-visible in its
+            // completion cycle.
+            assert(!icu.dispatch().has_value());
+        }
+        fabric->commit_cycle();
+        icu.commit_fetch();
+        assert(icu.fetch_active() != last);
+    }
     assert(!icu.fetch_active());
     assert(icu.iq_occupancy() == ftlpu::hw::kIcuFetchPackets);
     const auto first_fetched = icu.dispatch();

@@ -21,7 +21,14 @@ namespace isa {
 //
 // MEM 32b:
 //   [1:0] opcode, [7:2] stream, [13:8] map stream,
-//   [26:14] slice-local SRAM word address, copied from software address bits [16:4].
+//   [31:14] slice-local SRAM word address. GroqLike uses the low 13 bits
+//           exactly as before; narrower-vector configurations may use the
+//           formerly reserved high bits.
+// MEM extended 3x32b (ReadWrite/Accumulate only):
+//   word0 [2:0] opcode, [8:3] primary stream, [14:9] secondary stream,
+//         [15] accumulator destination;
+//   word1 primary SRAM word address;
+//   word2 secondary SRAM word address (ReadWrite only).
 // MXM control 32b:
 //   IW      [1:0] opcode, [2] weight buffer.
 //   Compute [1:0] opcode, [2] weight buffer, [8:3] activation stream base,
@@ -39,6 +46,9 @@ namespace isa {
 //   Repeat [2:0] opcode, [11:3] count, [19:12] interval,
 //          [31:20] signed MEM address stride.
 using EncodedMemInstruction = std::uint32_t;
+struct EncodedExtendedMemInstruction {
+    std::array<std::uint32_t, 3> words{};
+};
 using EncodedMxmInstruction = std::uint32_t;
 using EncodedIcuCommand = std::uint32_t;
 
@@ -120,6 +130,15 @@ inline void require_operand_index_fits(const VxmLaneOperand& operand, const char
     case VxmLaneOperandKind::StreamInt32:
         require_unsigned_fit(operand.index, hw::kStreams - 4, field);
         return;
+    case VxmLaneOperandKind::StreamFloat32:
+        require_unsigned_fit(operand.index, hw::kStreams - 4, field);
+        return;
+    case VxmLaneOperandKind::StreamFloat16:
+        require_unsigned_fit(operand.index, hw::kStreams - 2, field);
+        return;
+    case VxmLaneOperandKind::StreamInt8:
+        require_unsigned_fit(operand.index, hw::kStreams - 1, field);
+        return;
     case VxmLaneOperandKind::Immediate:
         require_unsigned_fit(operand.index, 0, field);
         return;
@@ -143,6 +162,9 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
     constexpr std::uint64_t kOpcodeMask = 0x3;
     constexpr std::uint64_t kStreamMask = 0x3f;
     constexpr std::uint64_t kAddressMask = MemLocalWordAddress13::kLimit - 1;
+    static_assert(
+        MemLocalWordAddress13::kBits <= 18,
+        "configured SRAM depth does not fit the 18-bit MEM instruction address field");
 
     detail::require_unsigned_fit(
         static_cast<std::uint64_t>(instruction.opcode),
@@ -170,12 +192,15 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
 
 inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
 {
-    constexpr std::uint64_t kUsedMask = 0x07ffffffull;
+    constexpr auto kAddressMask = MemLocalWordAddress13::kLimit - 1;
+    constexpr std::uint64_t kUsedMask =
+        0x3fffull | (static_cast<std::uint64_t>(kAddressMask) << 14);
     detail::require_reserved_zero(word, kUsedMask, "encoded MEM instruction has non-zero reserved bits");
     const auto opcode = static_cast<MemOpcode>(detail::low_bits(word, 0, 0x3));
     const auto stream = static_cast<std::size_t>(detail::low_bits(word, 2, 0x3f));
     const auto map_stream = static_cast<std::size_t>(detail::low_bits(word, 8, 0x3f));
-    const auto address = static_cast<std::size_t>(detail::low_bits(word, 14, 0x1fff));
+    const auto address = static_cast<std::size_t>(
+        detail::low_bits(word, 14, kAddressMask));
 
     switch (opcode) {
     case MemOpcode::Read:
@@ -188,6 +213,116 @@ inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
         return MemInstruction::Scatter(stream, map_stream);
     }
     throw std::logic_error("unknown encoded MEM opcode");
+}
+
+inline EncodedExtendedMemInstruction encode_extended_mem_instruction(
+    const MemInstruction& instruction)
+{
+    constexpr std::uint32_t kStreamMask = 0x3f;
+    constexpr std::uint32_t kAddressMask =
+        static_cast<std::uint32_t>(MemLocalWordAddress13::kLimit - 1);
+    static_assert(
+        MemLocalWordAddress13::kBits <= 18,
+        "configured SRAM depth does not fit the extended MEM address word");
+
+    if (instruction.opcode != MemOpcode::ReadWrite
+        && instruction.opcode != MemOpcode::Accumulate) {
+        throw std::logic_error(
+            "extended MEM encoding is reserved for ReadWrite/Accumulate");
+    }
+    detail::require_unsigned_fit(
+        instruction.stream, kStreamMask,
+        "extended MEM primary stream does not fit");
+    detail::require_unsigned_fit(
+        instruction.address.encoded(), kAddressMask,
+        "extended MEM primary address does not fit");
+
+    EncodedExtendedMemInstruction encoded{};
+    encoded.words[0] =
+        static_cast<std::uint32_t>(instruction.opcode)
+        | (static_cast<std::uint32_t>(instruction.stream) << 3);
+    encoded.words[1] =
+        static_cast<std::uint32_t>(instruction.address.encoded());
+
+    if (instruction.opcode == MemOpcode::ReadWrite) {
+        detail::require_unsigned_fit(
+            instruction.write_stream, kStreamMask,
+            "MEM ReadWrite destination stream does not fit");
+        detail::require_unsigned_fit(
+            instruction.write_address.encoded(), kAddressMask,
+            "MEM ReadWrite destination address does not fit");
+        if (instruction.address == instruction.write_address) {
+            throw std::logic_error(
+                "MEM ReadWrite encodes identical read and write addresses");
+        }
+        encoded.words[0] |=
+            static_cast<std::uint32_t>(instruction.write_stream) << 9;
+        encoded.words[2] =
+            static_cast<std::uint32_t>(instruction.write_address.encoded());
+        return encoded;
+    }
+
+    if (instruction.accumulator_destination
+        == MemAccumulatorDestination::Stream) {
+        encoded.words[0] |= 1u << 15;
+    }
+    return encoded;
+}
+
+inline MemInstruction decode_extended_mem_instruction(
+    const EncodedExtendedMemInstruction& encoded)
+{
+    constexpr std::uint32_t kControlMask = 0xffffu;
+    constexpr std::uint32_t kAddressMask =
+        static_cast<std::uint32_t>(MemLocalWordAddress13::kLimit - 1);
+    detail::require_reserved_zero(
+        encoded.words[0], kControlMask,
+        "extended MEM control word has non-zero reserved bits");
+    detail::require_reserved_zero(
+        encoded.words[1], kAddressMask,
+        "extended MEM primary address word has non-zero reserved bits");
+
+    const auto opcode =
+        static_cast<MemOpcode>(encoded.words[0] & 0x7u);
+    const auto stream =
+        static_cast<std::size_t>((encoded.words[0] >> 3) & 0x3fu);
+    const auto secondary_stream =
+        static_cast<std::size_t>((encoded.words[0] >> 9) & 0x3fu);
+    const auto address =
+        static_cast<std::size_t>(encoded.words[1] & kAddressMask);
+    switch (opcode) {
+    case MemOpcode::ReadWrite: {
+        if ((encoded.words[0] & (1u << 15)) != 0) {
+            throw std::logic_error(
+                "MEM ReadWrite sets the accumulator destination bit");
+        }
+        detail::require_reserved_zero(
+            encoded.words[2], kAddressMask,
+            "MEM ReadWrite destination address has non-zero reserved bits");
+        return MemInstruction::ReadWrite(
+            address,
+            stream,
+            static_cast<std::size_t>(encoded.words[2] & kAddressMask),
+            secondary_stream);
+    }
+    case MemOpcode::Accumulate:
+        if (secondary_stream != 0 || encoded.words[2] != 0) {
+            throw std::logic_error(
+                "MEM Accumulate has non-zero secondary fields");
+        }
+        return MemInstruction::Accumulate(
+            address,
+            stream,
+            (encoded.words[0] & (1u << 15)) != 0
+                ? MemAccumulatorDestination::Stream
+                : MemAccumulatorDestination::Sram);
+    case MemOpcode::Read:
+    case MemOpcode::Write:
+    case MemOpcode::Gather:
+    case MemOpcode::Scatter:
+        break;
+    }
+    throw std::logic_error("unknown extended MEM opcode");
 }
 
 inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction& instruction)
@@ -285,6 +420,12 @@ inline EncodedVxmInstruction encode_vxm_instruction(const VxmLaneAluInstruction&
     constexpr std::uint32_t kCastTargetMask = 0x3;
     constexpr std::uint32_t kOutputStreamMask = 0x3f;
 
+    if (instruction.input_hemisphere != Hemisphere::East
+        || instruction.output_hemisphere != Hemisphere::East) {
+        throw std::logic_error(
+            "legacy VXM encoding cannot carry hemisphere routing");
+    }
+
     detail::require_default_float(instruction.scale, "VXM instruction scale is model metadata, not a hardware ISA field");
     if (instruction.output_zero_point != 0) {
         throw std::logic_error("VXM output zero point is synthesized with ALU ops, not an encoded ISA field");
@@ -355,6 +496,8 @@ inline VxmLaneAluInstruction decode_vxm_instruction(const EncodedVxmInstruction&
     instruction.rhs.immediate = detail::bits_to_float(encoded.words[2]);
     instruction.scale = 1.0f;
     instruction.output_zero_point = 0;
+    instruction.input_hemisphere = Hemisphere::East;
+    instruction.output_hemisphere = Hemisphere::East;
     instruction.lhs.scale = 1.0f;
     instruction.rhs.scale = 1.0f;
     if (instruction.lhs.kind != VxmLaneOperandKind::Immediate) {

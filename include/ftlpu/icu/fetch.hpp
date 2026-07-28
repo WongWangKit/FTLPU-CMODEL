@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
+#include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/core/instruction_packet.hpp"
 #include "ftlpu/core/stream.hpp"
 #include "ftlpu/mem/address.hpp"
@@ -19,6 +20,7 @@ enum class IcuLocationKind : std::uint8_t {
     Vxm,
     MxmLoad,
     MxmCompute,
+    Sxm,
 };
 
 struct IcuLocation {
@@ -26,10 +28,27 @@ struct IcuLocation {
     std::size_t unit{0};
     std::size_t index{0};
 
-    static IcuLocation Mem(std::size_t slice) { return {IcuLocationKind::Mem, 0, slice}; }
+    static IcuLocation Mem(std::size_t slice)
+    {
+        return Mem(Hemisphere::East, slice);
+    }
+    static IcuLocation Mem(Hemisphere hemisphere, std::size_t slice)
+    {
+        return {
+            IcuLocationKind::Mem,
+            hemisphere_index(hemisphere),
+            slice};
+    }
     static IcuLocation Vxm(std::size_t alu) { return {IcuLocationKind::Vxm, 0, alu}; }
     static IcuLocation MxmLoad(std::size_t mxm) { return {IcuLocationKind::MxmLoad, mxm, 0}; }
     static IcuLocation MxmCompute(std::size_t mxm) { return {IcuLocationKind::MxmCompute, mxm, 0}; }
+    static IcuLocation Sxm(Hemisphere hemisphere)
+    {
+        return {
+            IcuLocationKind::Sxm,
+            hemisphere_index(hemisphere),
+            0};
+    }
 
     friend bool operator==(const IcuLocation&, const IcuLocation&) = default;
 };
@@ -39,10 +58,13 @@ class IcuFetchPortMap {
 public:
     explicit IcuFetchPortMap(std::size_t default_column = 0)
     {
-        mem_.fill(default_column);
+        for (auto& hemisphere : mem_) {
+            hemisphere.fill(default_column);
+        }
         vxm_.fill(default_column);
         mxm_load_.fill(default_column);
         mxm_compute_.fill(default_column);
+        sxm_.fill(default_column);
     }
 
     void map(IcuLocation location, std::size_t column)
@@ -59,10 +81,12 @@ private:
     std::size_t& slot(IcuLocation location)
     {
         switch (location.kind) {
-        case IcuLocationKind::Mem: return mem_.at(location.index);
+        case IcuLocationKind::Mem:
+            return mem_.at(location.unit).at(location.index);
         case IcuLocationKind::Vxm: return vxm_.at(location.index);
         case IcuLocationKind::MxmLoad: return mxm_load_.at(location.unit);
         case IcuLocationKind::MxmCompute: return mxm_compute_.at(location.unit);
+        case IcuLocationKind::Sxm: return sxm_.at(location.unit);
         }
         throw std::logic_error("unknown ICU location kind");
     }
@@ -72,10 +96,13 @@ private:
         return const_cast<IcuFetchPortMap*>(this)->slot(location);
     }
 
-    std::array<std::size_t, hw::kMemSliceColumns> mem_{};
-    std::array<std::size_t, 16> vxm_{};
-    std::array<std::size_t, 2> mxm_load_{};
-    std::array<std::size_t, 2> mxm_compute_{};
+    std::array<
+        std::array<std::size_t, hw::kMemSliceColumns>,
+        hw::kHemispheres> mem_{};
+    std::array<std::size_t, hw::kVxmAluCount> vxm_{};
+    std::array<std::size_t, hw::kMxmCount> mxm_load_{};
+    std::array<std::size_t, hw::kMxmCount> mxm_compute_{};
+    std::array<std::size_t, hw::kHemispheres> sxm_{};
 };
 
 // Per-ICU transient storage for exactly one 640-byte Ifetch.
@@ -185,8 +212,8 @@ struct IcuFetchState {
 };
 
 // A MEM ICU can bootstrap its own IQ from the SRAM in the same MEM slice.
-// One 320-byte vector is read per cycle; two vectors form the same 640-byte,
-// 40-packet unit used by stream-facing Ifetch.
+// One configured physical vector is read per cycle. Together the vectors form
+// the same 640-byte, 40-packet unit used by stream-facing Ifetch.
 struct MemIcuLocalFetchState {
     MemLocalWordAddress13 base_address{};
     std::size_t next_vector{0};

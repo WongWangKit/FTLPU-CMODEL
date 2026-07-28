@@ -15,7 +15,7 @@ namespace ftlpu {
 
 class VxmSuperlane {
 public:
-    static constexpr std::size_t kLaneCount = hw::kLanesPerTile;
+    static constexpr std::size_t kLaneCount = hw::kVxmLaneCount;
 
     using Int32Vector = std::array<std::int32_t, kLaneCount>;
     using Int8Vector = std::array<std::int8_t, kLaneCount>;
@@ -24,9 +24,10 @@ public:
 
     struct Output {
         Int8Vector values{};
-        std::array<std::array<std::uint8_t, 2>, kLaneCount> byte_values{};
+        std::array<std::array<std::uint8_t, 4>, kLaneCount> byte_values{};
         std::size_t stream{0};
         std::size_t byte_count{1};
+        Hemisphere hemisphere{Hemisphere::East};
     };
 
     void reset()
@@ -87,11 +88,19 @@ public:
         }
     }
 
-    void set_stream_inputs(const StreamMatrix& streams)
+    void set_stream_inputs(
+        Hemisphere hemisphere,
+        const StreamMatrix& streams)
     {
         for (std::size_t lane = 0; lane < kLaneCount; ++lane) {
-            lanes_[lane].set_stream_inputs(streams[lane]);
+            lanes_[lane].set_stream_inputs(
+                hemisphere, streams[lane]);
         }
+    }
+
+    void set_stream_inputs(const StreamMatrix& streams)
+    {
+        set_stream_inputs(Hemisphere::East, streams);
     }
 
     void set_swiglu_inputs(const Int32Vector& gates, const Int32Vector& ups)
@@ -121,9 +130,14 @@ public:
 
         for (std::size_t output_index = 0; output_index < output_count; ++output_index) {
             auto values = Int8Vector {};
-            auto byte_values = std::array<std::array<std::uint8_t, 2>, kLaneCount> {};
+            auto byte_values =
+                std::array<
+                    std::array<std::uint8_t, 4>,
+                    kLaneCount>{};
             const auto stream = lanes_[0].outputs()[output_index].stream;
             const auto byte_count = lanes_[0].outputs()[output_index].byte_count;
+            const auto hemisphere =
+                lanes_[0].outputs()[output_index].hemisphere;
             for (std::size_t lane = 0; lane < kLaneCount; ++lane) {
                 const auto& lane_output = lanes_[lane].outputs()[output_index];
                 if (lane_output.stream != stream) {
@@ -132,10 +146,20 @@ public:
                 if (lane_output.byte_count != byte_count) {
                     throw std::logic_error("VXM superlane lanes produced outputs with different byte widths");
                 }
+                if (lane_output.hemisphere != hemisphere) {
+                    throw std::logic_error(
+                        "VXM superlane lanes produced outputs for different hemispheres");
+                }
                 values[lane] = lane_output.value;
                 byte_values[lane] = lane_output.bytes;
             }
-            outputs_.push_back(Output {values, byte_values, stream, byte_count});
+            outputs_.push_back(
+                Output {
+                    values,
+                    byte_values,
+                    stream,
+                    byte_count,
+                    hemisphere});
         }
         if (!outputs_.empty()) {
             output_ = outputs_.front();

@@ -14,7 +14,10 @@ bool same_mem(const ftlpu::MemInstruction& lhs, const ftlpu::MemInstruction& rhs
     return lhs.opcode == rhs.opcode
         && lhs.address == rhs.address
         && lhs.stream == rhs.stream
-        && lhs.map_stream == rhs.map_stream;
+        && lhs.map_stream == rhs.map_stream
+        && lhs.accumulator_destination == rhs.accumulator_destination
+        && lhs.write_address == rhs.write_address
+        && lhs.write_stream == rhs.write_stream;
 }
 
 bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlInstruction& rhs)
@@ -45,7 +48,9 @@ bool same_vxm(const ftlpu::VxmLaneAluInstruction& lhs, const ftlpu::VxmLaneAluIn
         && lhs.scale == rhs.scale
         && lhs.output_zero_point == rhs.output_zero_point
         && lhs.cast_target == rhs.cast_target
-        && lhs.output_stream == rhs.output_stream;
+        && lhs.output_stream == rhs.output_stream
+        && lhs.input_hemisphere == rhs.input_hemisphere
+        && lhs.output_hemisphere == rhs.output_hemisphere;
 }
 
 bool require(bool condition, const std::string& message)
@@ -93,6 +98,50 @@ bool verify_mem_codec()
                 ftlpu::MemInstruction::Read(ftlpu::hw::kMemLocalWordAddressCount, 0));
         },
         "MEM codec should reject addresses outside the 13-bit local word range");
+}
+
+bool same_sxm(
+    const ftlpu::SxmInstruction& lhs,
+    const ftlpu::SxmInstruction& rhs)
+{
+    return lhs.opcode == rhs.opcode
+        && lhs.shift_source == rhs.shift_source
+        && lhs.shift_distance == rhs.shift_distance
+        && lhs.lane_map == rhs.lane_map
+        && lhs.permute_map == rhs.permute_map
+        && lhs.src_streams == rhs.src_streams
+        && lhs.dst_streams == rhs.dst_streams;
+}
+
+ftlpu::SxmInstruction::StreamList stream_range(
+    std::size_t first,
+    std::size_t count)
+{
+    auto result = ftlpu::SxmInstruction::StreamList{};
+    for (std::size_t index = 0; index < count; ++index) {
+        result.push_back(ftlpu::SxmStreamId{first + index});
+    }
+    return result;
+}
+
+ftlpu::SxmInstruction::PermuteMap block_diagonal_map(
+    std::size_t diagonal)
+{
+    auto map = ftlpu::SxmInstruction::PermuteMap{};
+    for (std::size_t destination = 0;
+         destination < ftlpu::hw::kTileRows;
+         ++destination) {
+        const auto source =
+            (diagonal + ftlpu::hw::kTileRows - destination)
+            % ftlpu::hw::kTileRows;
+        for (std::size_t lane = 0;
+             lane < ftlpu::hw::kLanesPerTile;
+             ++lane) {
+            map[destination * ftlpu::hw::kLanesPerTile + lane] =
+                source * ftlpu::hw::kLanesPerTile + lane;
+        }
+    }
+    return map;
 }
 
 bool same_icu(const ftlpu::IcuControlInstruction& lhs, const ftlpu::IcuControlInstruction& rhs)
@@ -224,6 +273,57 @@ bool verify_icu_command_codec()
         }
     }
 
+    auto vxm_extended = ftlpu::VxmLaneAluInstruction {
+        ftlpu::VxmAluOpcode::Multiply,
+        ftlpu::VxmLaneOperand::StreamFloat16(18),
+        ftlpu::VxmLaneOperand::StreamFloat32(24),
+        1.0f,
+        0,
+        ftlpu::VxmCastTarget::Float32,
+        8,
+        ftlpu::Hemisphere::West,
+        ftlpu::Hemisphere::East,
+    };
+    const auto extended_packet =
+        ftlpu::isa::encode_packet(vxm_extended);
+    if (!require(
+            ftlpu::isa::packet_kind(extended_packet)
+                    == ftlpu::isa::InstructionPacketKind::VxmExtended
+                && same_vxm(
+                    vxm_extended,
+                    ftlpu::isa::decode_vxm_packet(
+                        extended_packet)),
+            "extended VXM packet/hemisphere round-trip failed")) {
+        return false;
+    }
+
+    const ftlpu::MemInstruction mem_extended[] {
+        ftlpu::MemInstruction::ReadWrite(
+            17,
+            ftlpu::StreamId::East(3),
+            ftlpu::hw::kMemLocalWordAddressCount - 1,
+            ftlpu::StreamId::West(31)),
+        ftlpu::MemInstruction::Accumulate(
+            29,
+            ftlpu::StreamId::West(8),
+            ftlpu::MemAccumulatorDestination::Sram),
+        ftlpu::MemInstruction::Accumulate(
+            30,
+            ftlpu::StreamId::West(12),
+            ftlpu::MemAccumulatorDestination::Stream),
+    };
+    for (const auto& instruction : mem_extended) {
+        const auto packet = ftlpu::isa::encode_packet(instruction);
+        if (!require(
+                packet.bytes[1] == 12
+                    && same_mem(
+                        instruction,
+                        ftlpu::isa::decode_mem_packet(packet)),
+                "extended MEM packet round-trip failed")) {
+            return false;
+        }
+    }
+
     return require_throws(
         [] {
             ftlpu::isa::encode_icu_repeat(ftlpu::IcuRepeat {1, 1, 2048});
@@ -232,6 +332,45 @@ bool verify_icu_command_codec()
         && require_throws(
             [] { (void)ftlpu::isa::encode_icu_nop(65536); },
             "ICU NOP codec should reject counts wider than 16 bits");
+}
+
+bool verify_sxm_packet_codec()
+{
+    auto lane_map = ftlpu::SxmInstruction::LaneMap{};
+    for (std::size_t lane = 0; lane < lane_map.size(); ++lane) {
+        lane_map[lane] = lane_map.size() - 1 - lane;
+    }
+    const ftlpu::SxmInstruction instructions[] {
+        ftlpu::SxmInstruction::Distribute(
+            {3}, {ftlpu::StreamId::West(7).packed()}, lane_map),
+        ftlpu::SxmInstruction::Transpose(
+            stream_range(0, ftlpu::hw::kLanesPerTile),
+            stream_range(16, ftlpu::hw::kLanesPerTile)),
+        ftlpu::SxmInstruction::ShiftSelect(
+            stream_range(4, ftlpu::hw::kTileRows),
+            stream_range(24, ftlpu::hw::kTileRows),
+            ftlpu::SxmShiftSource::NorthShifted,
+            3),
+        ftlpu::SxmInstruction::Permute(
+            stream_range(0, ftlpu::hw::kTileRows),
+            stream_range(
+                ftlpu::StreamId::West(0).packed(),
+                ftlpu::hw::kTileRows),
+            block_diagonal_map(3)),
+    };
+    for (const auto& instruction : instructions) {
+        const auto packet = ftlpu::isa::encode_packet(instruction);
+        if (!require(
+                ftlpu::isa::packet_kind(packet)
+                        == ftlpu::isa::InstructionPacketKind::Sxm
+                    && same_sxm(
+                        instruction,
+                        ftlpu::isa::decode_sxm_packet(packet)),
+                "SXM compact packet round-trip failed")) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool verify_instruction_packets()
@@ -278,6 +417,9 @@ try
         return 1;
     }
     if (!verify_icu_command_codec()) {
+        return 1;
+    }
+    if (!verify_sxm_packet_codec()) {
         return 1;
     }
     if (!verify_instruction_packets()) {

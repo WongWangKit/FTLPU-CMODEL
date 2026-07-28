@@ -6,6 +6,7 @@
 #include "ftlpu/icu/instruction.hpp"
 #include "ftlpu/mem/tile_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
+#include "ftlpu/sxm/slice.hpp"
 #include "ftlpu/vxm/slice.hpp"
 
 #include <array>
@@ -72,6 +73,9 @@ IqEntry<FuncInstruction> decode_icu_fetch_packet(
     } else if constexpr (std::is_same_v<FuncInstruction, VxmLaneAluInstruction>) {
         return IqEntry<FuncInstruction> {
             std::in_place_type<FuncInstruction>, isa::decode_vxm_packet(packet)};
+    } else if constexpr (std::is_same_v<FuncInstruction, SxmInstruction>) {
+        return IqEntry<FuncInstruction> {
+            std::in_place_type<FuncInstruction>, isa::decode_sxm_packet(packet)};
     } else {
         throw std::logic_error("ICU Ifetch decoder does not support this functional instruction type");
     }
@@ -464,9 +468,22 @@ public:
     };
 
     static constexpr std::size_t kVxmQueues = VxmSlice::kAluQueues;
-    static constexpr std::size_t kMemQueues = hw::kSliceColumns;
-    static constexpr std::size_t kMxmUnitCount = 2;
+    static constexpr std::size_t kMemQueuesPerHemisphere =
+        hw::kSliceColumns;
+    static constexpr std::size_t kMemQueues =
+        hw::kHemispheres * kMemQueuesPerHemisphere;
+    static constexpr std::size_t kMxmUnitCount = hw::kMxmCount;
     static constexpr std::size_t kMxmIcusPerUnit = 2;
+    static constexpr std::size_t kSxmQueues = hw::kHemispheres;
+
+    static constexpr std::size_t mem_queue(
+        Hemisphere hemisphere,
+        std::size_t mem_slice) noexcept
+    {
+        return hemisphere_index(hemisphere)
+            * kMemQueuesPerHemisphere
+            + mem_slice;
+    }
 
     explicit InstructionControlUnit(
         std::size_t barrier_latency_cycles = hw::kIcuBarrierLatencyCycles)
@@ -480,6 +497,7 @@ public:
         reset_all(mem_iqs_);
         for (auto& fetch : mem_local_fetches_) fetch.reset();
         for (auto& ports : mxm_iqs_) reset_all(ports);
+        reset_all(sxm_iqs_);
         barrier_events_.clear();
         cycle_ = 0;
     }
@@ -492,7 +510,11 @@ public:
     {
         switch (location.kind) {
         case IcuLocationKind::Mem:
-            enqueue_mem_control(location.index, instruction);
+            enqueue_mem_control(
+                mem_queue(
+                    static_cast<Hemisphere>(location.unit),
+                    location.index),
+                instruction);
             return;
         case IcuLocationKind::Vxm:
             enqueue_vxm_control(location.index, instruction);
@@ -502,6 +524,9 @@ public:
             return;
         case IcuLocationKind::MxmCompute:
             enqueue_mxm_control(location.unit, MxmIcuPort::Compute, instruction);
+            return;
+        case IcuLocationKind::Sxm:
+            enqueue_sxm_control(location.unit, instruction);
             return;
         }
         throw std::logic_error("unknown ICU location kind");
@@ -514,6 +539,9 @@ public:
         for (auto& iq : mem_iqs_) iq.enqueue_control(IcuControlInstruction::Nop(cycles));
         for (auto& ports : mxm_iqs_) {
             for (auto& iq : ports) iq.enqueue_control(IcuControlInstruction::Nop(cycles));
+        }
+        for (auto& iq : sxm_iqs_) {
+            iq.enqueue_control(IcuControlInstruction::Nop(cycles));
         }
     }
 
@@ -544,9 +572,28 @@ public:
         mem_iq(column).enqueue(std::move(instruction));
     }
 
+    void enqueue_mem(
+        Hemisphere hemisphere,
+        std::size_t mem_slice,
+        MemInstruction instruction)
+    {
+        enqueue_mem(
+            mem_queue(hemisphere, mem_slice),
+            std::move(instruction));
+    }
+
     void enqueue_mem_control(std::size_t column, IcuControlInstruction instruction)
     {
         mem_iq(column).enqueue_control(instruction);
+    }
+
+    void enqueue_mem_control(
+        Hemisphere hemisphere,
+        std::size_t mem_slice,
+        IcuControlInstruction instruction)
+    {
+        enqueue_mem_control(
+            mem_queue(hemisphere, mem_slice), instruction);
     }
 
     void enqueue_mem_nop(std::size_t column, std::size_t cycles)
@@ -622,6 +669,42 @@ public:
         enqueue_mxm_repeat(mxm, MxmIcuPort::Compute, count, interval);
     }
 
+    void enqueue_sxm(Hemisphere hemisphere, SxmInstruction instruction)
+    {
+        sxm_iq(hemisphere_index(hemisphere)).enqueue(
+            std::move(instruction));
+    }
+
+    void enqueue_sxm_control(
+        std::size_t hemisphere,
+        IcuControlInstruction instruction)
+    {
+        sxm_iq(hemisphere).enqueue_control(instruction);
+    }
+
+    void enqueue_sxm_nop(
+        Hemisphere hemisphere,
+        std::size_t cycles)
+    {
+        if (cycles != 0) {
+            enqueue_sxm_control(
+                hemisphere_index(hemisphere),
+                IcuControlInstruction::Nop(cycles));
+        }
+    }
+
+    void enqueue_sxm_repeat(
+        Hemisphere hemisphere,
+        std::size_t count,
+        std::size_t interval = 1)
+    {
+        if (count != 0) {
+            enqueue_sxm_control(
+                hemisphere_index(hemisphere),
+                IcuControlInstruction::Repeat(count, interval));
+        }
+    }
+
     void notify_vxm(std::size_t alu) { vxm_iq(alu).notify(); }
     void notify_mem(std::size_t column) { mem_iq(column).notify(); }
     void notify_mxm(std::size_t mxm, MxmIcuPort port) { mxm_iq(mxm, port).notify(); }
@@ -658,6 +741,7 @@ public:
         for (auto& ports : mxm_iqs_) {
             for (auto& iq : ports) iq.notify();
         }
+        for (auto& iq : sxm_iqs_) iq.notify();
     }
 
     std::size_t barrier_latency_cycles() const noexcept
@@ -668,6 +752,51 @@ public:
     std::size_t pending_barrier_event_count() const noexcept
     {
         return barrier_events_.size();
+    }
+
+    void print_diagnostic_status(std::ostream& os) const
+    {
+        os << "ICU diagnostic cycle=" << cycle_
+           << " barrier_events=" << barrier_events_.size() << '\n';
+        const auto print_queue = [&](const char* kind,
+                                     std::size_t unit,
+                                     std::size_t index,
+                                     const auto& queue) {
+            if (queue.done()) {
+                return;
+            }
+            os << "  unfinished " << kind << " unit=" << unit
+               << " index=" << index
+               << " iq=" << queue.iq_occupancy()
+               << " reserved_bytes=" << queue.reserved_bytes()
+               << " pending_cycles=" << queue.pending_issue_cycles()
+               << " fetch_active=" << queue.fetch_active()
+               << " blocked_sync=" << queue.blocked_on_sync() << '\n';
+        };
+        for (std::size_t alu = 0; alu < kVxmQueues; ++alu) {
+            print_queue("VXM", 0, alu, vxm_iqs_[alu]);
+        }
+        for (std::size_t mem = 0; mem < kMemQueues; ++mem) {
+            print_queue("MEM", 0, mem, mem_iqs_[mem]);
+            if (mem_local_fetches_[mem].has_value()) {
+                os << "    local_fetch next_vector="
+                   << mem_local_fetches_[mem]->next_vector
+                   << " completion_staged="
+                   << mem_local_fetches_[mem]->completion_staged << '\n';
+            }
+        }
+        for (std::size_t mxm = 0; mxm < kMxmUnitCount; ++mxm) {
+            for (std::size_t port = 0;
+                 port < kMxmIcusPerUnit;
+                 ++port) {
+                print_queue("MXM", mxm, port, mxm_iqs_[mxm][port]);
+            }
+        }
+        for (std::size_t hemisphere = 0;
+             hemisphere < kSxmQueues;
+             ++hemisphere) {
+            print_queue("SXM", hemisphere, 0, sxm_iqs_[hemisphere]);
+        }
     }
 
     SliceIcu<VxmLaneAluInstruction>& vxm_iq(std::size_t alu)
@@ -708,24 +837,64 @@ public:
         return mxm_iqs_[mxm][static_cast<std::size_t>(port)];
     }
 
+    SliceIcu<SxmInstruction>& sxm_iq(std::size_t hemisphere)
+    {
+        check_sxm_queue(hemisphere);
+        return sxm_iqs_[hemisphere];
+    }
+
+    const SliceIcu<SxmInstruction>& sxm_iq(
+        std::size_t hemisphere) const
+    {
+        check_sxm_queue(hemisphere);
+        return sxm_iqs_[hemisphere];
+    }
+
     // Fetch frontend is intentionally separate from dispatch so a system can
     // read current SR state before functional slices write next SR state.
     void evaluate_fetches(
         StreamRegisterFabric& fabric,
         const IcuFetchPortMap& ports)
     {
-        for (std::size_t alu = 0; alu < kVxmQueues; ++alu) {
-            vxm_iqs_[alu].evaluate_fetch(fabric, ports.column(IcuLocation::Vxm(alu)));
+        evaluate_fetches(
+            fabric, ports, Hemisphere::East);
+    }
+
+    void evaluate_fetches(
+        StreamRegisterFabric& fabric,
+        const IcuFetchPortMap& ports,
+        Hemisphere hemisphere)
+    {
+        // VXM owns one shared set of ALU IQs. Until the packet gains an
+        // explicit fetch hemisphere, its program frontend is attached to
+        // the east control fabric for backward compatibility.
+        if (hemisphere == Hemisphere::East) {
+            for (std::size_t alu = 0; alu < kVxmQueues; ++alu) {
+                vxm_iqs_[alu].evaluate_fetch(
+                    fabric, ports.column(IcuLocation::Vxm(alu)));
+            }
         }
-        for (std::size_t column = 0; column < kMemQueues; ++column) {
-            mem_iqs_[column].evaluate_fetch(fabric, ports.column(IcuLocation::Mem(column)));
+        for (std::size_t mem_slice = 0;
+             mem_slice < kMemQueuesPerHemisphere;
+             ++mem_slice) {
+            mem_iqs_[mem_queue(hemisphere, mem_slice)].evaluate_fetch(
+                fabric,
+                ports.column(IcuLocation::Mem(
+                    hemisphere, mem_slice)));
         }
         for (std::size_t mxm = 0; mxm < kMxmUnitCount; ++mxm) {
+            if (mxm_hemisphere(mxm) != hemisphere) {
+                continue;
+            }
             mxm_iqs_[mxm][static_cast<std::size_t>(MxmIcuPort::Load)].evaluate_fetch(
                 fabric, ports.column(IcuLocation::MxmLoad(mxm)));
             mxm_iqs_[mxm][static_cast<std::size_t>(MxmIcuPort::Compute)].evaluate_fetch(
                 fabric, ports.column(IcuLocation::MxmCompute(mxm)));
         }
+        const auto sxm_index = hemisphere_index(hemisphere);
+        sxm_iqs_[sxm_index].evaluate_fetch(
+                fabric,
+                ports.column(IcuLocation::Sxm(hemisphere)));
     }
 
     // Minimal reset/bootstrap state for a MEM ICU: the address points into
@@ -734,25 +903,49 @@ public:
         std::size_t mem_slice,
         MemLocalWordAddress13 base_address)
     {
-        check_mem_queue(mem_slice);
+        bootstrap_mem_icu_from_local_sram(
+            Hemisphere::East, mem_slice, base_address);
+    }
+
+    void bootstrap_mem_icu_from_local_sram(
+        Hemisphere hemisphere,
+        std::size_t mem_slice,
+        MemLocalWordAddress13 base_address)
+    {
+        if (mem_slice >= kMemQueuesPerHemisphere) {
+            throw std::out_of_range(
+                "MEM ICU local bootstrap slice is outside its hemisphere");
+        }
+        const auto queue = mem_queue(hemisphere, mem_slice);
         if (base_address.word() + hw::kIcuFetchVectorCount
             > hw::kSramWordsPerBank) {
             throw StaticScheduleError(
                 "MEM ICU local bootstrap block cannot cross an SRAM bank");
         }
-        if (mem_local_fetches_[mem_slice].has_value()) {
+        if (mem_local_fetches_[queue].has_value()) {
             throw StaticScheduleError(
                 "MEM ICU already has an active local SRAM bootstrap fetch");
         }
-        mem_iqs_[mem_slice].begin_local_fetch();
-        mem_local_fetches_[mem_slice] = MemIcuLocalFetchState {
+        mem_iqs_[queue].begin_local_fetch();
+        mem_local_fetches_[queue] = MemIcuLocalFetchState {
             base_address, 0, {}, false};
     }
 
     void evaluate_mem_local_fetches(const MemArrayModel& memory)
     {
-        for (std::size_t mem_slice = 0; mem_slice < kMemQueues; ++mem_slice) {
-            auto& state_slot = mem_local_fetches_[mem_slice];
+        evaluate_mem_local_fetches(
+            memory, Hemisphere::East);
+    }
+
+    void evaluate_mem_local_fetches(
+        const MemArrayModel& memory,
+        Hemisphere hemisphere)
+    {
+        for (std::size_t mem_slice = 0;
+             mem_slice < kMemQueuesPerHemisphere;
+             ++mem_slice) {
+            const auto queue = mem_queue(hemisphere, mem_slice);
+            auto& state_slot = mem_local_fetches_[queue];
             if (!state_slot.has_value() || state_slot->completion_staged) {
                 continue;
             }
@@ -761,15 +954,21 @@ public:
                 mem_slice,
                 state.base_address.advance_words(state.next_vector));
             for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-                auto& packet = state.packets[
-                    state.next_vector * hw::kTileRows + tile];
                 for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                    packet.bytes[lane] = vector[tile][lane];
+                    const auto block_byte =
+                        state.next_vector * hw::kPhysicalVectorBytes
+                        + tile * hw::kLanesPerTile
+                        + lane;
+                    auto& packet = state.packets[
+                        block_byte / hw::kEncodedInstructionPacketBytes];
+                    packet.bytes[
+                        block_byte % hw::kEncodedInstructionPacketBytes] =
+                        vector[tile][lane];
                 }
             }
             ++state.next_vector;
             if (state.next_vector == hw::kIcuFetchVectorCount) {
-                mem_iqs_[mem_slice].stage_fetched_packets(state.packets);
+                mem_iqs_[queue].stage_fetched_packets(state.packets);
                 state.completion_staged = true;
             }
         }
@@ -779,6 +978,18 @@ public:
     {
         check_mem_queue(mem_slice);
         return mem_local_fetches_[mem_slice].has_value();
+    }
+
+    bool mem_local_fetch_active(
+        Hemisphere hemisphere,
+        std::size_t mem_slice) const
+    {
+        if (mem_slice >= kMemQueuesPerHemisphere) {
+            throw std::out_of_range(
+                "MEM ICU local fetch slice is outside its hemisphere");
+        }
+        return mem_local_fetches_[
+            mem_queue(hemisphere, mem_slice)].has_value();
     }
 
     const MemIcuLocalFetchState* mem_local_fetch_state(
@@ -803,6 +1014,7 @@ public:
         for (auto& ports : mxm_iqs_) {
             for (auto& iq : ports) iq.commit_fetch();
         }
+        for (auto& iq : sxm_iqs_) iq.commit_fetch();
     }
 
     void dispatch_vxm(VxmSlice& vxm, std::ostream* os = nullptr)
@@ -829,6 +1041,40 @@ public:
         std::array<Mxm, kMxmUnitCount>& mxms,
         std::ostream* os = nullptr)
     {
+        dispatch_impl(&mem, nullptr, vxm, nullptr, mxms, os);
+    }
+
+    void dispatch(
+        TileArrayModel& mem,
+        VxmSlice& vxm,
+        std::array<SxmSlice, kSxmQueues>& sxms,
+        std::array<Mxm, kMxmUnitCount>& mxms,
+        std::ostream* os = nullptr)
+    {
+        dispatch_impl(&mem, nullptr, vxm, &sxms, mxms, os);
+    }
+
+    void dispatch(
+        std::array<TileArrayModel, hw::kHemispheres>& mems,
+        VxmSlice& vxm,
+        std::array<SxmSlice, kSxmQueues>& sxms,
+        std::array<Mxm, kMxmUnitCount>& mxms,
+        std::ostream* os = nullptr)
+    {
+        dispatch_impl(nullptr, &mems, vxm, &sxms, mxms, os);
+    }
+
+    std::size_t cycle() const noexcept { return cycle_; }
+
+private:
+    void dispatch_impl(
+        TileArrayModel* east_mem,
+        std::array<TileArrayModel, hw::kHemispheres>* mems,
+        VxmSlice& vxm,
+        std::array<SxmSlice, kSxmQueues>* sxms,
+        std::array<Mxm, kMxmUnitCount>& mxms,
+        std::ostream* os)
+    {
         log_cycle_header(os);
         bool any = false;
 
@@ -839,12 +1085,34 @@ public:
             any = true;
             if (os != nullptr) *os << "  ICU -> VXM alu" << alu << ' ' << describe_vxm(*instruction) << '\n';
         }
-        for (std::size_t column = 0; column < kMemQueues; ++column) {
-            const auto instruction = mem_iqs_[column].tick();
+        for (std::size_t queue = 0; queue < kMemQueues; ++queue) {
+            const auto instruction = mem_iqs_[queue].tick();
             if (!instruction.has_value()) continue;
-            mem.enqueue_instruction(column, *instruction);
+            const auto hemisphere_index_value =
+                queue / kMemQueuesPerHemisphere;
+            const auto mem_slice =
+                queue % kMemQueuesPerHemisphere;
+            if (mems != nullptr) {
+                (*mems)[hemisphere_index_value].enqueue_instruction(
+                    mem_slice, *instruction);
+            } else {
+                if (hemisphere_index_value
+                    != hemisphere_index(Hemisphere::East)
+                    || east_mem == nullptr) {
+                    throw std::logic_error(
+                        "ICU west MEM dispatch has no connected hemisphere");
+                }
+                east_mem->enqueue_instruction(mem_slice, *instruction);
+            }
             any = true;
-            if (os != nullptr) *os << "  ICU -> MEM q" << column << ' ' << describe_mem(*instruction) << '\n';
+            if (os != nullptr) {
+                *os << "  ICU -> MEM."
+                    << hemisphere_short_name(
+                           static_cast<Hemisphere>(
+                               hemisphere_index_value))
+                    << " q" << mem_slice << ' '
+                    << describe_mem(*instruction) << '\n';
+            }
         }
         for (std::size_t mxm = 0; mxm < kMxmUnitCount; ++mxm) {
             for (std::size_t port = 0; port < kMxmIcusPerUnit; ++port) {
@@ -859,14 +1127,31 @@ public:
                 }
             }
         }
+        for (std::size_t hemisphere = 0;
+             hemisphere < kSxmQueues;
+             ++hemisphere) {
+            const auto instruction = sxm_iqs_[hemisphere].tick();
+            if (!instruction.has_value()) continue;
+            if (sxms == nullptr) {
+                throw std::logic_error(
+                    "ICU dispatched SXM without a connected SXM slice");
+            }
+            (*sxms)[hemisphere].issue(*instruction);
+            any = true;
+            if (os != nullptr) {
+                *os << "  ICU -> SXM."
+                    << hemisphere_short_name(
+                           static_cast<Hemisphere>(hemisphere))
+                    << " opcode="
+                    << static_cast<std::size_t>(instruction->opcode)
+                    << '\n';
+            }
+        }
 
         log_dispatch_idle(os, any);
         ++cycle_;
     }
 
-    std::size_t cycle() const noexcept { return cycle_; }
-
-private:
     std::size_t take_emitted_notifications()
     {
         std::size_t count = 0;
@@ -875,6 +1160,7 @@ private:
         for (auto& ports : mxm_iqs_) {
             for (auto& iq : ports) count += iq.take_notify() ? 1 : 0;
         }
+        for (auto& iq : sxm_iqs_) count += iq.take_notify() ? 1 : 0;
         return count;
     }
 
@@ -896,7 +1182,23 @@ private:
 
     static void check_mxm_queue(std::size_t mxm)
     {
-        if (mxm >= kMxmUnitCount) throw std::out_of_range("ICU MXM unit index is outside the two MXM units");
+        if (mxm >= kMxmUnitCount) throw std::out_of_range("ICU MXM unit index is outside the configured MXM units");
+    }
+
+    static constexpr Hemisphere mxm_hemisphere(
+        std::size_t mxm) noexcept
+    {
+        return mxm < hw::kWestMxmCount
+            ? Hemisphere::West
+            : Hemisphere::East;
+    }
+
+    static void check_sxm_queue(std::size_t hemisphere)
+    {
+        if (hemisphere >= kSxmQueues) {
+            throw std::out_of_range(
+                "ICU SXM hemisphere is outside the configured hemispheres");
+        }
     }
 
     template <typename QueueArray>
@@ -913,7 +1215,8 @@ private:
         *os << "icu cycle " << cycle_ << '\n'
             << "  queues: vxm=" << queued_instruction_count(vxm_iqs_)
             << " mem=" << queued_instruction_count(mem_iqs_)
-            << " mxm=" << queued_mxm_instruction_count() << '\n';
+            << " mxm=" << queued_mxm_instruction_count()
+            << " sxm=" << queued_instruction_count(sxm_iqs_) << '\n';
     }
 
     static void log_dispatch_idle(std::ostream* os, bool any)
@@ -937,8 +1240,10 @@ private:
         switch (instruction.opcode) {
         case MemOpcode::Read: opcode = "Read"; break;
         case MemOpcode::Write: opcode = "Write"; break;
+        case MemOpcode::ReadWrite: opcode = "ReadWrite"; break;
         case MemOpcode::Gather: opcode = "Gather"; break;
         case MemOpcode::Scatter: opcode = "Scatter"; break;
+        case MemOpcode::Accumulate: opcode = "Accumulate"; break;
         }
         os << opcode << " addr=b" << instruction.address.bank()
            << ":w" << instruction.address.word()
@@ -979,6 +1284,7 @@ private:
     std::array<
         std::array<SliceIcu<MxmControlInstruction>, kMxmIcusPerUnit>,
         kMxmUnitCount> mxm_iqs_{};
+    std::array<SliceIcu<SxmInstruction>, kSxmQueues> sxm_iqs_{};
     std::size_t barrier_latency_cycles_{hw::kIcuBarrierLatencyCycles};
     std::deque<std::size_t> barrier_events_{};
     std::size_t cycle_{0};

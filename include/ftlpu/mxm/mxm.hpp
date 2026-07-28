@@ -6,6 +6,7 @@
 #include "ftlpu/mxm/control_slice.hpp"
 
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -94,8 +95,10 @@ class Mxm {
 public:
     static constexpr std::size_t kWeightBuffers = MxmSupercell::kWeightBuffers;
     static constexpr std::size_t kAccumulatorBanks = hw::kMxmAccumulatorBanks;
-    using ActivationData = std::array<std::int8_t, hw::kLanesPerTile>;
-    using ResultValues = std::array<std::int32_t, hw::kMxmSupercellColumns>;
+    using ActivationData = MxmSupercell::ActivationData;
+    using Accumulator = MxmSupercell::Accumulator;
+    using ResultValues =
+        std::array<Accumulator, hw::kMxmSupercellColumns>;
     using PartialSum = MxmSupercell::PartialSum;
 
     struct ColumnOutput {
@@ -325,7 +328,7 @@ public:
         return last_outputs_;
     }
 
-    std::int32_t accumulator_value(
+    Accumulator accumulator_value(
         std::size_t accumulator_bank,
         std::size_t row,
         std::size_t column) const
@@ -413,7 +416,8 @@ private:
             const auto segment = input.consume_segment(tile, endpoint.stream_base + stream);
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                 result[lane][stream] = MxmArray::Supercell::InputWord {
-                    static_cast<std::int8_t>(segment[lane].data),
+                    static_cast<MxmArray::Supercell::EncodedWeightByte>(
+                        segment[lane].data),
                     stream + 1 == hw::kMxmLoadStreamsPerCycle,
                 };
             }
@@ -445,20 +449,48 @@ private:
         std::size_t tile,
         std::size_t stream_base) const
     {
-        if (stream_base >= hw::kStreamsPerDirection) {
+        if (stream_base + hw::kMxmActivationBytesPerValue
+            > hw::kStreamsPerDirection) {
             throw std::out_of_range("MXM activation stream is outside its configured direction");
         }
         const auto& endpoint = ports_.activation_input();
         StreamInputPort input(fabric, endpoint.column, endpoint.direction, "MXM Compute");
-        if (!input.segment_valid(tile, stream_base)) {
-            throw std::logic_error("MXM Compute reached tile before activation stream arrived");
+        for (std::size_t byte = 0;
+             byte < hw::kMxmActivationBytesPerValue;
+             ++byte) {
+            if (!input.segment_valid(tile, stream_base + byte)) {
+                throw std::logic_error(
+                    "MXM Compute reached tile before all activation bytes arrived");
+            }
         }
-        const auto segment = endpoint.multicast
-            ? input.consume_shared_segment(tile, stream_base)
-            : input.consume_segment(tile, stream_base);
         ActivationData data {};
-        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            data[lane] = static_cast<std::int8_t>(segment[lane].data);
+        if constexpr (MxmSupercell::kFp16Datapath) {
+            const auto low = endpoint.multicast
+                ? input.consume_shared_segment(tile, stream_base)
+                : input.consume_segment(tile, stream_base);
+            const auto high = endpoint.multicast
+                ? input.consume_shared_segment(tile, stream_base + 1)
+                : input.consume_segment(tile, stream_base + 1);
+            for (std::size_t element = 0;
+                 element < hw::kLanesPerTile;
+                 ++element) {
+                const auto bits = static_cast<std::uint16_t>(
+                    low[element].data)
+                    | (static_cast<std::uint16_t>(
+                           high[element].data)
+                       << 8);
+                data[element] = Fp16::from_bits(bits).to_float();
+            }
+        } else {
+            const auto segment = endpoint.multicast
+                ? input.consume_shared_segment(tile, stream_base)
+                : input.consume_segment(tile, stream_base);
+            for (std::size_t element = 0;
+                 element < hw::kLanesPerTile;
+                 ++element) {
+                data[element] =
+                    static_cast<std::int8_t>(segment[element].data);
+            }
         }
         return data;
     }
@@ -523,7 +555,13 @@ private:
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             const auto value = accumulator_banks_[event.accumulator_bank][event.row][global_column_base + lane];
             output.values[lane] = value;
-            const auto raw = static_cast<std::uint32_t>(value);
+            const auto raw = [&] {
+                if constexpr (MxmSupercell::kFp16Datapath) {
+                    return std::bit_cast<std::uint32_t>(value);
+                } else {
+                    return static_cast<std::uint32_t>(value);
+                }
+            }();
             const std::array<std::uint8_t, 4> bytes {
                 static_cast<std::uint8_t>(raw & 0xffu),
                 static_cast<std::uint8_t>((raw >> 8) & 0xffu),
@@ -630,7 +668,7 @@ private:
     std::array<std::array<std::size_t, hw::kMxmSupercellsPerPlane>, kAccumulatorBanks> next_row_for_tile_{};
     std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, kAccumulatorBanks>
         compute_active_by_accumulator_tile_{};
-    std::array<std::array<std::array<std::int32_t, hw::kMxmColumns>, hw::kMxmRows>, kAccumulatorBanks>
+    std::array<std::array<std::array<Accumulator, hw::kMxmColumns>, hw::kMxmRows>, kAccumulatorBanks>
         accumulator_banks_{};
     std::vector<ColumnOutput> last_outputs_{};
 };

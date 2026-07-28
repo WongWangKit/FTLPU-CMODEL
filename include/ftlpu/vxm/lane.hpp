@@ -1,8 +1,11 @@
 #pragma once
 
+#include "ftlpu/core/fp16.hpp"
+#include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/vxm/alu.hpp"
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -21,6 +24,9 @@ enum class VxmLaneOperandKind {
     AluOutput,
     StreamInt32,
     Immediate,
+    StreamFloat32,
+    StreamInt8,
+    StreamFloat16,
 };
 
 struct VxmLaneOperand {
@@ -43,6 +49,33 @@ struct VxmLaneOperand {
     {
         return VxmLaneOperand {VxmLaneOperandKind::Immediate, 0, value, 1.0f};
     }
+
+    static VxmLaneOperand StreamFloat32(std::size_t base_stream)
+    {
+        return VxmLaneOperand {
+            VxmLaneOperandKind::StreamFloat32,
+            base_stream,
+            0.0f,
+            1.0f};
+    }
+
+    static VxmLaneOperand StreamInt8(std::size_t stream)
+    {
+        return VxmLaneOperand {
+            VxmLaneOperandKind::StreamInt8,
+            stream,
+            0.0f,
+            1.0f};
+    }
+
+    static VxmLaneOperand StreamFloat16(std::size_t base_stream)
+    {
+        return VxmLaneOperand {
+            VxmLaneOperandKind::StreamFloat16,
+            base_stream,
+            0.0f,
+            1.0f};
+    }
 };
 
 struct VxmLaneAluInstruction {
@@ -53,6 +86,8 @@ struct VxmLaneAluInstruction {
     std::int32_t output_zero_point{0};
     VxmCastTarget cast_target{VxmCastTarget::Float32};
     std::optional<std::size_t> output_stream{};
+    Hemisphere input_hemisphere{Hemisphere::East};
+    Hemisphere output_hemisphere{Hemisphere::East};
 };
 
 enum class VxmLaneAluTraceState {
@@ -79,9 +114,9 @@ struct VxmLaneAluTrace {
 
 class VxmLane {
 public:
-    static constexpr std::size_t kAluCount = 16;
+    static constexpr std::size_t kAluCount = hw::kVxmAluCount;
     static constexpr std::size_t kInputStreams = hw::kStreams;
-    static constexpr std::size_t kAluStages = kAluCount;
+    static constexpr std::size_t kAluStages = hw::kVxmPipelineStages;
 
     using Byte = std::uint8_t;
     using Int32Bytes = std::array<Byte, 4>;
@@ -104,8 +139,9 @@ public:
     struct Output {
         std::int8_t value{0};
         std::size_t stream{0};
-        std::array<std::uint8_t, 2> bytes{};
+        std::array<std::uint8_t, 4> bytes{};
         std::size_t byte_count{1};
+        Hemisphere hemisphere{Hemisphere::East};
     };
 
     void reset()
@@ -116,8 +152,8 @@ public:
         for (auto& output : alu_outputs_) {
             output.reset();
         }
-        pending_streams_.reset();
-        streams_.reset();
+        for (auto& streams : pending_streams_) streams.reset();
+        for (auto& streams : streams_) streams.reset();
         output_.reset();
         outputs_.clear();
         reset_trace();
@@ -304,12 +340,22 @@ public:
         }
     }
 
-    void set_stream_inputs(StreamBytes streams)
+    void set_stream_inputs(
+        Hemisphere hemisphere,
+        StreamBytes streams)
     {
-        if (pending_streams_.has_value()) {
+        auto& pending =
+            pending_streams_[hemisphere_index(hemisphere)];
+        if (pending.has_value()) {
             throw std::logic_error("VXM lane stream input is already occupied");
         }
-        pending_streams_ = streams;
+        pending = std::move(streams);
+    }
+
+    void set_stream_inputs(StreamBytes streams)
+    {
+        set_stream_inputs(
+            Hemisphere::East, std::move(streams));
     }
 
     void set_swiglu_input(Int32Bytes gate_streams, Int32Bytes up_streams)
@@ -328,9 +374,14 @@ public:
         outputs_.clear();
         reset_trace();
         last_trace_cycle_ = cycle_;
-        if (pending_streams_.has_value()) {
-            streams_ = pending_streams_;
-            pending_streams_.reset();
+        for (std::size_t hemisphere = 0;
+             hemisphere < hw::kHemispheres;
+             ++hemisphere) {
+            if (pending_streams_[hemisphere].has_value()) {
+                streams_[hemisphere] =
+                    pending_streams_[hemisphere];
+                pending_streams_[hemisphere].reset();
+            }
         }
 
         const auto previous_outputs = alu_outputs_;
@@ -345,8 +396,14 @@ public:
 
             const auto& instruction = queues_[alu].front();
             trace.opcode = instruction.opcode;
-            trace.lhs = trace_operand(instruction.lhs, previous_outputs);
-            trace.rhs = trace_operand(instruction.rhs, previous_outputs);
+            trace.lhs = trace_operand(
+                instruction.lhs,
+                previous_outputs,
+                instruction.input_hemisphere);
+            trace.rhs = trace_operand(
+                instruction.rhs,
+                previous_outputs,
+                instruction.input_hemisphere);
             const auto result = try_execute(instruction, previous_outputs);
             if (!result.has_value()) {
                 trace.state = VxmLaneAluTraceState::Stalled;
@@ -362,6 +419,7 @@ public:
                     *instruction.output_stream,
                     result->output_bytes,
                     result->output_byte_count,
+                    instruction.output_hemisphere,
                 };
                 if (!output_.has_value()) {
                     output_ = output;
@@ -472,6 +530,27 @@ public:
         };
     }
 
+    static float unpack_float32(Int32Bytes streams)
+    {
+        const auto raw =
+            static_cast<std::uint32_t>(streams[0])
+            | (static_cast<std::uint32_t>(streams[1]) << 8)
+            | (static_cast<std::uint32_t>(streams[2]) << 16)
+            | (static_cast<std::uint32_t>(streams[3]) << 24);
+        return std::bit_cast<float>(raw);
+    }
+
+    static std::array<std::uint8_t, 4> pack_float32(float value)
+    {
+        const auto raw = std::bit_cast<std::uint32_t>(value);
+        return {
+            static_cast<Byte>(raw & 0xffu),
+            static_cast<Byte>((raw >> 8) & 0xffu),
+            static_cast<Byte>((raw >> 16) & 0xffu),
+            static_cast<Byte>((raw >> 24) & 0xffu),
+        };
+    }
+
     static const char* opcode_name(VxmAluOpcode opcode)
     {
         switch (opcode) {
@@ -539,7 +618,7 @@ private:
     struct AluResult {
         float value{0.0f};
         std::int8_t output{0};
-        std::array<std::uint8_t, 2> output_bytes{};
+        std::array<std::uint8_t, 4> output_bytes{};
         std::size_t output_byte_count{1};
         bool output_valid{false};
     };
@@ -565,6 +644,12 @@ private:
             return "alu" + std::to_string(operand.index);
         case VxmLaneOperandKind::StreamInt32:
             return "stream[" + std::to_string(operand.index) + ".." + std::to_string(operand.index + 3) + "]";
+        case VxmLaneOperandKind::StreamFloat32:
+            return "f32stream[" + std::to_string(operand.index) + ".." + std::to_string(operand.index + 3) + "]";
+        case VxmLaneOperandKind::StreamInt8:
+            return "i8stream[" + std::to_string(operand.index) + "]";
+        case VxmLaneOperandKind::StreamFloat16:
+            return "f16stream[" + std::to_string(operand.index) + ".." + std::to_string(operand.index + 1) + "]";
         case VxmLaneOperandKind::Immediate:
             return "imm(" + std::to_string(operand.immediate) + ")";
         }
@@ -573,35 +658,74 @@ private:
 
     VxmLaneOperandTrace trace_operand(
         const VxmLaneOperand& operand,
-        const std::array<std::optional<float>, kAluCount>& previous_outputs) const
+        const std::array<std::optional<float>, kAluCount>& previous_outputs,
+        Hemisphere input_hemisphere) const
     {
         return VxmLaneOperandTrace {
             operand_source_name(operand),
-            resolve_operand(operand, previous_outputs),
+            resolve_operand(
+                operand, previous_outputs, input_hemisphere),
         };
     }
 
     std::optional<float> resolve_operand(
         const VxmLaneOperand& operand,
-        const std::array<std::optional<float>, kAluCount>& previous_outputs) const
+        const std::array<std::optional<float>, kAluCount>& previous_outputs,
+        Hemisphere input_hemisphere) const
     {
+        const auto& stream_input =
+            streams_[hemisphere_index(input_hemisphere)];
         switch (operand.kind) {
         case VxmLaneOperandKind::AluOutput:
             check_alu(operand.index);
             return previous_outputs[operand.index];
         case VxmLaneOperandKind::StreamInt32:
-            if (!streams_.has_value()) {
+            if (!stream_input.has_value()) {
                 return std::nullopt;
             }
             if (operand.index + 3 >= kInputStreams) {
                 throw std::out_of_range("VXM lane int32 stream operand needs four streams");
             }
             return static_cast<float>(unpack_int32(Int32Bytes {
-                       (*streams_)[operand.index],
-                       (*streams_)[operand.index + 1],
-                       (*streams_)[operand.index + 2],
-                       (*streams_)[operand.index + 3],
+                       (*stream_input)[operand.index],
+                       (*stream_input)[operand.index + 1],
+                       (*stream_input)[operand.index + 2],
+                       (*stream_input)[operand.index + 3],
                    }));
+        case VxmLaneOperandKind::StreamFloat32:
+            if (!stream_input.has_value()) return std::nullopt;
+            if (operand.index + 3 >= kInputStreams) {
+                throw std::out_of_range(
+                    "VXM float32 operand needs four streams");
+            }
+            return unpack_float32(Int32Bytes {
+                (*stream_input)[operand.index],
+                (*stream_input)[operand.index + 1],
+                (*stream_input)[operand.index + 2],
+                (*stream_input)[operand.index + 3],
+            });
+        case VxmLaneOperandKind::StreamInt8:
+            if (!stream_input.has_value()) return std::nullopt;
+            if (operand.index >= kInputStreams) {
+                throw std::out_of_range(
+                    "VXM int8 operand stream is out of range");
+            }
+            return static_cast<float>(
+                static_cast<std::int8_t>(
+                    (*stream_input)[operand.index]));
+        case VxmLaneOperandKind::StreamFloat16:
+            if (!stream_input.has_value()) return std::nullopt;
+            if (operand.index + 1 >= kInputStreams) {
+                throw std::out_of_range(
+                    "VXM float16 operand needs two streams");
+            }
+            return Fp16::from_bits(
+                static_cast<std::uint16_t>(
+                    (*stream_input)[operand.index])
+                | (static_cast<std::uint16_t>(
+                       (*stream_input)[operand.index + 1])
+                   << 8))
+                .to_float();
         case VxmLaneOperandKind::Immediate:
             return operand.immediate;
         }
@@ -612,8 +736,14 @@ private:
         const VxmLaneAluInstruction& instruction,
         const std::array<std::optional<float>, kAluCount>& previous_outputs) const
     {
-        const auto lhs = resolve_operand(instruction.lhs, previous_outputs);
-        const auto rhs = resolve_operand(instruction.rhs, previous_outputs);
+        const auto lhs = resolve_operand(
+            instruction.lhs,
+            previous_outputs,
+            instruction.input_hemisphere);
+        const auto rhs = resolve_operand(
+            instruction.rhs,
+            previous_outputs,
+            instruction.input_hemisphere);
         if (!lhs.has_value() || !rhs.has_value()) {
             return std::nullopt;
         }
@@ -622,56 +752,101 @@ private:
         switch (instruction.opcode) {
         case VxmAluOpcode::Pass:
             result.value = *lhs;
-            return result;
+            break;
         case VxmAluOpcode::Add:
             result.value = *lhs + *rhs;
-            return result;
+            break;
         case VxmAluOpcode::Subtract:
             result.value = *lhs - *rhs;
-            return result;
+            break;
         case VxmAluOpcode::Multiply:
             result.value = *lhs * *rhs;
-            return result;
+            break;
         case VxmAluOpcode::Divide:
             result.value = *lhs / *rhs;
-            return result;
+            break;
+        case VxmAluOpcode::Max:
+            result.value = std::max(*lhs, *rhs);
+            break;
+        case VxmAluOpcode::Min:
+            result.value = std::min(*lhs, *rhs);
+            break;
         case VxmAluOpcode::Negate:
             result.value = -*lhs;
-            return result;
+            break;
+        case VxmAluOpcode::Abs:
+            result.value = std::fabs(*lhs);
+            break;
+        case VxmAluOpcode::Square:
+            result.value = *lhs * *lhs;
+            break;
+        case VxmAluOpcode::Sqrt:
+            result.value = std::sqrt(*lhs);
+            break;
         case VxmAluOpcode::Exp:
             result.value = std::exp(*lhs);
-            return result;
+            break;
+        case VxmAluOpcode::Log:
+            result.value = std::log(*lhs);
+            break;
+        case VxmAluOpcode::Relu:
+            result.value = std::max(0.0f, *lhs);
+            break;
         case VxmAluOpcode::Cast:
             if (instruction.cast_target == VxmCastTarget::Int8) {
-                result.output = VxmAlu::cast_scalar_to_int8(*lhs);
-                result.output_bytes[0] = static_cast<std::uint8_t>(result.output);
-                result.output_byte_count = 1;
-                result.value = static_cast<float>(result.output);
-                result.output_valid = true;
-                return result;
-            }
-            if (instruction.cast_target == VxmCastTarget::Float16) {
-                const auto bits = VxmAlu::cast_scalar_to_float16_bits(*lhs);
-                result.output = static_cast<std::int8_t>(bits & 0xffu);
-                result.output_bytes[0] = static_cast<std::uint8_t>(bits & 0xffu);
-                result.output_bytes[1] = static_cast<std::uint8_t>((bits >> 8) & 0xffu);
-                result.output_byte_count = 2;
+                result.value = static_cast<float>(
+                    VxmAlu::cast_scalar_to_int8(*lhs));
+            } else {
                 result.value = *lhs;
-                result.output_valid = true;
-                return result;
             }
-            result.value = *lhs;
-            return result;
+            break;
         default:
             throw std::logic_error("VXM lane ALU opcode is not implemented in the issue-queue lane");
         }
+
+        if (!instruction.output_stream.has_value()) {
+            return result;
+        }
+        switch (instruction.cast_target) {
+        case VxmCastTarget::Int8:
+            result.output =
+                VxmAlu::cast_scalar_to_int8(result.value);
+            result.output_bytes[0] =
+                static_cast<std::uint8_t>(result.output);
+            result.output_byte_count = 1;
+            break;
+        case VxmCastTarget::Float16: {
+            const auto bits =
+                VxmAlu::cast_scalar_to_float16_bits(
+                    result.value);
+            result.output =
+                static_cast<std::int8_t>(bits & 0xffu);
+            result.output_bytes[0] =
+                static_cast<std::uint8_t>(bits & 0xffu);
+            result.output_bytes[1] =
+                static_cast<std::uint8_t>((bits >> 8) & 0xffu);
+            result.output_byte_count = 2;
+            break;
+        }
+        case VxmCastTarget::Float32:
+            result.output = 0;
+            result.output_bytes = pack_float32(result.value);
+            result.output_byte_count = 4;
+            break;
+        }
+        result.output_valid = true;
+        return result;
     }
 
     SwigluParams swiglu_params_{};
     std::array<std::deque<VxmLaneAluInstruction>, kAluCount> queues_{};
     std::array<std::optional<float>, kAluCount> alu_outputs_{};
-    std::optional<StreamBytes> pending_streams_{};
-    std::optional<StreamBytes> streams_{};
+    std::array<
+        std::optional<StreamBytes>,
+        hw::kHemispheres> pending_streams_{};
+    std::array<
+        std::optional<StreamBytes>,
+        hw::kHemispheres> streams_{};
     std::optional<Output> output_{};
     std::vector<Output> outputs_{};
     std::array<VxmLaneAluTrace, kAluCount> last_trace_{};

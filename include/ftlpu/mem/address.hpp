@@ -2,6 +2,7 @@
 
 #include "ftlpu/core/hardware_params.hpp"
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -10,11 +11,32 @@ namespace ftlpu {
 
 class MemLocalWordAddress13;
 
-// Byte address after a MEM slice has been routed. Layout:
-//   [16] bank, [15:4] word, [3:0] byte within the 16-byte word.
+namespace address_detail {
+
+constexpr std::size_t bits_for_count(std::size_t count)
+{
+    return count <= 1 ? 0 : std::bit_width(count - 1);
+}
+
+constexpr std::size_t mask_for_bits(std::size_t bits)
+{
+    return bits == 0 ? 0 : (std::size_t {1} << bits) - 1;
+}
+
+} // namespace address_detail
+
+// Byte address after a MEM slice has been routed.  The historical class name
+// is retained for source compatibility; kBits and all field positions are
+// derived from the active SRAM configuration.
 class MemSliceByteAddress17 {
 public:
-    static constexpr std::size_t kBits = 17;
+    static constexpr std::size_t kByteBits =
+        address_detail::bits_for_count(hw::kSramWordBytes);
+    static constexpr std::size_t kWordBits =
+        address_detail::bits_for_count(hw::kSramWordsPerBank);
+    static constexpr std::size_t kBankBits =
+        address_detail::bits_for_count(hw::kSramBanksPerTileBlock);
+    static constexpr std::size_t kBits = kByteBits + kWordBits + kBankBits;
     static constexpr std::size_t kLimit = std::size_t {1} << kBits;
 
     constexpr MemSliceByteAddress17() noexcept = default;
@@ -39,13 +61,25 @@ public:
             throw std::out_of_range("MEM byte offset is outside the 16-byte word");
         }
         return MemSliceByteAddress17(
-            (bank << 16) | (word << 4) | byte_offset);
+            (bank << (kWordBits + kByteBits))
+            | (word << kByteBits)
+            | byte_offset);
     }
 
     constexpr std::size_t encoded() const noexcept { return encoded_; }
-    constexpr std::size_t bank() const noexcept { return encoded_ >> 16; }
-    constexpr std::size_t word() const noexcept { return (encoded_ >> 4) & 0x0fff; }
-    constexpr std::size_t byte_offset() const noexcept { return encoded_ & 0x0f; }
+    constexpr std::size_t bank() const noexcept
+    {
+        return encoded_ >> (kWordBits + kByteBits);
+    }
+    constexpr std::size_t word() const noexcept
+    {
+        return (encoded_ >> kByteBits)
+            & address_detail::mask_for_bits(kWordBits);
+    }
+    constexpr std::size_t byte_offset() const noexcept
+    {
+        return encoded_ & address_detail::mask_for_bits(kByteBits);
+    }
     constexpr bool word_aligned() const noexcept { return byte_offset() == 0; }
 
     constexpr MemLocalWordAddress13 local_word_address() const;
@@ -58,7 +92,7 @@ private:
     static constexpr std::uint32_t checked(std::size_t encoded)
     {
         if (encoded >= kLimit) {
-            throw std::out_of_range("MEM slice byte address exceeds 17 bits");
+            throw std::out_of_range("MEM slice byte address exceeds the configured field width");
         }
         return static_cast<std::uint32_t>(encoded);
     }
@@ -67,10 +101,14 @@ private:
 };
 
 // Address carried by MEM Read/Write. The physical pipeline stage selects the
-// tile-local block; bit 12 selects a bank and bits 11:0 select a word.
+// tile-local block.  The historical class name is retained for compatibility.
 class MemLocalWordAddress13 {
 public:
-    static constexpr std::size_t kBits = 13;
+    static constexpr std::size_t kWordBits =
+        address_detail::bits_for_count(hw::kSramWordsPerBank);
+    static constexpr std::size_t kBankBits =
+        address_detail::bits_for_count(hw::kSramBanksPerTileBlock);
+    static constexpr std::size_t kBits = kWordBits + kBankBits;
     static constexpr std::size_t kLimit = std::size_t {1} << kBits;
 
     constexpr MemLocalWordAddress13() noexcept = default;
@@ -90,12 +128,15 @@ public:
         if (word >= hw::kSramWordsPerBank) {
             throw std::out_of_range("MEM word does not fit local word address");
         }
-        return MemLocalWordAddress13((bank << 12) | word);
+        return MemLocalWordAddress13((bank << kWordBits) | word);
     }
 
     constexpr std::size_t encoded() const noexcept { return encoded_; }
-    constexpr std::size_t bank() const noexcept { return encoded_ >> 12; }
-    constexpr std::size_t word() const noexcept { return encoded_ & 0x0fff; }
+    constexpr std::size_t bank() const noexcept { return encoded_ >> kWordBits; }
+    constexpr std::size_t word() const noexcept
+    {
+        return encoded_ & address_detail::mask_for_bits(kWordBits);
+    }
 
     constexpr MemLocalWordAddress13 next_word() const
     {
@@ -127,15 +168,15 @@ public:
         MemLocalWordAddress13) = default;
 
 private:
-    static constexpr std::uint16_t checked(std::size_t encoded)
+    static constexpr std::uint32_t checked(std::size_t encoded)
     {
         if (encoded >= kLimit) {
-            throw std::out_of_range("MEM local word address exceeds 13 bits");
+            throw std::out_of_range("MEM local word address exceeds the configured field width");
         }
-        return static_cast<std::uint16_t>(encoded);
+        return static_cast<std::uint32_t>(encoded);
     }
 
-    std::uint16_t encoded_{0};
+    std::uint32_t encoded_{0};
 };
 
 constexpr MemLocalWordAddress13 MemSliceByteAddress17::local_word_address() const
@@ -146,11 +187,17 @@ constexpr MemLocalWordAddress13 MemSliceByteAddress17::local_word_address() cons
     return MemLocalWordAddress13::FromFields(bank(), word());
 }
 
-// Lower 24 bits of the software-visible byte address. Layout:
-//   [23] hemisphere, [22:17] slice, [16:0] slice-local byte address.
+// Software-visible byte address.  The historical class name is retained for
+// compatibility; narrower vector rows require a wider local SRAM address.
 class MemGlobalAddress24 {
 public:
-    static constexpr std::size_t kBits = 24;
+    static constexpr std::size_t kLocalBits = MemSliceByteAddress17::kBits;
+    static constexpr std::size_t kSliceBits =
+        address_detail::bits_for_count(hw::kMemSliceColumns);
+    static constexpr std::size_t kHemisphereBits =
+        address_detail::bits_for_count(hw::kHemispheres);
+    static constexpr std::size_t kBits =
+        kLocalBits + kSliceBits + kHemisphereBits;
     static constexpr std::size_t kLimit = std::size_t {1} << kBits;
 
     constexpr MemGlobalAddress24() noexcept = default;
@@ -172,15 +219,25 @@ public:
             throw std::out_of_range("MEM slice does not fit global address");
         }
         return MemGlobalAddress24(
-            (hemisphere << 23) | (mem_slice << 17) | local.encoded());
+            (hemisphere << (kSliceBits + kLocalBits))
+            | (mem_slice << kLocalBits)
+            | local.encoded());
     }
 
     constexpr std::size_t encoded() const noexcept { return encoded_; }
-    constexpr std::size_t hemisphere() const noexcept { return encoded_ >> 23; }
-    constexpr std::size_t mem_slice() const noexcept { return (encoded_ >> 17) & 0x3f; }
+    constexpr std::size_t hemisphere() const noexcept
+    {
+        return encoded_ >> (kSliceBits + kLocalBits);
+    }
+    constexpr std::size_t mem_slice() const noexcept
+    {
+        return (encoded_ >> kLocalBits)
+            & address_detail::mask_for_bits(kSliceBits);
+    }
     constexpr MemSliceByteAddress17 slice_byte_address() const
     {
-        return MemSliceByteAddress17(encoded_ & 0x1ffff);
+        return MemSliceByteAddress17(
+            encoded_ & address_detail::mask_for_bits(kLocalBits));
     }
 
     friend constexpr bool operator==(MemGlobalAddress24, MemGlobalAddress24) = default;
@@ -189,7 +246,7 @@ private:
     static constexpr std::uint32_t checked(std::size_t encoded)
     {
         if (encoded >= kLimit) {
-            throw std::out_of_range("MEM global address exceeds 24 bits");
+            throw std::out_of_range("MEM global address exceeds the configured field width");
         }
         return static_cast<std::uint32_t>(encoded);
     }

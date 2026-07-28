@@ -1,9 +1,11 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
+#include "ftlpu/core/fp16.hpp"
 #include "ftlpu/core/stream.hpp"
 
 #include <array>
+#include <type_traits>
 #include <cstddef>
 #include <cstdint>
 #include <iomanip>
@@ -30,21 +32,31 @@ struct MxmInstruction {
 
 class MxmSupercell {
 public:
-    using Weight = std::int8_t;
-    using InputWord = StreamWord<Weight>;
+    static constexpr bool kFp16Datapath =
+        hw::kMxmWeightBytesPerValue == 2;
+    using Weight = std::conditional_t<kFp16Datapath, float, std::int8_t>;
+    using Accumulator =
+        std::conditional_t<kFp16Datapath, float, std::int32_t>;
+    using EncodedWeightByte =
+        std::conditional_t<kFp16Datapath, std::uint8_t, std::int8_t>;
+    using InputWord = StreamWord<EncodedWeightByte>;
     using InputSlot = std::optional<InputWord>;
     using InputLane = std::array<InputSlot, hw::kMxmLoadStreamsPerCycle>;
     using InputVector = std::array<InputLane, hw::kLanesPerTile>;
-    using ActivationVector = std::array<InputSlot, hw::kLanesPerTile>;
+    using ActivationWord = StreamWord<Weight>;
+    using ActivationSlot = std::optional<ActivationWord>;
+    using ActivationVector =
+        std::array<ActivationSlot, hw::kLanesPerTile>;
     using ActivationData = std::array<Weight, hw::kLanesPerTile>;
-    using PartialSum = std::array<std::int32_t, hw::kMxmSupercellColumns>;
+    using PartialSum =
+        std::array<Accumulator, hw::kMxmSupercellColumns>;
     using WeightRow = std::array<Weight, hw::kMxmSupercellColumns>;
     using WeightMatrix = std::array<WeightRow, hw::kMxmSupercellRows>;
     static constexpr std::size_t kWeightBuffers = 2;
 
     struct ComputeResult {
         std::size_t column{0};
-        std::int32_t value{0};
+        Accumulator value{0};
     };
 
     struct ActivationPayload {
@@ -147,8 +159,10 @@ public:
         auto north_partial = south_partial;
         for (std::size_t column = 0; column < hw::kMxmSupercellColumns; ++column) {
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                north_partial[column] += static_cast<std::int32_t>(activation[lane])
-                    * static_cast<std::int32_t>(weight_buffers_[weight_buffer][lane][column]);
+                north_partial[column] +=
+                    static_cast<Accumulator>(activation[lane])
+                    * static_cast<Accumulator>(
+                        weight_buffers_[weight_buffer][lane][column]);
             }
         }
         return north_partial;
@@ -238,17 +252,20 @@ private:
         advance_activation_stages();
     }
 
-    std::int32_t dot_product(const ActivationPayload& activation, std::size_t column) const
+    Accumulator dot_product(
+        const ActivationPayload& activation,
+        std::size_t column) const
     {
         check_column(column);
         check_buffer(activation.weight_buffer);
         if (!weight_buffer_valid_[activation.weight_buffer]) {
             throw std::logic_error("MXM compute requires a valid selected weight buffer");
         }
-        std::int32_t sum = 0;
+        Accumulator sum = 0;
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            sum += static_cast<std::int32_t>(activation.data[lane])
-                * static_cast<std::int32_t>(weight_buffers_[activation.weight_buffer][lane][column]);
+            sum += static_cast<Accumulator>(activation.data[lane])
+                * static_cast<Accumulator>(
+                    weight_buffers_[activation.weight_buffer][lane][column]);
         }
         return sum;
     }
@@ -272,11 +289,31 @@ private:
     void write_buffer_from_input()
     {
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            for (std::size_t stream = 0; stream < hw::kMxmLoadStreamsPerCycle; ++stream) {
-                if (!input_[lane][stream].has_value()) {
-                    throw std::logic_error("MXM IW requires 16 streams on all 16 lanes to be valid");
+            for (std::size_t column = 0;
+                 column < hw::kMxmSupercellColumns;
+                 ++column) {
+                const auto stream =
+                    column * hw::kMxmWeightBytesPerValue;
+                for (std::size_t byte = 0;
+                     byte < hw::kMxmWeightBytesPerValue;
+                     ++byte) {
+                    if (!input_[lane][stream + byte].has_value()) {
+                        throw std::logic_error(
+                            "MXM IW requires every encoded weight byte stream");
+                    }
                 }
-                weight_buffers_[instruction_->weight_buffer][lane][stream] = input_[lane][stream]->data;
+                if constexpr (kFp16Datapath) {
+                    const auto bits = static_cast<std::uint16_t>(
+                        input_[lane][stream]->data)
+                        | (static_cast<std::uint16_t>(
+                               input_[lane][stream + 1]->data)
+                           << 8);
+                    weight_buffers_[instruction_->weight_buffer][lane][column]
+                        = Fp16::from_bits(bits).to_float();
+                } else {
+                    weight_buffers_[instruction_->weight_buffer][lane][column]
+                        = input_[lane][stream]->data;
+                }
             }
         }
         weight_buffer_valid_[instruction_->weight_buffer] = true;
@@ -289,7 +326,15 @@ private:
         os << std::hex << std::setfill('0');
         for (const auto& row : matrix) {
             for (const auto value : row) {
-                os << std::setw(2) << static_cast<unsigned>(static_cast<std::uint8_t>(value));
+                if constexpr (kFp16Datapath) {
+                    os << std::setw(4)
+                       << static_cast<unsigned>(
+                              Fp16::from_float(value).bits());
+                } else {
+                    os << std::setw(2)
+                       << static_cast<unsigned>(
+                              static_cast<std::uint8_t>(value));
+                }
             }
         }
         os.flags(old_flags);

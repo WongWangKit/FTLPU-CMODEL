@@ -96,7 +96,8 @@ struct MxmControlInstruction {
 
     static void check_activation_stream_base(std::size_t activation_stream_base)
     {
-        if (activation_stream_base >= hw::kStreams) {
+        if (activation_stream_base + hw::kMxmActivationBytesPerValue
+            > hw::kStreams) {
             throw std::out_of_range("MXM activation stream base is outside the stream set");
         }
     }

@@ -7,6 +7,7 @@
 #include "ftlpu/mem/sram.hpp"
 
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -144,6 +145,8 @@ public:
         enum class Kind {
             StoreStreamToSram,
             LoadSramToStream,
+            AccumulateStreamIntoSram,
+            AccumulateStreamToStream,
         };
 
         Kind kind{Kind::StoreStreamToSram};
@@ -405,10 +408,14 @@ private:
             return "Read";
         case MemOpcode::Write:
             return "Write";
+        case MemOpcode::ReadWrite:
+            return "ReadWrite";
         case MemOpcode::Gather:
             return "Gather";
         case MemOpcode::Scatter:
             return "Scatter";
+        case MemOpcode::Accumulate:
+            return "Accumulate";
         }
         return "Unknown";
     }
@@ -422,6 +429,24 @@ private:
             os << "(";
             print_address(os, instruction.address);
             os << ",s=" << instruction.stream << ")";
+            break;
+        case MemOpcode::ReadWrite:
+            os << "(read=";
+            print_address(os, instruction.address);
+            os << ",rs=" << instruction.stream << ",write=";
+            print_address(os, instruction.write_address);
+            os << ",ws=" << instruction.write_stream << ")";
+            break;
+        case MemOpcode::Accumulate:
+            os << "(";
+            print_address(os, instruction.address);
+            os << ",s=" << instruction.stream
+               << ",dst="
+               << (instruction.accumulator_destination
+                           == MemAccumulatorDestination::Sram
+                       ? "sram"
+                       : "stream+clear")
+               << ")";
             break;
         case MemOpcode::Gather:
         case MemOpcode::Scatter:
@@ -475,6 +500,21 @@ private:
                     break;
                 case MemOpcode::Write:
                     execute_write(fabric, mem_slice, tile, *instruction);
+                    break;
+                case MemOpcode::ReadWrite:
+                    execute_read_write(
+                        fabric,
+                        mem_slice,
+                        tile,
+                        *instruction,
+                        *issue_tag);
+                    break;
+                case MemOpcode::Accumulate:
+                    execute_accumulate(
+                        fabric,
+                        mem_slice,
+                        tile,
+                        *instruction);
                     break;
                 case MemOpcode::Gather:
                 case MemOpcode::Scatter:
@@ -559,6 +599,173 @@ private:
         });
     }
 
+    void execute_read_write(
+        StreamRegisterFabric& fabric,
+        std::size_t mem_slice,
+        std::size_t tile,
+        const MemInstruction& instruction,
+        std::uint64_t issue_tag)
+    {
+        if (instruction.address == instruction.write_address) {
+            throw std::logic_error(
+                "MEM ReadWrite requires distinct read and write addresses");
+        }
+        execute_read(
+            fabric,
+            mem_slice,
+            tile,
+            MemInstruction::Read(
+                instruction.address, instruction.stream_id()),
+            issue_tag);
+        execute_write(
+            fabric,
+            mem_slice,
+            tile,
+            MemInstruction::Write(
+                instruction.write_address,
+                instruction.write_stream_id()));
+    }
+
+    void execute_accumulate(
+        StreamRegisterFabric& fabric,
+        std::size_t mem_slice,
+        std::size_t tile,
+        const MemInstruction& instruction)
+    {
+        if (mem_slice != hw::kWestAccumulatorMemSliceBase
+            && mem_slice != hw::kEastAccumulatorMemSliceBase) {
+            throw std::logic_error(
+                "MEM Accumulate must issue on an accumulator group base queue");
+        }
+        for (std::size_t byte = 1; byte < sizeof(float); ++byte) {
+            if (instruction_rows_[mem_slice + byte][tile].has_value()) {
+                throw std::logic_error(
+                    "MEM Accumulate conflicts with its four-slice group");
+            }
+        }
+
+        const auto stream = instruction.stream_id();
+        if (stream.direction() != StreamDirection::West
+            || stream.index() + sizeof(float) > hw::kWestStreams) {
+            throw std::logic_error(
+                "MEM Accumulate requires four consecutive west streams");
+        }
+        const auto input_column =
+            ports_.input_column(mem_slice, StreamDirection::West);
+        std::array<StreamPayloadSegment16, sizeof(float)> incoming{};
+        auto vector_tag = std::optional<std::uint64_t>{};
+        for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+            StreamInputPort input(
+                fabric,
+                input_column,
+                StreamDirection::West,
+                "MEM Accumulate");
+            if (!input.segment_valid(tile, stream.index() + byte)) {
+                throw std::logic_error(
+                    "MEM Accumulate reached an invalid FP32 stream segment");
+            }
+            const auto segment =
+                input.consume_segment(tile, stream.index() + byte);
+            if (!vector_tag.has_value()) {
+                vector_tag = segment[0].vector_tag;
+            }
+            for (std::size_t lane = 0;
+                 lane < hw::kLanesPerTile;
+                 ++lane) {
+                if (segment[lane].vector_tag != *vector_tag) {
+                    throw std::logic_error(
+                        "MEM Accumulate FP32 bytes have misaligned vector tags");
+                }
+                incoming[byte][lane] = segment[lane].data;
+            }
+        }
+
+        std::array<StreamPayloadSegment16, sizeof(float)> stored{};
+        std::array<StreamPayloadSegment16, sizeof(float)> result{};
+        for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+            stored[byte] = sram_.slice(mem_slice + byte)
+                               .tile_block(tile)
+                               .read_word(instruction.address);
+        }
+        for (std::size_t lane = 0;
+             lane < hw::kLanesPerTile;
+             ++lane) {
+            std::uint32_t stored_raw = 0;
+            std::uint32_t incoming_raw = 0;
+            for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+                stored_raw |=
+                    static_cast<std::uint32_t>(stored[byte][lane])
+                    << (byte * 8);
+                incoming_raw |=
+                    static_cast<std::uint32_t>(incoming[byte][lane])
+                    << (byte * 8);
+            }
+            const auto value =
+                std::bit_cast<float>(stored_raw)
+                + std::bit_cast<float>(incoming_raw);
+            const auto raw = std::bit_cast<std::uint32_t>(value);
+            for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+                result[byte][lane] =
+                    static_cast<std::uint8_t>(
+                        (raw >> (byte * 8)) & 0xffu);
+            }
+        }
+
+        if (instruction.accumulator_destination
+            == MemAccumulatorDestination::Sram) {
+            for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+                sram_.slice(mem_slice + byte)
+                    .tile_block(tile)
+                    .write_word(instruction.address, result[byte]);
+                executed_mem_.push_back(MemTransfer {
+                    MemTransfer::Kind::AccumulateStreamIntoSram,
+                    mem_slice + byte,
+                    tile,
+                    input_column,
+                    StreamId::West(stream.index() + byte),
+                    instruction.address,
+                    instruction.address.bank(),
+                    instruction.address.word(),
+                    result[byte],
+                    vector_tag.value_or(0),
+                });
+            }
+            return;
+        }
+
+        const auto output_column =
+            ports_.output_column(mem_slice, StreamDirection::West);
+        StreamOutputPort output(
+            fabric,
+            output_column,
+            StreamDirection::West,
+            "MEM Accumulate stream-and-clear");
+        for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+            output.write_payload_segment(
+                tile,
+                stream.index() + byte,
+                result[byte],
+                vector_tag.value_or(0));
+            sram_.slice(mem_slice + byte)
+                .tile_block(tile)
+                .write_word(
+                    instruction.address,
+                    StreamPayloadSegment16{});
+            executed_mem_.push_back(MemTransfer {
+                MemTransfer::Kind::AccumulateStreamToStream,
+                mem_slice + byte,
+                tile,
+                output_column,
+                StreamId::West(stream.index() + byte),
+                instruction.address,
+                instruction.address.bank(),
+                instruction.address.word(),
+                result[byte],
+                vector_tag.value_or(0),
+            });
+        }
+    }
+
     void advance_instructions()
     {
         for (auto& mem_slice : instruction_rows_) {
@@ -632,7 +839,15 @@ private:
                 continue;
             }
             os << "    c" << transfer.mem_slice << ".t" << transfer.tile << ' '
-               << (transfer.kind == MemTransfer::Kind::StoreStreamToSram ? "store" : "load")
+               << (transfer.kind == MemTransfer::Kind::StoreStreamToSram
+                       ? "store"
+                       : transfer.kind
+                               == MemTransfer::Kind::LoadSramToStream
+                           ? "load"
+                           : transfer.kind
+                                   == MemTransfer::Kind::AccumulateStreamIntoSram
+                               ? "accumulate"
+                               : "stream-and-clear")
                << ' ' << direction_name(transfer.stream.direction()) << transfer.stream.index()
                << ' ';
             print_address(os, transfer.address);
