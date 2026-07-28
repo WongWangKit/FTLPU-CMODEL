@@ -50,6 +50,15 @@ public:
         pending_consumptions_.clear();
     }
 
+    void reset_execution_state()
+    {
+        cycle_ = 0;
+        mem_.reset_execution_state();
+        streams_.reset();
+        pending_inputs_.clear();
+        pending_consumptions_.clear();
+    }
+
     std::size_t cycle() const noexcept
     {
         return cycle_;

@@ -125,6 +125,17 @@ public:
         return cycle_;
     }
 
+    void reset_execution_state()
+    {
+        require_phase(CyclePhase::Idle, "resetting execution state");
+        for (auto& mem : mems_) mem.reset_execution_state();
+        vxm_.reset();
+        for (auto& sxm : sxms_) sxm.reset();
+        for (auto& mxm : mxms_) mxm.reset();
+        icu_.reset();
+        cycle_ = 0;
+    }
+
 private:
     enum class CyclePhase {
         Idle,

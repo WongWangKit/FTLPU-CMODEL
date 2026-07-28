@@ -172,6 +172,12 @@ public:
 
     void reset()
     {
+        reset_execution_state();
+        sram_.clear();
+    }
+
+    void reset_execution_state()
+    {
         cycle_ = 0;
         for (auto& queue : instruction_queues_) {
             queue.clear();
@@ -181,7 +187,6 @@ public:
                 slot.reset();
             }
         }
-        sram_.clear();
         executed_mem_.clear();
         executed_instructions_.clear();
     }

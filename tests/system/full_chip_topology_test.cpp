@@ -102,6 +102,17 @@ int main()
         }
     }
 
+    const auto preserved = system.read_mem_sram_lane_byte(
+        ftlpu::Hemisphere::West, 0, 0, kOutputAddress, 0);
+    system.reset_execution_state();
+    if (system.cycle() != 0
+        || system.read_mem_sram_lane_byte(
+               ftlpu::Hemisphere::West, 0, 0, kOutputAddress, 0)
+            != preserved) {
+        std::cerr << "execution-state reset did not preserve MEM SRAM\n";
+        return 1;
+    }
+
     std::cout << "full-chip mirrored topology passed: 88 MEM queues, 4 MXMs, dual SXM/MEM edges\n";
     return 0;
 }

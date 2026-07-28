@@ -319,6 +319,14 @@ work 分配到四个 MXM。SXM 为 attention replay 准备 packed/transpose layo
 各 phase 时序、MXM 利用率和后续 overlap 机会见
 [attention_pipeline_optimization.md](attention_pipeline_optimization.md)。
 
+### 多 executable 边界
+
+`TspSliceSystem::reset_execution_state()` 在 command binary 之间建立干净的
+cycle-0 边界。它会 reset ICU queue、MEM 指令与 stream 状态、MXM datapath
+和 accumulator、VXM、SXM 以及系统 cycle，但保留 MEM SRAM 内容。模型级执行
+需要区分这两类状态：decoder activation 可以继续驻留在 SRAM，而每一层都不会
+继承上一层残留的 pipeline 或 stream 状态。
+
 ## 11. 日志与调度图
 
 长回归默认关闭日志，因为逐拍 stream dump 会主导运行时间。

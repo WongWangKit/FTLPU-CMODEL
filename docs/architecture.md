@@ -352,6 +352,15 @@ check passes at 94,761 scheduled cycles.
 See [attention_pipeline_optimization.md](attention_pipeline_optimization.md) for
 phase timing, measured MXM utilization, and remaining overlap opportunities.
 
+### Multi-executable boundaries
+
+`TspSliceSystem::reset_execution_state()` establishes a clean cycle-zero
+boundary between command binaries. It resets ICU queues, MEM instruction and
+stream state, MXM datapaths and accumulators, VXM, SXM, and the system cycle,
+while preserving MEM SRAM contents. This distinction is required for
+model-level execution: decoder activations can remain resident in SRAM while
+each layer starts with no stale pipeline or stream state.
+
 ## 11. Logs and Diagrams
 
 Long regressions disable logging by default because per-cycle stream dumps
