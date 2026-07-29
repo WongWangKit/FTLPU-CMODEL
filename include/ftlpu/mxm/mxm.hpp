@@ -208,11 +208,15 @@ public:
         std::optional<std::size_t> log_tile = std::nullopt)
     {
         require_open_fabric(fabric);
-        auto provider = [this, &fabric, mxm_id, os, log_tile](std::size_t tile) {
+        auto provider =
+            [this, &fabric, mxm_id, os, log_tile](
+                std::size_t tile,
+                const MxmControlInstruction& instruction) {
             if (os != nullptr && (!log_tile.has_value() || tile == *log_tile)) {
                 *os << "  SR -> MXM" << mxm_id << " weights tile " << tile << '\n';
             }
-            return collect_weight_input(fabric, tile);
+            return collect_weight_input(
+                fabric, tile, instruction);
         };
         if (os != nullptr) {
             control_.tick(*os, provider, false, log_tile);
@@ -294,7 +298,10 @@ public:
                     computing[tile][column_block] = true;
                     const auto north = compute_supercell(event, column_block);
                     if (tile + 1 == hw::kMxmSupercellsPerPlane) {
-                        commit_north_output(fabric, column_block, north);
+                        commit_north_output(
+                            fabric,
+                            column_block,
+                            north);
                     } else {
                         next_north_pipeline[tile + 1][column_block].push_back(north);
                     }
@@ -401,24 +408,39 @@ private:
 
     MxmControlSlice::WeightInput collect_weight_input(
         StreamRegisterFabric& fabric,
-        std::size_t tile) const
+        std::size_t tile,
+        const MxmControlInstruction& instruction) const
     {
         const auto& endpoint = ports_.weight_input();
         StreamInputPort input(fabric, endpoint.column, endpoint.direction, "MXM IW");
-        for (std::size_t stream = 0; stream < hw::kMxmLoadStreamsPerCycle; ++stream) {
+        const auto stream_count =
+            instruction.opcode
+                    == MxmControlOpcode::LoadScales
+            ? hw::kMxmWeightScaleStreams
+            : hw::kMxmStoredWeightLoadStreams;
+        if (stream_count == 0) {
+            throw std::logic_error(
+                "MXM LoadScales is not supported by this hardware configuration");
+        }
+        for (std::size_t stream = 0;
+             stream < stream_count;
+             ++stream) {
             if (!input.segment_valid(tile, endpoint.stream_base + stream)) {
-                throw std::logic_error("MXM IW reached tile before all weight streams arrived");
+                throw std::logic_error(
+                    "MXM weight instruction reached tile before all input streams arrived");
             }
         }
 
         auto result = MxmControlSlice::WeightInput {};
-        for (std::size_t stream = 0; stream < hw::kMxmLoadStreamsPerCycle; ++stream) {
+        for (std::size_t stream = 0;
+             stream < stream_count;
+             ++stream) {
             const auto segment = input.consume_segment(tile, endpoint.stream_base + stream);
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                 result[lane][stream] = MxmArray::Supercell::InputWord {
                     static_cast<MxmArray::Supercell::EncodedWeightByte>(
                         segment[lane].data),
-                    stream + 1 == hw::kMxmLoadStreamsPerCycle,
+                    stream + 1 == stream_count,
                 };
             }
         }
@@ -552,6 +574,13 @@ private:
         ColumnOutput output {event.row, column_block, {}, event.accumulator_bank};
         const auto global_column_base = column_block * hw::kMxmSupercellColumns;
         std::array<StreamSegment16, 4> output_segments{};
+        const auto vector_tag =
+            UINT64_C(0x4d58000000000000)
+            | (static_cast<std::uint64_t>(
+                 event.accumulator_bank + 1)
+             << 32)
+            | static_cast<std::uint64_t>(
+                event.row);
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             const auto value = accumulator_banks_[event.accumulator_bank][event.row][global_column_base + lane];
             output.values[lane] = value;
@@ -571,7 +600,8 @@ private:
             for (std::size_t byte = 0; byte < bytes.size(); ++byte) {
                 output_segments[byte][lane] = StreamCell::Valid(
                     bytes[byte],
-                    lane + 1 == hw::kLanesPerTile);
+                    lane + 1 == hw::kLanesPerTile,
+                    vector_tag);
             }
         }
         if (event.output_stream_base + output_segments.size() > hw::kStreamsPerDirection) {

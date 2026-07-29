@@ -8,6 +8,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(ftlpu_cmodel INTERFACE)
 target_include_directories(ftlpu_cmodel INTERFACE include)
+target_compile_options(
+    ftlpu_cmodel
+    INTERFACE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
 enable_testing()
 
@@ -62,14 +65,24 @@ target_compile_definitions(mem_dual_mxm_swiglu_offline_icu_test PRIVATE FTLPU_OF
 ftlpu_add_test(mem_dual_mxm_swiglu_early_compute_icu_test tests/integration/mem_dual_mxm_swiglu_test.cpp)
 target_compile_definitions(mem_dual_mxm_swiglu_early_compute_icu_test PRIVATE FTLPU_OFFLINE_ICU_FFN_TEST FTLPU_EARLY_MXM_COMPUTE_TEST)
 ftlpu_add_test(attention_projection_test tests/integration/attention_projection_test.cpp)
+ftlpu_add_test(
+    smollm2_attention_test
+    tests/integration/smollm2_attention_test.cpp)
+target_compile_definitions(
+    smollm2_attention_test
+    PRIVATE FTLPU_TRANSFORMER_EVAL_CONFIG)
+ftlpu_add_test(
+    w8a16_datapath_test
+    tests/integration/w8a16_datapath_test.cpp)
+target_compile_definitions(
+    w8a16_datapath_test
+    PRIVATE FTLPU_TRANSFORMER_EVAL_CONFIG)
 
 ftlpu_add_test(vxm_alu_test tests/vxm/alu_test.cpp)
 ftlpu_add_test(vxm_lane_test tests/vxm/lane_test.cpp)
 ftlpu_add_test(vxm_superlane_test tests/vxm/superlane_test.cpp)
 ftlpu_add_test(vxm_slice_test tests/vxm/slice_test.cpp)
-set_tests_properties(
-    vxm_slice_test
-    PROPERTIES DISABLED TRUE)
+ftlpu_add_test(vxm_special_alu_test tests/vxm/special_alu_test.cpp)
 ftlpu_add_test(vxm_contract_test tests/vxm/contract_test.cpp)
 
 ftlpu_add_test(sxm_test tests/sxm/sxm_test.cpp)

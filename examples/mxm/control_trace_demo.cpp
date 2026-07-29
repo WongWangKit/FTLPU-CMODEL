@@ -41,7 +41,9 @@ int main(int argc, char** argv)
     for (std::size_t column = 0; column < ftlpu::hw::kMxmSupercellsPerPlane; ++column) {
         control.issue_south(ftlpu::MxmControlInstruction::IW(kBuffer));
     }
-    auto provider = [&control](std::size_t tile) {
+    auto provider = [&control](
+                        std::size_t tile,
+                        const ftlpu::MxmControlInstruction&) {
         const auto token = control.cycle() - tile;
         const auto target_column = ftlpu::hw::kMxmSupercellsPerPlane - 1 - token;
         return row_input(tile, target_column);

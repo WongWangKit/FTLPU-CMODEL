@@ -83,10 +83,16 @@ constexpr std::size_t kWestMxmCount = ActiveConfig::west_mxm_count;
 constexpr std::size_t kEastMxmCount = ActiveConfig::east_mxm_count;
 constexpr std::size_t kMxmWeightBytesPerValue =
     ActiveConfig::mxm_weight_bytes_per_value;
+constexpr std::size_t kMxmStoredWeightBytesPerValue =
+    ActiveConfig::mxm_stored_weight_bytes_per_value;
 constexpr std::size_t kMxmActivationBytesPerValue =
     ActiveConfig::mxm_activation_bytes_per_value;
 constexpr std::size_t kMxmLoadStreamsPerCycle =
     ActiveConfig::mxm_weight_load_streams;
+constexpr std::size_t kMxmStoredWeightLoadStreams =
+    ActiveDerived::mxm_stored_weight_load_streams;
+constexpr std::size_t kMxmWeightScaleStreams =
+    ActiveDerived::mxm_weight_scale_streams;
 constexpr std::size_t kMxmLoadBytesPerCycle =
     ActiveDerived::mxm_weight_load_bytes_per_cycle;
 

@@ -17,7 +17,6 @@ enum class InstructionPacketKind : std::uint8_t {
     Vxm = 3,
     IcuControl = 4,
     Sxm = 5,
-    VxmExtended = 6,
 };
 
 // Stable 16-byte little-endian program representation.  bytes[0..3] are an
@@ -100,7 +99,6 @@ inline InstructionPacketKind packet_kind(const EncodedInstructionPacket& packet)
     case InstructionPacketKind::Vxm:
     case InstructionPacketKind::IcuControl:
     case InstructionPacketKind::Sxm:
-    case InstructionPacketKind::VxmExtended:
         return static_cast<InstructionPacketKind>(packet.bytes[0]);
     }
     throw std::logic_error("instruction packet has an unknown kind");
@@ -133,86 +131,6 @@ inline EncodedInstructionPacket encode_packet(const MxmControlInstruction& instr
 
 inline EncodedInstructionPacket encode_packet(const VxmLaneAluInstruction& instruction)
 {
-    const auto needs_extended =
-        static_cast<std::size_t>(instruction.lhs.kind)
-                > static_cast<std::size_t>(
-                    VxmLaneOperandKind::Immediate)
-        || static_cast<std::size_t>(instruction.rhs.kind)
-                > static_cast<std::size_t>(
-                    VxmLaneOperandKind::Immediate)
-        || instruction.input_hemisphere != Hemisphere::East
-        || instruction.output_hemisphere != Hemisphere::East;
-    if (needs_extended) {
-        detail::require_operand_hardware_encodable(
-            instruction.lhs,
-            "extended VXM lhs operand is invalid");
-        detail::require_operand_hardware_encodable(
-            instruction.rhs,
-            "extended VXM rhs operand is invalid");
-        detail::require_unsigned_fit(
-            static_cast<std::size_t>(instruction.opcode),
-            0x1f,
-            "extended VXM opcode does not fit");
-        detail::require_unsigned_fit(
-            static_cast<std::size_t>(instruction.lhs.kind),
-            0x7,
-            "extended VXM lhs kind does not fit");
-        detail::require_unsigned_fit(
-            static_cast<std::size_t>(instruction.rhs.kind),
-            0x7,
-            "extended VXM rhs kind does not fit");
-        if (instruction.output_stream.has_value()) {
-            detail::require_unsigned_fit(
-                *instruction.output_stream,
-                0x3f,
-                "extended VXM output stream does not fit");
-        }
-        auto packet = packet_detail::make_packet(
-            InstructionPacketKind::VxmExtended, 12);
-        packet.bytes[2] =
-            static_cast<std::uint8_t>(
-                hemisphere_index(
-                    instruction.input_hemisphere)
-                | (hemisphere_index(
-                       instruction.output_hemisphere)
-                   << 1));
-        auto control =
-            static_cast<std::uint32_t>(instruction.opcode)
-            | (static_cast<std::uint32_t>(
-                   instruction.lhs.kind)
-               << 5)
-            | (static_cast<std::uint32_t>(
-                   instruction.lhs.index)
-               << 8)
-            | (static_cast<std::uint32_t>(
-                   instruction.rhs.kind)
-               << 14)
-            | (static_cast<std::uint32_t>(
-                   instruction.rhs.index)
-               << 17)
-            | (static_cast<std::uint32_t>(
-                   instruction.cast_target)
-               << 23);
-        if (instruction.output_stream.has_value()) {
-            control |= 1u << 25;
-            control |=
-                static_cast<std::uint32_t>(
-                    *instruction.output_stream)
-                << 26;
-        }
-        packet_detail::write_u32_le(packet, 4, control);
-        packet_detail::write_u32_le(
-            packet,
-            8,
-            detail::float_to_bits(
-                instruction.lhs.immediate));
-        packet_detail::write_u32_le(
-            packet,
-            12,
-            detail::float_to_bits(
-                instruction.rhs.immediate));
-        return packet;
-    }
     auto packet = packet_detail::make_packet(InstructionPacketKind::Vxm, 12);
     const auto encoded = encode_vxm_instruction(instruction);
     for (std::size_t word = 0; word < encoded.words.size(); ++word) {
@@ -392,67 +310,6 @@ inline MxmControlInstruction decode_mxm_packet(const EncodedInstructionPacket& p
 
 inline VxmLaneAluInstruction decode_vxm_packet(const EncodedInstructionPacket& packet)
 {
-    if (packet_kind(packet)
-        == InstructionPacketKind::VxmExtended) {
-        if (packet.bytes[1] != 12
-            || (packet.bytes[2] & ~0x3u) != 0
-            || packet.bytes[3] != 0) {
-            throw std::logic_error(
-                "extended VXM packet header is invalid");
-        }
-        const auto control =
-            packet_detail::read_u32_le(packet, 4);
-        auto instruction = VxmLaneAluInstruction{};
-        instruction.opcode =
-            static_cast<VxmAluOpcode>(control & 0x1fu);
-        instruction.lhs.kind =
-            static_cast<VxmLaneOperandKind>(
-                (control >> 5) & 0x7u);
-        instruction.lhs.index =
-            static_cast<std::size_t>(
-                (control >> 8) & 0x3fu);
-        instruction.rhs.kind =
-            static_cast<VxmLaneOperandKind>(
-                (control >> 14) & 0x7u);
-        instruction.rhs.index =
-            static_cast<std::size_t>(
-                (control >> 17) & 0x3fu);
-        instruction.cast_target =
-            static_cast<VxmCastTarget>(
-                (control >> 23) & 0x3u);
-        if ((control & (1u << 25)) != 0) {
-            instruction.output_stream =
-                static_cast<std::size_t>(
-                    (control >> 26) & 0x3fu);
-        }
-        instruction.input_hemisphere =
-            static_cast<Hemisphere>(
-                packet.bytes[2] & 0x1u);
-        instruction.output_hemisphere =
-            static_cast<Hemisphere>(
-                (packet.bytes[2] >> 1) & 0x1u);
-        instruction.lhs.immediate =
-            detail::bits_to_float(
-                packet_detail::read_u32_le(packet, 8));
-        instruction.rhs.immediate =
-            detail::bits_to_float(
-                packet_detail::read_u32_le(packet, 12));
-        if (instruction.lhs.kind
-            != VxmLaneOperandKind::Immediate) {
-            instruction.lhs.immediate = 0.0f;
-        }
-        if (instruction.rhs.kind
-            != VxmLaneOperandKind::Immediate) {
-            instruction.rhs.immediate = 0.0f;
-        }
-        detail::require_operand_hardware_encodable(
-            instruction.lhs,
-            "decoded extended VXM lhs is invalid");
-        detail::require_operand_hardware_encodable(
-            instruction.rhs,
-            "decoded extended VXM rhs is invalid");
-        return instruction;
-    }
     packet_detail::require_packet(packet, InstructionPacketKind::Vxm, 12);
     EncodedVxmInstruction encoded{};
     for (std::size_t word = 0; word < encoded.words.size(); ++word) {

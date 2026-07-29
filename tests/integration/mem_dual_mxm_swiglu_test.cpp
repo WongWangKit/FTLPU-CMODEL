@@ -55,9 +55,14 @@ constexpr std::size_t kRhsStreamBase = 36;
 constexpr std::size_t kLhsWestStreamBase = kLhsStreamBase - ftlpu::hw::kEastStreams;
 constexpr std::size_t kRhsWestStreamBase = kRhsStreamBase - ftlpu::hw::kEastStreams;
 constexpr std::size_t kOutputStream = 0;
-constexpr std::size_t kSwigluOutputStream = 31;
-constexpr std::size_t kSwigluLatency = 9;
-constexpr std::size_t kAddQuantLatency = 5;
+// The 8-ALU chain has four fixed four-byte output groups.  The full-depth
+// chain terminates at C7, whose physical output group starts at stream 12.
+constexpr std::size_t kSwigluOutputStream = 12;
+// Control issue to C7 output latency, including the two-cycle configuration
+// path and the Exp/Reciprocal/two Multiply pipelines.
+constexpr std::size_t kSwigluLatency = 19;
+// Eight one-cycle Basic stages plus the control-to-Current transition.
+constexpr std::size_t kAddQuantLatency = 9;
 constexpr std::size_t kWeightHandoffBaseCycle = 18;
 constexpr std::size_t kActivationHandoffBaseCycle = 4;
 constexpr std::size_t kLogTile = 0;
@@ -202,7 +207,8 @@ void log_mxm_array_state(
 
 std::vector<MxmOutputEvent> capture_mxm_outputs(
     const ftlpu::Mxm& mxm,
-    MatrixI32& output_matrix);
+    MatrixI32& output_matrix,
+    std::optional<std::size_t> accumulator_bank = std::nullopt);
 
 bool require(bool condition, const char* message)
 {
@@ -281,111 +287,77 @@ void enqueue_swiglu_stage(
     std::size_t up_stream_base,
     std::size_t output_stream)
 {
+    (void)gate_stream_base;
+    (void)up_stream_base;
+    if (stage > 7) {
+        return;
+    }
     switch (stage) {
     case 0:
         issue(0, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Cast,
-            ftlpu::VxmLaneOperand::StreamInt32(gate_stream_base),
-            ftlpu::VxmLaneOperand::Imm(0.0f),
-            1.0f,
-            0,
-            ftlpu::VxmCastTarget::Float32,
-        });
-        issue(1, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Cast,
-            ftlpu::VxmLaneOperand::StreamInt32(up_stream_base),
-            ftlpu::VxmLaneOperand::Imm(0.0f),
-            1.0f,
-            0,
-            ftlpu::VxmCastTarget::Float32,
+            ftlpu::VxmAluOpcode::Negate,
+            ftlpu::VxmLaneOperand::StreamInt32(
+                params.gate_scale),
+            ftlpu::VxmLaneOperand::StreamInt32(
+                params.up_scale),
         });
         break;
     case 1:
-        issue(2, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Multiply,
-            ftlpu::VxmLaneOperand::Alu(0),
-            ftlpu::VxmLaneOperand::Imm(params.gate_scale),
-        });
-        issue(3, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Multiply,
-            ftlpu::VxmLaneOperand::Alu(1),
-            ftlpu::VxmLaneOperand::Imm(params.up_scale),
+        issue(1, ftlpu::VxmLaneAluInstruction {
+            ftlpu::VxmSpecialAluOpcode::Exp,
+            ftlpu::VxmLaneOperand::Previous(),
         });
         break;
     case 2:
-        issue(4, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Multiply,
-            ftlpu::VxmLaneOperand::Alu(2),
-            ftlpu::VxmLaneOperand::Alu(3),
-        });
-        issue(5, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Negate,
-            ftlpu::VxmLaneOperand::Alu(2),
+        issue(2, ftlpu::VxmLaneAluInstruction {
+            ftlpu::VxmAluOpcode::Add,
+            ftlpu::VxmLaneOperand::Previous(),
+            ftlpu::VxmLaneOperand::Imm(1.0f),
         });
         break;
     case 3:
-        issue(6, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Exp,
-            ftlpu::VxmLaneOperand::Alu(5),
-        });
-        issue(9, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Pass,
-            ftlpu::VxmLaneOperand::Alu(4),
+        issue(3, ftlpu::VxmLaneAluInstruction {
+            ftlpu::VxmSpecialAluOpcode::Reciprocal,
+            ftlpu::VxmLaneOperand::Previous(),
         });
         break;
     case 4:
-        issue(7, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Add,
-            ftlpu::VxmLaneOperand::Alu(6),
-            ftlpu::VxmLaneOperand::Imm(1.0f),
-        });
-        issue(10, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Pass,
-            ftlpu::VxmLaneOperand::Alu(9),
+        issue(4, ftlpu::VxmLaneAluInstruction {
+            ftlpu::VxmAluOpcode::Multiply,
+            ftlpu::VxmLaneOperand::Previous(),
+            ftlpu::VxmLaneOperand::Original(),
         });
         break;
     case 5:
-        issue(8, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Divide,
-            ftlpu::VxmLaneOperand::Imm(1.0f),
-            ftlpu::VxmLaneOperand::Alu(7),
-        });
-        issue(11, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Pass,
-            ftlpu::VxmLaneOperand::Alu(10),
+        issue(5, ftlpu::VxmLaneAluInstruction {
+            ftlpu::VxmAluOpcode::Multiply,
+            ftlpu::VxmLaneOperand::Previous(),
+            ftlpu::VxmLaneOperand::Aux(),
         });
         break;
     case 6:
-        issue(12, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Multiply,
-            ftlpu::VxmLaneOperand::Alu(11),
-            ftlpu::VxmLaneOperand::Alu(8),
+        issue(6, ftlpu::VxmLaneAluInstruction {
+            ftlpu::VxmAluOpcode::Bypass,
+            ftlpu::VxmLaneOperand::Previous(),
         });
         break;
     case 7:
-        issue(13, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Multiply,
-            ftlpu::VxmLaneOperand::Alu(12),
-            ftlpu::VxmLaneOperand::Imm(1.0f / params.output_scale),
-        });
-        break;
-    case 8:
-        issue(14, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Add,
-            ftlpu::VxmLaneOperand::Alu(13),
-            ftlpu::VxmLaneOperand::Imm(static_cast<float>(params.output_zero_point)),
-        });
-        break;
-    case 9:
-        issue(15, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Cast,
-            ftlpu::VxmLaneOperand::Alu(14),
-            ftlpu::VxmLaneOperand::Imm(0.0f),
-            1.0f,
-            0,
-            ftlpu::VxmCastTarget::Int8,
-            output_stream,
-        });
+        {
+            auto instruction =
+                ftlpu::VxmLaneAluInstruction {
+                    ftlpu::VxmAluOpcode::Bypass,
+                    ftlpu::VxmLaneOperand::Previous(),
+                };
+            instruction.output_type =
+                ftlpu::VxmCastTarget::Int8;
+            instruction.output_scale =
+                params.output_scale;
+            instruction.output_zero_point =
+                params.output_zero_point;
+            instruction.output_stream =
+                output_stream;
+            issue(7, std::move(instruction));
+        }
         break;
     default:
         throw std::out_of_range("SwiGLU VXM stage is outside the ALU pipeline");
@@ -401,68 +373,49 @@ void enqueue_add_quant_stage(
     std::size_t rhs_stream_base,
     std::size_t output_stream)
 {
+    (void)lhs_stream_base;
+    (void)rhs_stream_base;
+    if (stage > 7) {
+        return;
+    }
     switch (stage) {
     case 0:
         issue(0, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Cast,
-            ftlpu::VxmLaneOperand::StreamInt32(lhs_stream_base),
-            ftlpu::VxmLaneOperand::Imm(0.0f),
-            1.0f,
-            0,
-            ftlpu::VxmCastTarget::Float32,
-        });
-        issue(1, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Cast,
-            ftlpu::VxmLaneOperand::StreamInt32(rhs_stream_base),
-            ftlpu::VxmLaneOperand::Imm(0.0f),
-            1.0f,
-            0,
-            ftlpu::VxmCastTarget::Float32,
+            ftlpu::VxmAluOpcode::Add,
+            ftlpu::VxmLaneOperand::StreamInt32(
+                params.lhs_scale),
+            ftlpu::VxmLaneOperand::StreamInt32(
+                params.rhs_scale),
         });
         break;
     case 1:
-        issue(2, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Multiply,
-            ftlpu::VxmLaneOperand::Alu(0),
-            ftlpu::VxmLaneOperand::Imm(params.lhs_scale),
-        });
-        issue(3, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Multiply,
-            ftlpu::VxmLaneOperand::Alu(1),
-            ftlpu::VxmLaneOperand::Imm(params.rhs_scale),
-        });
-        break;
     case 2:
-        issue(4, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Add,
-            ftlpu::VxmLaneOperand::Alu(2),
-            ftlpu::VxmLaneOperand::Alu(3),
-        });
-        break;
     case 3:
-        issue(5, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Multiply,
-            ftlpu::VxmLaneOperand::Alu(4),
-            ftlpu::VxmLaneOperand::Imm(1.0f / params.output_scale),
-        });
-        break;
     case 4:
-        issue(6, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Add,
-            ftlpu::VxmLaneOperand::Alu(5),
-            ftlpu::VxmLaneOperand::Imm(static_cast<float>(params.output_zero_point)),
+    case 5:
+    case 6:
+        issue(stage, ftlpu::VxmLaneAluInstruction {
+            ftlpu::VxmAluOpcode::Bypass,
+            ftlpu::VxmLaneOperand::Previous(),
         });
         break;
-    case 5:
-        issue(7, ftlpu::VxmLaneAluInstruction {
-            ftlpu::VxmAluOpcode::Cast,
-            ftlpu::VxmLaneOperand::Alu(6),
-            ftlpu::VxmLaneOperand::Imm(0.0f),
-            1.0f,
-            0,
-            ftlpu::VxmCastTarget::Int8,
-            output_stream,
-        });
+    case 7:
+        {
+            auto instruction =
+                ftlpu::VxmLaneAluInstruction {
+                    ftlpu::VxmAluOpcode::Bypass,
+                    ftlpu::VxmLaneOperand::Previous(),
+                };
+            instruction.output_type =
+                ftlpu::VxmCastTarget::Int8;
+            instruction.output_scale =
+                params.output_scale;
+            instruction.output_zero_point =
+                params.output_zero_point;
+            instruction.output_stream =
+                output_stream;
+            issue(7, std::move(instruction));
+        }
         break;
     default:
         throw std::out_of_range("add-quant VXM stage is outside the ALU pipeline");
@@ -1207,10 +1160,15 @@ void log_mxm_array_state(
 
 std::vector<MxmOutputEvent> capture_mxm_outputs(
     const ftlpu::Mxm& mxm,
-    MatrixI32& output_matrix)
+    MatrixI32& output_matrix,
+    std::optional<std::size_t> accumulator_bank)
 {
     std::vector<MxmOutputEvent> events;
     for (const auto& output : mxm.last_outputs()) {
+        if (accumulator_bank.has_value()
+            && output.accumulator_bank != *accumulator_bank) {
+            continue;
+        }
         for (std::size_t lane = 0; lane < kLanes; ++lane) {
             const auto column = output.column_block * kLanes + lane;
             const auto value = output.values[lane];
@@ -1244,8 +1202,41 @@ std::int8_t expected_swiglu(
 {
     const auto gate_fp32 = static_cast<float>(gate) * params.gate_scale;
     const auto up_fp32 = static_cast<float>(up) * params.up_scale;
-    const auto sigmoid = 1.0f / (1.0f + std::exp(-gate_fp32));
-    return ftlpu::VxmAlu::quantize_scalar(gate_fp32 * sigmoid * up_fp32, params.output_scale, params.output_zero_point);
+    const auto basic = [](
+                           ftlpu::VxmAluOpcode opcode,
+                           float lhs,
+                           float rhs = 0.0f) {
+        return ftlpu::VxmAlu::execute(
+            {opcode, ftlpu::VxmAluPrecision::Float16},
+            lhs,
+            rhs);
+    };
+    const auto special = ftlpu::VxmSpecialAlu {};
+    const auto negated = basic(
+        ftlpu::VxmAluOpcode::Negate,
+        gate_fp32);
+    const auto exponent = special.execute(
+        ftlpu::VxmSpecialAluOpcode::Exp,
+        negated);
+    const auto denominator = basic(
+        ftlpu::VxmAluOpcode::Add,
+        exponent,
+        1.0f);
+    const auto sigmoid = special.execute(
+        ftlpu::VxmSpecialAluOpcode::Reciprocal,
+        denominator);
+    const auto swish = basic(
+        ftlpu::VxmAluOpcode::Multiply,
+        sigmoid,
+        gate_fp32);
+    const auto product = basic(
+        ftlpu::VxmAluOpcode::Multiply,
+        swish,
+        up_fp32);
+    return ftlpu::VxmDataFormat::quantize_int8(
+        product,
+        params.output_scale,
+        params.output_zero_point);
 }
 
 std::int32_t expected_down_partial(
@@ -1472,10 +1463,14 @@ void emit_offline_compute_phase(
 
     for (std::size_t row = 0; row < kActivationRows; ++row) {
         const auto issue_start = phase.output_start + row + phase_vxm_post_op_start_offset(phase);
-        for (std::size_t stage = 0; stage <= phase.vxm_latency; ++stage) {
-            const auto cycle = issue_start + stage;
+        for (std::size_t stage = 0;
+             stage < ftlpu::hw::kVxmAluCount;
+             ++stage) {
             auto issue = [&](std::size_t alu, ftlpu::VxmLaneAluInstruction instruction) {
-                program.emit_vxm(cycle, alu, instruction);
+                program.emit_vxm(
+                    issue_start,
+                    alu,
+                    instruction);
             };
             if (phase.post_op == OfflinePostOp::Swiglu) {
                 enqueue_swiglu_stage(issue, swiglu_params, stage, kGateStreamBase, kUpStreamBase, kSwigluOutputStream);
@@ -1650,9 +1645,37 @@ DualMxmLoadSchedule down_weight_load_after_gemm_start(
         kSwigluLatency,
         kSwigluMemColumn1);
 
-    const auto mxm0_iw_start = mxm0_weight_iw_after_activation_e0_clear(gemm1_start);
+    auto mxm0_iw_start =
+        mxm0_weight_iw_after_activation_e0_clear(
+            gemm1_start);
+    // C7 is physically bound to E12 in the 8-ALU VXM.  MXM0 weight loads
+    // occupy E0..E15, so the next IW phase cannot overlap the preceding
+    // SwiGLU output wave.  The old 16-ALU schedule emitted on E31 and only
+    // needed the analogous MXM1 check.
+    mxm0_iw_start = std::max(
+        mxm0_iw_start,
+        vxm_output_leaves_shared_stream_cycle(
+            gemm1_output_start,
+            kSwigluLatency,
+            kSwigluMemColumn1)
+            + 1
+            + east_stream_cycles_to_sreg11(
+                kSwigluOutputStream)
+            + 1);
 #else
-    const auto mxm0_iw_start = mxm0_weight_iw_after_activation_e0_clear(gemm1_start);
+    auto mxm0_iw_start =
+        mxm0_weight_iw_after_activation_e0_clear(
+            gemm1_start);
+    mxm0_iw_start = std::max(
+        mxm0_iw_start,
+        vxm_output_leaves_shared_stream_cycle(
+            gemm1_output_start,
+            kSwigluLatency,
+            kSwigluMemColumn1)
+            + 1
+            + east_stream_cycles_to_sreg11(
+                kSwigluOutputStream)
+            + 1);
     auto mxm1_iw_start = mxm0_iw_start + kBlocks;
     mxm1_iw_start = avoid_mxm1_e31_vxm_output_conflict(
         mxm1_iw_start,
@@ -1681,7 +1704,13 @@ std::size_t post_op_gemm_phase_cycles(std::size_t vxm_latency, std::size_t vxm_m
 
 std::size_t vxm_post_op_start_offset()
 {
-    return ftlpu::hw::kStreamRegisterColumns;
+    // The two MXMs may deliver their operand groups with short local skew.
+    // Allow one 20-tile wave to collect in the tagged VXM boundary queues
+    // before enabling the fixed chain.  Once enabled, the queue supplies a
+    // dense one-token-per-cycle stream and the compiler can schedule MEM
+    // writeback without data-dependent holes.
+    return ftlpu::hw::kStreamRegisterColumns
+        + kBlocks;
 }
 
 std::size_t phase_vxm_post_op_start_offset(const OfflineComputePhase& phase)
@@ -2135,14 +2164,23 @@ int run_offline_icu_ffn_test()
         launched.layout.make_dma_descriptors(
             host_buffer);
     for (const auto& descriptor : descriptors) {
-        assert(dma.enqueue(descriptor).valid());
+        if (!dma.enqueue(descriptor).valid()) {
+            throw std::logic_error(
+                "FFN DMA returned an invalid transfer ID");
+        }
     }
     while (!dma.idle()) {
-        assert(dma.tick());
+        if (!dma.tick()) {
+            throw std::logic_error(
+                "FFN DMA stalled before completing its queue");
+        }
     }
     std::size_t dma_completions = 0;
     while (dma.completion_ready()) {
-        assert(dma.pop_completion().id.valid());
+        if (!dma.pop_completion().id.valid()) {
+            throw std::logic_error(
+                "FFN DMA produced an invalid completion ID");
+        }
         ++dma_completions;
     }
     assert(dma_completions == descriptors.size());
@@ -2278,8 +2316,14 @@ int run_offline_icu_ffn_test()
             }
             if (cycle >= phase.config->output_start
                 && cycle < phase.config->output_start + mxm_output_cycles()) {
-                capture_mxm_outputs(system->mxm_unit(0), *phase.config->mxm0_output);
-                capture_mxm_outputs(system->mxm_unit(1), *phase.config->mxm1_output);
+                capture_mxm_outputs(
+                    system->mxm_unit(0),
+                    *phase.config->mxm0_output,
+                    phase.config->weight_buffer);
+                capture_mxm_outputs(
+                    system->mxm_unit(1),
+                    *phase.config->mxm1_output,
+                    phase.config->weight_buffer);
             }
             if (logs.enabled) {
                 log_mxm_array_state(
@@ -2399,8 +2443,19 @@ int run_offline_icu_ffn_test()
         for (std::size_t column = 0; column < kColumns; ++column) {
             const auto lhs = expected_down_partial(reference_swiglu, 0, row, column);
             const auto rhs = expected_down_partial(reference_swiglu, 1, row, column);
-            const auto expected_final = ftlpu::VxmAlu::quantize_scalar(
-                static_cast<float>(lhs) * down_params.lhs_scale + static_cast<float>(rhs) * down_params.rhs_scale,
+            const auto down_sum =
+                ftlpu::VxmAlu::execute(
+                    {
+                        ftlpu::VxmAluOpcode::Add,
+                        ftlpu::VxmAluPrecision::
+                            Float16,
+                    },
+                    static_cast<float>(lhs)
+                        * down_params.lhs_scale,
+                    static_cast<float>(rhs)
+                        * down_params.rhs_scale);
+            const auto expected_final = ftlpu::VxmDataFormat::quantize_int8(
+                down_sum,
                 down_params.output_scale,
                 down_params.output_zero_point);
             const auto actual_final = static_cast<std::int8_t>(
@@ -2411,6 +2466,21 @@ int run_offline_icu_ffn_test()
                           << " column=" << column
                           << " actual=" << static_cast<int>(actual_final)
                           << " expected=" << static_cast<int>(expected_final)
+                          << " vxm_actual="
+                          << static_cast<int>(
+                                 final[matrix_index(
+                                     row,
+                                     column)])
+                          << " lhs_actual="
+                          << down0[matrix_index(
+                                 row,
+                                 column)]
+                          << " rhs_actual="
+                          << down1[matrix_index(
+                                 row,
+                                 column)]
+                          << " lhs_expected=" << lhs
+                          << " rhs_expected=" << rhs
                           << '\n';
                 return 1;
             }
@@ -2576,7 +2646,7 @@ try
         for (std::size_t column = 0; column < kColumns; ++column) {
             const auto lhs = expected_down_partial(reference_swiglu, 0, row, column);
             const auto rhs = expected_down_partial(reference_swiglu, 1, row, column);
-            const auto expected_final = ftlpu::VxmAlu::quantize_scalar(
+            const auto expected_final = ftlpu::VxmDataFormat::quantize_int8(
                 static_cast<float>(lhs) * down_params.lhs_scale + static_cast<float>(rhs) * down_params.rhs_scale,
                 down_params.output_scale,
                 down_params.output_zero_point);

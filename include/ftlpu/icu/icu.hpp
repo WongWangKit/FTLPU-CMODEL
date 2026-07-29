@@ -1256,6 +1256,11 @@ private:
         std::ostringstream os;
         if (instruction.opcode == MxmControlOpcode::IW) {
             os << "IW b" << instruction.weight_buffer;
+        } else if (
+            instruction.opcode
+            == MxmControlOpcode::LoadScales) {
+            os << "LoadScales b"
+               << instruction.weight_buffer;
         } else {
             os << "Compute b" << instruction.weight_buffer
                << " acc=" << instruction.accumulator_bank
@@ -1270,7 +1275,13 @@ private:
     static std::string describe_vxm(const VxmLaneAluInstruction& instruction)
     {
         std::ostringstream os;
-        os << VxmLane::opcode_name(instruction.opcode);
+        os << VxmLane::operation_name(instruction.operation)
+           << " in="
+           << hemisphere_short_name(
+                  instruction.input_hemisphere)
+           << " out="
+           << hemisphere_short_name(
+                  instruction.output_hemisphere);
         if (instruction.output_stream.has_value()) {
             os << " out_stream=" << *instruction.output_stream;
         }

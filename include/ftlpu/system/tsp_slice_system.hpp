@@ -10,6 +10,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
@@ -327,14 +328,28 @@ private:
 
     static const TileArrayModel::StreamSlot& mem_edge_stream(
         const TileArrayModel& mem,
+        Hemisphere hemisphere,
         std::size_t tile,
         std::size_t lane,
         std::size_t stream)
     {
-        if (stream < hw::kEastStreams) {
-            return mem.east_register(tile, lane, 0, stream);
+        if (stream >= hw::kStreamsPerDirection) {
+            throw std::out_of_range(
+                "VXM edge stream is outside one directional register file");
         }
-        return mem.west_register(tile, lane, 0, stream - hw::kEastStreams);
+        if (hemisphere == Hemisphere::East) {
+            return mem.west_register(
+                tile,
+                lane,
+                0,
+                stream);
+        }
+        return mem.east_register(
+            tile,
+            lane,
+            hw::kMemBoundaryStreamRegisterColumns
+                - 1,
+            stream);
     }
 
     void tick_mxm_controls(LogSinks sinks)
@@ -362,32 +377,183 @@ private:
         }
     }
 
-    bool has_complete_vxm_input(
-        Hemisphere hemisphere,
-        std::size_t tile) const
+    static bool group_required(
+        const VxmSlice::RequiredStreams& required,
+        std::size_t group)
     {
-        const auto& required_streams =
-            vxm_.required_streams_at(hemisphere, tile);
-        if (!required_streams.has_value()) {
-            return false;
-        }
-
-        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            for (std::size_t stream = 0; stream < hw::kStreams; ++stream) {
-                if (!(*required_streams)[stream]) {
-                    continue;
-                }
-                if (!mem_edge_stream(
-                        mem(hemisphere),
-                        tile,
-                        lane,
-                        stream)
-                         .has_value()) {
-                    return false;
-                }
+        const auto base =
+            group * VxmLane::kStreamGroupBytes;
+        for (std::size_t byte = 0;
+             byte < VxmLane::kStreamGroupBytes;
+             ++byte) {
+            if (required[base + byte]) {
+                return true;
             }
         }
+        return false;
+    }
+
+    static bool is_mxm_vector_tag(
+        std::uint64_t vector_tag) noexcept
+    {
+        return (vector_tag
+                & UINT64_C(
+                    0xffff000000000000))
+            == UINT64_C(
+                0x4d58000000000000);
+    }
+
+    bool capture_direct_vxm_input(
+        Hemisphere hemisphere,
+        std::size_t tile,
+        const VxmSlice::RequiredStreams& required)
+    {
+        auto streams =
+            VxmSlice::StreamMatrix {};
+        for (std::size_t lane = 0;
+             lane < hw::kLanesPerTile;
+             ++lane) {
+            for (std::size_t stream = 0;
+                 stream
+                 < hw::kStreamsPerDirection;
+                 ++stream) {
+                const auto& cell =
+                    mem_edge_stream(
+                        mem(hemisphere),
+                        hemisphere,
+                        tile,
+                        lane,
+                        stream);
+                if (required[stream]
+                    && (!cell.has_value()
+                        || is_mxm_vector_tag(
+                            cell->vector_tag))) {
+                    return false;
+                }
+                streams[lane][stream] =
+                    cell.has_value()
+                    ? cell->data
+                    : 0;
+            }
+        }
+        vxm_input_queues_[
+            hemisphere_index(hemisphere)]
+            [tile]
+            .push_back(std::move(streams));
         return true;
+    }
+
+    bool capture_vxm_group(
+        Hemisphere hemisphere,
+        std::size_t tile,
+        std::size_t group)
+    {
+        const auto base =
+            group * VxmLane::kStreamGroupBytes;
+        auto buffered = BufferedVxmGroup {};
+        auto tag = std::optional<std::uint64_t> {};
+        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+            for (std::size_t byte = 0;
+                 byte < VxmLane::kStreamGroupBytes;
+                 ++byte) {
+                const auto& cell = mem_edge_stream(
+                        mem(hemisphere),
+                        hemisphere,
+                        tile,
+                        lane,
+                        base + byte);
+                if (!cell.has_value()) {
+                    return false;
+                }
+                if (!is_mxm_vector_tag(
+                        cell->vector_tag)) {
+                    return false;
+                }
+                if (!tag.has_value()) {
+                    tag = cell->vector_tag;
+                } else if (*tag != cell->vector_tag) {
+                    throw std::logic_error(
+                        "VXM operand group contains mixed vector tags");
+                }
+                buffered.bytes[lane][byte] =
+                    cell->data;
+            }
+        }
+        buffered.vector_tag = tag.value_or(0);
+        vxm_input_group_queues_[
+            hemisphere_index(hemisphere)]
+            [tile][group]
+            .push_back(std::move(buffered));
+        return true;
+    }
+
+    void assemble_vxm_inputs(
+        Hemisphere hemisphere,
+        std::size_t tile,
+        const VxmSlice::RequiredStreams& required)
+    {
+        auto& groups =
+            vxm_input_group_queues_[
+                hemisphere_index(hemisphere)]
+                [tile];
+        while (true) {
+            auto tag =
+                std::optional<std::uint64_t> {};
+            for (std::size_t group = 0;
+                 group < VxmLane::kStreamGroupCount;
+                 ++group) {
+                if (!group_required(required, group)) {
+                    continue;
+                }
+                if (groups[group].empty()) {
+                    return;
+                }
+                const auto candidate =
+                    groups[group]
+                        .front()
+                        .vector_tag;
+                if (!tag.has_value()) {
+                    tag = candidate;
+                } else if (*tag != candidate) {
+                    throw std::logic_error(
+                        "VXM operand groups are misaligned by vector tag");
+                }
+            }
+            if (!tag.has_value()) {
+                return;
+            }
+
+            auto streams =
+                VxmSlice::StreamMatrix {};
+            for (std::size_t group = 0;
+                 group < VxmLane::kStreamGroupCount;
+                 ++group) {
+                if (!group_required(required, group)) {
+                    continue;
+                }
+                const auto buffered =
+                    std::move(groups[group].front());
+                groups[group].pop_front();
+                const auto base =
+                    group
+                    * VxmLane::kStreamGroupBytes;
+                for (std::size_t lane = 0;
+                     lane < hw::kLanesPerTile;
+                     ++lane) {
+                    for (std::size_t byte = 0;
+                         byte
+                         < VxmLane::kStreamGroupBytes;
+                         ++byte) {
+                        streams[lane][base + byte] =
+                            buffered.bytes[lane][byte];
+                    }
+                }
+            }
+            vxm_input_queues_[
+                hemisphere_index(hemisphere)]
+                [tile]
+                .push_back(std::move(streams));
+        }
     }
 
     void transfer_mem_west_to_vxm(LogSinks sinks)
@@ -401,28 +567,53 @@ private:
             for (std::size_t tile = 0;
                  tile < hw::kTileRows;
                  ++tile) {
-                if (!has_complete_vxm_input(hemisphere, tile)) {
-                    continue;
+                // MXM result groups may reach the VXM edge while a Current
+                // Config register is temporarily empty.  Their producer tag
+                // makes them safe to retain until the corresponding operand
+                // configuration becomes current.
+                for (std::size_t group = 0;
+                     group
+                     < VxmLane::kStreamGroupCount;
+                     ++group) {
+                    capture_vxm_group(
+                        hemisphere,
+                        tile,
+                        group);
                 }
-
-                auto streams = VxmSlice::StreamMatrix {};
-                for (std::size_t lane = 0;
-                     lane < hw::kLanesPerTile;
-                     ++lane) {
-                    for (std::size_t stream = 0;
-                         stream < hw::kStreams;
-                         ++stream) {
-                        const auto& slot = mem_edge_stream(
-                            mem(hemisphere),
+                const auto& required =
+                    vxm_.required_streams_at(
+                        hemisphere,
+                        tile);
+                if (required.has_value()) {
+                    assemble_vxm_inputs(
+                        hemisphere,
+                        tile,
+                        *required);
+                    auto& assembled =
+                        vxm_input_queues_[
+                            hemisphere_index_value]
+                            [tile];
+                    if (assembled.empty()) {
+                        capture_direct_vxm_input(
+                            hemisphere,
                             tile,
-                            lane,
-                            stream);
-                        streams[lane][stream] =
-                            slot.has_value() ? slot->data : 0;
+                            *required);
                     }
                 }
-                vxm_.set_stream_inputs(
-                    hemisphere, tile, streams);
+
+                auto& queue =
+                    vxm_input_queues_[
+                        hemisphere_index_value]
+                        [tile];
+                if (!vxm_.has_stream_inputs_at(
+                        hemisphere, tile)
+                    && !queue.empty()) {
+                    vxm_.set_stream_inputs(
+                        hemisphere,
+                        tile,
+                        queue.front());
+                    queue.pop_front();
+                }
                 if (sinks.vxm != nullptr
                     && (!sinks.vxm_log_tile.has_value()
                         || tile == *sinks.vxm_log_tile)) {
@@ -447,17 +638,9 @@ private:
             for (std::size_t tile = 0;
                  tile < hw::kTileRows;
                  ++tile) {
-                const auto& required =
-                    vxm_.required_streams_at(source, tile);
                 for (std::size_t west_stream = 0;
                      west_stream < hw::kWestStreams;
                      ++west_stream) {
-                    const auto packed =
-                        hw::kEastStreams + west_stream;
-                    if (required.has_value()
-                        && (*required)[packed]) {
-                        continue;
-                    }
                     auto complete = true;
                     for (std::size_t lane = 0;
                          lane < hw::kLanesPerTile;
@@ -465,9 +648,10 @@ private:
                         complete = complete
                             && mem_edge_stream(
                                    mem(source),
+                                   source,
                                    tile,
                                    lane,
-                                   packed)
+                                   west_stream)
                                    .has_value();
                     }
                     if (!complete) continue;
@@ -477,17 +661,30 @@ private:
                         const auto& cell =
                             mem_edge_stream(
                                 mem(source),
+                                source,
                                 tile,
                                 lane,
-                                packed);
-                        mem(destination)
-                            .set_east_stream_input(
-                                tile,
-                                lane,
-                                west_stream,
-                                TileArrayModel::DataWord {
-                                    cell->data,
-                                    cell->last});
+                                west_stream);
+                        const auto word =
+                            TileArrayModel::DataWord {
+                                cell->data,
+                                cell->last};
+                        if (destination
+                            == Hemisphere::East) {
+                            mem(destination)
+                                .set_east_stream_input(
+                                    tile,
+                                    lane,
+                                    west_stream,
+                                    word);
+                        } else {
+                            mem(destination)
+                                .set_west_stream_input(
+                                    tile,
+                                    lane,
+                                    west_stream,
+                                    word);
+                        }
                     }
                     if (sinks.system != nullptr) {
                         *sinks.system
@@ -508,8 +705,10 @@ private:
     {
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
             for (const auto& output : vxm_.outputs_at(tile)) {
-                if (output.stream + output.byte_count > hw::kStreams) {
-                    throw std::out_of_range("VXM output stream is outside the 64-stream lane");
+                if (output.stream + output.byte_count
+                    > hw::kStreamsPerDirection) {
+                    throw std::out_of_range(
+                        "VXM output exceeds its fixed 32-stream port");
                 }
                 auto& destination_mem =
                     mem(output.hemisphere);
@@ -520,14 +719,20 @@ private:
                             output.byte_values[lane][byte],
                             lane + 1 == hw::kLanesPerTile,
                         };
-                        if (stream < hw::kEastStreams) {
-                            destination_mem.set_east_stream_input(
-                                    tile, lane, stream, word);
-                        } else {
-                            destination_mem.set_west_stream_input(
+                        if (output.hemisphere
+                            == Hemisphere::East) {
+                            destination_mem
+                                .set_east_stream_input(
                                     tile,
                                     lane,
-                                    stream - hw::kEastStreams,
+                                    stream,
+                                    word);
+                        } else {
+                            destination_mem
+                                .set_west_stream_input(
+                                    tile,
+                                    lane,
+                                    stream,
                                     word);
                         }
                     }
@@ -546,6 +751,29 @@ private:
 
     std::array<TileArrayModel, hw::kHemispheres> mems_{};
     VxmSlice vxm_{};
+    struct BufferedVxmGroup {
+        std::uint64_t vector_tag{0};
+        std::array<
+            std::array<
+                std::uint8_t,
+                VxmLane::kStreamGroupBytes>,
+            hw::kLanesPerTile>
+            bytes{};
+    };
+    std::array<
+        std::array<
+            std::array<
+                std::deque<BufferedVxmGroup>,
+                VxmLane::kStreamGroupCount>,
+            hw::kTileRows>,
+        hw::kHemispheres>
+        vxm_input_group_queues_{};
+    std::array<
+        std::array<
+            std::deque<VxmSlice::StreamMatrix>,
+            hw::kTileRows>,
+        hw::kHemispheres>
+        vxm_input_queues_{};
     std::array<SxmSlice, hw::kHemispheres> sxms_;
     std::array<Mxm, kMxmCount> mxms_{};
     InstructionControlUnit icu_{};

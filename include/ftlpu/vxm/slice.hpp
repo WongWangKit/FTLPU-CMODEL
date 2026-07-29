@@ -27,7 +27,8 @@ public:
     using StreamMatrix = Superlane::StreamMatrix;
     using InstructionSlot = std::optional<AluInstruction>;
     using OutputSlot = std::optional<Superlane::Output>;
-    using RequiredStreams = std::array<bool, hw::kStreams>;
+    using RequiredStreams =
+        std::array<bool, hw::kStreamsPerDirection>;
 
     struct InputSlot {
         StreamMatrix streams{};
@@ -56,9 +57,7 @@ public:
             outputs.clear();
         }
         for (auto& hemisphere_required : required_streams_) {
-            for (auto& required : hemisphere_required) {
-                required.reset();
-            }
+            for (auto& required : hemisphere_required) required.reset();
         }
         cycle_ = 0;
     }
@@ -69,12 +68,31 @@ public:
         instruction_queues_[alu].push_back(instruction);
     }
 
-    void set_swiglu_input(std::size_t tile, const Int32Vector& gates, const Int32Vector& ups)
+    void set_chain_depth(VxmChainDepth depth)
+    {
+        for (auto& superlane : superlanes_) {
+            superlane.set_chain_depth(depth);
+        }
+    }
+
+    void configure_special_lut(VxmSpecialAluOpcode opcode, VxmLutConfig config,
+                               const std::vector<VxmLutEntry>& entries)
+    {
+        for (auto& superlane : superlanes_) {
+            superlane.configure_special_lut(opcode, config, entries);
+        }
+    }
+
+    void set_swiglu_input(
+        Hemisphere hemisphere,
+        std::size_t tile,
+        const Int32Vector& gates,
+        const Int32Vector& ups)
     {
         check_tile(tile);
-        auto& input =
-            input_slots_[hemisphere_index(Hemisphere::East)][tile];
-        if (input.has_value()) {
+        auto& slot =
+            input_slots_[hemisphere_index(hemisphere)][tile];
+        if (slot.has_value()) {
             throw std::logic_error("VXM tile input is already occupied");
         }
         auto streams = StreamMatrix {};
@@ -86,7 +104,7 @@ public:
                 streams[lane][4 + byte] = up_bytes[byte];
             }
         }
-        input = InputSlot {streams};
+        slot = InputSlot {streams};
     }
 
     void set_stream_inputs(
@@ -95,20 +113,12 @@ public:
         const StreamMatrix& streams)
     {
         check_tile(tile);
-        auto& input =
+        auto& slot =
             input_slots_[hemisphere_index(hemisphere)][tile];
-        if (input.has_value()) {
+        if (slot.has_value()) {
             throw std::logic_error("VXM tile input is already occupied");
         }
-        input = InputSlot {streams};
-    }
-
-    void set_stream_inputs(
-        std::size_t tile,
-        const StreamMatrix& streams)
-    {
-        set_stream_inputs(
-            Hemisphere::East, tile, streams);
+        slot = InputSlot {streams};
     }
 
     void tick(std::ostream* os = nullptr, std::optional<std::size_t> log_tile = std::nullopt)
@@ -175,11 +185,13 @@ public:
             hemisphere_index(hemisphere)][tile];
     }
 
-    const std::optional<RequiredStreams>& required_streams_at(
+    bool has_stream_inputs_at(
+        Hemisphere hemisphere,
         std::size_t tile) const
     {
-        return required_streams_at(
-            Hemisphere::East, tile);
+        check_tile(tile);
+        return superlanes_[tile]
+            .has_stream_inputs(hemisphere);
     }
 
     const Superlane& superlane(std::size_t tile) const
@@ -199,7 +211,7 @@ private:
     static void check_alu(std::size_t alu)
     {
         if (alu >= kAluQueues) {
-            throw std::out_of_range("VXM ALU queue is outside the 16-ALU lane");
+            throw std::out_of_range("VXM ALU queue is outside the 8-ALU lane");
         }
     }
 
@@ -264,7 +276,7 @@ private:
                     any_logged = true;
                     *os << "  tile " << tile
                         << " alu" << alu
-                        << " " << VxmLane::opcode_name(instruction->opcode)
+                        << " " << VxmLane::operation_name(instruction->operation)
                         << '\n';
                 }
             }
@@ -283,8 +295,7 @@ private:
             for (std::size_t hemisphere = 0;
                  hemisphere < hw::kHemispheres;
                  ++hemisphere) {
-                const auto& input =
-                    input_slots_[hemisphere][tile];
+                const auto& input = input_slots_[hemisphere][tile];
                 if (input.has_value()) {
                     superlanes_[tile].set_stream_inputs(
                         static_cast<Hemisphere>(hemisphere),
@@ -292,10 +303,9 @@ private:
                     if (os != nullptr
                         && (!log_tile.has_value()
                             || tile == *log_tile)) {
-                        *os << "  tile " << tile << " input."
+                        *os << "  tile " << tile << " input "
                             << hemisphere_short_name(
-                                   static_cast<Hemisphere>(
-                                       hemisphere))
+                                static_cast<Hemisphere>(hemisphere))
                             << '\n';
                     }
                 }
@@ -328,32 +338,19 @@ private:
         }
     }
 
-    static void mark_operand_streams(RequiredStreams& required, const VxmLaneOperand& operand)
+    static void mark_operand_streams(RequiredStreams& required,
+                                     const VxmLaneOperand& operand,
+                                     std::size_t alu, bool rhs_port)
     {
-        std::size_t byte_count = 0;
-        switch (operand.kind) {
-        case VxmLaneOperandKind::StreamInt32:
-        case VxmLaneOperandKind::StreamFloat32:
-            byte_count = 4;
-            break;
-        case VxmLaneOperandKind::StreamFloat16:
-            byte_count = 2;
-            break;
-        case VxmLaneOperandKind::StreamInt8:
-            byte_count = 1;
-            break;
-        case VxmLaneOperandKind::AluOutput:
-        case VxmLaneOperandKind::Immediate:
+        if (operand.kind != VxmLaneOperandKind::StreamInt32
+            && operand.kind != VxmLaneOperandKind::StreamFloat32
+            && operand.kind != VxmLaneOperandKind::StreamFloat16) {
             return;
         }
-        if (operand.index + byte_count > hw::kStreams) {
-            throw std::out_of_range(
-                "VXM stream operand is outside the stream set");
-        }
-        for (std::size_t byte = 0;
-             byte < byte_count;
-             ++byte) {
-            required[operand.index + byte] = true;
+        const auto group = VxmLane::fixed_input_group_for_stage(alu, rhs_port);
+        const auto base = group * VxmLane::kStreamGroupBytes;
+        for (std::size_t byte = 0; byte < 4; ++byte) {
+            required[base + byte] = true;
         }
     }
 
@@ -361,7 +358,6 @@ private:
     {
         return operand.kind == VxmLaneOperandKind::StreamInt32
             || operand.kind == VxmLaneOperandKind::StreamFloat32
-            || operand.kind == VxmLaneOperandKind::StreamInt8
             || operand.kind == VxmLaneOperandKind::StreamFloat16;
     }
 
@@ -378,34 +374,38 @@ private:
             }
         }
 
-        for (std::size_t hemisphere = 0;
-             hemisphere < hw::kHemispheres;
-             ++hemisphere) {
-            for (std::size_t tile = 0;
-                 tile < kTileCount;
-                 ++tile) {
-                auto required = RequiredStreams {};
-                bool any = false;
-                for (std::size_t alu = 0;
-                     alu < kAluQueues;
-                     ++alu) {
-                    const auto& instruction =
-                        instruction_rows_[alu][tile];
-                    if (!instruction.has_value()
-                        || instruction->input_hemisphere
-                            != static_cast<Hemisphere>(hemisphere)
-                        || !instruction_uses_stream(*instruction)) {
-                        continue;
-                    }
-                    mark_operand_streams(
-                        required, instruction->lhs);
-                    mark_operand_streams(
-                        required, instruction->rhs);
-                    any = true;
+        for (std::size_t tile = 0; tile < kTileCount; ++tile) {
+            auto required =
+                std::array<RequiredStreams, hw::kHemispheres>{};
+            auto any = std::array<bool, hw::kHemispheres>{};
+            for (std::size_t alu = 0; alu < kAluQueues; ++alu) {
+                // SR data may be consumed only after the explicit decoder has
+                // installed a Current Config.  A packet in the southbound
+                // control row, decoder, or Next register is not executable
+                // yet and must not claim data early.
+                auto instruction =
+                    superlanes_[tile].current_instruction(
+                        alu);
+                if (!instruction.has_value() || !instruction_uses_stream(*instruction)) {
+                    continue;
                 }
-                if (any) {
+                const auto hemisphere =
+                    hemisphere_index(
+                        instruction->input_hemisphere);
+                mark_operand_streams(
+                    required[hemisphere],
+                    instruction->lhs, alu, false);
+                mark_operand_streams(
+                    required[hemisphere],
+                    instruction->rhs, alu, true);
+                any[hemisphere] = true;
+            }
+            for (std::size_t hemisphere = 0;
+                 hemisphere < hw::kHemispheres;
+                 ++hemisphere) {
+                if (any[hemisphere]) {
                     required_streams_[hemisphere][tile] =
-                        required;
+                        required[hemisphere];
                 }
             }
         }
@@ -413,16 +413,17 @@ private:
 
     std::array<std::deque<AluInstruction>, kAluQueues> instruction_queues_{};
     std::array<std::array<InstructionSlot, kTileCount>, kAluQueues> instruction_rows_{};
-    std::array<Superlane, kTileCount> superlanes_{};
+    // A complete Slice contains 20 Superlanes and every Lane now owns real
+    // internal ALU pipeline state. Keep the fixed architectural count while
+    // placing the large C-model objects on the host heap instead of its stack.
+    std::vector<Superlane> superlanes_{kTileCount};
     std::array<
         std::array<std::optional<InputSlot>, kTileCount>,
         hw::kHemispheres> input_slots_{};
     std::array<OutputSlot, kTileCount> output_slots_{};
     std::array<std::vector<Superlane::Output>, kTileCount> output_slots_multi_{};
     std::array<
-        std::array<
-            std::optional<RequiredStreams>,
-            kTileCount>,
+        std::array<std::optional<RequiredStreams>, kTileCount>,
         hw::kHemispheres> required_streams_{};
     std::size_t cycle_{0};
     bool prepared_{false};

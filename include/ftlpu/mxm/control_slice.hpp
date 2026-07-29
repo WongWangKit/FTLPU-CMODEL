@@ -21,6 +21,7 @@ namespace ftlpu {
 enum class MxmControlOpcode {
     IW = 0,
     Compute = 1,
+    LoadScales = 2,
 };
 
 struct MxmControlInstruction {
@@ -60,6 +61,21 @@ struct MxmControlInstruction {
             true,
             false,
         };
+    }
+
+    static MxmControlInstruction LoadScales(
+        std::size_t weight_buffer = 0)
+    {
+        check_weight_buffer(weight_buffer);
+        return MxmControlInstruction {
+            MxmControlOpcode::LoadScales,
+            weight_buffer,
+            0,
+            0,
+            0,
+            false,
+            false,
+            false};
     }
 
     static MxmControlInstruction ComputeToAccumulator(
@@ -122,7 +138,10 @@ public:
     using WeightInput = MxmArray::InputVector;
     using InstructionSlot = std::optional<MxmControlInstruction>;
     using WeightInputSlot = std::optional<WeightInput>;
-    using WeightInputProvider = std::function<WeightInput(std::size_t)>;
+    using WeightInputProvider = std::function<
+        WeightInput(
+            std::size_t,
+            const MxmControlInstruction&)>;
 
     struct ComputePulse {
         std::size_t weight_buffer{0};
@@ -283,6 +302,7 @@ public:
 
 private:
     struct WeightToken {
+        MxmOpcode opcode{MxmOpcode::IW};
         std::size_t weight_buffer{0};
         WeightInput input{};
     };
@@ -360,11 +380,13 @@ private:
         for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
             const auto& instruction = load_instruction_rows_[tile];
             if (!instruction.has_value()
-                || instruction->opcode != MxmControlOpcode::IW
+                || instruction->opcode
+                    == MxmControlOpcode::Compute
                 || weight_inputs_[tile].has_value()) {
                 continue;
             }
-            weight_inputs_[tile] = weight_provider(tile);
+            weight_inputs_[tile] =
+                weight_provider(tile, *instruction);
         }
     }
 
@@ -385,20 +407,34 @@ private:
                     any_logged = true;
                     os << "  tile " << tile << " ";
                 }
-                if (instruction->opcode == MxmControlOpcode::IW) {
+                if (instruction->opcode
+                    != MxmControlOpcode::Compute) {
                     if (!weight_inputs_[tile].has_value()) {
-                        throw std::logic_error("MXM IW reached tile without local weight input");
+                        throw std::logic_error(
+                            "MXM weight-control instruction reached tile without local input");
                     }
 
+                    const auto opcode =
+                        instruction->opcode
+                                == MxmControlOpcode::IW
+                        ? MxmOpcode::IW
+                        : MxmOpcode::LoadScales;
                     if (should_log) {
-                        os << "IW b" << instruction->weight_buffer << " inject ";
+                        os << (opcode == MxmOpcode::IW
+                                  ? "IW b"
+                                  : "LoadScales b")
+                           << instruction->weight_buffer
+                           << " inject ";
                     }
                     for (std::size_t column = hw::kMxmSupercellsPerPlane - 1; column > 0; --column) {
                         weight_token(instruction->weight_buffer, tile, column)
                             = weight_token(instruction->weight_buffer, tile, column - 1);
                     }
                     weight_token(instruction->weight_buffer, tile, 0)
-                        = WeightToken {instruction->weight_buffer, *weight_inputs_[tile]};
+                        = WeightToken {
+                            opcode,
+                            instruction->weight_buffer,
+                            *weight_inputs_[tile]};
                     weight_inputs_[tile].reset();
 
                     for (std::size_t column = 0; column < hw::kMxmSupercellsPerPlane; ++column) {
@@ -410,17 +446,30 @@ private:
                         if (should_log) {
                             any_logged = true;
                             os << "  tile " << tile << " weight b" << token->weight_buffer << " col=" << column << " ";
-                            array_.tick_cell_iw_load(tile, column, token->weight_buffer, token->input, os);
-                        } else {
-                            static NullStream null_stream;
-                            array_.tick_cell_iw_load(
+                            array_.tick_cell_load(
                                 tile,
                                 column,
-                                token->weight_buffer,
+                                MxmInstruction {
+                                    token->opcode,
+                                    token->weight_buffer},
+                                token->input,
+                                os);
+                        } else {
+                            static NullStream null_stream;
+                            array_.tick_cell_load(
+                                tile,
+                                column,
+                                MxmInstruction {
+                                    token->opcode,
+                                    token->weight_buffer},
                                 token->input,
                                 null_stream.stream());
                         }
-                        loaded_cells_[token->weight_buffer][tile][column] = true;
+                        if (token->opcode == MxmOpcode::IW) {
+                            loaded_cells_[
+                                token->weight_buffer]
+                                [tile][column] = true;
+                        }
                     }
                 }
             }

@@ -35,20 +35,25 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
 bool same_operand(const ftlpu::VxmLaneOperand& lhs, const ftlpu::VxmLaneOperand& rhs)
 {
     return lhs.kind == rhs.kind
-        && lhs.index == rhs.index
         && lhs.immediate == rhs.immediate
-        && lhs.scale == rhs.scale;
+        && lhs.scale == rhs.scale
+        && lhs.zero_point == rhs.zero_point;
 }
 
 bool same_vxm(const ftlpu::VxmLaneAluInstruction& lhs, const ftlpu::VxmLaneAluInstruction& rhs)
 {
-    return lhs.opcode == rhs.opcode
+    return lhs.operation == rhs.operation
         && same_operand(lhs.lhs, rhs.lhs)
         && same_operand(lhs.rhs, rhs.rhs)
-        && lhs.scale == rhs.scale
+        && lhs.precision == rhs.precision
+        && lhs.output_type == rhs.output_type
+        && lhs.output_scale == rhs.output_scale
         && lhs.output_zero_point == rhs.output_zero_point
-        && lhs.cast_target == rhs.cast_target
         && lhs.output_stream == rhs.output_stream
+        && lhs.accumulator_reset == rhs.accumulator_reset
+        && lhs.accumulator_write == rhs.accumulator_write
+        && lhs.accumulator_emit == rhs.accumulator_emit
+        && lhs.repeat_count == rhs.repeat_count
         && lhs.input_hemisphere == rhs.input_hemisphere
         && lhs.output_hemisphere == rhs.output_hemisphere;
 }
@@ -157,6 +162,7 @@ bool verify_mxm_codec()
 {
     const ftlpu::MxmControlInstruction instructions[] {
         ftlpu::MxmControlInstruction::IW(1),
+        ftlpu::MxmControlInstruction::LoadScales(1),
         ftlpu::MxmControlInstruction::Compute(1, 31, 36),
         ftlpu::MxmControlInstruction::ComputeToAccumulator(0, 1, 17, 24, true, false, true),
     };
@@ -179,14 +185,17 @@ bool verify_mxm_codec()
 bool verify_vxm_codec()
 {
     auto instruction = ftlpu::VxmLaneAluInstruction {
-        ftlpu::VxmAluOpcode::Multiply,
-        ftlpu::VxmLaneOperand::StreamInt32(32),
-        ftlpu::VxmLaneOperand::Alu(13),
-        1.0f,
-        0,
-        ftlpu::VxmCastTarget::Float32,
+        ftlpu::VxmAluOpcode::Add,
+        ftlpu::VxmLaneOperand::StreamFloat32(0.5f),
+        ftlpu::VxmLaneOperand::StreamFloat16(2.0f),
     };
-    instruction.output_stream = 31;
+    instruction.precision = ftlpu::VxmAluPrecision::Float32;
+    instruction.output_type = ftlpu::VxmCastTarget::Float16;
+    instruction.output_scale = 0.25f;
+    instruction.output_stream = 8;
+    instruction.repeat_count = 37;
+    instruction.input_hemisphere = ftlpu::Hemisphere::West;
+    instruction.output_hemisphere = ftlpu::Hemisphere::East;
 
     const auto encoded = ftlpu::isa::encode_vxm_instruction(instruction);
     const auto decoded = ftlpu::isa::decode_vxm_instruction(encoded);
@@ -194,48 +203,60 @@ bool verify_vxm_codec()
         return false;
     }
 
-    auto cast = ftlpu::VxmLaneAluInstruction {
-        ftlpu::VxmAluOpcode::Cast,
-        ftlpu::VxmLaneOperand::Alu(14),
-        ftlpu::VxmLaneOperand::Imm(0.0f),
-        1.0f,
-        0,
-        ftlpu::VxmCastTarget::Int8,
-        9,
+    auto special = ftlpu::VxmLaneAluInstruction {
+        ftlpu::VxmSpecialAluOpcode::Rsqrt,
+        ftlpu::VxmLaneOperand::Previous(),
     };
-    const auto decoded_cast = ftlpu::isa::decode_vxm_instruction(ftlpu::isa::encode_vxm_instruction(cast));
-    if (!require(same_vxm(cast, decoded_cast), "VXM cast/output codec round-trip failed")) {
+    special.accumulator_emit = false;
+    const auto decoded_special =
+        ftlpu::isa::decode_vxm_instruction(
+            ftlpu::isa::encode_vxm_instruction(
+                special));
+    if (!require(
+            same_vxm(special, decoded_special),
+            "VXM special-ALU codec round-trip failed")) {
         return false;
     }
 
     return require_throws(
         [] {
             auto invalid = ftlpu::VxmLaneAluInstruction {
-                ftlpu::VxmAluOpcode::Pass,
-                ftlpu::VxmLaneOperand::Alu(16),
+                ftlpu::VxmAluOpcode::Bypass,
+                ftlpu::VxmLaneOperand::Previous(),
             };
+            invalid.output_stream = 6;
             ftlpu::isa::encode_vxm_instruction(invalid);
         },
-        "VXM codec should reject ALU indexes outside the 16-ALU lane")
+        "VXM codec should reject non-physical output stream groups")
         && require_throws(
             [] {
                 auto invalid = ftlpu::VxmLaneAluInstruction {
-                    ftlpu::VxmAluOpcode::Pass,
-                    ftlpu::VxmLaneOperand::StreamInt32(61),
+                    ftlpu::VxmAluOpcode::Bypass,
+                    ftlpu::VxmLaneOperand::StreamInt32(
+                        1.0f, 1),
                 };
                 ftlpu::isa::encode_vxm_instruction(invalid);
             },
-            "VXM codec should reject int32 stream operands that cross the 64-stream boundary")
+            "VXM codec should reject asymmetric operand zero points")
         && require_throws(
             [] {
                 auto invalid = ftlpu::VxmLaneAluInstruction {
-                    ftlpu::VxmAluOpcode::Pass,
-                    ftlpu::VxmLaneOperand::Alu(0),
+                    ftlpu::VxmAluOpcode::Bypass,
+                    ftlpu::VxmLaneOperand::Previous(),
                 };
                 invalid.output_zero_point = 1;
                 ftlpu::isa::encode_vxm_instruction(invalid);
             },
-            "VXM codec should reject model-only output zero point metadata");
+            "VXM codec should reject asymmetric output zero points")
+        && require_throws(
+            [] {
+                auto invalid =
+                    ftlpu::VxmLaneAluInstruction{};
+                invalid.repeat_count = 2049;
+                ftlpu::isa::encode_vxm_instruction(
+                    invalid);
+            },
+            "VXM codec should reject repeat counts above 2048");
 }
 
 bool verify_icu_command_codec()
@@ -273,27 +294,26 @@ bool verify_icu_command_codec()
         }
     }
 
-    auto vxm_extended = ftlpu::VxmLaneAluInstruction {
+    auto vxm_routed = ftlpu::VxmLaneAluInstruction {
         ftlpu::VxmAluOpcode::Multiply,
-        ftlpu::VxmLaneOperand::StreamFloat16(18),
-        ftlpu::VxmLaneOperand::StreamFloat32(24),
-        1.0f,
-        0,
-        ftlpu::VxmCastTarget::Float32,
-        8,
-        ftlpu::Hemisphere::West,
-        ftlpu::Hemisphere::East,
+        ftlpu::VxmLaneOperand::StreamFloat32(),
+        ftlpu::VxmLaneOperand::StreamFloat32(),
     };
-    const auto extended_packet =
-        ftlpu::isa::encode_packet(vxm_extended);
+    vxm_routed.output_stream = 12;
+    vxm_routed.input_hemisphere =
+        ftlpu::Hemisphere::West;
+    vxm_routed.output_hemisphere =
+        ftlpu::Hemisphere::East;
+    const auto routed_packet =
+        ftlpu::isa::encode_packet(vxm_routed);
     if (!require(
-            ftlpu::isa::packet_kind(extended_packet)
-                    == ftlpu::isa::InstructionPacketKind::VxmExtended
+            ftlpu::isa::packet_kind(routed_packet)
+                    == ftlpu::isa::InstructionPacketKind::Vxm
                 && same_vxm(
-                    vxm_extended,
+                    vxm_routed,
                     ftlpu::isa::decode_vxm_packet(
-                        extended_packet)),
-            "extended VXM packet/hemisphere round-trip failed")) {
+                        routed_packet)),
+            "VXM packet/hemisphere round-trip failed")) {
         return false;
     }
 

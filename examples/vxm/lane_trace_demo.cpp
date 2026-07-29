@@ -1,4 +1,4 @@
-#include "ftlpu/vxm/lane.hpp"
+#include "ftlpu/vxm/superlane.hpp"
 
 #include <cstdint>
 #include <cstddef>
@@ -12,7 +12,7 @@ int main(int argc, char** argv)
 {
     const std::string log_path = argc > 1 ? argv[1] : "vxm_lane_trace.log";
 
-    auto lane = ftlpu::VxmLane {};
+    auto superlane = ftlpu::VxmSuperlane {};
     const auto params = ftlpu::VxmLane::SwigluParams {
         0.25f,
         0.5f,
@@ -21,7 +21,8 @@ int main(int argc, char** argv)
     };
     const std::vector<std::int32_t> gates {2, 4, -3, 8};
     const std::vector<std::int32_t> ups {11, 7, 5, -9};
-    lane.load_pipelined_swiglu_program(params, gates.size());
+    superlane.load_pipelined_swiglu_program(
+        params, gates.size());
 
     std::ofstream log(log_path);
     if (!log) {
@@ -30,12 +31,28 @@ int main(int argc, char** argv)
 
     for (std::size_t cycle = 0; cycle < gates.size() + 9; ++cycle) {
         if (cycle < gates.size()) {
-            lane.set_swiglu_input(
-                ftlpu::VxmLane::pack_int32(gates[cycle]),
-                ftlpu::VxmLane::pack_int32(ups[cycle]));
+            auto streams =
+                ftlpu::VxmSuperlane::StreamMatrix {};
+            for (auto& lane_streams : streams) {
+                const auto gate =
+                    ftlpu::VxmLane::pack_int32(
+                        gates[cycle]);
+                const auto up =
+                    ftlpu::VxmLane::pack_int32(
+                        ups[cycle]);
+                for (std::size_t byte = 0;
+                     byte < 4;
+                     ++byte) {
+                    lane_streams[byte] = gate[byte];
+                    lane_streams[4 + byte] = up[byte];
+                }
+            }
+            superlane.set_stream_inputs(
+                ftlpu::Hemisphere::East,
+                streams);
         }
-        lane.tick();
-        lane.print_last_trace(log);
+        superlane.tick();
+        superlane.print_lane_trace(log, 0);
         log << '\n';
     }
 

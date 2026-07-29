@@ -436,14 +436,23 @@ try
         launched.layout.make_dma_descriptors(
             host_buffer);
     for (const auto& descriptor : descriptors) {
-        assert(dma.enqueue(descriptor).valid());
+        if (!dma.enqueue(descriptor).valid()) {
+            throw std::logic_error(
+                "attention DMA returned an invalid transfer ID");
+        }
     }
     while (!dma.idle()) {
-        assert(dma.tick());
+        if (!dma.tick()) {
+            throw std::logic_error(
+                "attention DMA stalled before completing its queue");
+        }
     }
     std::size_t completions = 0;
     while (dma.completion_ready()) {
-        assert(dma.pop_completion().id.valid());
+        if (!dma.pop_completion().id.valid()) {
+            throw std::logic_error(
+                "attention DMA produced an invalid completion ID");
+        }
         ++completions;
     }
     assert(completions == descriptors.size());

@@ -31,6 +31,7 @@ struct GroqLikeConfig {
     static constexpr std::size_t west_mxm_count = 0;
     static constexpr std::size_t east_mxm_count = 2;
     static constexpr std::size_t mxm_weight_bytes_per_value = 1;
+    static constexpr std::size_t mxm_stored_weight_bytes_per_value = 1;
     static constexpr std::size_t mxm_activation_bytes_per_value = 1;
     static constexpr std::size_t mxm_weight_load_streams = 16;
     static constexpr std::size_t mxm_accumulator_banks = 2;
@@ -45,8 +46,8 @@ struct GroqLikeConfig {
 
     static constexpr std::size_t sxm_operation_lanes = 16;
     static constexpr std::size_t vxm_lane_count = 16;
-    static constexpr std::size_t vxm_pipeline_stages = 16;
-    static constexpr std::size_t vxm_alu_count = 16;
+    static constexpr std::size_t vxm_pipeline_stages = 8;
+    static constexpr std::size_t vxm_alu_count = 8;
 
     static constexpr std::size_t ifetch_packet_bytes = 16;
     static constexpr std::size_t ifetch_block_bytes = 640;
@@ -77,6 +78,7 @@ struct TransformerEvalConfig {
     static constexpr std::size_t west_mxm_count = 2;
     static constexpr std::size_t east_mxm_count = 2;
     static constexpr std::size_t mxm_weight_bytes_per_value = 2;
+    static constexpr std::size_t mxm_stored_weight_bytes_per_value = 1;
     static constexpr std::size_t mxm_activation_bytes_per_value = 2;
     static constexpr std::size_t mxm_weight_load_streams = 16;
     static constexpr std::size_t mxm_accumulator_banks = 2;
@@ -91,8 +93,8 @@ struct TransformerEvalConfig {
 
     static constexpr std::size_t sxm_operation_lanes = 16;
     static constexpr std::size_t vxm_lane_count = 8;
-    static constexpr std::size_t vxm_pipeline_stages = 16;
-    static constexpr std::size_t vxm_alu_count = 16;
+    static constexpr std::size_t vxm_pipeline_stages = 8;
+    static constexpr std::size_t vxm_alu_count = 8;
 
     static constexpr std::size_t ifetch_packet_bytes = 16;
     static constexpr std::size_t ifetch_block_bytes = 640;
@@ -113,12 +115,21 @@ struct ConfigDerived {
         Config::mxm_n / Config::mxm_block_columns;
     static constexpr std::size_t mxm_weight_load_bytes_per_cycle =
         Config::lanes_per_tile
-        * Config::mxm_weight_load_streams
+        * (Config::mxm_block_columns
+            * Config::mxm_stored_weight_bytes_per_value)
         * Config::stream_register_bytes;
     static constexpr std::size_t mxm_weight_block_bytes =
         Config::mxm_block_rows
         * Config::mxm_block_columns
-        * Config::mxm_weight_bytes_per_value;
+        * Config::mxm_stored_weight_bytes_per_value;
+    static constexpr std::size_t mxm_stored_weight_load_streams =
+        Config::mxm_block_columns
+        * Config::mxm_stored_weight_bytes_per_value;
+    static constexpr std::size_t mxm_weight_scale_streams =
+        Config::mxm_stored_weight_bytes_per_value
+                == Config::mxm_weight_bytes_per_value
+        ? 0
+        : Config::mxm_block_columns * 2;
     static constexpr std::size_t mxm_weight_block_load_cycles =
         mxm_weight_block_bytes / mxm_weight_load_bytes_per_cycle;
     static constexpr std::size_t mem_read_bytes_per_cycle =
@@ -146,9 +157,10 @@ consteval bool valid_hardware_config()
         && Config::mxm_k % Config::mxm_block_rows == 0
         && Config::mxm_weight_load_streams
             <= Config::streams_per_direction
-        && Config::mxm_weight_load_streams
-            == Config::mxm_block_columns
-                * Config::mxm_weight_bytes_per_value
+        && D::mxm_stored_weight_load_streams
+            <= Config::mxm_weight_load_streams
+        && D::mxm_weight_scale_streams
+            <= Config::mxm_weight_load_streams
         && Config::mxm_activation_bytes_per_value
             <= Config::streams_per_direction
         && D::mxm_weight_block_bytes

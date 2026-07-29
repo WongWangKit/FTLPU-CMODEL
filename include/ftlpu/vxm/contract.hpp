@@ -12,8 +12,8 @@ enum class VxmCapability {
     NotImplemented,
 };
 
-// Stable description of the VXM implementation retained on feat/cjh and
-// extended with the minimum f621374 workload-facing operand/routing fields.
+// Architectural contract for the four 2-ALU blocks that can be configured
+// as four 2-stage, two 4-stage, or one 8-stage chain.
 struct VxmInterfaceContract {
     static constexpr std::size_t lane_count = hw::kVxmLaneCount;
     static constexpr std::size_t alu_queue_count = hw::kVxmAluCount;
@@ -21,14 +21,16 @@ struct VxmInterfaceContract {
         hw::kVxmPipelineStages;
     static constexpr std::size_t initiation_interval_cycles = 1;
     static constexpr std::size_t encoded_stream_index_bits = 6;
-    static constexpr std::size_t encoded_alu_index_bits = 6;
+    static constexpr std::size_t encoded_alu_index_bits = 3;
 
     static constexpr bool hemisphere_selected_by_port_map = false;
     static constexpr bool hemisphere_encoded_in_instruction = true;
     static constexpr bool float16_stream_operand = true;
     static constexpr bool float32_stream_operand = true;
-    static constexpr bool int8_stream_operand = true;
+    static constexpr bool int8_stream_operand = false;
     static constexpr bool one_finite_iq_per_alu = true;
+    static constexpr std::size_t minimum_chain_depth = 2;
+    static constexpr std::size_t maximum_chain_depth = 8;
 
     static constexpr VxmCapability exp = VxmCapability::Native;
     static constexpr VxmCapability sqrt = VxmCapability::Native;
@@ -45,7 +47,7 @@ struct VxmInterfaceContract {
 static_assert(
     VxmInterfaceContract::pipeline_stages
         == VxmInterfaceContract::alu_queue_count,
-    "retained VXM requires one physical pipeline stage per ALU IQ");
+    "8-ALU VXM requires one physical pipeline stage per ALU IQ");
 static_assert(
     (std::size_t {1}
         << VxmInterfaceContract::encoded_stream_index_bits)
