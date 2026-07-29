@@ -53,6 +53,7 @@ ftlpu_add_test(
 target_compile_definitions(
     transformer_system_smoke_test
     PRIVATE FTLPU_TRANSFORMER_EVAL_CONFIG)
+ftlpu_add_test(full_chip_topology_test tests/system/full_chip_topology_test.cpp)
 
 ftlpu_add_test(mxm_supercell_test tests/mxm/supercell_test.cpp)
 ftlpu_add_test(mxm_array_test tests/mxm/array_test.cpp)
@@ -86,6 +87,10 @@ ftlpu_add_test(
 target_compile_definitions(
     w8a16_datapath_test
     PRIVATE FTLPU_TRANSFORMER_EVAL_CONFIG)
+ftlpu_add_test(w8a16_projection_test tests/integration/w8a16_projection_test.cpp)
+ftlpu_add_test(w8a16_swiglu_test tests/integration/w8a16_swiglu_test.cpp)
+ftlpu_add_test(dual_hemisphere_w8a16_swiglu_test tests/integration/dual_hemisphere_w8a16_swiglu_test.cpp)
+ftlpu_add_test(rmsnorm_test tests/integration/rmsnorm_test.cpp)
 
 ftlpu_add_test(vxm_alu_test tests/vxm/alu_test.cpp)
 ftlpu_add_test(vxm_lane_test tests/vxm/lane_test.cpp)
@@ -101,6 +106,8 @@ ftlpu_add_test(vxm_special_alu_test tests/vxm/special_alu_test.cpp)
 ftlpu_add_test(vxm_contract_test tests/vxm/contract_test.cpp)
 
 ftlpu_add_test(sxm_test tests/sxm/sxm_test.cpp)
+ftlpu_add_test(sxm_attention_transpose_test tests/sxm/attention_transpose_test.cpp)
+ftlpu_add_test(sxm_mem_transpose_test tests/integration/sxm_mem_transpose_test.cpp)
 
 ftlpu_add_test(icu_test tests/icu/icu_test.cpp)
 ftlpu_add_test(icu_fetch_test tests/icu/fetch_test.cpp)
@@ -135,7 +142,6 @@ ftlpu_add_demo(mem_mxm_trace_demo examples/mxm/mem_mxm_trace_demo.cpp)
 ftlpu_add_demo(mem_sr_mxm_demo examples/mxm/mem_sr_mxm_demo.cpp)
 ftlpu_add_demo(icu_mem_demo examples/icu/icu_mem_demo.cpp)
 ftlpu_add_demo(sxm_chain_demo examples/sxm/chain_demo.cpp)
-ftlpu_add_demo(vxm_lane_trace_demo examples/vxm/lane_trace_demo.cpp)
 ftlpu_add_demo(stream_topology_api_demo examples/system/stream_topology_api_demo.cpp)
 ftlpu_add_demo(c2c_stream_demo examples/c2c/c2c_stream_demo.cpp)
 ftlpu_add_demo(transformer_design_space examples/system/transformer_design_space.cpp)

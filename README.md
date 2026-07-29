@@ -1,88 +1,105 @@
 # FTLPU-CMODEL
 
-FTLPU-CMODEL is a cycle-oriented C++17 model for experimenting with an
-FTLPU/TSP-style dataflow: MEM streams move through stream registers, MXM consumes
-streamed int8 vectors for matrix multiply, VXM executes ALU instruction queues,
-and an ICU dispatches instructions into each functional block.
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-The model is inspired by public Groq TSP/LPU descriptions, but it is not a
-bit-accurate Groq implementation. The current goal is to build a useful compiler
-and scheduling playground where instructions, stream timing, and functional-unit
-handoffs can be tested cycle by cycle.
+FTLPU-CMODEL is a cycle-oriented C++20 model of an FTLPU/TSP-style processor.
+It models stream-register timing, per-queue ICU control, two mirrored MEM
+hemispheres, four MXMs, a central VXM, and one SXM per hemisphere.
 
-## Current Status
+The project is inspired by public Groq LPU/TSP material, but it is not a
+bit-accurate implementation of private Groq hardware or ISA. Its purpose is to
+provide a concrete target for dataflow scheduling and future compiler work.
 
-The repository currently models:
+## Architecture Snapshot
 
-- `MEM`: 44 slice columns, 20 tile rows, 16 lanes per tile, 32 east streams and
-  32 west streams per lane. Each stream register is one byte wide. Each
-  tile-local SRAM has two banks, and each bank is 4096 x 16 bytes.
-- `MXM`: two east-side MXM units. Each unit is a 20 x 20 array of 16 x 16
-  supercells. Each supercell has two peer weight buffers; `IW` selects which
-  buffer receives the right-shifting weight stream and `Compute` selects both
-  the weight buffer and output stream base for a 320 x 320 int8 GEMM datapath
-  with int32 accumulation.
-- `VXM`: one west-side VXM slice with 20 superlanes/tiles. Each superlane has
-  16 lanes, and each lane has 16 ALU issue queues. ALU outputs can write int8
-  or fp16 bytes onto streams.
-- `ICU`: per-queue instruction dispatch with `NOP N` and `Repeat n,d`, including
-  MEM address stride support.
-- `DMA`: Host buffers referenced by handles, descriptor-driven Host/MEM
-  transfers, global hemisphere/slice/bank/word address routing, and one
-  320-byte vector transferred per DMA cycle.
-- `TspSliceSystem`: fixed local topology with VXM on the west side of MEM and
-  two MXMs on the east side of MEM.
-- A compact model ISA codec for MEM, MXM, VXM ALU, and ICU queue commands.
+| Block | Current model |
+| --- | --- |
+| Vector shape | 4 tiles/superlanes x 8 lanes = 32 elements |
+| Streams | 32 eastward + 32 westward streams, one byte per register |
+| MEM | 44 slices per hemisphere, 88 ICU queues total |
+| SRAM | 2.5 MiB per slice, 110 MiB per hemisphere, 220 MiB total |
+| Accumulators | Two four-slice FP32 accumulator groups per hemisphere |
+| MXM | Four 32 x 32 FP16 GEMM arrays, two per hemisphere |
+| MXM weights | Two peer buffers per supercell, selected by `IW`/`Compute` |
+| VXM | One central slice, 8 independently controlled ALUs per lane |
+| SXM | One four-tile slice per hemisphere for Transpose/Permute |
+| ICU | 88 MEM, 4 MXM load, 4 MXM compute, 8 VXM, and 2 SXM queues |
 
-The largest integration test models an FFN-like path:
+The fixed full-chip topology is:
 
-1. Load gate/up weights from MEM into two MXMs.
-2. Stream activations from MEM into both MXMs.
-3. Route gate/up int32 outputs west through MEM streams into VXM.
-4. Execute SwiGLU using ALU instructions.
-5. Store the int8 hidden result back to MEM.
-6. Load down-projection weights into the two MXMs.
-7. Stream the hidden result through MXM.
-8. Route the two int32 partial results into VXM for add + quant.
-9. Store the final int8 result back to MEM and compare against golden data.
+```text
+MXM2/MXM3 <-> SXM.W <-> MEM.W <-> VXM <-> MEM.E <-> SXM.E <-> MXM0/MXM1
+```
 
-`mem_dual_mxm_swiglu_offline_icu_test` is the canonical FFN integration test.
-All MEM, MXM, and VXM instructions are generated offline and loaded into the ICU
-before cycle 0. MXM output is controlled by the `Compute` instruction stream.
-The runtime loop only advances clocks and bridges data. This is the shape
-intended for a future compiler backend.
+Each hemisphere uses local stream-register columns `sreg0..sreg12`.
+`sreg0` is next to VXM, MEM occupies the eleven groups between
+`sreg0..sreg11`, and SXM connects `sreg11` to the MXM boundary at `sreg12`.
 
-`attention_projection_test` is the first single-head attention-oriented test. It
-initializes `seq_len=160`, `hidden=320` input and Wq/Wk matrices in MEM, loads
-Wq and Wk into the two MXMs, streams X through both MXMs, sends Q/K int32 results
-to VXM, dequantizes to fp16, stores fp16 bytes back to MEM, and checks sampled
-results against golden data.
+Stream reads are broadcast-capable: multiple functional units may consume the
+same register value in one cycle. A consumed value no longer propagates
+passively, and multiple producers still cannot write different values to the
+same stream register.
 
-## Repository Layout
+## Execution Model
 
-- `include/ftlpu/core/`: hardware parameters, stream words, topology helpers,
-  instruction pipeline primitives, and instruction encoding.
-- `include/ftlpu/mem/`: MEM slice and full tile-array model.
-- `include/ftlpu/mxm/`: MXM supercell, array, control slice, wrapper, and
-  system-owned datapath state.
-- `include/ftlpu/vxm/`: VXM ALU, lane, superlane, and slice models.
-- `include/ftlpu/system/`: ICU and whole-slice system integration.
-- `tests/core/`, `tests/mem/`, `tests/mxm/`, `tests/vxm/`: subsystem tests.
-- `tests/integration/`: cross-unit tests for MEM/MXM/VXM/ICU flows.
-- `examples/`: small trace-oriented demos.
-- `docs/architecture.md`: detailed project notes.
+Whole-system workloads use a statically scheduled but SRAM-backed launch path:
+
+1. Build a host-side `ProgramImage` containing encoded per-IQ instruction
+   sections and vector-aligned data sections.
+2. `ProgramSramLayout` packs those sections and creates DMA descriptors.
+   `DmaEngine` copies them from host buffers into the selected hemisphere,
+   MEM slice, bank, and row.
+3. Apply only the minimal bootstrap state: non-MEM targets receive
+   `Fetch`/`Sync`, while each participating MEM ICU receives a local SRAM
+   program address.
+4. MEM ICUs fetch their own loader programs from local SRAM. Those loaders use
+   MEM Read and stream-register traffic to fill MXM, VXM, and SXM instruction
+   queues through ICU IFetch.
+5. Start the clock and call only `TspSliceSystem::tick()` until the static
+   schedule completes, then read final MEM state.
+
+After bootstrap, instructions and workload data are no longer injected
+directly into functional queues by host C++ code. A DMA descriptor advances by
+one physical vector per beat and may cross automatically from one SRAM bank to
+the next within the same MEM slice. DMA request IDs are allocated by
+`DmaEngine::enqueue()`, and runtime completion handling uses
+`completion_ready()`/`pop_completion()`; a separate history remains available
+for diagnostics.
+
+MEM, MXM, VXM, and SXM instructions must meet their stream operands in the same
+cycle. Queue-local `NOP N` and `Repeat n,d` commands encode delays and regular
+instruction trains. MEM repeats may also apply a signed address stride.
+
+## Validated Workloads
+
+| Test | Workload | Validation |
+| --- | --- | --- |
+| `w8a16_projection_test` | `[128,576] x [576,1536]` W8A16 projection | 196,608 FP32 outputs |
+| `w8a16_swiglu_test` | gate/up projection plus SwiGLU | 196,608 FP16 outputs |
+| `dual_hemisphere_w8a16_swiglu_test` | full gate/up, SwiGLU, and down FFN | `[128,576]` final FP16 output |
+| `rmsnorm_test` | `[32,32]` FP16 RMSNorm | all stored FP16 outputs |
+| `smollm2_attention_test` | Q/K/V, RoPE, QK, softmax, P x V, and `o_proj` | `[128,576]` attention output |
+| `sxm_mem_transpose_test` | continuous MEM -> SXM -> MEM FP16 transpose | four 32 x 32 matrices |
+
+The full FFN uses all four MXMs and currently schedules 90,817 cycles. Its final
+gate/up reduction streams accumulator results directly into the shared VXM
+SwiGLU pipeline. The complete SmolLM2 attention workload uses sequence length
+128, hidden size 576, 9 query heads, 3 KV heads, and head dimension 64; its
+validated schedule is 81,273 cycles.
 
 ## Build
 
-On Windows with Visual Studio generator:
+The current Windows build is tested with Visual Studio 2026 Community:
 
 ```powershell
-cmake -S . -B build-vs2019
-cmake --build build-vs2019 --config Debug
-ctest --test-dir build-vs2019 -C Debug --output-on-failure
+cmake -S . -B build-vs2026 `
+  -G "Visual Studio 18 2026" `
+  -A x64
+cmake --build build-vs2026 --config Release
+ctest --test-dir build-vs2026 -C Release --output-on-failure
 ```
 
-With a single-config generator:
+For another CMake generator:
 
 ```powershell
 cmake -S . -B build
@@ -90,73 +107,70 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-## Common Tests
-
-Run the offline ICU FFN test:
+Run the two largest regressions directly:
 
 ```powershell
-ctest --test-dir build-vs2019 -C Debug -R mem_dual_mxm_swiglu_offline_icu --output-on-failure
+build-vs2026\Release\dual_hemisphere_w8a16_swiglu_test.exe
+build-vs2026\Release\smollm2_attention_test.exe
 ```
 
-Run the VXM tests:
+Whole-system logging is disabled by default because per-cycle traces are
+expensive. Small tests and demos can provide `TspSliceSystem::LogSinks` for
+separate ICU, MEM, MXM, VXM, SXM, and system logs.
+
+## Schedule Diagrams
+
+- [W8A16 projection pipeline](docs/w8a16_projection_pipeline.svg)
+- [Full FFN pipeline](docs/w8a16_swiglu_pipeline.svg)
+- [Full FFN detailed ICU schedule](docs/w8a16_swiglu_schedule_detail.svg)
+- [SmolLM2 attention pipeline](docs/smollm2_attention_pipeline.svg)
+- [Attention optimization comparison](docs/smollm2_attention_pipeline_optimization.svg)
+- [Attention detailed ICU schedule](docs/smollm2_attention_schedule_detail.svg)
+
+Regenerate the FFN schedule:
 
 ```powershell
-ctest --test-dir build-vs2019 -C Debug -R "vxm_alu|vxm_lane|vxm_superlane|vxm_slice" --output-on-failure
+$env:FTLPU_SCHEDULE_TRACE = "$PWD\logs\w8a16_swiglu\schedule.csv"
+$env:FTLPU_SCHEDULE_TRACE_ONLY = "1"
+build-vs2026\Release\dual_hemisphere_w8a16_swiglu_test.exe
+python scripts\render_swiglu_schedule_trace.py `
+  logs\w8a16_swiglu\schedule.csv `
+  docs\w8a16_swiglu_schedule_detail.svg
 ```
 
-Run the attention projection test:
+Regenerate the attention schedule:
 
 ```powershell
-ctest --test-dir build-vs2019 -C Debug -R attention_projection_test --output-on-failure
+$env:FTLPU_SCHEDULE_TRACE = "$PWD\logs\smollm2_attention\schedule.csv"
+$env:FTLPU_SCHEDULE_TRACE_ONLY = "1"
+build-vs2026\Release\smollm2_attention_test.exe
+python scripts\render_schedule_trace.py `
+  logs\smollm2_attention\schedule.csv `
+  docs\smollm2_attention_schedule_detail.svg
 ```
 
-## Logs and Diagrams
+Accumulator bars in detailed diagrams use purple for partial sums retained in
+SRAM and red for final `stream+clear` operations.
 
-FFN integration tests skip log generation by default so the long-running
-workloads are not dominated by file I/O. Enable logs when debugging:
+## Repository Layout
 
-```powershell
-$env:FTLPU_FFN_LOG = "1"
-ctest --test-dir build-vs2019 -C Debug -R mem_dual_mxm_swiglu_offline_icu --output-on-failure
-Remove-Item Env:\FTLPU_FFN_LOG
-```
+- `include/ftlpu/core/`: hardware constants, streams, FP16, and ISA codec.
+- `include/ftlpu/dma/`: host memory, global MEM routing, DMA descriptors, and engine.
+- `include/ftlpu/icu/`: unified program-ordered slice IQs and IFetch.
+- `include/ftlpu/mem/`: SRAM, MEM instruction pipelines, and accumulators.
+- `include/ftlpu/mxm/`: supercells, arrays, control slices, and GEMM datapath.
+- `include/ftlpu/program/`: ProgramImage layout, packet encoding, bootstrap, and autonomous launch.
+- `include/ftlpu/vxm/`: ALU, lane, superlane, and central VXM slice.
+- `include/ftlpu/sxm/`: Shift/Distribute/Transpose/Permute models.
+- `include/ftlpu/system/`: stream topology and full-chip integration.
+- `tests/`: unit and offline whole-system numerical regressions.
+- `examples/`: small trace-oriented demos.
+- `scripts/`: schedule visualization tools.
+- `docs/`: architecture notes, optimization studies, and diagrams.
 
-When enabled, integration tests write logs under the build directory:
+## Documentation
 
-- `build-vs2019/logs/mem_mxm/`
-- `build-vs2019/logs/mem_dual_mxm_swiglu_offline_icu/`
-- `build-vs2019/logs/mem_dual_mxm_swiglu_early_compute_icu/`
-
-The FFN tests generate four functional-unit logs:
-
-- `icu.log`
-- `mem.log`
-- `mxm.log`
-- `vxm.log`
-
-They also generate a pipeline diagram:
-
-- `build-vs2019/logs/mem_dual_mxm_swiglu_offline_icu/pipeline.svg`
-
-The diagram separates `MEM W read`, `MEM A read`, `MEM write`, `MXM0 load`,
-`MXM0 compute`, `MXM1 load`, `MXM1 compute`, and `VXM` rows. There is no
-separate `LW` phase; `IW` fills a selected buffer and `Compute` names the buffer
-to consume plus the output stream base.
-
-## Demo Executables
-
-After building, demos are available under the build output directory. Examples:
-
-```powershell
-.\build-vs2019\Debug\tile_array_trace_demo.exe tile_array_trace.log
-.\build-vs2019\Debug\vector_roundtrip_demo.exe vector_roundtrip.log
-.\build-vs2019\Debug\mxm_control_trace_demo.exe mxm_control_trace.log
-.\build-vs2019\Debug\mem_mxm_trace_demo.exe mem_mxm_mem.log mem_mxm_mxm.log
-.\build-vs2019\Debug\vxm_lane_trace_demo.exe vxm_lane_trace.log
-```
-
-## More Documentation
-
-See [docs/architecture.md](docs/architecture.md) for the current architecture,
-timing model, instruction queues, FFN workload, data layout, generated logs, and
-known limitations.
+- [Architecture reference](docs/architecture.md)
+- [中文架构说明](docs/architecture.zh-CN.md)
+- [Attention pipeline optimization study](docs/attention_pipeline_optimization.md)
+- [Editable topology diagram](docs/FTLPU.drawio)

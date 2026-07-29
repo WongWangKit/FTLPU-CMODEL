@@ -33,7 +33,7 @@ public:
         std::array<bool, kTotalLanes> seen{};
         for (const auto source : map) {
             if (source >= kTotalLanes) {
-                throw std::out_of_range("SXM permutation source is outside the 320-lane plane");
+                throw std::out_of_range("SXM permutation source is outside the physical vector plane");
             }
             if (seen[source]) {
                 throw std::logic_error("SXM permutation map is not bijective");

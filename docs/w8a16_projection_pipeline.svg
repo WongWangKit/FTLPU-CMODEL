@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="810" viewBox="0 0 1320 810" role="img" aria-labelledby="title desc">
+  <title id="title">Offline ICU W8A16 projection pipeline with two accumulator groups</title>
+  <desc id="desc">MXM0 and MXM1 compute in parallel and write to independent four-slice MEM accumulator groups.</desc>
+  <style>
+    text { font-family: "Segoe UI", Arial, sans-serif; fill: #17202a; letter-spacing: 0; }
+    .title { font-size: 25px; font-weight: 650; }
+    .subtitle { font-size: 14px; fill: #52606d; }
+    .section { font-size: 17px; font-weight: 650; }
+    .label { font-size: 13px; font-weight: 600; }
+    .small { font-size: 11px; fill: #52606d; }
+    .bartext { font-size: 11px; font-weight: 650; fill: #10212b; }
+    .axis { stroke: #83909b; stroke-width: 1; }
+    .grid { stroke: #d9dfe4; stroke-width: 1; }
+    .phase { fill: #e8edf1; stroke: #83909b; }
+    .mem { fill: #80c7b2; stroke: #2d7765; }
+    .vxm { fill: #f3c969; stroke: #98701d; }
+    .mxm0 { fill: #77a9e8; stroke: #3169aa; }
+    .mxm1 { fill: #9a8cda; stroke: #5f4eaa; }
+    .acc0 { fill: #eb8d79; stroke: #a74431; }
+    .acc1 { fill: #efaa70; stroke: #a65c21; }
+    .idle { fill: #f7f8f9; stroke: #d9dfe4; }
+  </style>
+
+  <defs>
+    <g id="matrix-block">
+      <rect x="320.5" y="456" width="144" height="25" class="mem"/>
+      <rect x="343" y="494" width="144" height="25" class="mxm0"/>
+      <rect x="343" y="532" width="144" height="25" class="mxm1"/>
+      <rect x="356.5" y="570" width="157.5" height="25" class="mxm0"/>
+      <rect x="356.5" y="608" width="157.5" height="25" class="mxm1"/>
+      <rect x="370" y="646" width="157.5" height="25" class="acc0"/>
+      <rect x="365.5" y="684" width="157.5" height="25" class="acc1"/>
+      <text x="372" y="473" class="bartext">32 activation reads</text>
+      <text x="395" y="511" class="bartext">32 pulses</text>
+      <text x="395" y="549" class="bartext">32 pulses</text>
+      <text x="399" y="587" class="bartext">FP32 output</text>
+      <text x="399" y="625" class="bartext">FP32 output</text>
+      <text x="410" y="663" class="bartext">ACC W0</text>
+      <text x="405" y="701" class="bartext">ACC W4</text>
+    </g>
+  </defs>
+
+  <rect width="1320" height="810" fill="#ffffff"/>
+  <text x="38" y="44" class="title">Offline ICU W8A16 projection pipeline</text>
+  <text x="38" y="70" class="subtitle">A[128,576] fp16 x W[576,1536] int8 -&gt; C[128,1536] fp32, two independent four-slice MEM ACC groups</text>
+
+  <text x="38" y="112" class="section">Full workload</text>
+  <text x="190" y="112" class="small">24 output-tile pairs x 18 K tiles x 226 cycles; final northbound drain included</text>
+  <line x1="190" y1="140" x2="1270" y2="140" class="axis"/>
+  <text x="190" y="132" class="small">cycle 0</text>
+  <text x="1210" y="132" class="small">cycle 97,638</text>
+  <text x="38" y="166" class="label">ICU phases</text>
+  <rect x="190" y="150" width="45" height="26" class="phase"/>
+  <rect x="235" y="150" width="45" height="26" class="phase"/>
+  <rect x="280" y="150" width="675" height="26" class="phase"/>
+  <rect x="955" y="150" width="45" height="26" class="phase"/>
+  <rect x="1000" y="150" width="225" height="26" class="phase"/>
+  <rect x="1225" y="150" width="45" height="26" class="idle"/>
+  <text x="200" y="168" class="bartext">K0</text>
+  <text x="245" y="168" class="bartext">K1</text>
+  <text x="603" y="168" class="bartext">...</text>
+  <text x="966" y="168" class="bartext">K17</text>
+  <text x="1022" y="168" class="bartext">repeat for N pair 1..23</text>
+  <text x="1234" y="168" class="small">drain</text>
+
+  <text x="38" y="224" class="section">Expanded phase S .. S+226</text>
+  <text x="267" y="224" class="small">both MXMs compute together; group9 ACC is one west hop later than group10</text>
+  <line x1="190" y1="250" x2="1207" y2="250" class="axis"/>
+  <line x1="190" y1="250" x2="190" y2="735" class="grid"/>
+  <line x1="370" y1="250" x2="370" y2="735" class="grid"/>
+  <line x1="550" y1="250" x2="550" y2="735" class="grid"/>
+  <line x1="730" y1="250" x2="730" y2="735" class="grid"/>
+  <line x1="910" y1="250" x2="910" y2="735" class="grid"/>
+  <line x1="1090" y1="250" x2="1090" y2="735" class="grid"/>
+  <line x1="1207" y1="250" x2="1207" y2="735" class="grid"/>
+  <text x="186" y="243" class="small">0</text>
+  <text x="362" y="243" class="small">40</text>
+  <text x="542" y="243" class="small">80</text>
+  <text x="718" y="243" class="small">120</text>
+  <text x="898" y="243" class="small">160</text>
+  <text x="1078" y="243" class="small">200</text>
+  <text x="1195" y="243" class="small">226</text>
+
+  <text x="38" y="287" class="label">MEM W read</text>
+  <rect x="194.5" y="269" width="67.5" height="25" class="mem"/>
+  <text x="201" y="286" class="bartext">slices 0..28</text>
+  <text x="38" y="325" class="label">VXM dequant</text>
+  <rect x="235" y="307" width="36" height="25" class="vxm"/>
+  <text x="240" y="324" class="bartext">W8 to FP16</text>
+  <text x="38" y="401" class="label">MXM0 IW</text>
+  <rect x="298" y="383" width="18" height="25" class="mxm0"/>
+  <text x="299" y="400" class="bartext">4c</text>
+  <text x="38" y="439" class="label">MXM1 IW</text>
+  <rect x="316" y="421" width="18" height="25" class="mxm1"/>
+  <text x="317" y="438" class="bartext">4c</text>
+
+  <text x="38" y="477" class="label">MEM A read</text>
+  <text x="38" y="515" class="label">MXM0 Compute</text>
+  <text x="38" y="553" class="label">MXM1 Compute</text>
+  <text x="38" y="591" class="label">MXM0 output</text>
+  <text x="38" y="629" class="label">MXM1 output</text>
+  <text x="38" y="667" class="label">ACC group9</text>
+  <text x="38" y="705" class="label">ACC group10</text>
+  <use href="#matrix-block"/>
+  <use href="#matrix-block" x="216"/>
+  <use href="#matrix-block" x="432"/>
+  <use href="#matrix-block" x="648"/>
+
+  <rect x="38" y="758" width="14" height="14" class="mem"/>
+  <text x="59" y="770" class="small">MEM</text>
+  <rect x="116" y="758" width="14" height="14" class="vxm"/>
+  <text x="137" y="770" class="small">VXM</text>
+  <rect x="194" y="758" width="14" height="14" class="mxm0"/>
+  <text x="215" y="770" class="small">MXM0</text>
+  <rect x="282" y="758" width="14" height="14" class="mxm1"/>
+  <text x="303" y="770" class="small">MXM1</text>
+  <rect x="370" y="758" width="14" height="14" class="acc0"/>
+  <text x="391" y="770" class="small">Group9 ACC</text>
+  <rect x="474" y="758" width="14" height="14" class="acc1"/>
+  <text x="495" y="770" class="small">Group10 ACC</text>
+  <text x="605" y="770" class="small">Each ACC reads and writes one SRAM address; both groups run concurrently.</text>
+</svg>

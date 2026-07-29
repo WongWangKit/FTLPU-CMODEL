@@ -1,0 +1,201 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1100" viewBox="0 0 1800 1100">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#4a5560"/>
+    </marker>
+    <style>
+      .title { font: 700 30px 'Segoe UI', Arial, sans-serif; fill: #18212b; }
+      .subtitle { font: 16px 'Segoe UI', Arial, sans-serif; fill: #5d6874; }
+      .section { font: 700 20px 'Segoe UI', Arial, sans-serif; fill: #26313c; }
+      .row { font: 600 15px 'Segoe UI', Arial, sans-serif; fill: #26313c; }
+      .bar { font: 600 13px 'Segoe UI', Arial, sans-serif; fill: #17212b; }
+      .small { font: 12px 'Segoe UI', Arial, sans-serif; fill: #4e5965; }
+      .note { font: 13px 'Segoe UI', Arial, sans-serif; fill: #3e4a56; }
+      .grid { stroke: #dde3e8; stroke-width: 1; }
+      .lane { fill: #fafbfc; stroke: #d8dee5; stroke-width: 1; }
+      .memr { fill: #90c9a8; stroke: #416b54; stroke-width: 1.2; }
+      .memw { fill: #f2cf81; stroke: #80672f; stroke-width: 1.2; }
+      .mxm0 { fill: #91b8e8; stroke: #41678f; stroke-width: 1.2; }
+      .mxm1 { fill: #b1a7df; stroke: #5e568d; stroke-width: 1.2; }
+      .vxm { fill: #ed9c72; stroke: #8a4e31; stroke-width: 1.2; }
+      .sxm { fill: #76c7c0; stroke: #34736e; stroke-width: 1.2; }
+      .acc { fill: #dca2c2; stroke: #814f6b; stroke-width: 1.2; }
+      .quiet { fill: #eef1f4; stroke: #aab4be; stroke-width: 1.1; }
+      .phase { fill: #f7f9fb; stroke: #c9d1d9; stroke-width: 1.2; }
+    </style>
+  </defs>
+
+  <rect width="1800" height="1080" fill="#ffffff"/>
+  <text x="42" y="48" class="title">SmolLM2 Attention Pipeline</text>
+  <text x="42" y="76" class="subtitle">seq_len=128, hidden=576, Q heads=9, KV heads=3, head_dim=64, W8A16 projection</text>
+
+  <text x="42" y="118" class="section">1. End-to-end phases</text>
+  <line x1="250" y1="112" x2="1735" y2="112" stroke="#4a5560" stroke-width="2.5" stroke-dasharray="10 8" marker-end="url(#arrow)"/>
+  <text x="1742" y="118" class="row">Time</text>
+
+  <g transform="translate(250,136)">
+    <rect x="0" y="0" width="300" height="80" rx="5" class="phase"/>
+    <rect x="300" y="0" width="320" height="80" rx="5" class="phase"/>
+    <rect x="620" y="0" width="350" height="80" rx="5" class="phase"/>
+    <rect x="970" y="0" width="270" height="80" rx="5" class="phase"/>
+    <rect x="1240" y="0" width="270" height="80" rx="5" class="phase"/>
+    <text x="150" y="28" text-anchor="middle" class="row">Q / K / V projection</text>
+    <text x="150" y="51" text-anchor="middle" class="small">W8 read, VXM dequant, MXM GEMM</text>
+    <text x="150" y="68" text-anchor="middle" class="small">Q/K stores; V writes packed x16</text>
+    <text x="460" y="28" text-anchor="middle" class="row">QK score</text>
+    <text x="460" y="51" text-anchor="middle" class="small">load Q as WS weights</text>
+    <text x="460" y="68" text-anchor="middle" class="small">stream K, score goes west</text>
+    <text x="795" y="28" text-anchor="middle" class="row">Softmax + P replay layout</text>
+    <text x="795" y="51" text-anchor="middle" class="small">scale + max | exp + sum | normalize</text>
+    <text x="795" y="68" text-anchor="middle" class="small">P3 x16 -&gt; SXM -&gt; persistent replay MEM</text>
+    <text x="1105" y="28" text-anchor="middle" class="row">P x V</text>
+    <text x="1105" y="51" text-anchor="middle" class="small">V x16 -&gt; SXM transpose/permute -&gt; IW(column)</text>
+    <text x="1105" y="68" text-anchor="middle" class="small">P reads persistent MEM as 2-stream replay</text>
+    <text x="1375" y="28" text-anchor="middle" class="row">o_proj</text>
+    <text x="1375" y="51" text-anchor="middle" class="small">concat heads by MEM layout</text>
+    <text x="1375" y="68" text-anchor="middle" class="small">dual MXM + dual accumulator</text>
+  </g>
+
+  <text x="42" y="260" class="section">2. Expanded hardware schedule</text>
+  <text x="42" y="282" class="subtitle">Relative timing only; repeated head and reduction blocks are compressed.</text>
+
+  <g transform="translate(0,325)">
+    <rect x="190" y="0" width="1560" height="54" class="lane"/>
+    <rect x="190" y="58" width="1560" height="54" class="lane"/>
+    <rect x="190" y="116" width="1560" height="54" class="lane"/>
+    <rect x="190" y="174" width="1560" height="54" class="lane"/>
+    <rect x="190" y="232" width="1560" height="54" class="lane"/>
+    <rect x="190" y="290" width="1560" height="54" class="lane"/>
+    <rect x="190" y="348" width="1560" height="54" class="lane"/>
+    <rect x="190" y="406" width="1560" height="54" class="lane"/>
+    <rect x="190" y="464" width="1560" height="54" class="lane"/>
+    <rect x="190" y="522" width="1560" height="54" class="lane"/>
+
+    <text x="32" y="34" class="row">MEM read</text>
+    <text x="32" y="92" class="row">MEM write</text>
+    <text x="32" y="150" class="row">SXM</text>
+    <text x="32" y="208" class="row">VXM</text>
+    <text x="32" y="266" class="row">MXM0 load</text>
+    <text x="32" y="324" class="row">MXM0 compute</text>
+    <text x="32" y="382" class="row">MXM1 load</text>
+    <text x="32" y="440" class="row">MXM1 compute</text>
+    <text x="32" y="498" class="row">ACC0</text>
+    <text x="32" y="556" class="row">ACC1</text>
+
+    <line x1="205" y1="-14" x2="1715" y2="-14" stroke="#4a5560" stroke-width="2" stroke-dasharray="9 7" marker-end="url(#arrow)"/>
+    <text x="1722" y="-8" class="row">Time</text>
+    <line x1="510" y1="0" x2="510" y2="576" class="grid"/>
+    <line x1="850" y1="0" x2="850" y2="576" class="grid"/>
+    <line x1="1190" y1="0" x2="1190" y2="576" class="grid"/>
+    <line x1="1450" y1="0" x2="1450" y2="576" class="grid"/>
+    <text x="350" y="-22" text-anchor="middle" class="small">Projection + RoPE</text>
+    <text x="680" y="-22" text-anchor="middle" class="small">QK + softmax</text>
+    <text x="1020" y="-22" text-anchor="middle" class="small">P layout + P x V</text>
+    <text x="1320" y="-22" text-anchor="middle" class="small">Context route</text>
+    <text x="1600" y="-22" text-anchor="middle" class="small">o_proj</text>
+
+    <!-- MEM read -->
+    <rect x="210" y="10" width="105" height="34" rx="4" class="memr"/>
+    <text x="262" y="32" text-anchor="middle" class="bar">Wq/Wk/Wv</text>
+    <rect x="325" y="10" width="165" height="34" rx="4" class="memr"/>
+    <text x="408" y="32" text-anchor="middle" class="bar">X activations</text>
+    <rect x="525" y="10" width="92" height="34" rx="4" class="memr"/>
+    <text x="571" y="32" text-anchor="middle" class="bar">Q weights</text>
+    <rect x="625" y="10" width="95" height="34" rx="4" class="memr"/>
+    <text x="672" y="32" text-anchor="middle" class="bar">K stream</text>
+    <rect x="730" y="10" width="105" height="34" rx="4" class="memr"/>
+    <text x="782" y="32" text-anchor="middle" class="bar">P1 / P2 data</text>
+    <rect x="865" y="10" width="130" height="34" rx="4" class="memr"/>
+    <text x="930" y="32" text-anchor="middle" class="bar">softmax P</text>
+    <rect x="1005" y="10" width="165" height="34" rx="4" class="memr"/>
+    <text x="1087" y="32" text-anchor="middle" class="bar">packed V: 16 streams</text>
+    <rect x="1470" y="10" width="100" height="34" rx="4" class="memr"/>
+    <text x="1520" y="32" text-anchor="middle" class="bar">Wo int8</text>
+    <rect x="1580" y="10" width="150" height="34" rx="4" class="memr"/>
+    <text x="1655" y="32" text-anchor="middle" class="bar">context FP16</text>
+
+    <!-- MEM write -->
+    <rect x="360" y="68" width="130" height="34" rx="4" class="memw"/>
+    <text x="425" y="90" text-anchor="middle" class="bar">Q/K + V packed x16</text>
+    <rect x="650" y="68" width="82" height="34" rx="4" class="memw"/>
+    <text x="691" y="90" text-anchor="middle" class="bar">scaled x</text>
+    <rect x="742" y="68" width="82" height="34" rx="4" class="memw"/>
+    <text x="783" y="90" text-anchor="middle" class="bar">exp(x)</text>
+    <rect x="826" y="68" width="94" height="34" rx="4" class="memw"/>
+    <text x="873" y="90" text-anchor="middle" class="bar">softmax P</text>
+    <rect x="930" y="68" width="175" height="34" rx="4" class="memw"/>
+    <text x="1017" y="90" text-anchor="middle" class="bar">P transpose replay layout</text>
+    <rect x="1120" y="68" width="95" height="34" rx="4" class="memw"/>
+    <text x="1167" y="90" text-anchor="middle" class="bar">context</text>
+    <rect x="1645" y="68" width="85" height="34" rx="4" class="memw"/>
+    <text x="1687" y="90" text-anchor="middle" class="bar">output</text>
+
+    <!-- SXM and VXM -->
+    <rect x="900" y="126" width="190" height="34" rx="4" class="sxm"/>
+    <text x="995" y="148" text-anchor="middle" class="bar">P x16 -&gt; replay MEM</text>
+    <rect x="1120" y="126" width="175" height="34" rx="4" class="sxm"/>
+    <text x="1207" y="148" text-anchor="middle" class="bar">V x16 -&gt; IW(column)</text>
+    <rect x="220" y="184" width="135" height="34" rx="4" class="vxm"/>
+    <text x="287" y="206" text-anchor="middle" class="bar">dequant W8</text>
+    <rect x="365" y="184" width="125" height="34" rx="4" class="vxm"/>
+    <text x="427" y="206" text-anchor="middle" class="bar">RoPE Q/K</text>
+    <rect x="640" y="184" width="90" height="34" rx="4" class="vxm"/>
+    <text x="685" y="206" text-anchor="middle" class="bar">scale + max</text>
+    <rect x="740" y="184" width="84" height="34" rx="4" class="vxm"/>
+    <text x="782" y="206" text-anchor="middle" class="bar">exp + sum</text>
+    <rect x="826" y="184" width="94" height="34" rx="4" class="vxm"/>
+    <text x="873" y="206" text-anchor="middle" class="bar">divide + cast</text>
+    <rect x="1130" y="184" width="85" height="34" rx="4" class="vxm"/>
+    <text x="1172" y="206" text-anchor="middle" class="bar">cast FP16</text>
+    <rect x="1470" y="184" width="105" height="34" rx="4" class="vxm"/>
+    <text x="1522" y="206" text-anchor="middle" class="bar">dequant Wo</text>
+    <rect x="1645" y="184" width="85" height="34" rx="4" class="vxm"/>
+    <text x="1687" y="206" text-anchor="middle" class="bar">cast FP16</text>
+
+    <!-- MXM load/compute -->
+    <rect x="245" y="242" width="95" height="34" rx="4" class="mxm0"/>
+    <text x="292" y="264" text-anchor="middle" class="bar">IW Wq/Wv</text>
+    <rect x="530" y="242" width="85" height="34" rx="4" class="mxm0"/>
+    <text x="572" y="264" text-anchor="middle" class="bar">IW Q</text>
+    <rect x="955" y="242" width="90" height="34" rx="4" class="mxm0"/>
+    <text x="1000" y="264" text-anchor="middle" class="bar">IW Vlo c0..3</text>
+    <rect x="1500" y="242" width="95" height="34" rx="4" class="mxm0"/>
+    <text x="1547" y="264" text-anchor="middle" class="bar">IW Wo half</text>
+    <rect x="340" y="300" width="150" height="34" rx="4" class="mxm0"/>
+    <text x="415" y="322" text-anchor="middle" class="bar">Q / V projection</text>
+    <rect x="625" y="300" width="95" height="34" rx="4" class="mxm0"/>
+    <text x="672" y="322" text-anchor="middle" class="bar">QK score</text>
+    <rect x="1025" y="300" width="145" height="34" rx="4" class="mxm0"/>
+    <text x="1097" y="322" text-anchor="middle" class="bar">P x V dims 0..31</text>
+    <rect x="1580" y="300" width="150" height="34" rx="4" class="mxm0"/>
+    <text x="1655" y="322" text-anchor="middle" class="bar">o_proj partial 0</text>
+
+    <rect x="245" y="358" width="95" height="34" rx="4" class="mxm1"/>
+    <text x="292" y="380" text-anchor="middle" class="bar">IW Wk</text>
+    <rect x="955" y="358" width="90" height="34" rx="4" class="mxm1"/>
+    <text x="1000" y="380" text-anchor="middle" class="bar">IW Vhi c0..3</text>
+    <rect x="1500" y="358" width="95" height="34" rx="4" class="mxm1"/>
+    <text x="1547" y="380" text-anchor="middle" class="bar">IW Wo half</text>
+    <rect x="340" y="416" width="150" height="34" rx="4" class="mxm1"/>
+    <text x="415" y="438" text-anchor="middle" class="bar">K projection</text>
+    <rect x="1025" y="416" width="145" height="34" rx="4" class="mxm1"/>
+    <text x="1097" y="438" text-anchor="middle" class="bar">P x V dims 32..63</text>
+    <rect x="1580" y="416" width="150" height="34" rx="4" class="mxm1"/>
+    <text x="1655" y="438" text-anchor="middle" class="bar">o_proj partial 1</text>
+
+    <!-- Accumulators -->
+    <rect x="1580" y="474" width="150" height="34" rx="4" class="acc"/>
+    <text x="1655" y="496" text-anchor="middle" class="bar">add -&gt; stream + clear</text>
+    <rect x="1580" y="532" width="150" height="34" rx="4" class="acc"/>
+    <text x="1655" y="554" text-anchor="middle" class="bar">add -&gt; stream + clear</text>
+  </g>
+
+  <g transform="translate(42,947)">
+    <rect x="0" y="0" width="1710" height="136" rx="6" fill="#f7f9fb" stroke="#c9d1d9"/>
+    <text x="18" y="28" class="section">Key dataflow</text>
+    <text x="18" y="53" class="note">QK: both local MXMs hold independent Q blocks; replicated K streams through both arrays. Complete score tiles drain from MEM ACC to VXM.</text>
+    <text x="18" y="76" class="note">P3 writes packed x16 directly; SXM creates persistent replay MEM after softmax. P x V uses SXM only for V IW loading and replays P as two FP16 streams.</text>
+    <text x="18" y="99" class="note">Context stays in its producer hemisphere; o_proj routes a remote half on demand instead of materializing a cross-hemisphere MEM copy.</text>
+    <text x="18" y="122" class="note">o_proj: MXM0/1 emit FP32 partial sums to ACC0/1. Stream destination emits the completed value and clears that accumulator address.</text>
+  </g>
+</svg>

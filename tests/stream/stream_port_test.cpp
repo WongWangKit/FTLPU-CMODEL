@@ -14,22 +14,29 @@ int main()
     fabric.begin_cycle();
     ftlpu::StreamOutputPort producer(
         fabric, 0, ftlpu::StreamDirection::East, "producer");
-    producer.write_payload_segment(4, 7, payload, 123);
+    constexpr auto kTile = ftlpu::hw::kTileRows - 1;
+    producer.write_payload_segment(kTile, 7, payload, 123);
     fabric.commit_cycle();
 
     fabric.begin_cycle();
-    ftlpu::StreamInputPort consumer(
-        fabric, 0, ftlpu::StreamDirection::East, "consumer");
-    assert(consumer.segment_valid(4, 7));
-    const auto segment = consumer.consume_segment(4, 7);
-    for (std::size_t lane = 0; lane < segment.size(); ++lane) {
-        assert(segment[lane].data == lane);
-        assert(segment[lane].vector_tag == 123);
+    ftlpu::StreamInputPort consumer_a(
+        fabric, 0, ftlpu::StreamDirection::East, "consumer A");
+    ftlpu::StreamInputPort consumer_b(
+        fabric, 0, ftlpu::StreamDirection::East, "consumer B");
+    assert(consumer_a.segment_valid(kTile, 7));
+    const auto segment_a = consumer_a.consume_segment(kTile, 7);
+    assert(consumer_b.segment_valid(kTile, 7));
+    const auto segment_b = consumer_b.consume_segment(kTile, 7);
+    for (std::size_t lane = 0; lane < segment_a.size(); ++lane) {
+        assert(segment_a[lane].data == lane);
+        assert(segment_a[lane].vector_tag == 123);
+        assert(segment_b[lane].data == segment_a[lane].data);
+        assert(segment_b[lane].vector_tag == segment_a[lane].vector_tag);
     }
     fabric.stage_linear_links();
     fabric.commit_cycle();
 
-    // A consumed operand does not pass through the passive SR link.
-    assert(!fabric.cell(1, 4, 0, ftlpu::StreamId::East(7)).valid);
+    // Broadcast consumption still suppresses passive forwarding once.
+    assert(!fabric.cell(1, kTile, 0, ftlpu::StreamId::East(7)).valid);
     return 0;
 }

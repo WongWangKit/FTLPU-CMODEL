@@ -1,469 +1,476 @@
-# FTLPU-CMODEL Architecture Notes
+# FTLPU-CMODEL Architecture Reference
 
-This document describes the current C++ model in this repository. It is written
-as an implementation guide for future compiler and scheduler work.
+This document describes the current transformer-datapath implementation.
+Public Groq LPU/TSP material is architectural inspiration only; field widths,
+timing rules, and functional behavior here belong to this CModel.
 
-## Design Goal
+## 1. Current Configuration
 
-The model is a cycle-oriented playground for an FTLPU/TSP-like architecture. It
-focuses on three ideas:
-
-- Streams are explicit. Data moves through named eastward and westward streams,
-  with byte-wide stream registers.
-- Instructions are explicit. MEM, MXM, and VXM work is driven by instruction
-  queues rather than direct calls into individual tiles.
-- Timing matters. Tests check whether instructions and data arrive in the same
-  cycle at the functional unit that consumes them.
-
-This is not a bit-accurate Groq LPU/TSP model. The public material is used as
-architectural inspiration, while the exact instruction encoding and timing rules
-here are local to this CModel.
-
-## Hardware Shape
-
-The modeled slice uses the constants in `include/ftlpu/core/hardware_params.hpp`.
-
-Current topology:
-
-- 20 tile rows.
-- 44 MEM slice columns.
-- 4 MEM slices per stream-register group.
-- 11 MEM slice groups.
-- 12 stream-register columns, including both boundaries.
-- 16 lanes per tile/superlane.
-- 64 streams per lane: 32 eastward and 32 westward.
-- 1 byte per stream register.
-- One modeled hemisphere: 44 MEM/SRAM slice columns.
-- Public two-hemisphere total: 88 MEM/SRAM slices.
-- Each slice column has 20 tile-local SRAM blocks.
-- Each tile-local SRAM block has two banks.
-- Each bank is 4096 words x 16 bytes.
-- A complete slice is 20 x 2 x 4096 x 16 bytes = 2.5 MiB.
-
-Software-visible MEM addresses follow the public-style layout:
+The central vector shape is:
 
 ```text
-[39:24] TSP chip
-[23]    hemisphere, East=1 and West=0
-[22:17] slice number 0..43
-[16]    bank
-[15:4]  4096-word offset within the selected bank
-[3:0]   byte offset within the 16-byte SRAM word
+4 tiles/superlanes x 8 lanes = 32 elements
 ```
 
-The current model instantiates one hemisphere. A MEM slice receives one
-instruction stream; for `Read` and `Write`, the encoded hardware address field
-is the 13-bit slice-local word address copied from software address bits
-`[16:4]`. Address domains are kept distinct by `MemGlobalAddress24`,
-`MemSliceByteAddress17`, and `MemLocalWordAddress13` in
-`include/ftlpu/mem/address.hpp`; there are no implicit conversions between
-them. `set_sram_byte` and `sram_byte` take an explicit tile plus a
-`MemSliceByteAddress17` for byte-level DMA/test initialization, while MEM
-`Read` and `Write` carry a `MemLocalWordAddress13` and move one full aligned
-SRAM word per cycle.
+| Property | Value |
+| --- | ---: |
+| Hemispheres | 2 |
+| MEM slices | 44 per hemisphere, 88 total |
+| MEM groups | 11 per hemisphere, 4 slices per group |
+| Stream-register columns | 13 per hemisphere (`sreg0..sreg12`) |
+| Streams per lane | 32 eastward + 32 westward |
+| Stream-register width | 1 byte |
+| SRAM capacity | 2.5 MiB per slice, 220 MiB full chip |
+| MXM units | 4 total, 2 per hemisphere |
+| MXM array | 32 x 32 FP16 multiply with FP32 accumulation |
+| VXM | 1 central slice, 8 ALUs per lane |
+| SXM | 1 four-tile slice per hemisphere |
 
-## Stream Direction Conventions
+One MEM slice owns two SRAM banks. Under the 4-tile/8-lane transformer
+configuration, each bank contains `40960 x 32-byte` vector rows, so one slice
+retains 2.5 MiB rather than shrinking when the physical vector width changes.
+Each row spans all four tiles; one tile accesses its local 8-byte segment when
+the instruction wave reaches that tile.
 
-The model treats streams as lane-local channels:
+## 2. Full-Chip Topology
 
-- `E0..E31`: eastward streams.
-- `W0..W31`: westward streams.
-- Combined stream IDs `0..31` mean east streams.
-- Combined stream IDs `32..63` mean west streams.
+```text
+MXM2/MXM3 <-> SXM.W <-> MEM.W(44) <-> VXM <-> MEM.E(44) <-> SXM.E <-> MXM0/MXM1
+```
 
-For MEM instructions, the `stream` field uses the combined `0..63` numbering.
-For VXM operands, `StreamInt32(base)` consumes four consecutive byte streams and
-packs them little-endian into one int32 operand.
+Both hemispheres use the same local orientation:
 
-## MEM Model
+- `sreg0` is adjacent to VXM.
+- Eleven MEM groups occupy the boundaries `sreg0..sreg11`.
+- SXM connects the MEM boundary `sreg11` to the MXM boundary `sreg12`.
+- East streams move from VXM toward MXM.
+- West streams move from MXM toward VXM.
 
-The MEM tile-array model is in `include/ftlpu/mem/tile_array.hpp`.
+Global MEM queues `0..43` and MXMs `0..1` select East. MEM queues `44..87`
+and MXMs `2..3` select West.
 
-Important behavior:
+The shared stream fabric is double-buffered by cycle: functional units read
+current state and stage next state, then the system commits once. A value written
+this cycle is visible next cycle.
 
-- There are 44 independent MEM instruction queues, one per slice column.
-- Instructions enter at tile 0 and move north one tile per cycle.
-- Each MEM slice column is modeled as a single instruction port. A slice cannot
-  issue a `Read` and a `Write` in the same cycle; schedules that need both must
-  place them on different cycles.
-- A `Read(address, stream)` reads one aligned 16-byte SRAM word from the bank
-  selected by local word-address bit 12, one byte per lane, and writes those bytes into the
-  selected stream at the stream register adjacent to that MEM slice.
-- A `Write(address, stream)` consumes 16 bytes from the selected stream, one byte
-  per lane, and writes one aligned SRAM word into the bank selected by address
-  bit 12.
-- `SramSlice::read_vector` and `write_vector` aggregate the same local word
-  address across all 20 tile-local blocks into a 320-byte payload.
-- `MemLocalWordAddress13::next_word` and `advance_words` stay within the current
-  4096-word bank; crossing into another bank or slice is rejected.
-- `MemArrayModel::reset` clears execution state but preserves SRAM.
-  `clear_sram` clears storage explicitly, while `reset_and_clear_sram` performs
-  both operations.
-- `Gather` and `Scatter` are represented in the instruction enum, but the current
-  tests focus on `Read` and `Write`.
+### Broadcast Consumption
 
-Per cycle and per tile, one MEM instruction can move 16 bytes across the 16 lanes
-for a single stream ID.
+Multiple functional units may consume the same physical stream-register cell
+in one cycle and observe identical data and vector tags. Consumption is
+idempotent and means "at least one consumer":
 
-## DMA Model
+- any consumption suppresses passive propagation of that value;
+- multiple readers are legal;
+- multiple producers targeting the same next-state cell remain illegal.
 
-The DMA model under `include/ftlpu/dma/` separates Host storage from SRAM
-initialization:
+Broadcast consumption lets two local MXMs share one activation stream pair. It
+does not allow weight and activation data to occupy the same stream ID.
 
-- `HostMemorySpace` registers model files and tensors as independent byte
-  buffers identified by `HostBufferId` handles.
-- `DmaDescriptor` records the transaction ID, direction, purpose, Host buffer,
-  Host byte offset, global MEM address, and vector count.
-- `GlobalMemoryAddressSpace` decodes hemisphere, MEM slice, bank, and word, then
-  routes the transfer to the selected `MemArrayModel`.
-- `DmaEngine::tick` transfers at most one 320-byte vector per cycle. Consecutive
-  vectors advance by 320 bytes in the Host buffer and by one local SRAM word in
-  the same bank. Crossing a bank boundary is currently rejected.
+## 3. Clock and Control Flow
 
-Both Host-to-MEM initialization and MEM-to-Host output transfers are modeled.
+MEM, MXM control, and SXM Transpose instructions enter tile 0 at the south edge
+and advance north by one tile per cycle. Workloads must align data and control
+at every tile. Tests do not directly manipulate an in-flight tile.
 
-## MXM Model
+`TspSliceSystem::tick()` performs one complete system cycle:
 
-The MXM model lives under `include/ftlpu/mxm/`.
+1. ICU dispatches the next command from every queue.
+2. MEM, SXM, VXM, and MXM read current stream-register state.
+3. Functional units consume operands and stage outputs.
+4. Unconsumed values stage passive links.
+5. The shared stream fabric commits next state.
 
-Current components:
+Whole-system tests may construct the static schedule on the host, but the
+autonomous path loads both instructions and data through DMA. After the
+minimal bootstrap state is applied, tests call only `tick()` until the offline
+schedule completes.
 
-- `MxmSupercell`: one 16 x 16 int8 weight block.
-- `MxmArray`: a 20 x 20 grid of supercells.
-- `MxmControlSlice`: south-to-north control pipeline for `IW` and `Compute`.
-- `Mxm`: wrapper containing the array, its control slice, and the datapath
-  state for activation flow, int32 accumulation, and output stream injection.
+### Autonomous Program Launch
 
-The system contains two MXMs on the east side of MEM.
+The modeled launch path is:
+
+```text
+Host ProgramImage
+  -> ProgramSramLayout
+  -> DMA descriptors
+  -> local SRAM
+  -> MEM ICU local bootstrap fetch
+  -> MEM Read
+  -> stream-register fabric
+  -> target ICU IFetch
+  -> functional slice
+```
+
+`ProgramImage` contains encoded instruction sections targeted at concrete ICU
+locations and vector-aligned data sections. `ProgramSramLayout` pads each
+instruction block to 640 bytes (40 packets of 16 bytes), assigns non-overlapping
+SRAM regions, and emits host-to-memory DMA descriptors.
+
+Bootstrap is deliberately not a second program-loading path. It supplies only:
+
+- a local SRAM start address for each participating MEM ICU;
+- a `Fetch` followed by `Sync` for non-MEM target IQs.
+
+Each MEM ICU reads its own initial program block directly from its local SRAM.
+Loader instructions in that block stream other program blocks to their target
+ICUs. A coordinator `Notify` releases the target `Sync` instructions after the
+loads have completed. The host does not enqueue the post-bootstrap functional
+instruction stream directly.
+
+The autonomous builder currently requires each per-IQ schedule to fit one
+640-byte IFetch block.
+
+## 4. MEM
+
+### Organization
+
+Each hemisphere has 44 MEM slice columns and one instruction queue per slice.
+Four adjacent slices form a group between two stream-register boundaries.
+Groups 9 and 10, slices `36..39` and `40..43`, retain normal SRAM behavior and
+also implement FP32 accumulation.
+
+A MEM instruction is a single-port operation for its slice. A slice cannot read
+and write in the same cycle, even at different addresses. An accumulator
+operation reserves all four slices in its group for that tile and cycle.
+
+### Instructions
+
+- `Read(address, stream)` reads the tile-local 8-byte SRAM segment and writes it
+  to one stream ID.
+- `Write(address, stream)` consumes one 8-byte stream segment and stores it.
+- `Accumulate(address, west_stream_base, destination)` consumes four consecutive
+  west streams as FP32, adds the selected four-slice SRAM value, and either:
+  - writes the sum back to SRAM; or
+  - emits the sum on the same four west streams and clears the SRAM slot.
+- `Gather` and `Scatter` are encoded but intentionally reject execution because
+  the address-stream datapath is not modeled yet.
+
+Each instruction wave eventually visits all four tiles, so a complete wave
+moves one 32-byte physical vector row as four skewed 8-byte segments.
+
+### Addressing
+
+Addresses use separate semantic fields rather than the former
+`address + lane` convention:
+
+```text
+global byte address = hemisphere | MEM slice | bank | row | byte offset
+MEM instruction     = bank | row
+```
+
+The address type names `MemGlobalAddress24`, `MemSliceByteAddress17`, and
+`MemLocalWordAddress13` retain historical suffixes for source compatibility;
+the actual field widths are derived from the active hardware configuration.
+The fields use:
+
+- `ceil(log2(hemisphere_count))` bits for hemisphere;
+- `ceil(log2(mem_slice_count))` bits for MEM slice;
+- `ceil(log2(bank_count))` bits for bank;
+- `ceil(log2(rows_per_bank))` bits for row;
+- `ceil(log2(row_bytes))` bits for byte offset.
+
+For the 4x8 transformer configuration this means 1 hemisphere bit, 6 slice
+bits, 1 bank bit, 16 row bits, and 5 byte-offset bits. Only values inside the
+configured counts are legal even where a bit field has unused encodings.
+`MemInstruction::address` carries only `bank | row`; tile and lane select the
+physical segment and byte within the 32-byte vector row.
+
+`MemLocalWordAddress13::advance_words()` linearizes `(bank,row)` while
+incrementing. It therefore crosses from the last row of one bank to row zero of
+the next bank, but never crosses a MEM-slice boundary.
+
+### DMA
+
+`DmaDescriptor` identifies direction, purpose, host buffer and byte offset,
+global MEM base address, and physical-vector count. `DmaEngine` moves at most
+one physical vector per cycle. Every beat accesses one hemisphere, one MEM
+slice, one bank, and one vector row. A multi-beat descriptor uses the local
+word-address increment rule above, so it may span both banks of one slice.
+
+Transfer IDs are non-zero and allocated monotonically by
+`DmaEngine::enqueue()`. Pending and active requests therefore cannot reuse an
+ID. Completions are exposed as a consumable queue through
+`completion_ready()` and `pop_completion()`; `completion_history()` is retained
+separately for debugging.
+
+## 5. MXM
+
+Each `Mxm` contains:
+
+- a `4 x 4` array of supercells;
+- one `8 x 8` FP16 weight block per supercell;
+- two peer weight buffers per supercell;
+- a south-to-north control slice;
+- activation-flow and FP32 output state.
 
 ### Weight Loading
 
-Each supercell has two peer weight buffers. `IW(buffer)` injects one 16 x 16
-weight block into the west side of the selected row buffer. On every valid `IW`
-cycle for that row, the selected buffer shifts one column to the east and the
-new block enters column 0. To end with column 0..19 in the expected order, MEM
-reads weight column blocks in reverse order: column block 19 first, then 18,
-down to 0. There is no separate `LW` commit instruction:
-`Compute(buffer, activation_stream, output_stream)` directly selects which
-buffer supplies weights for that activation token.
+`IW(buffer, column)` writes one explicit supercell-column block into the selected
+buffer. The two-bit `column` field selects columns `0..3`; load order does not
+implicitly shift the final layout. There is no `LW` instruction.
 
-The weight bytes for `IW` arrive from MEM at the east handoff stream register.
-Each MXM uses 16 streams per cycle:
+One IW pulse consumes 16 east streams:
 
-- MXM 0 consumes streams `E0..E15`.
-- MXM 1 consumes streams `E16..E31`.
+```text
+8 FP16 values x 2 byte streams = 16 streams
+```
 
-For a full 320 x 320 weight matrix, there are 20 column blocks. The current
-tests issue 20 continuous `IW` pulses into one buffer while the other buffer can
-still be used by in-flight compute. The two weight buffers have independent row
-shift state, so loading one buffer does not disturb the other.
+Local MXM0 uses `E0..E15`; local MXM1 uses `E16..E31`. Four continuous IW
+pulses fill one 32-column weight tile. The peer buffer may still supply
+in-flight Compute work while IW fills the inactive buffer.
+
+W8 weights use symmetric per-output-column scales:
+
+```text
+scale[n] = max_k(abs(W[k,n])) / 127
+```
+
+VXM multiplies INT8 values by the corresponding scale and casts them to FP16
+before IW.
 
 ### Compute
 
-`Compute(buffer, activation_stream, output_stream)` is a one-cycle pulse. The
-ICU emits one `Compute` instruction per cycle for the active compute window.
-The selected buffer id and output stream base are carried with the activation
-event as it moves across the MXM, so later `IW` commands can overwrite the
-other buffer without changing in-flight work.
+`Compute(buffer, activation_stream_base, output_stream_base)` is a one-cycle
+control pulse. Consecutive pulses inject consecutive activation vectors.
+The selected buffer and stream bases travel with the activation wave.
 
-The system-owned MXM runtime models activation flow:
+Each supercell dots an 8-element FP16 activation against eight FP16 weight
+columns. Activations move east across the four supercell columns while partial
+sums move north and accumulate as FP32. Completed outputs are automatically
+written to four consecutive west byte streams selected by the Compute
+instruction. There is no separate MXM output command or software output queue.
 
-- Activations enter from MEM into tile rows with a one-cycle south-to-north skew.
-- Each active supercell consumes one 16-byte activation vector.
-- The supercell computes 16 dot products against its 16 local weight columns.
-- Activations move east across supercell columns.
-- Partial sums accumulate into int32 result columns.
+The system owns all MXM runtime state; whole-system tests do not use a separate
+GEMM engine or runtime helper.
 
-The runtime is owned by `TspSliceSystem`. ICU `Compute` pulses consume MEM east
-handoff streams through the MXM datapath. When the contribution from tile row 19
-completes a result column block, the MXM automatically injects the int32 result
-bytes onto the MEM west streams named by the `Compute` instruction.
+## 6. VXM
 
-## VXM Model
+The central VXM contains four superlanes, eight lanes per superlane, and 8 ALUs
+per lane. Each ALU has an independent ICU queue. The same ALU instruction is
+applied across the physical lanes.
 
-The VXM model lives under `include/ftlpu/vxm/`.
-
-Hierarchy:
-
-- `VxmAlu`: vector helper for supported ALU ops.
-- `VxmLane`: one lane with 16 ALUs and one instruction queue per ALU.
-- `VxmSuperlane`: 16 lanes.
-- `VxmSlice`: 20 superlanes/tiles with south-to-north instruction flow.
-
-Supported ALU opcodes currently include:
-
-- `Pass`
-- `Add`
-- `Subtract`
-- `Multiply`
-- `Divide`
-- `Negate`
-- `Abs`
-- `Min`
-- `Max`
-- `Clamp`
-- `Square`
-- `Sqrt`
-- `Exp`
-- `Log`
-- `Relu`
-- `Cast`
-
-Quantization and dequantization are not special ALU opcodes. They are modeled
-with primitive ALU operations:
-
-- Cast int32 stream data to fp32.
-- Multiply by a scale to dequantize.
-- Multiply by reciprocal output scale.
-- Add zero point if needed.
-- Cast to int8.
-
-VXM can also cast fp32 values to fp16 stream output. The fp16 path writes the
-IEEE half-precision bit pattern as two little-endian byte streams, while the
-legacy int8 path still writes one byte stream.
-
-SwiGLU is built from primitive ops:
+Supported opcodes are:
 
 ```text
-gate_i32 -> cast fp32 -> multiply gate_scale
-up_i32   -> cast fp32 -> multiply up_scale
-sigmoid(gate) = 1 / (1 + exp(-gate))
-hidden = gate * sigmoid(gate) * up
-hidden_i8 = cast_int8(hidden / output_scale + zero_point)
+Pass Add Subtract Multiply Divide Negate Abs Min Max Clamp
+Square Sqrt Exp Log Relu Cast
 ```
 
-## ICU Model
+Operands may come from INT8, FP16, INT32, or FP32 streams; FP32 immediates; or
+prior-cycle ALU outputs. Results may remain in an ALU register or be emitted to
+a selected stream and destination hemisphere.
 
-The ICU is implemented in `include/ftlpu/system/icu.hpp`.
+Quantization and dequantization are instruction graphs, not dedicated opcodes.
+For example, W8 dequant is synthesized with Multiply and Cast. SwiGLU is
+synthesized from arithmetic, Exp, pipeline-delay Pass operations, and Cast.
+RMSNorm uses ALU feedback for `sum(x^2)` and keeps inverse RMS resident while
+`x` and `gamma` stream through.
 
-Queue counts:
+## 7. SXM
 
-- 44 MEM queues, one per MEM slice column.
-- 2 MXM load queues, one per MXM.
-- 2 MXM compute queues, one per MXM.
-- 16 VXM queues, one per ALU.
+There are two independent SXMs, one per hemisphere. SXM transforms only east
+streams; west streams take the symmetric register hop without transformation.
 
-The ICU supports per-queue commands:
+Each SXM has four tile rows. A Transpose instruction advances south to north one
+tile per cycle so each tile captures its matching diagonal wavefront. FP16 low
+and high bytes are two planes. Tile-local Transpose exchanges rows and columns
+of an `8 x 8` block.
 
-- `Instruction`: dispatch one MEM/MXM/VXM instruction.
-- `NOP N`: delay only the current queue by `N` cycles.
-- `Repeat n,d`: repeat the previous instruction `n` times, with `d` cycles
-  between dispatches.
-- MEM `Repeat` additionally supports an address stride.
+Transpose output is registered for one cycle before Permute may consume it.
+Permute rearranges complete blocks across four superlanes/32 lanes. The current
+implementation uses one transpose buffer; same-destination blocks can pipeline
+at `II=4`.
 
-This is important for compiler work: a compiler can build each queue as a static
-timeline and use NOP/Repeat to compact long regular schedules.
+Each hemisphere has one program-ordered SXM ICU queue carrying all SXM
+instructions. With no issued SXM operation, east streams pass from `sreg11` to
+`sreg12` as an ordinary one-cycle link.
 
-## Instruction Encoding
+## 8. ICU and ISA
 
-The model ISA encoder is in `include/ftlpu/core/instruction_codec.hpp`.
+The ICU owns 106 independent queues:
 
-Current encoding:
+| Queue class | Count |
+| --- | ---: |
+| MEM | 88 |
+| MXM load | 4 |
+| MXM compute | 4 |
+| VXM ALU | 8 |
+| SXM | 2 |
 
-- MEM instruction: 32 bits.
-- MXM control instruction: 32 bits.
-- VXM ALU instruction: 3 x 32-bit words.
-- ICU queue command: 32 bits.
+Every functional slice has one program-ordered IQ whose entry type is:
 
-The MEM instruction address field is not the full software address. It encodes
-only the slice-local SRAM word address: bit 12 is the bank and bits 11:0 are the
-4096-word offset. The low software byte offset must be zero for `Read`/`Write`.
+```cpp
+template <typename FuncInstruction>
+using IqEntry =
+    std::variant<IcuControlInstruction, FuncInstruction>;
+```
 
-This is a compact FTLPU CModel encoding, not a Groq hardware binary encoding.
-It deliberately rejects model-only metadata such as VXM operand scale and output
-zero point, because those should be synthesized with explicit ALU instructions.
+The ICU examines only the head of each IQ every cycle. ICU control instructions
+execute locally; functional instructions dispatch to that slice. Consequently,
+an ordered sequence such as `Read, Sync, Write` issues Read, blocks with Sync at
+the head until a notification token arrives, and only then dispatches Write.
+There is no separate control program and no `Dispatch` pseudo-instruction.
 
-The codec is covered by `tests/core/instruction_codec_test.cpp`.
+Each MXM has two IQs because load and compute are independently schedulable and
+may overlap. All other queue counts follow physical functional slices: one per
+MEM slice, one per VXM ALU stage, and one per hemisphere SXM.
 
-## Whole-System Topology
+Implemented queue commands are:
 
-`TspSliceSystem` fixes the current local topology:
+- `NOP N`: delay that queue by `N` cycles.
+- `Repeat n,d`: repeat the previous instruction `n` times at interval `d`.
+- MEM Repeat may apply a signed address stride.
+- `Fetch`: reserve IQ capacity and receive one 640-byte instruction block from
+  the configured stream.
+- `Sync`: remain at the queue head until a notification token is available.
+- `Notify`: emit a barrier notification locally.
+
+The compact model codec currently covers:
+
+- 32-bit MEM instructions;
+- 32-bit MXM control instructions;
+- VXM ALU instructions encoded as four 32-bit words;
+- 32-bit ICU control instructions;
+- SXM instruction packets.
+
+Reserved bits and field ranges are validated by
+`tests/core/instruction_codec_test.cpp`.
+
+## 9. Scheduling Patterns
+
+### W8A16 Weight and Activation Coexistence
+
+Raw INT8 weights travel west from MEM to VXM. Dequantized FP16 weights then
+travel east to MXM, which is the point where they may conflict with activation.
+
+| Active operation | FP16 IW streams | Shared activation |
+| --- | --- | --- |
+| Load local MXM0 | `E0..E15` | `E16..E17` |
+| Load local MXM1 | `E16..E31` | `E0..E1` |
+| No IW | none | normally `E0..E1` |
+
+Loading both MXMs in one cycle would occupy all 32 east streams. Offline FFN
+schedules therefore load one inactive buffer at a time and place activation in
+the opposite half. Both local MXMs broadcast-consume the same FP16 activation
+pair.
+
+### Ping-Pong Weights
+
+For projection reductions, Compute uses buffer `k mod 2` while VXM and IW
+prepare reduction `k+1` in the other buffer. SRAM slices, stream IDs, VXM ALUs,
+and MXM load queues are all explicit scheduling resources.
+
+### Accumulator Lifetime
+
+Non-final reductions use `Accumulate(..., SRAM)`. Final reductions use
+`Accumulate(..., Stream)`, which emits and clears the slot. Address reuse is
+legal only after the final stream result has been issued.
+
+### Single-Port MEM
+
+Different addresses do not remove a slice conflict. Read, Write, and
+Accumulate windows must be disjoint whenever they reserve the same physical
+slice.
+
+## 10. Validated Whole-System Workloads
+
+### W8A16 Projection
+
+`w8a16_projection_test` computes:
 
 ```text
-VXM <-> west MEM edge ... 44 MEM slices ... east MEM edge <-> MXM0/MXM1
+A[128,576] fp16 x W[576,1536] int8 -> C[128,1536] fp32
 ```
 
-Important paths:
+Weights use symmetric per-output-column W8 scales. VXM dequantizes weights,
+MXM0/1 compute adjacent output blocks, and the two MEM accumulator groups sum
+18 K tiles. All 196,608 outputs are compared against an FP16-aware scalar
+golden model.
 
-- MEM east streams feed MXM weight and activation inputs.
-- MXM int32 outputs are written back into MEM west streams near the east edge.
-- Those west streams travel through MEM to the west edge.
-- VXM consumes selected streams according to its ALU operands.
-- VXM output streams are injected back into MEM and can be written into SRAM.
+### Full FFN
 
-The system tick handles ICU dispatch, MEM tick, VXM stream bridge, and MXM
-control slices. MXM compute and output are owned by the `Mxm` datapath inside
-`TspSliceSystem`; tests no longer use a separate software GEMM engine.
-
-## FFN Integration Tests
-
-The main integration file is:
+`dual_hemisphere_w8a16_swiglu_test` computes:
 
 ```text
-tests/integration/mem_dual_mxm_swiglu_test.cpp
+X[128,576]
+  -> gate/up[128,1536]
+  -> SwiGLU[128,1536]
+  -> down[128,576]
 ```
 
-It builds a 160 x 320 activation matrix and three 640 x 320 weight matrices:
+All four MXMs participate. Non-final gate/up reductions run both hemispheres in
+parallel. During the final reduction, East and West 32-row blocks alternate
+through the single shared VXM SwiGLU pipeline, so one hemisphere's MXMs are idle
+for each alternating block. This is a deliberate throughput tradeoff: it removes
+the standalone accumulator readback/SwiGLU phase and reduces the validated
+schedule from 93,642 to 90,817 cycles.
 
-- gate projection weights
-- up projection weights
-- down projection weights
+SwiGLU results are stored in both MEM hemispheres. Down projection reads local
+copies, uses all four MXMs, accumulates 48 K tiles, casts the final sums to FP16,
+and verifies all 73,728 output values.
 
-The test computes:
+### RMSNorm
+
+`rmsnorm_test` computes `[32,32]` FP16 RMSNorm entirely through MEM and VXM.
+ALU0 squares one hidden column per cycle; ALU1 recurrently accumulates
+`sum(x^2)` independently in all 32 physical lanes. VXM then computes inverse
+RMS and applies it to streamed `x` and `gamma`. No MXM or MEM accumulator is
+used.
+
+### SmolLM2 Attention
+
+`smollm2_attention_test` validates:
 
 ```text
-hidden = swiglu(A * W_gate, A * W_up)
-out = quant((hidden_left * W_down_left) + (hidden_right * W_down_right))
+Q/K/V projection -> Q/K RoPE -> QK score -> scaled three-pass softmax
+-> P x V -> o_proj[128,576]
 ```
 
-Shapes:
+The configuration is sequence length 128, hidden size 576, 9 query heads,
+3 KV heads, and head dimension 64. QK, P x V, and o_proj use independent work
+across all four MXMs where stream and accumulator resources allow. SXM prepares
+packed/transpose layouts for attention replay. The complete numerical golden
+check passes at 81,273 scheduled cycles.
 
-- Activation: `160 x 320`, int8.
-- Gate weight: effectively `320 x 640`, loaded in two 320-column passes.
-- Up weight: effectively `320 x 640`, loaded in two 320-column passes.
-- Hidden: `160 x 640`, int8.
-- Down weight: `640 x 320`, split across two MXMs.
-- Final output: `160 x 320`, int8.
+See [attention_pipeline_optimization.md](attention_pipeline_optimization.md) for
+phase timing, measured MXM utilization, and remaining overlap opportunities.
 
-The generated data uses non-trivial symmetric quantization scales so the output
-is not mostly zero. The test compares SRAM contents against golden reference
-data computed in the test.
+## 11. Logs and Diagrams
 
-### Offline ICU Test
+Long regressions disable logging by default because per-cycle stream dumps
+dominate wall time. `TspSliceSystem::LogSinks` can independently capture ICU,
+MEM, MXM, VXM, SXM, and system logs.
 
-`mem_dual_mxm_swiglu_offline_icu_test` uses the same source file with
-`FTLPU_OFFLINE_ICU_FFN_TEST` enabled.
+Schedule CSV export is controlled by:
 
-This test builds an `OfflineIcuProgram` before cycle 0. The program contains all
-MEM, MXM, and VXM ALU instructions. MXM result stream placement is encoded in
-the `Compute` instructions. It then loads those instructions into the ICU queues
-once and starts ticking.
+- `FTLPU_SCHEDULE_TRACE=<path>`
+- `FTLPU_SCHEDULE_TRACE_ONLY=1`
+- `FTLPU_SCHEDULE_REPORT=1`
 
-This is the intended shape for a future compiler:
+Detailed diagrams are generated by `scripts/render_schedule_trace.py` and
+`scripts/render_swiglu_schedule_trace.py`. Accumulator colors are:
 
-```text
-high-level workload -> compiler/scheduler -> OfflineIcuProgram -> ICU queues
-```
+- purple: retain partial sum in SRAM;
+- red: emit final sum to stream and clear the slot.
 
-The current offline test only loads the ICU queues, initializes external MEM
-contents, ticks the system datapaths, and checks final MEM contents.
+## 12. Known Limitations
 
-The test also exercises the MXM two-buffer path. `IW(buffer)` fills one selected
-buffer through the per-row right-shift path while
-`Compute(buffer, activation_stream, output_stream)` continues to use the other.
-MXM control has separate load and compute queues, so the scheduler can overlap
-next-weight transfer with current compute. The second gate/up pass and the down
-pass use this ping-pong schedule:
+- The model is not bit-accurate to private Groq hardware or ISA.
+- Gather/Scatter lack the address-stream execution datapath.
+- Offline schedules are still constructed inside integration tests; there is
+  no standalone compiler or serialized program-file container yet.
+- Autonomous launch currently supports one 640-byte fetched schedule block per
+  IQ.
+- Resource allocation uses workload-specific SRAM slices and stream IDs rather
+  than a general allocator.
+- The simulator scans substantial inactive state every cycle and remains slow
+  for long workloads.
 
-- MXM0 starts `IW` immediately when the previous GEMM starts. Shared activation
-  traffic uses alternate stream IDs during the first few rows so it does not
-  collide with `E0..E15`.
-- MXM1 starts `IW` immediately after MXM0's 20-cycle `IW` window. The current
-  FFN schedule uses `MXM0: cycles 38..57` and `MXM1: cycles 58..77` for the
-  second gate/up pass.
-- In the early-compute variant, the second gate/up GEMM starts as soon as the
-  compute queue is free. The down weights are loaded in two segments: MXM1 can
-  start early after stream conflicts clear, while MXM0 waits until the `E0`
-  activation stream is no longer needed. Because MEM is single-port, the down
-  GEMM still waits until the second SwiGLU writeback has finished before reading
-  hidden activations from the same MEM slice.
-- `Compute` names the buffer to consume and the MEM west stream base for int32
-  result output; no `LW`, active-weight commit, or separate MXM output
-  instruction is issued.
+## 13. Next Engineering Steps
 
-`mxm.log` includes per-phase and total MXM performance counters:
-
-```text
-offline_gate_up_p0_mxm0 perf cycles=160 active_cycles=160 ...
-offline_total_mxm0 perf cycles=614 active_cycles=480 ...
-```
-
-The per-phase utilization uses the tile0 compute window. The total utilization
-also uses tile0 scheduling time and includes weight-load, writeback, and wait
-cycles, so it is the number to watch when changing the scheduler.
-
-## Logs
-
-The FFN integration tests skip log generation by default. Set
-`FTLPU_FFN_LOG=1` when trace files or the pipeline diagram are needed.
-When enabled, the integration tests write logs under the build directory.
-
-Offline ICU FFN:
-
-```text
-build-vs2019/logs/mem_dual_mxm_swiglu_offline_icu/
-```
-
-Each directory contains:
-
-- `icu.log`: queue depths and dispatched instructions.
-- `mem.log`: MEM stream/register/SRAM activity.
-- `mxm.log`: MXM load/compute state.
-- `vxm.log`: VXM ALU state for tile 0.
-- `pipeline.svg`: phase timeline with separate MEM weight-read, MEM
-  activation-read, MEM write, MXM load, MXM compute, and VXM rows.
-
-The offline ICU log prints the key phase starts, for example:
-
-```text
-offline ICU FFN program loaded before cycle 0
-  schedule=baseline ...
-  load0.mxm0_iw=... gemm0=... gemm0_output=...
-```
-
-The early-compute variant currently prints:
-
-```text
-offline ICU FFN program loaded before cycle 0
-  schedule=early_mxm_compute p1 compute starts as soon as the compute queue is free
-  load0.mxm0_iw=18 load0.mxm1_iw=18 load0.done=38 gemm0=38 gemm0_output=38 load1.mxm1_iw=58 load1.mxm0_iw=38 load1.done=78 gemm1=198 gemm1_output=236 down_load.mxm1_iw=256 down_load.mxm0_iw=367 down_load.done=387 down_gemm=450 down_output=450
-```
-
-## Data Layout Summary
-
-The FFN test stages data directly into SRAM before cycle 0. After that, movement
-between units is through ICU-controlled MEM Read/Write instructions and streams.
-
-Activation:
-
-- Stored in MEM column `32`.
-- Address for row `r`, lane `l`: `r * 16 + l`.
-- Tile selects the 16-element block of the K dimension.
-
-Weights:
-
-- Staged across MEM columns `0..31`.
-- MXM0 reads weight streams from columns `0..15`.
-- MXM1 reads weight streams from columns `16..31`.
-- Each pass reads 20 column blocks in reverse order, because `IW` shifts each
-  row's selected weight buffer eastward.
-
-SwiGLU hidden output:
-
-- Pass 0 stored in MEM column `40`.
-- Pass 1 stored in MEM column `41`.
-
-Final output:
-
-- Stored in MEM column `42`.
-
-## Known Limitations
-
-- The model is not bit-accurate to any private Groq ISA.
-- `Gather` and `Scatter` are not the focus of current tests.
-- The current VXM op list is intentionally small and contains only the ops needed
-  for the current FFN/SwiGLU experiments plus simple scalar primitives.
-- The compiler does not exist yet. `OfflineIcuProgram` is a prototype container
-  for what the compiler should emit.
-
-## Suggested Next Steps
-
-Near-term engineering work:
-
-- Tighten the MXM runtime timing against more detailed hardware pipeline
-  assumptions.
-- Turn `OfflineIcuProgram` into a reusable module instead of a test-local helper.
-- Add a textual or binary program dump/load format using the ISA codec.
-- Add a simple compiler pass that emits MEM Read/Write, MXM IW/Compute, and VXM
-  ALU timelines for the FFN workload.
-- Add resource-conflict diagnostics for stream-register and queue collisions.
+1. Extract a reusable offline program and resource-calendar scheduler.
+2. Add SRAM/stream lifetime allocation and conflict diagnostics.
+3. Add ProgramImage serialization using the existing ISA codec.
+4. Pipeline remaining attention phases using data-ready events instead of
+   global phase barriers.
+5. Add simulator fast-forward for queue NOP spans and globally idle intervals.

@@ -12,7 +12,7 @@
 namespace ftlpu {
 
 // A logical TSP stream is identified by a lane-local index (0..31) and a
-// direction.  The same StreamId names all 320 byte lanes of a functional
+// direction.  The same StreamId names all byte lanes of a functional
 // slice; it is not a scalar channel owned by one lane.
 enum class StreamDirection : std::uint8_t {
     East,
@@ -150,8 +150,8 @@ struct StreamCell {
     }
 };
 
-// Spatial views of one logical stream.  StreamVector320 is a logical/debug
-// aggregation, not an atomic 320-byte transfer.  Hardware-facing slices act
+// Spatial views of one logical stream.  StreamVector320 is a legacy-named
+// logical/debug aggregation, not an atomic transfer. Hardware-facing slices act
 // on one StreamSegment16 at one tile row per cycle; northbound instruction
 // staggering can skew the twenty segments across columns and cycles.
 using StreamSegment16 = std::array<StreamCell, hw::kLanesPerTile>;

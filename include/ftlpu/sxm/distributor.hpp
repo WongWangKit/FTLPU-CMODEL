@@ -36,7 +36,7 @@ public:
                 continue;
             }
             if (source >= hw::kLanesPerTile) {
-                throw std::out_of_range("SXM distributor lane source is outside the 16-lane vector");
+                throw std::out_of_range("SXM distributor lane source is outside the configured vector");
             }
             output[lane] = input[source];
         }
