@@ -15,12 +15,12 @@ The central vector shape is:
 | Property | Value |
 | --- | ---: |
 | Hemispheres | 2 |
-| MEM slices | 44 per hemisphere, 88 total |
-| MEM groups | 11 per hemisphere, 4 slices per group |
-| Stream-register columns | 13 per hemisphere (`sreg0..sreg12`) |
+| MEM slices | 52 per hemisphere, 104 total |
+| MEM groups | 13 per hemisphere, 4 slices per group |
+| Stream-register columns | 15 per hemisphere (`sreg0..sreg14`) |
 | Streams per lane | 32 eastward + 32 westward |
 | Stream-register width | 1 byte |
-| SRAM capacity | 2 MiB per slice, 176 MiB full chip |
+| SRAM capacity | 2 MiB per slice, 208 MiB full chip |
 | MXM units | 4 total, 2 per hemisphere |
 | MXM array | 32 x 32 FP16 multiply with FP32 accumulation |
 | VXM | 1 central slice, 16 ALUs per lane |
@@ -28,24 +28,24 @@ The central vector shape is:
 
 One MEM slice owns a `65536 x 32-byte` SRAM block. Each row spans all four
 tiles; one tile accesses its local 8-byte segment when the instruction wave
-reaches that tile. The model has 88 homogeneous slices across two hemispheres,
-for `88 x 2 MiB = 176 MiB` total SRAM. There is no logical bank subdivision.
+reaches that tile. The model has 104 homogeneous slices across two hemispheres,
+for `104 x 2 MiB = 208 MiB` total SRAM. There is no logical bank subdivision.
 
 ## 2. Full-Chip Topology
 
 ```text
-MXM2/MXM3 <-> SXM.W <-> MEM.W(44) <-> VXM <-> MEM.E(44) <-> SXM.E <-> MXM0/MXM1
+MXM2/MXM3 <-> SXM.W <-> MEM.W(52) <-> VXM <-> MEM.E(52) <-> SXM.E <-> MXM0/MXM1
 ```
 
 Both hemispheres use the same local orientation:
 
 - `sreg0` is adjacent to VXM.
-- Eleven MEM groups occupy the boundaries `sreg0..sreg11`.
-- SXM connects the MEM boundary `sreg11` to the MXM boundary `sreg12`.
+- Thirteen MEM groups occupy the boundaries `sreg0..sreg13`.
+- SXM connects the MEM boundary `sreg13` to the MXM boundary `sreg14`.
 - East streams move from VXM toward MXM.
 - West streams move from MXM toward VXM.
 
-Global MEM queues `0..43` and MXMs `0..1` select East. MEM queues `44..87`
+Global MEM queues `0..51` and MXMs `0..1` select East. MEM queues `52..103`
 and MXMs `2..3` select West.
 
 The shared stream fabric is double-buffered by cycle: functional units read
@@ -90,9 +90,9 @@ starts, they call only `tick()` until the offline schedule completes.
 
 ### Organization
 
-Each hemisphere has 44 MEM slice columns and one instruction queue per slice.
+Each hemisphere has 52 MEM slice columns and one instruction queue per slice.
 Four adjacent slices form a group between two stream-register boundaries. All
-44 slices are homogeneous SRAM; no MEM group has accumulator behavior.
+52 slices are homogeneous SRAM; no MEM group has accumulator behavior.
 
 A MEM instruction is a single-port operation for its slice. A slice cannot read
 and write in the same cycle, even at different addresses.
@@ -140,7 +140,7 @@ Each `Mxm` contains:
 buffer. The two-bit `column` field selects columns `0..3`; load order does not
 implicitly shift the final layout. There is no `LW` instruction.
 
-One IW pulse consumes 16 east streams:
+The original full-supercell form consumes 16 east streams:
 
 ```text
 8 FP16 values x 2 byte streams = 16 streams
@@ -149,6 +149,19 @@ One IW pulse consumes 16 east streams:
 Local MXM0 uses `E0..E15`; local MXM1 uses `E16..E31`. Four continuous IW
 pulses fill one 32-column weight tile. The peer buffer may still supply
 in-flight Compute work while IW fills the inactive buffer.
+
+`IWColumn(buffer, column, inner_column)` is the narrow form. It consumes two
+east streams and writes one of the eight columns inside the selected `8 x 8`
+supercell:
+
+```text
+1 FP16 value per lane x 2 byte streams = 2 streams
+```
+
+Local MXM0 uses `E0..E1`; local MXM1 uses `E16..E17`. On an empty buffer,
+eight narrow pulses, one for each `inner_column` in `0..7`, make that
+supercell valid for Compute. A narrow write to an already complete buffer
+updates the selected column without invalidating its other columns.
 
 W8 weights use symmetric per-output-column scales:
 
@@ -215,16 +228,16 @@ implementation uses one transpose buffer; same-destination blocks can pipeline
 at `II=4`.
 
 Each hemisphere has two ICU queues for SXM: one Transpose queue and one Permute
-queue. With no issued SXM operation, east streams pass from `sreg11` to
-`sreg12` as an ordinary one-cycle link.
+queue. With no issued SXM operation, east streams pass from `sreg13` to
+`sreg14` as an ordinary one-cycle link.
 
 ## 8. ICU and ISA
 
-The ICU owns 116 independent queues:
+The ICU owns 132 independent queues:
 
 | Queue class | Count |
 | --- | ---: |
-| MEM | 88 |
+| MEM | 104 |
 | MXM load | 4 |
 | MXM compute | 4 |
 | VXM ALU | 16 |

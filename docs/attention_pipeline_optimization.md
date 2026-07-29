@@ -255,7 +255,7 @@ Hardware cycle optimization and simulator wall-time optimization are separate.
 After schedule work, the CModel can be accelerated by storing NOP spans as
 `next_issue_cycle` values, fast-forwarding globally idle intervals, and scanning
 only active SR streams and units. These changes preserve cycle results while
-avoiding a full 44-slice, 64-stream state scan on every empty tick.
+avoiding a full 52-slice, 64-stream state scan on every empty tick.
 
 ## Exact Schedule Visualization
 

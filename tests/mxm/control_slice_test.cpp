@@ -34,6 +34,23 @@ ftlpu::MxmControlSlice::WeightInput row_input(std::size_t tile, std::size_t supe
     return input;
 }
 
+ftlpu::MxmControlSlice::WeightInput column_input(
+    std::size_t tile,
+    std::size_t supercell_column,
+    std::size_t inner_column)
+{
+    auto input = ftlpu::MxmControlSlice::WeightInput {};
+    const auto base = static_cast<std::uint8_t>(
+        (tile * ftlpu::hw::kMxmSupercellsPerPlane + supercell_column) & 0xff);
+    for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+        input[lane][inner_column] = ftlpu::MxmArray::Supercell::InputWord {
+            static_cast<float>(base + lane + inner_column),
+            lane + 1 == ftlpu::hw::kLanesPerTile,
+        };
+    }
+    return input;
+}
+
 float expected_weight(std::size_t tile, std::size_t supercell_column, std::size_t lane, std::size_t stream)
 {
     const auto base = static_cast<std::uint8_t>(
@@ -74,6 +91,54 @@ int main()
                 return 1;
             }
             if (!require(control.loaded_cell(kBuffer, tile, column), "IW should set loaded-cell marker for selected buffer")) {
+                return 1;
+            }
+        }
+    }
+
+    auto column_array = std::make_unique<ftlpu::MxmArray>();
+    ftlpu::MxmControlSlice column_control(*column_array);
+    constexpr std::size_t kTargetSupercellColumn = 2;
+    for (std::size_t inner_column = 0;
+         inner_column < ftlpu::hw::kMxmSupercellColumns;
+         ++inner_column) {
+        column_control.issue_south(ftlpu::MxmControlInstruction::IWColumn(
+            kBuffer, kTargetSupercellColumn, inner_column));
+    }
+    auto column_provider = [&column_control](std::size_t tile) {
+        const auto inner_column = column_control.cycle() - tile;
+        return column_input(
+            tile, kTargetSupercellColumn, inner_column);
+    };
+    for (std::size_t cycle = 0;
+         cycle < ftlpu::hw::kMxmSupercellColumns
+             + ftlpu::hw::kMxmSupercellsPerPlane - 1;
+         ++cycle) {
+        column_control.tick(log, column_provider);
+    }
+    for (std::size_t tile = 0; tile < ftlpu::hw::kMxmSupercellsPerPlane; ++tile) {
+        if (!require(
+                column_control.loaded_cell(
+                    kBuffer, tile, kTargetSupercellColumn),
+                "eight column IW instructions should complete the supercell")) {
+            return 1;
+        }
+        for (std::size_t inner_column = 0;
+             inner_column < ftlpu::hw::kMxmSupercellColumns;
+             ++inner_column) {
+            if (!require(
+                    column_array->weight(
+                        kBuffer,
+                        tile,
+                        kTargetSupercellColumn,
+                        5,
+                        inner_column)
+                        == expected_weight(
+                            tile,
+                            kTargetSupercellColumn,
+                            5,
+                            inner_column),
+                    "column IW weight mismatch")) {
                 return 1;
             }
         }
@@ -141,6 +206,17 @@ int main()
         caught = true;
     }
     if (!require(caught, "expected bad weight column to throw")) {
+        return 1;
+    }
+
+    caught = false;
+    try {
+        control.issue_south(ftlpu::MxmControlInstruction::IWColumn(
+            0, 0, ftlpu::hw::kMxmSupercellColumns));
+    } catch (const std::out_of_range&) {
+        caught = true;
+    }
+    if (!require(caught, "expected bad inner weight column to throw")) {
         return 1;
     }
 

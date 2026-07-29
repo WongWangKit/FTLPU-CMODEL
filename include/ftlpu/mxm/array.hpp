@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <ostream>
 #include <stdexcept>
+#include <utility>
 
 namespace ftlpu {
 
@@ -77,10 +78,21 @@ public:
 
     void tick_cell_iw_load(std::size_t row, std::size_t column, std::size_t buffer, InputVector input, std::ostream& os)
     {
+        tick_cell_iw_load(
+            row, column, MxmInstruction::IW(buffer), std::move(input), os);
+    }
+
+    void tick_cell_iw_load(
+        std::size_t row,
+        std::size_t column,
+        MxmInstruction instruction,
+        InputVector input,
+        std::ostream& os)
+    {
         auto& target = cell(row, column);
         os << "mxm_array cell(" << row << "," << column << ") ";
         target.set_input(input);
-        target.issue(MxmInstruction::IW(buffer));
+        target.issue(instruction);
         target.tick(os);
     }
 

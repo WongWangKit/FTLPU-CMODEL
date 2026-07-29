@@ -20,7 +20,7 @@
 
 namespace ftlpu {
 
-// Maps the twelve SR boundaries surrounding the 11 groups of four MEM slices
+// Maps the SR boundaries surrounding the groups of four MEM slices
 // into arbitrary physical SR column IDs in a whole-chip StreamRegisterFabric.
 class MemStreamPortMap {
 public:
@@ -123,7 +123,7 @@ private:
     static std::size_t group_for(std::size_t mem_slice)
     {
         if (mem_slice >= hw::kMemSliceColumns) {
-            throw std::out_of_range("MEM slice is outside the 44-slice hemisphere");
+            throw std::out_of_range("MEM slice is outside the configured hemisphere");
         }
         return mem_slice / hw::kMemSlicesPerGroup;
     }
@@ -299,7 +299,7 @@ private:
     static void check_mem_slice(std::size_t mem_slice)
     {
         if (mem_slice >= hw::kMemSliceColumns) {
-            throw std::out_of_range("MEM slice is outside the 44-slice hemisphere");
+            throw std::out_of_range("MEM slice is outside the configured hemisphere");
         }
     }
 

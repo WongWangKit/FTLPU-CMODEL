@@ -16,14 +16,14 @@ provide a concrete target for dataflow scheduling and future compiler work.
 | --- | --- |
 | Vector shape | 4 tiles/superlanes x 8 lanes = 32 elements |
 | Streams | 32 eastward + 32 westward streams, one byte per register |
-| MEM | 44 slices per hemisphere, 88 ICU queues total |
-| SRAM | 2 MiB per slice, 88 MiB per hemisphere, 176 MiB total |
+| MEM | 52 slices per hemisphere, 104 ICU queues total |
+| SRAM | 2 MiB per slice, 104 MiB per hemisphere, 208 MiB total |
 | Accumulators | One 1 MiB FP32 accumulator inside each MXM |
 | MXM | Four 32 x 32 FP16 GEMM arrays, two per hemisphere |
 | MXM weights | Two peer buffers per supercell, selected by `IW`/`Compute` |
 | VXM | One central slice, 16 independently controlled ALUs per lane |
 | SXM | One four-tile slice per hemisphere for Transpose/Permute |
-| ICU | 88 MEM, 4 MXM load, 4 MXM compute, 16 VXM, and 4 SXM queues |
+| ICU | 104 MEM, 4 MXM load, 4 MXM compute, 16 VXM, and 4 SXM queues |
 
 The fixed full-chip topology is:
 
@@ -31,9 +31,9 @@ The fixed full-chip topology is:
 MXM2/MXM3 <-> SXM.W <-> MEM.W <-> VXM <-> MEM.E <-> SXM.E <-> MXM0/MXM1
 ```
 
-Each hemisphere uses local stream-register columns `sreg0..sreg12`.
-`sreg0` is next to VXM, MEM occupies the eleven groups between
-`sreg0..sreg11`, and SXM connects `sreg11` to the MXM boundary at `sreg12`.
+Each hemisphere uses local stream-register columns `sreg0..sreg14`.
+`sreg0` is next to VXM, MEM occupies the thirteen groups between
+`sreg0..sreg13`, and SXM connects `sreg13` to the MXM boundary at `sreg14`.
 
 Stream reads are broadcast-capable: multiple functional units may consume the
 same register value in one cycle. A consumed value no longer propagates
@@ -102,7 +102,7 @@ expensive. Small tests and demos can provide `TspSliceSystem::LogSinks` for
 separate ICU, MEM, MXM, VXM, SXM, and system logs.
 The no-log path skips MEM/VXM/SXM trace construction. SRAM preserves its full
 2 MiB-per-slice address space while allocating backing storage lazily in 4 KiB
-pages, so sparse workloads do not eagerly reserve all 176 MiB.
+pages, so sparse workloads do not eagerly reserve all 208 MiB.
 
 ## Schedule Diagrams
 

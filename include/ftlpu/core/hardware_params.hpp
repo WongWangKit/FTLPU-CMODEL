@@ -17,7 +17,7 @@ constexpr std::size_t kStreams = kEastStreams + kWestStreams;
 constexpr std::size_t kStreamRegisterBytes = 1;
 
 // MEM/SRAM geometry for one modeled hemisphere.
-constexpr std::size_t kMemSliceColumns = 44;
+constexpr std::size_t kMemSliceColumns = 52;
 constexpr std::size_t kMemSlicesPerGroup = 4;
 constexpr std::size_t kMemGroups = kMemSliceColumns / kMemSlicesPerGroup;
 constexpr std::size_t kMemBoundaryStreamRegisterColumns = kMemGroups + 1;
@@ -32,7 +32,7 @@ constexpr std::size_t kMxmBoundaryStreamRegisterColumn =
 
 // Compatibility names used by the existing code.  New code should use the
 // MEM-specific names above instead of assuming that the whole chip has only
-// twelve SR columns.
+// a fixed number of SR columns.
 constexpr std::size_t kSliceColumns = kMemSliceColumns;
 constexpr std::size_t kSlicesPerGroup = kMemSlicesPerGroup;
 constexpr std::size_t kSliceGroups = kMemGroups;
@@ -53,6 +53,7 @@ constexpr std::size_t kMxmSupercellColumns = kLanesPerTile;
 constexpr std::size_t kMxmSupercellsPerPlane = kTileRows;
 constexpr std::size_t kMxmWeightBytesPerValue = 2;
 constexpr std::size_t kMxmLoadStreamsPerCycle = kMxmSupercellColumns * kMxmWeightBytesPerValue;
+constexpr std::size_t kMxmColumnLoadStreamsPerCycle = kMxmWeightBytesPerValue;
 constexpr std::size_t kMxmActivationStreamsPerVector = 2;
 constexpr std::size_t kMxmLoadBytesPerCycle = kLanesPerTile * kMxmLoadStreamsPerCycle * kStreamRegisterBytes;
 constexpr std::size_t kMxmAccumulatorRows = 8192;
@@ -62,8 +63,9 @@ constexpr std::size_t kMxmAccumulatorBytes =
 constexpr std::size_t kSxmConcurrentStreamOps = 16;
 
 constexpr std::size_t kHemispheres = 2;
-constexpr std::size_t kPublicSramBlocks = 88;
-constexpr std::size_t kModeledSramBlocks = kPublicSramBlocks / kHemispheres;
+constexpr std::size_t kModeledSramBlocks = kMemSliceColumns;
+constexpr std::size_t kPublicSramBlocks =
+    kHemispheres * kModeledSramBlocks;
 // One vector-wide SRAM is owned by each MEM slice.
 constexpr std::size_t kSramBlocksPerSlice = 1;
 constexpr std::size_t kSramBlocks = kModeledSramBlocks;
@@ -77,13 +79,13 @@ constexpr std::size_t kPublicTotalSramBytes = kPublicSramBlocks * kSramBlockByte
 
 static_assert(kPhysicalVectorBytes == 32);
 static_assert(kMemSliceColumns % kMemSlicesPerGroup == 0);
-static_assert(kMemBoundaryStreamRegisterColumns == 12);
-static_assert(kSystemStreamRegisterColumns == 13);
-static_assert(kMemEastBoundaryStreamRegisterColumn == 11);
-static_assert(kMxmBoundaryStreamRegisterColumn == 12);
+static_assert(kMemBoundaryStreamRegisterColumns == 14);
+static_assert(kSystemStreamRegisterColumns == 15);
+static_assert(kMemEastBoundaryStreamRegisterColumn == 13);
+static_assert(kMxmBoundaryStreamRegisterColumn == 14);
 static_assert(kModeledSramBlocks == kMemSliceColumns);
-static_assert(kPublicSramBlocks == 88);
-static_assert(kSramBlocks == 44);
+static_assert(kPublicSramBlocks == 104);
+static_assert(kSramBlocks == 52);
 static_assert(kSramBlocksPerSlice == 1);
 static_assert(kEastStreams + kWestStreams == kStreams);
 static_assert(kLanesPerTile == 8);
@@ -96,7 +98,7 @@ static_assert(kMxmLoadBytesPerCycle == 128);
 static_assert(kMxmAccumulatorBytes == 1024 * 1024);
 static_assert(kSxmConcurrentStreamOps == 16);
 static_assert(kSramBlockBytes == 2 * 1024 * 1024);
-static_assert(kTotalSramBytes == 88 * 1024 * 1024);
-static_assert(kPublicTotalSramBytes == 176 * 1024 * 1024);
+static_assert(kTotalSramBytes == 104 * 1024 * 1024);
+static_assert(kPublicTotalSramBytes == 208 * 1024 * 1024);
 
 } // namespace ftlpu::hw

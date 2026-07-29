@@ -493,7 +493,8 @@ private:
     static void check_mem_queue(std::size_t column)
     {
         if (column >= kMemQueues) {
-            throw std::out_of_range("ICU MEM queue is outside the 88 full-chip MEM queues");
+            throw std::out_of_range(
+                "ICU MEM queue is outside the configured full-chip MEM queues");
         }
     }
 
@@ -582,6 +583,10 @@ private:
         if (instruction.opcode == MxmControlOpcode::IW) {
             os << "IW b" << instruction.weight_buffer
                << " col=" << instruction.weight_column;
+            if (instruction.weight_load_mode == MxmWeightLoadMode::Column) {
+                os << " inner=" << instruction.weight_inner_column
+                   << " streams=2";
+            }
         } else if (instruction.opcode == MxmControlOpcode::Compute) {
             os << "Compute b" << instruction.weight_buffer
                << " stream=" << instruction.activation_stream_base

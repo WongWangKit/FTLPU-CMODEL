@@ -22,6 +22,18 @@ ftlpu::MxmSupercell::InputVector full_input()
     return input;
 }
 
+ftlpu::MxmSupercell::InputVector column_input(std::size_t column)
+{
+    ftlpu::MxmSupercell::InputVector input{};
+    for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+        input[lane][column] = ftlpu::MxmSupercell::InputWord {
+            static_cast<float>(static_cast<int>(lane * 8 + column) - 31),
+            lane + 1 == ftlpu::hw::kLanesPerTile,
+        };
+    }
+    return input;
+}
+
 ftlpu::MxmSupercell::ActivationVector activation_input(float base = 0.5f)
 {
     ftlpu::MxmSupercell::ActivationVector input{};
@@ -86,6 +98,22 @@ int main()
         caught = true;
     }
     assert(caught);
+
+    ftlpu::MxmSupercell column_loaded;
+    for (std::size_t column = 0;
+         column < ftlpu::hw::kMxmSupercellColumns;
+         ++column) {
+        column_loaded.set_input(column_input(column));
+        column_loaded.issue(ftlpu::MxmInstruction::IWColumn(0, column));
+        column_loaded.tick(log);
+        assert(column_loaded.weight_buffer_valid(0)
+            == (column + 1 == ftlpu::hw::kMxmSupercellColumns));
+        for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+            assert(column_loaded.weight(0, lane, column)
+                == static_cast<float>(
+                    static_cast<int>(lane * 8 + column) - 31));
+        }
+    }
 
     supercell.reset();
     auto missing = full_input();

@@ -220,6 +220,7 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
     constexpr std::uint64_t kOpcodeMask = 0x3;
     constexpr std::uint64_t kWeightBufferMask = 0x1;
     constexpr std::uint64_t kWeightColumnMask = 0x3;
+    constexpr std::uint64_t kWeightInnerColumnMask = 0x7;
     constexpr std::uint64_t kStreamBaseMask = 0x3f;
     constexpr std::uint64_t kActivationStreamMask = 0x3f;
 
@@ -230,6 +231,9 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
     const auto opcode = static_cast<std::uint64_t>(instruction.opcode);
     switch (instruction.opcode) {
     case MxmControlOpcode::IW:
+        MxmControlInstruction::check_weight_load(
+            instruction.weight_load_mode,
+            instruction.weight_inner_column);
         detail::require_unsigned_fit(
             static_cast<std::uint64_t>(instruction.weight_buffer),
             kWeightBufferMask,
@@ -238,9 +242,17 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
             static_cast<std::uint64_t>(instruction.weight_column),
             kWeightColumnMask,
             "MXM weight column does not fit encoded instruction");
+        detail::require_unsigned_fit(
+            static_cast<std::uint64_t>(instruction.weight_inner_column),
+            kWeightInnerColumnMask,
+            "MXM weight inner column does not fit encoded instruction");
         return opcode
             | (static_cast<std::uint64_t>(instruction.weight_buffer) << 2)
-            | (static_cast<std::uint64_t>(instruction.weight_column) << 3);
+            | (static_cast<std::uint64_t>(instruction.weight_column) << 3)
+            | (static_cast<std::uint64_t>(
+                   instruction.weight_load_mode == MxmWeightLoadMode::Column)
+               << 5)
+            | (static_cast<std::uint64_t>(instruction.weight_inner_column) << 6);
     case MxmControlOpcode::Compute:
         detail::require_unsigned_fit(
             static_cast<std::uint64_t>(instruction.weight_buffer),
@@ -291,14 +303,19 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
     const auto opcode = static_cast<MxmControlOpcode>(word & 0x3u);
     const auto iw_weight_buffer = static_cast<std::size_t>((word >> 2) & 0x1u);
     const auto iw_weight_column = static_cast<std::size_t>((word >> 3) & 0x3u);
+    const auto iw_column_mode = ((word >> 5) & 0x1u) != 0;
+    const auto iw_inner_column = static_cast<std::size_t>((word >> 6) & 0x7u);
     const auto compute_weight_buffer = static_cast<std::size_t>((word >> 2) & 0x1u);
     const auto compute_activation_stream_base = static_cast<std::size_t>((word >> 3) & 0x3fu);
     const auto stream_base = static_cast<std::size_t>((word >> 9) & 0x3fu);
 
     switch (opcode) {
     case MxmControlOpcode::IW:
-        detail::require_reserved_zero(word, 0x0000001fu, "encoded MXM IW instruction has non-zero reserved bits");
-        return MxmControlInstruction::IW(iw_weight_buffer, iw_weight_column);
+        detail::require_reserved_zero(word, 0x000001ffu, "encoded MXM IW instruction has non-zero reserved bits");
+        return iw_column_mode
+            ? MxmControlInstruction::IWColumn(
+                  iw_weight_buffer, iw_weight_column, iw_inner_column)
+            : MxmControlInstruction::IW(iw_weight_buffer, iw_weight_column);
     case MxmControlOpcode::Compute:
         detail::require_reserved_zero(
             word,

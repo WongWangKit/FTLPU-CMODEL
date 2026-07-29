@@ -22,13 +22,17 @@ constexpr std::size_t kRows = 128;
 constexpr std::size_t kHidden = 576;
 constexpr std::size_t kIntermediate = 1536;
 constexpr std::size_t kTile = ftlpu::hw::kMxmRows;
-constexpr std::size_t kWeightToIwLatency = 14;
-constexpr std::size_t kActivationLatency = 5;
+constexpr std::size_t kWeightToIwLatency =
+    ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 2;
+constexpr std::size_t kActivationLatency =
+    ftlpu::hw::kMemGroups - 32 / ftlpu::hw::kMemSlicesPerGroup + 2;
 constexpr std::size_t kGateAccumulatorLatency = 6;
 constexpr std::size_t kUpAccumulatorLatency = 5;
 constexpr std::size_t kSwishWriteLatency = 13;
-constexpr std::size_t kMemToMxmLatency = 13;
-constexpr std::size_t kDownOutputCastLatency = 16;
+constexpr std::size_t kMemToMxmLatency = ftlpu::hw::kMemGroups + 2;
+constexpr std::size_t kMxmOutputToVxmLatency =
+    ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 4;
+constexpr std::size_t kDownOutputCastLatency = kMxmOutputToVxmLatency;
 constexpr std::size_t kDownActivationStreamBase = 16;
 constexpr std::size_t kDownActivationOutputBase = 8;
 constexpr std::size_t kDownAccumulatorAddressBase = 7000;
@@ -678,11 +682,10 @@ int main() try
                         accumulator_destination);
 
                     if (final_reduction) {
-                        constexpr auto kAccumulatorToVxmLatency = 16;
                         for (std::size_t offset = 0; offset < kTile; ++offset) {
                             const auto row = row_block * kTile + offset;
                             const auto vxm_cycle = compute_cycle
-                                + kAccumulatorToVxmLatency + offset;
+                                + kMxmOutputToVxmLatency + offset;
                             if (!fused_swish_start) fused_swish_start = vxm_cycle;
                             const auto swiglu_address = (n_base / kTile) * kRows + row;
                             schedule.swish_at(vxm_cycle, ftlpu::test::SwishSpec {

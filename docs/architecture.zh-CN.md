@@ -14,12 +14,12 @@
 | 属性 | 当前值 |
 | --- | ---: |
 | Hemisphere | 2 |
-| MEM slice | 每侧 44 个，全芯片 88 个 |
-| MEM group | 每侧 11 个，每组 4 个 slice |
-| Stream-register column | 每侧 13 个（`sreg0..sreg12`） |
+| MEM slice | 每侧 52 个，全芯片 104 个 |
+| MEM group | 每侧 13 个，每组 4 个 slice |
+| Stream-register column | 每侧 15 个（`sreg0..sreg14`） |
 | 每 lane stream | 32 条 eastward + 32 条 westward |
 | Stream-register 位宽 | 1 byte |
-| SRAM 容量 | 每 slice 2 MiB，全芯片 176 MiB |
+| SRAM 容量 | 每 slice 2 MiB，全芯片 208 MiB |
 | MXM | 共 4 个，每侧 2 个 |
 | MXM 阵列 | 32 x 32 FP16 乘法、FP32 累加 |
 | VXM | 中心 1 个 slice，每 lane 16 个 ALU |
@@ -27,24 +27,24 @@
 
 一个 MEM slice 拥有一个 `65536 x 32-byte` SRAM block。每个 row 横跨 4 个
 tile；指令波到达某个 tile 时，该 tile 只访问自己的 8-byte segment。两个
-hemisphere 共 88 个同构 slice，总容量为 `88 x 2 MiB = 176 MiB`，不再划分
+hemisphere 共 104 个同构 slice，总容量为 `104 x 2 MiB = 208 MiB`，不再划分
 logical bank。
 
 ## 2. 完整芯片拓扑
 
 ```text
-MXM2/MXM3 <-> SXM.W <-> MEM.W(44) <-> VXM <-> MEM.E(44) <-> SXM.E <-> MXM0/MXM1
+MXM2/MXM3 <-> SXM.W <-> MEM.W(52) <-> VXM <-> MEM.E(52) <-> SXM.E <-> MXM0/MXM1
 ```
 
 两个 hemisphere 使用相同的局部朝向：
 
 - `sreg0` 靠近 VXM；
-- 11 个 MEM group 位于 `sreg0..sreg11`；
-- SXM 把 MEM 边界 `sreg11` 连接到 MXM 边界 `sreg12`；
+- 13 个 MEM group 位于 `sreg0..sreg13`；
+- SXM 把 MEM 边界 `sreg13` 连接到 MXM 边界 `sreg14`；
 - east stream 从 VXM 流向 MXM；
 - west stream 从 MXM 流向 VXM。
 
-全局 MEM queue `0..43`、MXM `0..1` 属于 East；MEM queue `44..87`、MXM
+全局 MEM queue `0..51`、MXM `0..1` 属于 East；MEM queue `52..103`、MXM
 `2..3` 属于 West。
 
 共享 stream fabric 采用逐拍 current/next state：功能单元读取当前状态并暂存输出，
@@ -82,8 +82,8 @@ tile。workload 必须在每个 tile 对齐数据和控制，测试不能直接�
 
 ### 组织方式
 
-每个 hemisphere 有 44 个 MEM slice column，每个 slice 一条指令队列。相邻四个
-slice 组成一个 group，位于两个 stream-register boundary 之间。全部 44 个 slice
+每个 hemisphere 有 52 个 MEM slice column，每个 slice 一条指令队列。相邻四个
+slice 组成一个 group，位于两个 stream-register boundary 之间。全部 52 个 slice
 都是同构 SRAM，不再有专用 accumulator group。
 
 每个 slice 是单端口：同一拍即使地址不同，也不能同时 Read 和 Write。
@@ -192,15 +192,15 @@ Transpose 输出先打一拍，再由 Permute 消费。Permute 在 4 个 superla
 可按 `II=4` 流水。
 
 每个 hemisphere 有两条 SXM ICU queue：Transpose 和 Permute 各一条。没有 SXM
-指令时，east stream 以普通一拍 link 从 `sreg11` pass 到 `sreg12`。
+指令时，east stream 以普通一拍 link 从 `sreg13` pass 到 `sreg14`。
 
 ## 8. ICU 与 ISA
 
-ICU 共拥有 116 条独立 queue：
+ICU 共拥有 132 条独立 queue：
 
 | Queue 类别 | 数量 |
 | --- | ---: |
-| MEM | 88 |
+| MEM | 104 |
 | MXM load | 4 |
 | MXM compute | 4 |
 | VXM ALU | 16 |

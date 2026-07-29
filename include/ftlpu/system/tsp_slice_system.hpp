@@ -256,7 +256,9 @@ private:
             }
             auto provider = [this, mxm, sinks](std::size_t tile) {
                 if (sinks.mxm != nullptr && (!sinks.mxm_log_tile.has_value() || tile == *sinks.mxm_log_tile)) {
-                    *sinks.mxm << "  SXM.sreg12 -> MXM" << mxm << " tile " << tile << '\n';
+                    *sinks.mxm << "  SXM.sreg"
+                               << hw::kMxmBoundaryStreamRegisterColumn
+                               << " -> MXM" << mxm << " tile " << tile << '\n';
                 }
                 try {
                     return collect_mxm_weight_input_from_streams(mxm, tile);
@@ -290,13 +292,44 @@ private:
         auto input = MxmControlSlice::WeightInput {};
         const auto hemisphere = hemisphere_index(mxm_hemisphere(mxm));
         const auto stream_base = local_mxm_index(mxm) * hw::kMxmLoadStreamsPerCycle;
+        const auto& instruction = mxms_[mxm].control().instruction_at(tile);
+        if (!instruction.has_value()
+            || instruction->opcode != MxmControlOpcode::IW) {
+            throw std::logic_error(
+                "MXM weight input requested without an active IW instruction");
+        }
+        if (instruction->weight_load_mode == MxmWeightLoadMode::Column) {
+            const auto low = stream_base;
+            const auto high =
+                stream_base + hw::kMxmColumnLoadStreamsPerCycle - 1;
+            const auto column = instruction->weight_inner_column;
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                const auto low_word = mems_[hemisphere].consume_east_register(
+                    tile, lane, kTargetSreg, low);
+                const auto high_word = mems_[hemisphere].consume_east_register(
+                    tile, lane, kTargetSreg, high);
+                if (!low_word.has_value() || !high_word.has_value()) {
+                    throw std::logic_error(
+                        "MXM column IW reached tile before both FP16 weight streams arrived at the MXM boundary register");
+                }
+                const auto bits = static_cast<std::uint16_t>(low_word->data)
+                    | (static_cast<std::uint16_t>(high_word->data) << 8);
+                input[lane][column] = MxmArray::Supercell::InputWord {
+                    Fp16::from_bits(bits).to_float(),
+                    lane + 1 == hw::kLanesPerTile,
+                };
+            }
+            return input;
+        }
+
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             for (std::size_t column = 0; column < hw::kMxmSupercellColumns; ++column) {
                 const auto low_stream = stream_base + column * hw::kMxmWeightBytesPerValue;
                 const auto low = mems_[hemisphere].consume_east_register(tile, lane, kTargetSreg, low_stream);
                 const auto high = mems_[hemisphere].consume_east_register(tile, lane, kTargetSreg, low_stream + 1);
                 if (!low.has_value() || !high.has_value()) {
-                    throw std::logic_error("MXM IW reached tile before both FP16 weight streams arrived at sreg12");
+                    throw std::logic_error(
+                        "MXM IW reached tile before both FP16 weight streams arrived at the MXM boundary register");
                 }
                 const auto bits = static_cast<std::uint16_t>(low->data)
                     | (static_cast<std::uint16_t>(high->data) << 8);

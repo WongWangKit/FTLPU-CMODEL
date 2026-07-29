@@ -27,8 +27,10 @@ constexpr std::size_t kKvWidth = kKvHeads * kHeadDim;
 constexpr std::size_t kQueryWidth = kQueryHeads * kHeadDim;
 constexpr std::size_t kTile = ftlpu::hw::kMxmRows;
 constexpr float kRopeTheta = 100000.0f;
-constexpr std::size_t kWeightToIwLatency = 14;
-constexpr std::size_t kActivationLatency = 5;
+constexpr std::size_t kWeightToIwLatency =
+    ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 2;
+constexpr std::size_t kActivationLatency =
+    ftlpu::hw::kMemGroups - 32 / ftlpu::hw::kMemSlicesPerGroup + 2;
 constexpr std::size_t kMxm0AccumulatorLatency = 6;
 constexpr std::size_t kMxm1AccumulatorLatency = 5;
 constexpr std::size_t kMxmInputBlockIssueCycles =
@@ -59,8 +61,21 @@ constexpr std::size_t kQueryIwAddressBase = 7600;
 constexpr std::size_t kValuePackAddressBase = 7800;
 constexpr std::size_t kCausalMaskAddressBase = 8128;
 constexpr std::size_t kProbabilityDiagonalAddressBase = kRopeTableAddressBase;
-constexpr std::size_t kMemToSxmLatency = 12;
-constexpr std::size_t kMemToMxmLatency = 13;
+constexpr std::size_t kMemToSxmLatency = ftlpu::hw::kMemGroups + 1;
+constexpr std::size_t kMemToMxmLatency = ftlpu::hw::kMemGroups + 2;
+constexpr std::size_t kMxmToVxmLatency =
+    ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 1;
+constexpr std::size_t kMxmOutputToVxmLatency =
+    ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 4;
+constexpr std::size_t kProjectionFinalTail =
+    kMxmOutputToVxmLatency + 2;
+constexpr std::size_t kProjectionFinalBlockCycles =
+    kMxmOutputToVxmLatency
+    + kTile - 1
+    + kRopeWriteLatency
+    + 32 / ftlpu::hw::kMemSlicesPerGroup
+    + 1
+    + kActivationLatency;
 constexpr float kAttentionScale = 1.0f / 8.0f;
 constexpr float kCausalMaskValue = -1.0e9f;
 constexpr float kOProjAbsoluteTolerance = 1.0e-1f;
@@ -1295,7 +1310,7 @@ int main() try
                 const auto first_compute = dequant_start + 32;
                 const auto final_reduction = k_block + 1 == kHidden / kTile;
                 const auto compute_block_cycles = final_reduction
-                    ? 2 * kTile : kMxmInputBlockIssueCycles;
+                    ? kProjectionFinalBlockCycles : kMxmInputBlockIssueCycles;
                 for (std::size_t token_block = 0; token_block < kSeqLen / kTile; ++token_block) {
                     for (std::size_t hemisphere_index = 0;
                          hemisphere_index < ftlpu::hw::kHemispheres;
@@ -1340,11 +1355,10 @@ int main() try
                             destination);
 
                         if (destination == ftlpu::MxmAccumulatorDestination::Stream) {
-                            constexpr auto kAccumulatorToVxmLatency = 16;
                             for (std::size_t token_offset = 0; token_offset < kTile; ++token_offset) {
                                 const auto token = token_block * kTile + token_offset;
                                 const auto vxm_cycle = compute_cycle
-                                    + kAccumulatorToVxmLatency + token_offset;
+                                    + kMxmOutputToVxmLatency + token_offset;
                                 if (projection != Projection::Value) {
                                     for (std::size_t byte = 0; byte < kRopeTableSlices.size(); ++byte) {
                                         const auto slice = kRopeTableSlices[byte];
@@ -1423,7 +1437,7 @@ int main() try
                 }
                 phase_start = first_compute
                     + (kSeqLen / kTile) * compute_block_cycles
-                    + (final_reduction ? 16 : 0);
+                    + (final_reduction ? kProjectionFinalTail : 0);
             }
         }
         phase_markers.emplace_back(
@@ -1694,7 +1708,7 @@ int main() try
             const auto local_key = key % kTile;
             schedule.mxm_accumulator_read_at(
                 global_mxm,
-                vxm_cycle - 13,
+                vxm_cycle - kMxmToVxmLatency,
                 score_address(work.query_head, work.query_block, key),
                 0,
                 true);
@@ -2008,14 +2022,14 @@ int main() try
                 schedule.mxm_accumulator_read_at(
                     ftlpu::InstructionControlUnit::mxm_queue(
                         work.destination, 0),
-                    vxm_cycle - 13,
+                    vxm_cycle - kMxmToVxmLatency,
                     context_accumulator_address(work.query_head, token),
                     0,
                     true);
                 schedule.mxm_accumulator_read_at(
                     ftlpu::InstructionControlUnit::mxm_queue(
                         work.destination, 1),
-                    vxm_cycle - 13,
+                    vxm_cycle - kMxmToVxmLatency,
                     context_accumulator_address(work.query_head, token),
                     4,
                     true);
@@ -2274,11 +2288,10 @@ int main() try
                     1,
                     destination);
                 if (destination == ftlpu::MxmAccumulatorDestination::Stream) {
-                    constexpr auto kOutputToVxmLatency = 16;
                     for (std::size_t offset = 0; offset < kTile; ++offset) {
                         const auto token = token_block * kTile + offset;
                         const auto vxm_cycle = compute_cycle
-                            + kOutputToVxmLatency + offset;
+                            + kMxmOutputToVxmLatency + offset;
                         schedule.cast_pair_to_at(
                             vxm_cycle, output_hemisphere, kSoftmaxOutputStream,
                             output_hemisphere == ftlpu::Hemisphere::East ? 0 : 8);
@@ -2324,11 +2337,10 @@ int main() try
                         1,
                         destination);
                     if (destination == ftlpu::MxmAccumulatorDestination::Stream) {
-                        constexpr auto kOutputToVxmLatency = 16;
                         for (std::size_t offset = 0; offset < kTile; ++offset) {
                             const auto token = token_block * kTile + offset;
                             const auto vxm_cycle = compute_cycle
-                                + kOutputToVxmLatency + offset;
+                                + kMxmOutputToVxmLatency + offset;
                             schedule.cast_pair_to_at(
                                 vxm_cycle, west_hemisphere, kSoftmaxOutputStream, 8);
                             for (std::size_t byte = 0;

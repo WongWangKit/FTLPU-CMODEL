@@ -39,6 +39,8 @@ struct MxmControlInstruction {
     MxmAccumulatorDestination accumulator_destination{
         MxmAccumulatorDestination::Stream};
     bool accumulator_clear{true};
+    MxmWeightLoadMode weight_load_mode{MxmWeightLoadMode::Supercell};
+    std::size_t weight_inner_column{0};
 
     static MxmControlInstruction IW(
         std::size_t weight_buffer = 0,
@@ -48,6 +50,20 @@ struct MxmControlInstruction {
         check_column(weight_column);
         return MxmControlInstruction {
             MxmControlOpcode::IW, weight_buffer, 0, 0, weight_column};
+    }
+
+    static MxmControlInstruction IWColumn(
+        std::size_t weight_buffer,
+        std::size_t weight_column,
+        std::size_t weight_inner_column)
+    {
+        check_weight_buffer(weight_buffer);
+        check_column(weight_column);
+        check_inner_column(weight_inner_column);
+        auto instruction = IW(weight_buffer, weight_column);
+        instruction.weight_load_mode = MxmWeightLoadMode::Column;
+        instruction.weight_inner_column = weight_inner_column;
+        return instruction;
     }
 
     static MxmControlInstruction Compute(
@@ -101,6 +117,32 @@ struct MxmControlInstruction {
         if (column >= hw::kMxmSupercellsPerPlane) {
             throw std::out_of_range("MXM weight column is outside the array");
         }
+    }
+
+    static void check_inner_column(std::size_t column)
+    {
+        if (column >= hw::kMxmSupercellColumns) {
+            throw std::out_of_range(
+                "MXM weight inner column is outside the supercell");
+        }
+    }
+
+    static void check_weight_load(
+        MxmWeightLoadMode mode,
+        std::size_t inner_column)
+    {
+        switch (mode) {
+        case MxmWeightLoadMode::Supercell:
+            if (inner_column != 0) {
+                throw std::invalid_argument(
+                    "MXM full-supercell IW cannot select an inner column");
+            }
+            return;
+        case MxmWeightLoadMode::Column:
+            check_inner_column(inner_column);
+            return;
+        }
+        throw std::invalid_argument("MXM weight load mode is invalid");
     }
 
     static void check_activation_stream_base(std::size_t activation_stream_base)
@@ -335,6 +377,9 @@ private:
             MxmControlInstruction::check_stream_base(instruction.stream_base);
         } else {
             MxmControlInstruction::check_column(instruction.weight_column);
+            MxmControlInstruction::check_weight_load(
+                instruction.weight_load_mode,
+                instruction.weight_inner_column);
         }
     }
 
@@ -420,29 +465,47 @@ private:
 
                     if (should_log) {
                         os << "IW b" << instruction->weight_buffer
-                           << " col=" << instruction->weight_column << " inject ";
+                           << " col=" << instruction->weight_column;
+                        if (instruction->weight_load_mode
+                            == MxmWeightLoadMode::Column) {
+                            os << " inner=" << instruction->weight_inner_column;
+                        }
+                        os << " inject ";
                     }
                     const auto column = instruction->weight_column;
                     const auto input = *weight_inputs_[tile];
+                    const auto load = instruction->weight_load_mode
+                            == MxmWeightLoadMode::Column
+                        ? MxmInstruction::IWColumn(
+                              instruction->weight_buffer,
+                              instruction->weight_inner_column)
+                        : MxmInstruction::IW(instruction->weight_buffer);
                     weight_inputs_[tile].reset();
 
                     any = true;
                     if (should_log) {
                         any_logged = true;
                         os << "  tile " << tile << " weight b" << instruction->weight_buffer
-                           << " col=" << column << " ";
+                           << " col=" << column;
+                        if (instruction->weight_load_mode
+                            == MxmWeightLoadMode::Column) {
+                            os << " inner=" << instruction->weight_inner_column;
+                        }
+                        os << " ";
                         array_.tick_cell_iw_load(
-                            tile, column, instruction->weight_buffer, input, os);
+                            tile, column, load, input, os);
                     } else {
                         static NullStream null_stream;
                         array_.tick_cell_iw_load(
                             tile,
                             column,
-                            instruction->weight_buffer,
+                            load,
                             input,
                             null_stream.stream());
                     }
-                    loaded_cells_[instruction->weight_buffer][tile][column] = true;
+                    loaded_cells_[instruction->weight_buffer][tile][column]
+                        = array_.cell(tile, column).weight_buffer_valid(
+                            instruction->weight_buffer);
                 }
             }
 

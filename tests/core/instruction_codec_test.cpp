@@ -25,6 +25,8 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
         && lhs.stream_base == rhs.stream_base
         && lhs.activation_stream_base == rhs.activation_stream_base
         && lhs.weight_column == rhs.weight_column
+        && lhs.weight_load_mode == rhs.weight_load_mode
+        && lhs.weight_inner_column == rhs.weight_inner_column
         && lhs.accumulator_address == rhs.accumulator_address
         && lhs.accumulator_row_stride == rhs.accumulator_row_stride
         && lhs.accumulator_destination == rhs.accumulator_destination
@@ -97,6 +99,7 @@ bool verify_mxm_codec()
 {
     const ftlpu::MxmControlInstruction instructions[] {
         ftlpu::MxmControlInstruction::IW(1, 3),
+        ftlpu::MxmControlInstruction::IWColumn(1, 2, 7),
         ftlpu::MxmControlInstruction::Compute(
             1,
             30,
@@ -119,7 +122,14 @@ bool verify_mxm_codec()
         [] {
             ftlpu::isa::encode_mxm_instruction(ftlpu::MxmControlInstruction::IW(32));
         },
-        "MXM codec should reject weight buffers outside the two-buffer set");
+        "MXM codec should reject weight buffers outside the two-buffer set")
+        && require_throws(
+            [] {
+                auto invalid = ftlpu::MxmControlInstruction::IW(0, 0);
+                invalid.weight_inner_column = 1;
+                ftlpu::isa::encode_mxm_instruction(invalid);
+            },
+            "MXM codec should reject an inner column in full-supercell mode");
 }
 
 bool verify_vxm_codec()

@@ -134,7 +134,7 @@ struct MemStreamWord {
 };
 
 // Small generic scalar MEM helper retained for unit-level experimentation.
-// The full 4x44 MEM functional-slice model is MemArrayModel in mem_array.hpp.
+// The full 4x52 MEM functional-slice model is MemArrayModel in mem_array.hpp.
 template <typename T>
 class MemSlice {
 public:

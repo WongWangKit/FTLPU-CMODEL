@@ -16,14 +16,14 @@ bit-accurate。当前目标是提供一个可验证的数据流调度目标，�
 | --- | --- |
 | 向量形态 | 4 个 tile/superlane x 8 lane = 32 个元素 |
 | Stream | 32 条 eastward + 32 条 westward，每个寄存器 1 byte |
-| MEM | 每个 hemisphere 44 个 slice，全芯片 88 条 ICU queue |
-| SRAM | 每个 slice 2 MiB，每侧 88 MiB，全芯片 176 MiB |
+| MEM | 每个 hemisphere 52 个 slice，全芯片 104 条 ICU queue |
+| SRAM | 每个 slice 2 MiB，每侧 104 MiB，全芯片 208 MiB |
 | Accumulator | 每个 MXM 内置一个 1 MiB FP32 accumulator |
 | MXM | 四个 32 x 32 FP16 GEMM 阵列，每侧两个 |
 | MXM 权重 | 每个 supercell 两个对等 buffer，由 `IW`/`Compute` 选择 |
 | VXM | 中心一个 slice，每个 lane 有 16 个独立控制的 ALU |
 | SXM | 每个 hemisphere 一个四-tile Transpose/Permute slice |
-| ICU | 88 MEM、4 MXM load、4 MXM compute、16 VXM、4 SXM queue |
+| ICU | 104 MEM、4 MXM load、4 MXM compute、16 VXM、4 SXM queue |
 
 固定的完整芯片拓扑为：
 
@@ -31,8 +31,8 @@ bit-accurate。当前目标是提供一个可验证的数据流调度目标，�
 MXM2/MXM3 <-> SXM.W <-> MEM.W <-> VXM <-> MEM.E <-> SXM.E <-> MXM0/MXM1
 ```
 
-每个 hemisphere 使用局部 `sreg0..sreg12`。`sreg0` 靠近 VXM，MEM 的 11 个
-group 位于 `sreg0..sreg11`，SXM 将 `sreg11` 连接到 MXM 边界 `sreg12`。
+每个 hemisphere 使用局部 `sreg0..sreg14`。`sreg0` 靠近 VXM，MEM 的 13 个
+group 位于 `sreg0..sreg13`，SXM 将 `sreg13` 连接到 MXM 边界 `sreg14`。
 
 Stream 支持广播读取：同一拍内多个功能单元可以消费同一个寄存器值。只要有一个
 消费者，该值就不再被动传播；多个生产者仍不能向同一个 stream register 写入

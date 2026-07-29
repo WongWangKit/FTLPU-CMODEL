@@ -18,12 +18,16 @@ constexpr std::size_t kSeqLen = 128;
 constexpr std::size_t kHidden = 576;
 constexpr std::size_t kIntermediate = 1536;
 constexpr std::size_t kTile = ftlpu::hw::kMxmRows;
-constexpr std::size_t kActivationLatency = 5;
-constexpr std::size_t kWeightToIwLatency = 14;
+constexpr std::size_t kActivationLatency =
+    ftlpu::hw::kMemGroups - 32 / ftlpu::hw::kMemSlicesPerGroup + 2;
+constexpr std::size_t kWeightToIwLatency =
+    ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 2;
 constexpr std::size_t kGateAccumulatorLatency = 6;
 constexpr std::size_t kUpAccumulatorLatency = 5;
 constexpr std::size_t kComputeBlockCycles = 48;
 constexpr std::size_t kSwishOutputWriteLatency = 13;
+constexpr std::size_t kMxmToVxmLatency =
+    ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 1;
 constexpr std::size_t kOutputLowSlice = 29;
 constexpr std::size_t kOutputHighSlice = 30;
 constexpr std::array<std::size_t, 8> kWeightSlices {0, 4, 8, 12, 16, 20, 24, 28};
@@ -345,8 +349,10 @@ int main()
         for (std::size_t row = 0; row < kSeqLen; ++row) {
             const auto cycle = swish_start + (n_base / kTile) * kSeqLen + row;
             const auto acc_address = accumulator_address(row, n_base);
-            schedule.mxm_accumulator_read_at(0, cycle - 13, acc_address, 0);
-            schedule.mxm_accumulator_read_at(1, cycle - 13, acc_address, 4);
+            schedule.mxm_accumulator_read_at(
+                0, cycle - kMxmToVxmLatency, acc_address, 0);
+            schedule.mxm_accumulator_read_at(
+                1, cycle - kMxmToVxmLatency, acc_address, 4);
             schedule.swish_at(cycle, ftlpu::test::SwishSpec {32, 36, 0});
             schedule.mem_at(
                 kOutputLowSlice,
