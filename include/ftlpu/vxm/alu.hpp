@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ftlpu/core/bf16.hpp"
 #include "ftlpu/core/hardware_params.hpp"
 
 #include <algorithm>
@@ -35,6 +36,7 @@ enum class VxmCastTarget {
     Float32,
     Float16,
     Int8,
+    BFloat16,
 };
 
 struct VxmAluInstruction {
@@ -237,6 +239,11 @@ private:
         case VxmCastTarget::Float16:
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                 out[lane] = input[lane];
+            }
+            return out;
+        case VxmCastTarget::BFloat16:
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                out[lane] = Bf16::from_float(input[lane]).to_float();
             }
             return out;
         case VxmCastTarget::Int8:

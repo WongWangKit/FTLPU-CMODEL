@@ -83,6 +83,18 @@ int main()
     assert(nearly_equal(cast_fp32[0], 1.0f));
     assert(nearly_equal(cast_fp32[15], 16.0f));
 
+    ftlpu::VxmAlu::Vector bf16_cast_input {};
+    bf16_cast_input[0] = 1.00390625f;
+    bf16_cast_input[1] = -3.1415927f;
+    const auto cast_bf16 = ftlpu::VxmAlu::execute(
+        {ftlpu::VxmAluOpcode::Cast, 0.0f, 0.0f, 0, 1.0f,
+         ftlpu::VxmCastTarget::BFloat16},
+        bf16_cast_input);
+    assert(cast_bf16[0]
+        == ftlpu::Bf16::from_float(bf16_cast_input[0]).to_float());
+    assert(cast_bf16[1]
+        == ftlpu::Bf16::from_float(bf16_cast_input[1]).to_float());
+
     ftlpu::VxmAlu::Vector int8_cast_input {};
     int8_cast_input[0] = -129.0f;
     int8_cast_input[1] = -2.4f;

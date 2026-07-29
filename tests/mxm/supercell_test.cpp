@@ -14,7 +14,8 @@ ftlpu::MxmSupercell::InputVector full_input()
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
         for (std::size_t stream = 0; stream < ftlpu::hw::kMxmSupercellColumns; ++stream) {
             input[lane][stream] = ftlpu::MxmSupercell::InputWord {
-                static_cast<float>(static_cast<int>(lane * 8 + stream) - 31),
+                ftlpu::Fp16::from_float(static_cast<float>(
+                    static_cast<int>(lane * 8 + stream) - 31)).bits(),
                 stream + 1 == ftlpu::hw::kMxmSupercellColumns,
             };
         }
@@ -27,7 +28,8 @@ ftlpu::MxmSupercell::InputVector column_input(std::size_t column)
     ftlpu::MxmSupercell::InputVector input{};
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
         input[lane][column] = ftlpu::MxmSupercell::InputWord {
-            static_cast<float>(static_cast<int>(lane * 8 + column) - 31),
+            ftlpu::Fp16::from_float(static_cast<float>(
+                static_cast<int>(lane * 8 + column) - 31)).bits(),
             lane + 1 == ftlpu::hw::kLanesPerTile,
         };
     }
@@ -114,6 +116,37 @@ int main()
                     static_cast<int>(lane * 8 + column) - 31));
         }
     }
+
+    ftlpu::MxmSupercell bf16_supercell;
+    auto bf16_weights = ftlpu::MxmSupercell::InputVector {};
+    for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+        for (std::size_t column = 0;
+             column < ftlpu::hw::kMxmSupercellColumns;
+             ++column) {
+            const auto value = 1.00390625f
+                + static_cast<float>(lane + column) * 0.03125f;
+            bf16_weights[lane][column] = ftlpu::MxmSupercell::InputWord {
+                ftlpu::Bf16::from_float(value).bits(),
+                column + 1 == ftlpu::hw::kMxmSupercellColumns,
+            };
+        }
+    }
+    bf16_supercell.set_input(bf16_weights);
+    bf16_supercell.issue(ftlpu::MxmInstruction::IW(0));
+    bf16_supercell.tick(log);
+    bf16_supercell.set_activation_input(
+        activation_input(), 0, ftlpu::MxmDataFormat::BFloat16);
+    bf16_supercell.tick(log);
+    float bf16_expected = 0.0f;
+    for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+        const auto activation = 0.5f + static_cast<float>(lane) * 0.25f;
+        const auto weight = 1.00390625f
+            + static_cast<float>(lane) * 0.03125f;
+        bf16_expected += activation
+            * ftlpu::Bf16::from_float(weight).to_float();
+    }
+    assert(nearly_equal(
+        bf16_supercell.outputs().front().value, bf16_expected));
 
     supercell.reset();
     auto missing = full_input();

@@ -41,6 +41,7 @@ struct MxmControlInstruction {
     bool accumulator_clear{true};
     MxmWeightLoadMode weight_load_mode{MxmWeightLoadMode::Supercell};
     std::size_t weight_inner_column{0};
+    MxmDataFormat data_format{MxmDataFormat::Float16};
 
     static MxmControlInstruction IW(
         std::size_t weight_buffer = 0,
@@ -48,8 +49,11 @@ struct MxmControlInstruction {
     {
         check_weight_buffer(weight_buffer);
         check_column(weight_column);
-        return MxmControlInstruction {
-            MxmControlOpcode::IW, weight_buffer, 0, 0, weight_column};
+        auto instruction = MxmControlInstruction {};
+        instruction.opcode = MxmControlOpcode::IW;
+        instruction.weight_buffer = weight_buffer;
+        instruction.weight_column = weight_column;
+        return instruction;
     }
 
     static MxmControlInstruction IWColumn(
@@ -73,21 +77,22 @@ struct MxmControlInstruction {
         std::size_t accumulator_address = 0,
         std::size_t accumulator_row_stride = 1,
         MxmAccumulatorDestination accumulator_destination =
-            MxmAccumulatorDestination::Stream)
+            MxmAccumulatorDestination::Stream,
+        MxmDataFormat data_format = MxmDataFormat::Float16)
     {
         check_weight_buffer(weight_buffer);
         check_activation_stream_base(activation_stream_base);
         check_stream_base(stream_base);
-        return MxmControlInstruction {
-            MxmControlOpcode::Compute,
-            weight_buffer,
-            stream_base,
-            activation_stream_base,
-            0,
-            accumulator_address,
-            accumulator_row_stride,
-            accumulator_destination,
-            true};
+        auto instruction = MxmControlInstruction {};
+        instruction.opcode = MxmControlOpcode::Compute;
+        instruction.weight_buffer = weight_buffer;
+        instruction.stream_base = stream_base;
+        instruction.activation_stream_base = activation_stream_base;
+        instruction.accumulator_address = accumulator_address;
+        instruction.accumulator_row_stride = accumulator_row_stride;
+        instruction.accumulator_destination = accumulator_destination;
+        instruction.data_format = data_format;
+        return instruction;
     }
 
     static MxmControlInstruction AccumulatorRead(
@@ -145,10 +150,20 @@ struct MxmControlInstruction {
         throw std::invalid_argument("MXM weight load mode is invalid");
     }
 
+    static void check_data_format(MxmDataFormat format)
+    {
+        switch (format) {
+        case MxmDataFormat::Float16:
+        case MxmDataFormat::BFloat16:
+            return;
+        }
+        throw std::invalid_argument("MXM data format is invalid");
+    }
+
     static void check_activation_stream_base(std::size_t activation_stream_base)
     {
         if (activation_stream_base + hw::kMxmActivationStreamsPerVector > hw::kEastStreams) {
-            throw std::out_of_range("MXM FP16 activation requires two consecutive east streams");
+            throw std::out_of_range("MXM 16-bit activation requires two consecutive east streams");
         }
     }
 
@@ -182,6 +197,7 @@ public:
         std::size_t accumulator_row_stride{1};
         MxmAccumulatorDestination accumulator_destination{
             MxmAccumulatorDestination::Stream};
+        MxmDataFormat data_format{MxmDataFormat::Float16};
     };
 
     struct AccumulatorReadPulse {
@@ -363,6 +379,8 @@ private:
     {
         MxmControlInstruction::check_weight_buffer(instruction.weight_buffer);
         if (instruction.opcode == MxmControlOpcode::Compute) {
+            MxmControlInstruction::check_data_format(
+                instruction.data_format);
             MxmControlInstruction::check_activation_stream_base(instruction.activation_stream_base);
             MxmControlInstruction::check_stream_base(instruction.stream_base);
             MxmControlInstruction::check_accumulator_address(
@@ -521,6 +539,9 @@ private:
                         os << "  tile " << tile << " Compute b"
                            << compute_instruction->weight_buffer
                            << " stream=" << compute_instruction->activation_stream_base
+                           << " format="
+                           << mxm_data_format_name(
+                                  compute_instruction->data_format)
                            << " acc=" << compute_instruction->accumulator_address
                            << " out=" << compute_instruction->stream_base << '\n';
                     }
@@ -532,6 +553,7 @@ private:
                         compute_instruction->accumulator_address,
                         compute_instruction->accumulator_row_stride,
                         compute_instruction->accumulator_destination,
+                        compute_instruction->data_format,
                     };
                 } else if (
                     compute_instruction->opcode

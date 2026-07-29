@@ -49,6 +49,18 @@ public:
     }
 
     Weight weight(
+        std::size_t buffer,
+        std::size_t supercell_row,
+        std::size_t supercell_column,
+        std::size_t row,
+        std::size_t column,
+        MxmDataFormat format) const
+    {
+        return cell(supercell_row, supercell_column).weight(
+            buffer, row, column, format);
+    }
+
+    Weight weight(
         std::size_t supercell_row,
         std::size_t supercell_column,
         std::size_t row,

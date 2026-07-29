@@ -22,7 +22,7 @@ The central vector shape is:
 | Stream-register width | 1 byte |
 | SRAM capacity | 2 MiB per slice, 208 MiB full chip |
 | MXM units | 4 total, 2 per hemisphere |
-| MXM array | 32 x 32 FP16 multiply with FP32 accumulation |
+| MXM array | 32 x 32 FP16/BF16 multiply with FP32 accumulation |
 | VXM | 1 central slice, 16 ALUs per lane |
 | SXM | 1 four-tile slice per hemisphere |
 
@@ -129,7 +129,7 @@ initialization/result APIs expose tile and lane byte selection separately.
 Each `Mxm` contains:
 
 - a `4 x 4` array of supercells;
-- one `8 x 8` FP16 weight block per supercell;
+- one raw `8 x 8` 16-bit weight block per supercell;
 - two peer weight buffers per supercell;
 - a south-to-north control slice;
 - activation-flow and FP32 output state.
@@ -143,7 +143,7 @@ implicitly shift the final layout. There is no `LW` instruction.
 The original full-supercell form consumes 16 east streams:
 
 ```text
-8 FP16 values x 2 byte streams = 16 streams
+8 16-bit values x 2 byte streams = 16 streams
 ```
 
 Local MXM0 uses `E0..E15`; local MXM1 uses `E16..E31`. Four continuous IW
@@ -155,7 +155,7 @@ east streams and writes one of the eight columns inside the selected `8 x 8`
 supercell:
 
 ```text
-1 FP16 value per lane x 2 byte streams = 2 streams
+1 16-bit value per lane x 2 byte streams = 2 streams
 ```
 
 Local MXM0 uses `E0..E1`; local MXM1 uses `E16..E17`. On an empty buffer,
@@ -170,19 +170,22 @@ scale[n] = max_k(abs(W[k,n])) / 127
 ```
 
 VXM multiplies INT8 values by the corresponding scale and casts them to FP16
-before IW.
+or BF16 before IW. IW stores the two incoming bytes unchanged and therefore
+does not carry a data-format field.
 
 ### Compute
 
-`Compute(buffer, activation_stream_base, output_stream_base)` is a one-cycle
-control pulse. Consecutive pulses inject consecutive activation vectors.
-The selected buffer and stream bases travel with the activation wave.
+`Compute(buffer, activation_stream_base, output_stream_base, ..., data_format)`
+is a one-cycle control pulse. Consecutive pulses inject consecutive activation
+vectors. The selected buffer, stream bases, and FP16/BF16 format travel with
+the activation wave.
 
-Each supercell dots an 8-element FP16 activation against eight FP16 weight
-columns. Activations move east across the four supercell columns while partial
-sums move north and accumulate as FP32. Completed outputs are automatically
-written to four consecutive west byte streams selected by the Compute
-instruction. There is no separate MXM output command or software output queue.
+Each supercell interprets both the activation and raw weight bits using the
+Compute format, then dots eight elements against eight weight columns.
+Activations move east across the four supercell columns while partial sums move
+north and accumulate as FP32. Completed outputs are automatically written to
+four consecutive west byte streams selected by the Compute instruction. There
+is no separate MXM output command or software output queue.
 
 The system owns all MXM runtime state; whole-system tests do not use a separate
 GEMM engine or runtime helper.
@@ -200,9 +203,10 @@ Pass Add Subtract Multiply Divide Negate Abs Min Max Clamp
 Square Sqrt Exp Log Relu Cast
 ```
 
-Operands may come from INT8, FP16, INT32, or FP32 streams; FP32 immediates; or
-prior-cycle ALU outputs. Results may remain in an ALU register or be emitted to
-a selected stream and destination hemisphere.
+Operands may come from INT8, FP16, BF16, INT32, or FP32 streams; FP32
+immediates; or prior-cycle ALU outputs. Results may remain in an ALU register
+or be emitted to a selected stream and destination hemisphere. Cast can emit
+FP16 or BF16 as two little-endian byte streams.
 
 Quantization and dequantization are instruction graphs, not dedicated opcodes.
 For example, W8 dequant is synthesized with Multiply and Cast. SwiGLU is
@@ -364,6 +368,25 @@ check passes at 94,761 scheduled cycles.
 
 See [attention_pipeline_optimization.md](attention_pipeline_optimization.md) for
 phase timing, measured MXM utilization, and remaining overlap opportunities.
+
+### Decoder-Layer Decode
+
+`decoder_layer_decode_test` starts from a materialized 128-token K/V cache and
+executes token 128 through one tile-scale decoder layer:
+
+```text
+RMSNorm -> Q/K/V -> RoPE -> append K/V
+        -> QK -> softmax -> P x V -> O -> residual
+        -> RMSNorm -> Gate/Up -> SwiGLU -> Down -> residual
+```
+
+The test uses hidden/head dimension 32 and intermediate dimension 64 so every
+matrix edge is an exact MXM tile. All GEMV, QK, and P x V work is issued through
+the system MEM/MXM paths. Decode Q is installed as one weight column with the
+two-stream `IWColumn` form, then all 129 cached K rows stream through the MXM.
+The nonlinear composition follows the FP16 boundaries already validated by the
+dedicated RMSNorm, VXM, attention, and SwiGLU tests. Scaling to the SmolLM2
+576/1536/9-head shape repeats these tile mappings across four MXMs.
 
 ### Multi-executable boundaries
 

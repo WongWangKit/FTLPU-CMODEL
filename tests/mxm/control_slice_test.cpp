@@ -26,7 +26,8 @@ ftlpu::MxmControlSlice::WeightInput row_input(std::size_t tile, std::size_t supe
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
         for (std::size_t stream = 0; stream < ftlpu::hw::kMxmSupercellColumns; ++stream) {
             input[lane][stream] = ftlpu::MxmArray::Supercell::InputWord {
-                static_cast<float>(base + lane + stream),
+                ftlpu::Fp16::from_float(
+                    static_cast<float>(base + lane + stream)).bits(),
                 stream + 1 == ftlpu::hw::kMxmSupercellColumns,
             };
         }
@@ -44,7 +45,8 @@ ftlpu::MxmControlSlice::WeightInput column_input(
         (tile * ftlpu::hw::kMxmSupercellsPerPlane + supercell_column) & 0xff);
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
         input[lane][inner_column] = ftlpu::MxmArray::Supercell::InputWord {
-            static_cast<float>(base + lane + inner_column),
+            ftlpu::Fp16::from_float(
+                static_cast<float>(base + lane + inner_column)).bits(),
             lane + 1 == ftlpu::hw::kLanesPerTile,
         };
     }

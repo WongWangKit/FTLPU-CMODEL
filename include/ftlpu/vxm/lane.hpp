@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ftlpu/core/bf16.hpp"
 #include "ftlpu/core/fp16.hpp"
 #include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/vxm/alu.hpp"
@@ -28,6 +29,7 @@ enum class VxmLaneOperandKind {
     StreamFloat32,
     StreamInt8,
     StreamFloat16,
+    StreamBFloat16,
 };
 
 struct VxmLaneOperand {
@@ -59,6 +61,12 @@ struct VxmLaneOperand {
     static VxmLaneOperand StreamFloat16(std::size_t base_stream)
     {
         return VxmLaneOperand {VxmLaneOperandKind::StreamFloat16, base_stream, 0.0f, 1.0f};
+    }
+
+    static VxmLaneOperand StreamBFloat16(std::size_t base_stream)
+    {
+        return VxmLaneOperand {
+            VxmLaneOperandKind::StreamBFloat16, base_stream, 0.0f, 1.0f};
     }
 
     static VxmLaneOperand Imm(float value)
@@ -450,6 +458,8 @@ private:
             return "i8stream[" + std::to_string(operand.index) + "]";
         case VxmLaneOperandKind::StreamFloat16:
             return "f16stream[" + std::to_string(operand.index) + ".." + std::to_string(operand.index + 1) + "]";
+        case VxmLaneOperandKind::StreamBFloat16:
+            return "bf16stream[" + std::to_string(operand.index) + ".." + std::to_string(operand.index + 1) + "]";
         case VxmLaneOperandKind::Immediate:
             return "imm(" + std::to_string(operand.immediate) + ")";
         }
@@ -511,6 +521,11 @@ private:
             if (!stream_input.has_value()) return std::nullopt;
             if (operand.index + 1 >= kInputStreams) throw std::out_of_range("VXM lane fp16 stream operand needs two streams");
             return Fp16::from_bits(static_cast<std::uint16_t>((*stream_input)[operand.index])
+                | (static_cast<std::uint16_t>((*stream_input)[operand.index + 1]) << 8)).to_float();
+        case VxmLaneOperandKind::StreamBFloat16:
+            if (!stream_input.has_value()) return std::nullopt;
+            if (operand.index + 1 >= kInputStreams) throw std::out_of_range("VXM lane bf16 stream operand needs two streams");
+            return Bf16::from_bits(static_cast<std::uint16_t>((*stream_input)[operand.index])
                 | (static_cast<std::uint16_t>((*stream_input)[operand.index + 1]) << 8)).to_float();
         case VxmLaneOperandKind::Immediate:
             return operand.immediate;
@@ -575,6 +590,9 @@ private:
         case VxmAluOpcode::Cast:
             if (instruction.cast_target == VxmCastTarget::Int8) {
                 result.value = static_cast<float>(VxmAlu::cast_scalar_to_int8(*lhs));
+            } else if (
+                instruction.cast_target == VxmCastTarget::BFloat16) {
+                result.value = Bf16::from_float(*lhs).to_float();
             } else {
                 result.value = *lhs;
             }
@@ -595,6 +613,15 @@ private:
             break;
         case VxmCastTarget::Float16: {
             const auto bits = VxmAlu::cast_scalar_to_float16_bits(result.value);
+            result.output = static_cast<std::int8_t>(bits & 0xffu);
+            result.output_bytes[0] = static_cast<std::uint8_t>(bits & 0xffu);
+            result.output_bytes[1] = static_cast<std::uint8_t>((bits >> 8) & 0xffu);
+            result.output_byte_count = 2;
+            break;
+        }
+        case VxmCastTarget::BFloat16: {
+            const auto bits = Bf16::from_float(result.value).bits();
+            result.value = Bf16::from_bits(bits).to_float();
             result.output = static_cast<std::int8_t>(bits & 0xffu);
             result.output_bytes[0] = static_cast<std::uint8_t>(bits & 0xffu);
             result.output_bytes[1] = static_cast<std::uint8_t>((bits >> 8) & 0xffu);

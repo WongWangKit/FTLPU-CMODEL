@@ -77,10 +77,11 @@ ftlpu::MxmControlSlice::WeightInput collect_mxm_weight_input(
             if (!low.has_value() || !high.has_value()) {
                 throw std::logic_error("MEM to MXM handoff reached an empty stream slot");
             }
-            const auto bits = static_cast<std::uint16_t>(low->data)
-                | (static_cast<std::uint16_t>(high->data) << 8);
+            const auto bits = static_cast<std::uint16_t>(
+                static_cast<std::uint16_t>(low->data)
+                | (static_cast<std::uint16_t>(high->data) << 8));
             input[lane][column] = ftlpu::MxmArray::Supercell::InputWord {
-                ftlpu::Fp16::from_bits(bits).to_float(),
+                bits,
                 column + 1 == ftlpu::hw::kMxmSupercellColumns,
             };
         }

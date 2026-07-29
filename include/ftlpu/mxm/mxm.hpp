@@ -137,7 +137,8 @@ public:
             if (tile == 0 && absolute_row >= hw::kMxmRows) {
                 reset_accumulator_row(weight_buffer, row);
             }
-            const auto data = collect_activation(mem, tile, stream_base);
+            const auto data = collect_activation(
+                mem, tile, stream_base, compute.data_format);
             east_pipeline_[0][tile].push_back(ActivationEvent {
                 tile,
                 row,
@@ -146,12 +147,15 @@ public:
                 compute.accumulator_address,
                 compute.accumulator_row_stride,
                 compute.accumulator_destination,
+                compute.data_format,
                 data});
             if (os != nullptr && (!log_tile.has_value() || *log_tile == tile)) {
                 *os << "  MXM" << mxm_id << " consume activation tile=" << tile
                     << " row=" << row
                     << " buffer=" << weight_buffer
                     << " stream=" << stream_base
+                    << " format="
+                    << mxm_data_format_name(compute.data_format)
                     << " out=" << output_stream_base << '\n';
             }
         }
@@ -217,6 +221,7 @@ private:
         std::size_t accumulator_row_stride{1};
         MxmAccumulatorDestination accumulator_destination{
             MxmAccumulatorDestination::Stream};
+        MxmDataFormat data_format{MxmDataFormat::Float16};
         ActivationData data{};
     };
 
@@ -256,22 +261,26 @@ private:
         contribution_counts_[weight_buffer][row].fill(0);
     }
 
-    static ActivationData collect_activation(TileArrayModel& mem, std::size_t tile, std::size_t stream_base)
+    static ActivationData collect_activation(
+        TileArrayModel& mem,
+        std::size_t tile,
+        std::size_t stream_base,
+        MxmDataFormat format)
     {
         constexpr auto kTargetSreg = hw::kMxmBoundaryStreamRegisterColumn;
         if (stream_base + hw::kMxmActivationStreamsPerVector > hw::kEastStreams) {
-            throw std::out_of_range("MXM FP16 activation requires two consecutive east streams");
+            throw std::out_of_range("MXM 16-bit activation requires two consecutive east streams");
         }
         ActivationData data {};
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             const auto low = mem.consume_east_register(tile, lane, kTargetSreg, stream_base);
             const auto high = mem.consume_east_register(tile, lane, kTargetSreg, stream_base + 1);
             if (!low.has_value() || !high.has_value()) {
-                throw std::logic_error("MXM Compute reached tile before both FP16 activation streams arrived");
+                throw std::logic_error("MXM Compute reached tile before both 16-bit activation streams arrived");
             }
             const auto bits = static_cast<std::uint16_t>(low->data)
                 | (static_cast<std::uint16_t>(high->data) << 8);
-            data[lane] = Fp16::from_bits(bits).to_float();
+            data[lane] = decode_mxm_16bit(bits, format);
         }
         return data;
     }
@@ -283,7 +292,13 @@ private:
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                 const auto partial = event.data[lane]
                     * static_cast<float>(
-                        array_.weight(event.weight_buffer, event.tile, column_block, lane, local_column));
+                        array_.weight(
+                            event.weight_buffer,
+                            event.tile,
+                            column_block,
+                            lane,
+                            local_column,
+                            event.data_format));
                 accumulators_[event.weight_buffer][event.row][global_column] += partial;
             }
             ++contribution_counts_[event.weight_buffer][event.row][global_column];

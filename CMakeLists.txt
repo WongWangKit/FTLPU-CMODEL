@@ -26,6 +26,7 @@ function(ftlpu_add_demo target source)
 endfunction()
 
 ftlpu_add_test(instruction_codec_test tests/core/instruction_codec_test.cpp)
+ftlpu_add_test(bf16_test tests/core/bf16_test.cpp)
 
 ftlpu_add_test(stream_fabric_test tests/stream/stream_fabric_test.cpp)
 ftlpu_add_test(stream_port_test tests/stream/stream_port_test.cpp)
@@ -42,11 +43,13 @@ ftlpu_add_test(mxm_supercell_test tests/mxm/supercell_test.cpp)
 ftlpu_add_test(mxm_array_test tests/mxm/array_test.cpp)
 ftlpu_add_test(mxm_control_slice_test tests/mxm/control_slice_test.cpp)
 ftlpu_add_test(mxm_accumulator_test tests/mxm/accumulator_test.cpp)
+ftlpu_add_test(mxm_bf16_test tests/integration/mxm_bf16_test.cpp)
 ftlpu_add_test(w8a16_projection_test tests/integration/w8a16_projection_test.cpp)
 ftlpu_add_test(w8a16_swiglu_test tests/integration/w8a16_swiglu_test.cpp)
 ftlpu_add_test(dual_hemisphere_w8a16_swiglu_test tests/integration/dual_hemisphere_w8a16_swiglu_test.cpp)
 ftlpu_add_test(rmsnorm_test tests/integration/rmsnorm_test.cpp)
 ftlpu_add_test(smollm2_attention_test tests/integration/smollm2_attention_test.cpp)
+ftlpu_add_test(decoder_layer_decode_test tests/integration/decoder_layer_decode_test.cpp)
 
 # These workloads saturate the simulator's CPU and memory paths. Running them
 # concurrently is substantially slower than scheduling them one at a time.
@@ -55,6 +58,7 @@ set_tests_properties(
     w8a16_swiglu_test
     dual_hemisphere_w8a16_swiglu_test
     smollm2_attention_test
+    decoder_layer_decode_test
     PROPERTIES RUN_SERIAL TRUE
 )
 

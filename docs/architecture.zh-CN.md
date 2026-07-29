@@ -21,7 +21,7 @@
 | Stream-register 位宽 | 1 byte |
 | SRAM 容量 | 每 slice 2 MiB，全芯片 208 MiB |
 | MXM | 共 4 个，每侧 2 个 |
-| MXM 阵列 | 32 x 32 FP16 乘法、FP32 累加 |
+| MXM 阵列 | 32 x 32 FP16/BF16 乘法、FP32 累加 |
 | VXM | 中心 1 个 slice，每 lane 16 个 ALU |
 | SXM | 每侧 1 个四-tile slice |
 
@@ -117,7 +117,7 @@ slice 组成一个 group，位于两个 stream-register boundary 之间。全部
 每个 `Mxm` 包含：
 
 - `4 x 4` supercell 阵列；
-- 每个 supercell 一个 `8 x 8` FP16 weight block；
+- 每个 supercell 一个 `8 x 8` 原始 16-bit weight block；
 - 每个 supercell 两个对等 weight buffer；
 - 从南向北传播的 control slice；
 - activation flow 和 FP32 output state。
@@ -130,7 +130,7 @@ slice 组成一个 group，位于两个 stream-register boundary 之间。全部
 一个 IW pulse 消费 16 条 east stream：
 
 ```text
-8 个 FP16 值 x 每值 2 条 byte stream = 16 条 stream
+8 个 16-bit 值 x 每值 2 条 byte stream = 16 条 stream
 ```
 
 本地 MXM0 使用 `E0..E15`，MXM1 使用 `E16..E31`。连续四个 IW pulse 填满一个
@@ -142,17 +142,19 @@ W8 权重采用按输出列的对称 scale：
 scale[n] = max_k(abs(W[k,n])) / 127
 ```
 
-IW 前，VXM 先把 INT8 乘对应 scale，再 cast 为 FP16。
+IW 前，VXM 先把 INT8 乘对应 scale，再 cast 为 FP16 或 BF16。IW 原样保存输入的
+两个 byte，因此 IW 指令不需要 data-format 字段。
 
 ### Compute
 
-`Compute(buffer, activation_stream_base, output_stream_base)` 是一拍 control pulse。
-连续 pulse 注入连续 activation vector；buffer 和 stream base 会随 activation 波传播。
+`Compute(buffer, activation_stream_base, output_stream_base, ..., data_format)` 是一拍
+control pulse。连续 pulse 注入连续 activation vector；buffer、stream base 和
+FP16/BF16 格式会随 activation 波传播。
 
-每个 supercell 将 8 个 FP16 activation 与八列 FP16 权重做点积。activation 向东
-穿过四个 supercell column，partial sum 向北传播并按 FP32 累加。完成的输出会自动
-写入 Compute 指定的连续四条 west byte stream。不存在独立 MXM output 指令，也
-不存在软件输出队列。
+每个 supercell 按 Compute 指定的格式解释 activation 和原始 weight bits，再完成
+8 元素与八列权重的点积。activation 向东穿过四个 supercell column，partial sum
+向北传播并按 FP32 累加。完成的输出会自动写入 Compute 指定的连续四条 west byte
+stream。不存在独立 MXM output 指令，也不存在软件输出队列。
 
 全部 MXM runtime state 由整系统持有；整系统测试不使用独立 GEMM engine 或 runtime
 helper。
@@ -169,8 +171,9 @@ Pass Add Subtract Multiply Divide Negate Abs Min Max Clamp
 Square Sqrt Exp Log Relu Cast
 ```
 
-operand 可以来自 INT8、FP16、INT32、FP32 stream，FP32 immediate，或前一拍 ALU
-output。结果可以保留在 ALU register，也可以写入指定 stream 和目标 hemisphere。
+operand 可以来自 INT8、FP16、BF16、INT32、FP32 stream，FP32 immediate，或前一拍
+ALU output。结果可以保留在 ALU register，也可以写入指定 stream 和目标 hemisphere。
+Cast 可以把 FP16 或 BF16 按 little-endian 拆成两条 byte stream 输出。
 
 量化/反量化不是独立 opcode，而是 ALU 指令图。例如 W8 dequant 由 Multiply 和 Cast
 组成；SwiGLU 由算术、Exp、用于流水延迟的 Pass 和 Cast 组成。RMSNorm 使用 ALU
@@ -318,6 +321,24 @@ work 分配到四个 MXM。SXM 为 attention replay 准备 packed/transpose layo
 
 各 phase 时序、MXM 利用率和后续 overlap 机会见
 [attention_pipeline_optimization.md](attention_pipeline_optimization.md)。
+
+### Decoder Layer Decode
+
+`decoder_layer_decode_test` 从已经物化的 128-token K/V cache 开始，让 token 128
+完整经过一个 tile-scale decoder layer：
+
+```text
+RMSNorm -> Q/K/V -> RoPE -> append K/V
+        -> QK -> softmax -> P x V -> O -> residual
+        -> RMSNorm -> Gate/Up -> SwiGLU -> Down -> residual
+```
+
+测试采用 hidden/head dimension 32、intermediate dimension 64，使每条矩阵边界
+恰好对应一个 MXM tile。所有 GEMV、QK 和 P x V 都通过系统 MEM/MXM 路径发射。
+Decode Q 使用两条 stream 的 `IWColumn` 写入一个 weight column，随后把 cache 中
+的 129 条 K 连续送入 MXM。非线性组合遵循 RMSNorm、VXM、attention 和 SwiGLU
+独立测试已经验证的 FP16 边界。扩展到 SmolLM2 的 576/1536/9-head 配置时，只需
+把相同 tile 映射平铺到四个 MXM。
 
 ### 多 executable 边界
 

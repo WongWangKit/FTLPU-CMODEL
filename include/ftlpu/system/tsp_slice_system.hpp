@@ -310,12 +310,13 @@ private:
                     tile, lane, kTargetSreg, high);
                 if (!low_word.has_value() || !high_word.has_value()) {
                     throw std::logic_error(
-                        "MXM column IW reached tile before both FP16 weight streams arrived at the MXM boundary register");
+                        "MXM column IW reached tile before both 16-bit weight streams arrived at the MXM boundary register");
                 }
-                const auto bits = static_cast<std::uint16_t>(low_word->data)
-                    | (static_cast<std::uint16_t>(high_word->data) << 8);
+                const auto bits = static_cast<std::uint16_t>(
+                    static_cast<std::uint16_t>(low_word->data)
+                    | (static_cast<std::uint16_t>(high_word->data) << 8));
                 input[lane][column] = MxmArray::Supercell::InputWord {
-                    Fp16::from_bits(bits).to_float(),
+                    bits,
                     lane + 1 == hw::kLanesPerTile,
                 };
             }
@@ -329,12 +330,13 @@ private:
                 const auto high = mems_[hemisphere].consume_east_register(tile, lane, kTargetSreg, low_stream + 1);
                 if (!low.has_value() || !high.has_value()) {
                     throw std::logic_error(
-                        "MXM IW reached tile before both FP16 weight streams arrived at the MXM boundary register");
+                        "MXM IW reached tile before both 16-bit weight streams arrived at the MXM boundary register");
                 }
-                const auto bits = static_cast<std::uint16_t>(low->data)
-                    | (static_cast<std::uint16_t>(high->data) << 8);
+                const auto bits = static_cast<std::uint16_t>(
+                    static_cast<std::uint16_t>(low->data)
+                    | (static_cast<std::uint16_t>(high->data) << 8));
                 input[lane][column] = MxmArray::Supercell::InputWord {
-                    Fp16::from_bits(bits).to_float(),
+                    bits,
                     column + 1 == hw::kMxmSupercellColumns,
                 };
             }

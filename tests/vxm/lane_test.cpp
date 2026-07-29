@@ -34,6 +34,35 @@ int main()
         | (static_cast<std::uint16_t>(lane.output()->bytes[1]) << 8);
     assert(std::fabs(ftlpu::Fp16::from_bits(bits).to_float() + 2.0f) < 1.0e-3f);
 
+    constexpr float kBf16Input = 1.00390625f;
+    lane.enqueue_instruction(2, {
+        ftlpu::VxmAluOpcode::Cast,
+        ftlpu::VxmLaneOperand::Imm(kBf16Input),
+        ftlpu::VxmLaneOperand::Imm(0.0f),
+        1.0f, 0, ftlpu::VxmCastTarget::BFloat16, 8});
+    lane.tick();
+    assert(lane.output().has_value());
+    assert(lane.output()->stream == 8);
+    assert(lane.output()->byte_count == 2);
+    const auto bf16_bits = static_cast<std::uint16_t>(lane.output()->bytes[0])
+        | (static_cast<std::uint16_t>(lane.output()->bytes[1]) << 8);
+    assert(bf16_bits == ftlpu::Bf16::from_float(kBf16Input).bits());
+    assert(*lane.alu_output(2)
+        == ftlpu::Bf16::from_float(kBf16Input).to_float());
+
+    auto bf16_input_lane = ftlpu::VxmLane {};
+    bf16_input_lane.enqueue_instruction(0, {
+        ftlpu::VxmAluOpcode::Pass,
+        ftlpu::VxmLaneOperand::StreamBFloat16(10),
+        ftlpu::VxmLaneOperand::Imm(0.0f)});
+    auto bf16_streams = ftlpu::VxmLane::StreamBytes {};
+    bf16_streams[10] = static_cast<std::uint8_t>(bf16_bits & 0xffu);
+    bf16_streams[11] = static_cast<std::uint8_t>(bf16_bits >> 8);
+    bf16_input_lane.set_stream_inputs(bf16_streams);
+    bf16_input_lane.tick();
+    assert(*bf16_input_lane.alu_output(0)
+        == ftlpu::Bf16::from_bits(bf16_bits).to_float());
+
     auto invalid_lane = ftlpu::VxmLane {};
     invalid_lane.enqueue_instruction(0, {
         ftlpu::VxmAluOpcode::Pass,

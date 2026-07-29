@@ -281,7 +281,10 @@ private:
         std::size_t width = 0;
         switch (operand.kind) {
         case VxmLaneOperandKind::StreamInt8: width = 1; break;
-        case VxmLaneOperandKind::StreamFloat16: width = 2; break;
+        case VxmLaneOperandKind::StreamFloat16:
+        case VxmLaneOperandKind::StreamBFloat16:
+            width = 2;
+            break;
         case VxmLaneOperandKind::StreamInt32:
         case VxmLaneOperandKind::StreamFloat32: width = 4; break;
         default: return;
@@ -297,7 +300,8 @@ private:
         return operand.kind == VxmLaneOperandKind::StreamInt32
             || operand.kind == VxmLaneOperandKind::StreamFloat32
             || operand.kind == VxmLaneOperandKind::StreamInt8
-            || operand.kind == VxmLaneOperandKind::StreamFloat16;
+            || operand.kind == VxmLaneOperandKind::StreamFloat16
+            || operand.kind == VxmLaneOperandKind::StreamBFloat16;
     }
 
     static bool instruction_uses_stream(const AluInstruction& instruction)

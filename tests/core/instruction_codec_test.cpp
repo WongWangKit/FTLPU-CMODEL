@@ -30,7 +30,8 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
         && lhs.accumulator_address == rhs.accumulator_address
         && lhs.accumulator_row_stride == rhs.accumulator_row_stride
         && lhs.accumulator_destination == rhs.accumulator_destination
-        && lhs.accumulator_clear == rhs.accumulator_clear;
+        && lhs.accumulator_clear == rhs.accumulator_clear
+        && lhs.data_format == rhs.data_format;
 }
 
 bool same_vxm(const ftlpu::VxmLaneAluInstruction& lhs, const ftlpu::VxmLaneAluInstruction& rhs)
@@ -107,6 +108,14 @@ bool verify_mxm_codec()
             4095,
             48,
             ftlpu::MxmAccumulatorDestination::Sram),
+        ftlpu::MxmControlInstruction::Compute(
+            0,
+            4,
+            8,
+            1024,
+            1,
+            ftlpu::MxmAccumulatorDestination::Stream,
+            ftlpu::MxmDataFormat::BFloat16),
         ftlpu::MxmControlInstruction::AccumulatorRead(7000, 16, false),
     };
 
@@ -116,6 +125,28 @@ bool verify_mxm_codec()
         if (!require(same_mxm(instruction, decoded), "MXM instruction codec round-trip failed")) {
             return false;
         }
+    }
+
+    if (!require(
+            ftlpu::isa::encode_mxm_instruction(
+                ftlpu::MxmControlInstruction::IW(1, 3))
+                == 0x1cu,
+            "MXM IW encoding changed while adding BF16")) {
+        return false;
+    }
+    const auto bf16_compute = ftlpu::isa::encode_mxm_instruction(
+        ftlpu::MxmControlInstruction::Compute(
+            0,
+            0,
+            0,
+            0,
+            1,
+            ftlpu::MxmAccumulatorDestination::Stream,
+            ftlpu::MxmDataFormat::BFloat16));
+    if (!require(
+            (bf16_compute & (std::uint64_t {1} << 45)) != 0,
+            "MXM BF16 Compute format bit was not encoded")) {
+        return false;
     }
 
     return require_throws(
@@ -136,9 +167,9 @@ bool verify_vxm_codec()
 {
     auto instruction = ftlpu::VxmLaneAluInstruction {
         ftlpu::VxmAluOpcode::Multiply,
-        ftlpu::VxmLaneOperand::StreamInt8(32),
+        ftlpu::VxmLaneOperand::StreamBFloat16(32),
         ftlpu::VxmLaneOperand::Imm(0.125f),
-        1.0f, 0, ftlpu::VxmCastTarget::Float16, 16,
+        1.0f, 0, ftlpu::VxmCastTarget::BFloat16, 16,
         ftlpu::Hemisphere::West, ftlpu::Hemisphere::East};
 
     const auto encoded = ftlpu::isa::encode_vxm_instruction(instruction);
