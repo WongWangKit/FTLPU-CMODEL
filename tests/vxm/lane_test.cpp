@@ -57,6 +57,8 @@ std::filesystem::path result_path()
 int main()
 {
     using namespace ftlpu;
+    static_assert(hw::kTileRows == 4);
+    static_assert(hw::kLanesPerTile == 8);
     static_assert(VxmLane::kAluCount == 8);
     static_assert(VxmLane::kBlockCount == 4);
     static_assert(VxmLane::kInputStreams == 32);
@@ -259,6 +261,51 @@ int main()
     local_max.tick();
     assert(local_max.output());
     assert(VxmLane::unpack_float32(local_max.output()->bytes) == -2.0f);
+
+    // The Transformer path consumes FP16 from two stream bytes and preserves
+    // FP16 through the complete eight-ALU chain.
+    auto fp16_chain = VxmLaneTestDriver{};
+    fp16_chain.set_chain_depth(VxmChainDepth::Eight);
+    fp16_chain.enqueue_instruction(
+        0,
+        {VxmAluOpcode::Bypass,
+         VxmLaneOperand::StreamFloat16()});
+    for (std::size_t stage = 1;
+         stage < VxmLane::kAluCount;
+         ++stage) {
+        auto instruction = VxmLaneAluInstruction{
+            VxmAluOpcode::Bypass,
+            VxmLaneOperand::Previous()};
+        if (stage + 1 == VxmLane::kAluCount) {
+            instruction.output_type =
+                VxmCastTarget::Float16;
+            instruction.output_stream = 12;
+        }
+        fp16_chain.enqueue_instruction(
+            stage, instruction);
+    }
+    fp16_chain.tick();
+    auto fp16_streams = VxmLane::StreamBytes{};
+    const auto fp16_bits =
+        VxmDataFormat::float_to_fp16_bits(-1.375f);
+    fp16_streams[0] =
+        static_cast<std::uint8_t>(fp16_bits);
+    fp16_streams[1] =
+        static_cast<std::uint8_t>(fp16_bits >> 8);
+    fp16_chain.set_stream_inputs(
+        Hemisphere::East, fp16_streams);
+    for (std::size_t cycle = 0;
+         cycle < 24 && !fp16_chain.output();
+         ++cycle) {
+        fp16_chain.tick();
+    }
+    assert(fp16_chain.output());
+    assert(fp16_chain.output()->byte_count == 2);
+    assert(fp16_chain.output()->bytes[0]
+        == static_cast<std::uint8_t>(fp16_bits));
+    assert(fp16_chain.output()->bytes[1]
+        == static_cast<std::uint8_t>(fp16_bits >> 8));
+
     const auto output_path = result_path();
     auto result_file = std::ofstream(output_path, std::ios::trunc);
     assert(result_file && "failed to create VXM lane result file");

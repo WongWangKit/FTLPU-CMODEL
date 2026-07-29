@@ -352,6 +352,26 @@ private:
             stream);
     }
 
+    static bool mem_edge_stream_consumed(
+        const TileArrayModel& mem,
+        Hemisphere hemisphere,
+        std::size_t tile,
+        std::size_t lane,
+        std::size_t stream)
+    {
+        const auto column =
+            hemisphere == Hemisphere::East
+            ? std::size_t {0}
+            : hw::kMemBoundaryStreamRegisterColumns
+                - 1;
+        const auto id =
+            hemisphere == Hemisphere::East
+            ? StreamId::West(stream)
+            : StreamId::East(stream);
+        return mem.stream_fabric().cell_consumed(
+            column, tile, lane, id);
+    }
+
     void tick_mxm_controls(LogSinks sinks)
     {
         for (std::size_t mxm = 0; mxm < kMxmCount; ++mxm) {
@@ -652,7 +672,13 @@ private:
                                    tile,
                                    lane,
                                    west_stream)
-                                   .has_value();
+                                   .has_value()
+                            && !mem_edge_stream_consumed(
+                                mem(source),
+                                source,
+                                tile,
+                                lane,
+                                west_stream);
                     }
                     if (!complete) continue;
                     for (std::size_t lane = 0;

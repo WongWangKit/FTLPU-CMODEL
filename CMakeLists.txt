@@ -61,9 +61,18 @@ ftlpu_add_test(mxm_stream_interface_test tests/mxm/stream_interface_test.cpp)
 ftlpu_add_test(mxm_systolic_accumulator_test tests/mxm/systolic_accumulator_test.cpp)
 
 ftlpu_add_test(mem_dual_mxm_swiglu_offline_icu_test tests/integration/mem_dual_mxm_swiglu_test.cpp)
-target_compile_definitions(mem_dual_mxm_swiglu_offline_icu_test PRIVATE FTLPU_OFFLINE_ICU_FFN_TEST)
+target_compile_definitions(
+    mem_dual_mxm_swiglu_offline_icu_test
+    PRIVATE
+        FTLPU_OFFLINE_ICU_FFN_TEST
+        FTLPU_TRANSFORMER_EVAL_CONFIG)
 ftlpu_add_test(mem_dual_mxm_swiglu_early_compute_icu_test tests/integration/mem_dual_mxm_swiglu_test.cpp)
-target_compile_definitions(mem_dual_mxm_swiglu_early_compute_icu_test PRIVATE FTLPU_OFFLINE_ICU_FFN_TEST FTLPU_EARLY_MXM_COMPUTE_TEST)
+target_compile_definitions(
+    mem_dual_mxm_swiglu_early_compute_icu_test
+    PRIVATE
+        FTLPU_OFFLINE_ICU_FFN_TEST
+        FTLPU_EARLY_MXM_COMPUTE_TEST
+        FTLPU_TRANSFORMER_EVAL_CONFIG)
 ftlpu_add_test(attention_projection_test tests/integration/attention_projection_test.cpp)
 ftlpu_add_test(
     smollm2_attention_test
@@ -80,7 +89,13 @@ target_compile_definitions(
 
 ftlpu_add_test(vxm_alu_test tests/vxm/alu_test.cpp)
 ftlpu_add_test(vxm_lane_test tests/vxm/lane_test.cpp)
+target_compile_definitions(
+    vxm_lane_test
+    PRIVATE FTLPU_TRANSFORMER_EVAL_CONFIG)
 ftlpu_add_test(vxm_superlane_test tests/vxm/superlane_test.cpp)
+target_compile_definitions(
+    vxm_superlane_test
+    PRIVATE FTLPU_TRANSFORMER_EVAL_CONFIG)
 ftlpu_add_test(vxm_slice_test tests/vxm/slice_test.cpp)
 ftlpu_add_test(vxm_special_alu_test tests/vxm/special_alu_test.cpp)
 ftlpu_add_test(vxm_contract_test tests/vxm/contract_test.cpp)

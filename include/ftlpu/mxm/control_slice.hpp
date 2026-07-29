@@ -427,10 +427,22 @@ private:
                            << " inject ";
                     }
                     for (std::size_t column = hw::kMxmSupercellsPerPlane - 1; column > 0; --column) {
-                        weight_token(instruction->weight_buffer, tile, column)
-                            = weight_token(instruction->weight_buffer, tile, column - 1);
+                        load_token(
+                            opcode,
+                            instruction->weight_buffer,
+                            tile,
+                            column)
+                            = load_token(
+                                opcode,
+                                instruction->weight_buffer,
+                                tile,
+                                column - 1);
                     }
-                    weight_token(instruction->weight_buffer, tile, 0)
+                    load_token(
+                        opcode,
+                        instruction->weight_buffer,
+                        tile,
+                        0)
                         = WeightToken {
                             opcode,
                             instruction->weight_buffer,
@@ -438,7 +450,11 @@ private:
                     weight_inputs_[tile].reset();
 
                     for (std::size_t column = 0; column < hw::kMxmSupercellsPerPlane; ++column) {
-                        const auto& token = weight_token(instruction->weight_buffer, tile, column);
+                        const auto& token = load_token(
+                            opcode,
+                            instruction->weight_buffer,
+                            tile,
+                            column);
                         if (!token.has_value()) {
                             continue;
                         }
@@ -507,16 +523,51 @@ private:
         }
     }
 
-    WeightTokenSlot& weight_token(std::size_t weight_buffer, std::size_t tile, std::size_t column)
+    static constexpr std::size_t load_pipeline_index(
+        MxmOpcode opcode,
+        std::size_t weight_buffer,
+        std::size_t tile,
+        std::size_t column)
     {
-        return weight_pipeline_[
-            (weight_buffer * hw::kMxmSupercellsPerPlane + tile) * hw::kMxmSupercellsPerPlane + column];
+        const auto opcode_index =
+            opcode == MxmOpcode::LoadScales
+            ? std::size_t {1}
+            : std::size_t {0};
+        return ((opcode_index
+                     * MxmSupercell::kWeightBuffers
+                 + weight_buffer)
+                    * hw::kMxmSupercellsPerPlane
+                + tile)
+                * hw::kMxmSupercellsPerPlane
+            + column;
     }
 
-    const WeightTokenSlot& weight_token(std::size_t weight_buffer, std::size_t tile, std::size_t column) const
+    WeightTokenSlot& load_token(
+        MxmOpcode opcode,
+        std::size_t weight_buffer,
+        std::size_t tile,
+        std::size_t column)
     {
         return weight_pipeline_[
-            (weight_buffer * hw::kMxmSupercellsPerPlane + tile) * hw::kMxmSupercellsPerPlane + column];
+            load_pipeline_index(
+                opcode,
+                weight_buffer,
+                tile,
+                column)];
+    }
+
+    const WeightTokenSlot& load_token(
+        MxmOpcode opcode,
+        std::size_t weight_buffer,
+        std::size_t tile,
+        std::size_t column) const
+    {
+        return weight_pipeline_[
+            load_pipeline_index(
+                opcode,
+                weight_buffer,
+                tile,
+                column)];
     }
 
     static void print_load_matrix(
@@ -558,7 +609,9 @@ private:
     std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> compute_instruction_rows_{};
     std::array<WeightInputSlot, hw::kMxmSupercellsPerPlane> weight_inputs_{};
     std::vector<WeightTokenSlot> weight_pipeline_ = std::vector<WeightTokenSlot>(
-        MxmSupercell::kWeightBuffers * hw::kMxmSupercellsPerPlane * hw::kMxmSupercellsPerPlane);
+        2 * MxmSupercell::kWeightBuffers
+        * hw::kMxmSupercellsPerPlane
+        * hw::kMxmSupercellsPerPlane);
     std::array<bool, hw::kMxmSupercellsPerPlane> compute_pulses_{};
     std::array<std::optional<ComputePulse>, hw::kMxmSupercellsPerPlane> compute_pulse_details_{};
     std::array<

@@ -73,6 +73,14 @@ Supercell::InputVector weight_input()
 
 int main()
 {
+    static_assert(ftlpu::hw::kTileRows == 4);
+    static_assert(ftlpu::hw::kLanesPerTile == 8);
+    static_assert(ftlpu::hw::kMxmCount == 4);
+    static_assert(ftlpu::hw::kMxmRows == 32);
+    static_assert(ftlpu::hw::kMxmColumns == 32);
+    static_assert(ftlpu::hw::kVxmAluCount == 8);
+    static_assert(
+        ftlpu::hw::kMxmActivationBytesPerValue == 2);
     static_assert(
         ftlpu::hw::kMxmStoredWeightBytesPerValue == 1);
     static_assert(
@@ -154,6 +162,52 @@ int main()
         }
         assert(
             std::fabs(result[column] - expected)
+            < 1.0e-6f);
+    }
+
+    // Scale and W8 weight state is independently addressable in both
+    // ping-pong buffers; loading the next K block must not alter buffer 0.
+    auto second_scales = scales;
+    for (auto& scale : second_scales) {
+        scale = ftlpu::Fp16::from_float(
+            scale * 0.5f).to_float();
+    }
+    supercell.set_input(scale_input(second_scales));
+    supercell.issue(
+        ftlpu::MxmInstruction::LoadScales(1));
+    supercell.tick(log);
+    supercell.set_input(encoded_weights);
+    supercell.issue(ftlpu::MxmInstruction::IW(1));
+    supercell.tick(log);
+
+    const auto second_result =
+        supercell.compute_partial(activations, 1);
+    for (std::size_t column = 0;
+         column < ftlpu::hw::kMxmSupercellColumns;
+         ++column) {
+        auto expected = 0.0f;
+        for (std::size_t lane = 0;
+             lane < ftlpu::hw::kLanesPerTile;
+             ++lane) {
+            const auto quantized =
+                static_cast<std::int8_t>(
+                    encoded_weights[lane][column]
+                        ->data);
+            expected += activations[lane]
+                * ftlpu::Fp16::from_float(
+                      static_cast<float>(quantized)
+                      * second_scales[column])
+                      .to_float();
+            assert(
+                supercell.weight(0, lane, column)
+                == ftlpu::Fp16::from_float(
+                       static_cast<float>(quantized)
+                       * scales[column])
+                       .to_float());
+        }
+        assert(
+            std::fabs(
+                second_result[column] - expected)
             < 1.0e-6f);
     }
     return 0;

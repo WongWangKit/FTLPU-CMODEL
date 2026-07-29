@@ -117,6 +117,17 @@ public:
         return true;
     }
 
+    bool cell_consumed(
+        std::size_t column,
+        std::size_t tile,
+        std::size_t lane,
+        StreamId stream) const
+    {
+        check_location(column, tile, lane, stream);
+        return is_consumed(
+            column, tile, lane, stream);
+    }
+
     void stage_write(
         std::size_t column,
         std::size_t tile,

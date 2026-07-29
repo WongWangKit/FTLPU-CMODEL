@@ -44,6 +44,9 @@ std::filesystem::path test_output_path(const char* filename)
 
 int main()
 {
+    static_assert(ftlpu::hw::kTileRows == 4);
+    static_assert(ftlpu::hw::kLanesPerTile == 8);
+    static_assert(ftlpu::VxmSuperlane::kLaneCount == 8);
     auto superlane = ftlpu::VxmSuperlane{};
     constexpr std::size_t entries = 64;
     superlane.configure_special_lut(ftlpu::VxmSpecialAluOpcode::Reciprocal,
@@ -161,6 +164,76 @@ int main()
     }
     superlane.tick();
     assert(superlane.idle());
+
+    // All eight lanes consume independent FP16 values while sharing one
+    // eight-stage configuration and emit two-byte FP16 results in lockstep.
+    auto fp16_superlane = ftlpu::VxmSuperlane{};
+    fp16_superlane.set_chain_depth(
+        ftlpu::VxmChainDepth::Eight);
+    fp16_superlane.enqueue_instruction(
+        0,
+        {ftlpu::VxmAluOpcode::Bypass,
+         ftlpu::VxmLaneOperand::StreamFloat16()});
+    for (std::size_t stage = 1;
+         stage < ftlpu::VxmLane::kAluCount;
+         ++stage) {
+        auto instruction =
+            ftlpu::VxmLaneAluInstruction{
+                ftlpu::VxmAluOpcode::Bypass,
+                ftlpu::VxmLaneOperand::Previous()};
+        if (stage + 1
+            == ftlpu::VxmLane::kAluCount) {
+            instruction.output_type =
+                ftlpu::VxmCastTarget::Float16;
+            instruction.output_stream = 12;
+        }
+        fp16_superlane.enqueue_instruction(
+            stage, instruction);
+    }
+    fp16_superlane.tick();
+    auto fp16_streams =
+        ftlpu::VxmSuperlane::StreamMatrix{};
+    std::array<std::uint16_t,
+               ftlpu::VxmSuperlane::kLaneCount>
+        expected_bits{};
+    for (std::size_t lane = 0;
+         lane < ftlpu::VxmSuperlane::kLaneCount;
+         ++lane) {
+        expected_bits[lane] =
+            ftlpu::VxmDataFormat::float_to_fp16_bits(
+                static_cast<float>(
+                    static_cast<int>(lane) - 4)
+                * 0.25f);
+        fp16_streams[lane][0] =
+            static_cast<std::uint8_t>(
+                expected_bits[lane]);
+        fp16_streams[lane][1] =
+            static_cast<std::uint8_t>(
+                expected_bits[lane] >> 8);
+    }
+    fp16_superlane.set_stream_inputs(
+        ftlpu::Hemisphere::East, fp16_streams);
+    for (std::size_t cycle = 0;
+         cycle < 24 && !fp16_superlane.output();
+         ++cycle) {
+        fp16_superlane.tick();
+    }
+    assert(fp16_superlane.output());
+    assert(fp16_superlane.output()->byte_count == 2);
+    for (std::size_t lane = 0;
+         lane < ftlpu::VxmSuperlane::kLaneCount;
+         ++lane) {
+        assert(
+            fp16_superlane.output()
+                ->byte_values[lane][0]
+            == static_cast<std::uint8_t>(
+                expected_bits[lane]));
+        assert(
+            fp16_superlane.output()
+                ->byte_values[lane][1]
+            == static_cast<std::uint8_t>(
+                expected_bits[lane] >> 8));
+    }
 
     const auto result_path =
         test_output_path("superlane_test_results.txt");
