@@ -229,23 +229,22 @@ int main()
         return 1;
     }
 
-    caught = false;
-    try {
-        static_cast<void>(ftlpu::MxmControlInstruction::Compute(
+    const auto block_stream_compute =
+        ftlpu::MxmControlInstruction::Compute(
             0,
             0,
             0,
             0,
             1,
             ftlpu::MxmAccumulatorDestination::Stream,
-            ftlpu::MxmDataFormat::Float16,
-            ftlpu::MxmComputeMode::Block8));
-    } catch (const std::invalid_argument&) {
-        caught = true;
-    }
+            ftlpu::MxmDataFormat::BFloat16,
+            ftlpu::MxmComputeMode::Block8,
+            true);
     if (!require(
-            caught,
-            "Block8 Compute should require accumulator destination")) {
+            block_stream_compute.accumulator_destination
+                    == ftlpu::MxmAccumulatorDestination::Stream
+                && block_stream_compute.accumulator_clear,
+            "Block8 Compute should support clear-on-stream output")) {
         return 1;
     }
 

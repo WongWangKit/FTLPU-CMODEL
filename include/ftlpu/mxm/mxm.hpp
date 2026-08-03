@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
+#include "ftlpu/core/bf16.hpp"
 #include "ftlpu/core/fp16.hpp"
 #include "ftlpu/mem/tile_array.hpp"
 #include "ftlpu/mxm/accumulator.hpp"
@@ -172,6 +173,7 @@ public:
                 compute.accumulator_address,
                 compute.accumulator_row_stride,
                 compute.accumulator_destination,
+                compute.accumulator_clear,
                 compute.data_format,
                 compute.compute_mode,
                 data});
@@ -267,6 +269,7 @@ private:
         std::size_t accumulator_row_stride{1};
         MxmAccumulatorDestination accumulator_destination{
             MxmAccumulatorDestination::Stream};
+        bool accumulator_clear{true};
         MxmDataFormat data_format{MxmDataFormat::Float16};
         MxmComputeMode compute_mode{MxmComputeMode::Vector};
         ActivationBlock data{};
@@ -344,7 +347,17 @@ private:
                     tile, lane, kTargetSreg, row_stream_base + 1);
                 if (!low.has_value() || !high.has_value()) {
                     throw std::logic_error(
-                        "MXM Compute reached tile before all activation streams arrived");
+                        "MXM Compute reached tile "
+                        + std::to_string(tile)
+                        + " lane " + std::to_string(lane)
+                        + " before activation streams "
+                        + std::to_string(row_stream_base)
+                        + "/" + std::to_string(row_stream_base + 1)
+                        + " arrived (low="
+                        + (low.has_value() ? "valid" : "missing")
+                        + ", high="
+                        + (high.has_value() ? "valid" : "missing")
+                        + ")");
                 }
                 const auto bits = static_cast<std::uint16_t>(low->data)
                     | (static_cast<std::uint16_t>(high->data) << 8);
@@ -432,6 +445,22 @@ private:
                 address,
                 column_block,
                 block_values);
+            if (event.accumulator_destination
+                == MxmAccumulatorDestination::Sram) {
+                return;
+            }
+
+            const auto accumulated =
+                block_accumulator_.read(address, column_block);
+            emit_block_bf16_stream_values(
+                mem,
+                column_block,
+                event.output_stream_base,
+                address,
+                accumulated);
+            if (event.accumulator_clear) {
+                block_accumulator_.clear_segment(address, column_block);
+            }
             return;
         }
 
@@ -470,7 +499,9 @@ private:
                 event.output_stream_base,
                 row,
                 accumulated);
-            accumulator_.clear_segment(address, column_block);
+            if (event.accumulator_clear) {
+                accumulator_.clear_segment(address, column_block);
+            }
             output.values = accumulated;
             last_outputs_.push_back(output);
         }
@@ -547,6 +578,40 @@ private:
                         column_block,
                         lane,
                         stream_base + output_row * sizeof(float) + byte,
+                        StreamCell::Valid(
+                            static_cast<std::uint8_t>(
+                                (raw >> (byte * 8)) & 0xffu),
+                            lane + 1 == hw::kMxmSupercellColumns,
+                            vector_tag));
+                }
+            }
+        }
+    }
+
+    static void emit_block_bf16_stream_values(
+        TileArrayModel& mem,
+        std::size_t column_block,
+        std::size_t stream_base,
+        std::uint64_t vector_tag,
+        const MxmBlockAccumulator::Segment& values)
+    {
+        for (std::size_t output_row = 0;
+             output_row < hw::kMxmBlockRows;
+             ++output_row) {
+            for (std::size_t lane = 0;
+                 lane < hw::kMxmSupercellColumns;
+                 ++lane) {
+                const auto raw = Bf16::from_float(
+                    values[output_row][lane]).bits();
+                for (std::size_t byte = 0;
+                     byte < sizeof(std::uint16_t);
+                     ++byte) {
+                    mem.set_west_stream_cell(
+                        column_block,
+                        lane,
+                        stream_base
+                            + output_row * sizeof(std::uint16_t)
+                            + byte,
                         StreamCell::Valid(
                             static_cast<std::uint8_t>(
                                 (raw >> (byte * 8)) & 0xffu),

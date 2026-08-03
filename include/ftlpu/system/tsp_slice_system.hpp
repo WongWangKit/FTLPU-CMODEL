@@ -21,8 +21,9 @@ namespace ftlpu {
 
 class TspSliceSystem {
 public:
-    static constexpr std::size_t kMxmCountPerHemisphere = 2;
-    static constexpr std::size_t kMxmCount = hw::kHemispheres * kMxmCountPerHemisphere;
+    static constexpr std::size_t kMxmCountPerHemisphere =
+        hw::kMxmsPerHemisphere;
+    static constexpr std::size_t kMxmCount = hw::kMxmCount;
 
     struct LogSinks {
         std::ostream* icu{nullptr};

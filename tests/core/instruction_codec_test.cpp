@@ -129,6 +129,16 @@ bool verify_mxm_codec()
             ftlpu::MxmAccumulatorDestination::Sram,
             ftlpu::MxmDataFormat::Float16,
             ftlpu::MxmComputeMode::Block8),
+        ftlpu::MxmControlInstruction::Compute(
+            0,
+            16,
+            0,
+            512,
+            1,
+            ftlpu::MxmAccumulatorDestination::Stream,
+            ftlpu::MxmDataFormat::BFloat16,
+            ftlpu::MxmComputeMode::Block8,
+            false),
         ftlpu::MxmControlInstruction::AccumulatorRead(7000, 16, false),
         ftlpu::MxmControlInstruction::AccumulatorRead(
             700,
@@ -201,6 +211,22 @@ bool verify_mxm_codec()
     if (!require(
             (block_compute & (std::uint64_t {1} << 46)) != 0,
             "MXM Block8 Compute mode bit was not encoded")) {
+        return false;
+    }
+    const auto retain_compute = ftlpu::isa::encode_mxm_instruction(
+        ftlpu::MxmControlInstruction::Compute(
+            0,
+            0,
+            0,
+            0,
+            1,
+            ftlpu::MxmAccumulatorDestination::Stream,
+            ftlpu::MxmDataFormat::BFloat16,
+            ftlpu::MxmComputeMode::Block8,
+            false));
+    if (!require(
+            (retain_compute & (std::uint64_t {1} << 47)) != 0,
+            "MXM Compute retain-accumulator bit was not encoded")) {
         return false;
     }
     const auto vector_read = ftlpu::isa::encode_mxm_instruction(

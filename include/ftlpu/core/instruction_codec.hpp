@@ -24,13 +24,14 @@ namespace isa {
 //   [2:0] opcode, [8:3] stream, [14:9] map stream,
 //   [30:15] slice-local SRAM row address.
 //   ReadWrite repurposes [14:9] as write stream and [46:31] as write address.
-// MXM control 47b:
+// MXM control 48b:
 //   IW      [1:0] opcode, [2] weight buffer, [4:3] weight column,
 //           [5] column mode, [8:6] inner column, [9] Direct16 input mode.
 //   Compute [1:0] opcode, [2] weight buffer, [8:3] activation stream base,
 //           [14:9] output stream base, [27:15] accumulator address,
 //           [43:28] accumulator row stride, [44] destination,
-//           [45] weight/activation data format, [46] compute mode.
+//           [45] weight/activation data format, [46] compute mode,
+//           [47] retain accumulator after stream output.
 //   AccRead [1:0] opcode, [14:9] output stream base,
 //           [27:15] accumulator address, [28] clear.
 // VXM ALU 4x32b:
@@ -307,7 +308,8 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
             | (static_cast<std::uint64_t>(instruction.accumulator_row_stride) << 28)
             | (static_cast<std::uint64_t>(instruction.accumulator_destination) << 44)
             | (static_cast<std::uint64_t>(instruction.data_format) << 45)
-            | (static_cast<std::uint64_t>(instruction.compute_mode) << 46);
+            | (static_cast<std::uint64_t>(instruction.compute_mode) << 46)
+            | (static_cast<std::uint64_t>(!instruction.accumulator_clear) << 47);
     case MxmControlOpcode::AccumulatorRead:
         MxmControlInstruction::check_compute_mode(instruction.compute_mode);
         MxmControlInstruction::check_accumulator_read_stream_base(
@@ -366,7 +368,7 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
     case MxmControlOpcode::Compute:
         detail::require_reserved_zero(
             word,
-            (std::uint64_t {1} << 47) - 1,
+            (std::uint64_t {1} << 48) - 1,
             "encoded MXM Compute instruction has non-zero reserved bits");
         return MxmControlInstruction::Compute(
             compute_weight_buffer,
@@ -376,7 +378,8 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
             static_cast<std::size_t>((word >> 28) & 0xffffu),
             static_cast<MxmAccumulatorDestination>((word >> 44) & 0x1u),
             compute_data_format,
-            compute_mode);
+            compute_mode,
+            ((word >> 47) & 0x1u) == 0);
     case MxmControlOpcode::AccumulatorRead:
         detail::require_reserved_zero(
             word,

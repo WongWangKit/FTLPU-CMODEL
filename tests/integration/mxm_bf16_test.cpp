@@ -27,12 +27,19 @@ constexpr std::size_t kActivationAddress = 80;
 constexpr std::size_t kBlockCount = 4;
 constexpr std::size_t kAccumulatorAddress = 1024;
 constexpr std::size_t kBlockAccumulatorAddress = 128;
+constexpr std::size_t kDirectOutputAddress = 192;
 constexpr std::size_t kLoadStart = 20;
 constexpr std::size_t kComputeCycle = 30;
 
 std::size_t east_read_to_mxm_latency(std::size_t slice)
 {
     return ftlpu::hw::kMemGroups + 2
+        - slice / ftlpu::hw::kMemSlicesPerGroup;
+}
+
+std::size_t mxm_to_west_write_latency(std::size_t slice)
+{
+    return ftlpu::hw::kSystemStreamRegisterColumns - 1
         - slice / ftlpu::hw::kMemSlicesPerGroup;
 }
 
@@ -536,7 +543,139 @@ int main()
         }
     }
 
+    auto direct_system =
+        std::make_unique<ftlpu::TspSliceSystem>();
+    initialize_inputs(*direct_system);
+    initialize_block_activations(*direct_system);
+    auto direct_schedule = Schedule(direct_system->icu());
+
+    for (std::size_t block = 0;
+         block < ftlpu::hw::kMxmSupercellsPerPlane;
+         ++block) {
+        const auto iw_cycle = kLoadStart + block;
+        for (std::size_t stream = 0;
+             stream < kWeightSlices.size();
+             ++stream) {
+            const auto slice = kWeightSlices[stream];
+            direct_schedule.mem_at(
+                slice,
+                iw_cycle - east_read_to_mxm_latency(slice),
+                ftlpu::MemInstruction::Read(
+                    kWeightAddress + block,
+                    ftlpu::StreamId::East(stream)));
+        }
+        direct_schedule.mxm_load_at(
+            iw_cycle,
+            ftlpu::MxmControlInstruction::IWDirect16(0, block));
+    }
+
+    constexpr std::size_t kFinalPartialCycle = kComputeCycle + 8;
+    for (const auto compute_cycle : {kComputeCycle, kFinalPartialCycle}) {
+        for (std::size_t stream = 0;
+             stream < kBlockActivationSlices.size();
+             ++stream) {
+            const auto slice = kBlockActivationSlices[stream];
+            direct_schedule.mem_repeat_at(
+                slice,
+                compute_cycle - east_read_to_mxm_latency(slice),
+                ftlpu::MemInstruction::Read(
+                    kActivationAddress,
+                    ftlpu::StreamId::East(stream)),
+                kBlockCount,
+                1);
+        }
+        direct_schedule.mxm_compute_repeat_at(
+            compute_cycle,
+            ftlpu::MxmControlInstruction::Compute(
+                0,
+                0,
+                0,
+                kBlockAccumulatorAddress,
+                1,
+                compute_cycle == kFinalPartialCycle
+                    ? ftlpu::MxmAccumulatorDestination::Stream
+                    : ftlpu::MxmAccumulatorDestination::Sram,
+                ftlpu::MxmDataFormat::BFloat16,
+                ftlpu::MxmComputeMode::Block8,
+                true),
+            kBlockCount);
+    }
+
+    for (std::size_t stream = 0;
+         stream < kBlockActivationSlices.size();
+         ++stream) {
+        const auto slice = kBlockActivationSlices[stream];
+        const auto write_cycle = kFinalPartialCycle
+            + ftlpu::hw::kMxmSupercellsPerPlane - 1
+            + mxm_to_west_write_latency(slice);
+        direct_schedule.mem_repeat_at(
+            slice,
+            write_cycle,
+            ftlpu::MemInstruction::Write(
+                kDirectOutputAddress,
+                ftlpu::StreamId::West(stream)),
+            kBlockCount,
+            1);
+    }
+
+    for (std::size_t cycle = 0;
+         cycle < direct_schedule.end_cycle() + 8;
+         ++cycle) {
+        direct_system->tick({});
+    }
+
+    for (std::size_t output_row = 0;
+         output_row < kBlockCount * ftlpu::hw::kMxmBlockRows;
+         ++output_row) {
+        const auto row = kDirectOutputAddress
+            + output_row / ftlpu::hw::kMxmBlockRows;
+        const auto stream =
+            (output_row % ftlpu::hw::kMxmBlockRows) * 2;
+        for (std::size_t column = 0;
+             column < ftlpu::hw::kMxmColumns;
+             ++column) {
+            const auto tile = column / ftlpu::hw::kLanesPerTile;
+            const auto lane = column % ftlpu::hw::kLanesPerTile;
+            const auto low = direct_system->read_mem_sram_lane_byte(
+                kBlockActivationSlices[stream], tile, row, lane);
+            const auto high = direct_system->read_mem_sram_lane_byte(
+                kBlockActivationSlices[stream + 1], tile, row, lane);
+            const auto actual = ftlpu::Bf16::from_bits(
+                static_cast<std::uint16_t>(low)
+                | (static_cast<std::uint16_t>(high) << 8));
+            const auto expected = ftlpu::Bf16::from_float(
+                2.0f * block_reference(output_row, column));
+            if (actual.bits() != expected.bits()) {
+                std::cerr
+                    << "MXM Block8 direct BF16 stream mismatch at row="
+                    << output_row << " column=" << column
+                    << " actual=" << actual.to_float()
+                    << " expected=" << expected.to_float() << '\n';
+                return 1;
+            }
+        }
+    }
+    for (std::size_t address = kBlockAccumulatorAddress;
+         address < kBlockAccumulatorAddress + kBlockCount;
+         ++address) {
+        for (std::size_t output_row = 0;
+             output_row < ftlpu::hw::kMxmBlockRows;
+             ++output_row) {
+            for (std::size_t column = 0;
+                 column < ftlpu::hw::kMxmColumns;
+                 ++column) {
+                if (direct_system->mxm_unit(0).block_accumulator().value(
+                        address, output_row, column) != 0.0f) {
+                    std::cerr
+                        << "MXM Block8 stream destination did not clear "
+                        << "the accumulator\n";
+                    return 1;
+                }
+            }
+        }
+    }
+
     std::cout
-        << "MXM BF16 passed: INT8 Dequant queue load, Vector and Block8 Compute, raw Direct16 IW bits, FP32 accumulation\n";
+        << "MXM BF16 passed: INT8 Dequant queue load, Vector and Block8 Compute, direct BF16 stream output, accumulator clear\n";
     return 0;
 }

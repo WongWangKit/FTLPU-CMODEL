@@ -118,12 +118,13 @@ struct MxmControlInstruction {
         MxmAccumulatorDestination accumulator_destination =
             MxmAccumulatorDestination::Stream,
         MxmDataFormat data_format = MxmDataFormat::Float16,
-        MxmComputeMode compute_mode = MxmComputeMode::Vector)
+        MxmComputeMode compute_mode = MxmComputeMode::Vector,
+        bool accumulator_clear = true)
     {
         check_weight_buffer(weight_buffer);
         check_compute_mode(compute_mode);
         check_activation_stream_base(activation_stream_base, compute_mode);
-        check_stream_base(stream_base);
+        check_stream_base(stream_base, compute_mode);
         check_compute_destination(compute_mode, accumulator_destination);
         auto instruction = MxmControlInstruction {};
         instruction.opcode = MxmControlOpcode::Compute;
@@ -133,6 +134,7 @@ struct MxmControlInstruction {
         instruction.accumulator_address = accumulator_address;
         instruction.accumulator_row_stride = accumulator_row_stride;
         instruction.accumulator_destination = accumulator_destination;
+        instruction.accumulator_clear = accumulator_clear;
         instruction.data_format = data_format;
         instruction.compute_mode = compute_mode;
         return instruction;
@@ -244,17 +246,20 @@ struct MxmControlInstruction {
         MxmComputeMode mode,
         MxmAccumulatorDestination destination)
     {
-        if (mode == MxmComputeMode::Block8
-            && destination != MxmAccumulatorDestination::Sram) {
-            throw std::invalid_argument(
-                "MXM Block8 Compute must retain results in the accumulator");
-        }
+        (void)mode;
+        (void)destination;
     }
 
-    static void check_stream_base(std::size_t stream_base)
+    static void check_stream_base(
+        std::size_t stream_base,
+        MxmComputeMode mode)
     {
-        if (stream_base + 3 >= hw::kWestStreams) {
-            throw std::out_of_range("MXM output stream base must leave room for four FP32 byte streams");
+        const auto stream_count = mode == MxmComputeMode::Block8
+            ? hw::kMxmBlockRows * sizeof(std::uint16_t)
+            : sizeof(float);
+        if (stream_base + stream_count > hw::kWestStreams) {
+            throw std::out_of_range(
+                "MXM output stream range is outside the west stream set");
         }
     }
 
@@ -301,6 +306,7 @@ public:
         std::size_t accumulator_row_stride{1};
         MxmAccumulatorDestination accumulator_destination{
             MxmAccumulatorDestination::Stream};
+        bool accumulator_clear{true};
         MxmDataFormat data_format{MxmDataFormat::Float16};
         MxmComputeMode compute_mode{MxmComputeMode::Vector};
     };
@@ -509,7 +515,9 @@ private:
             MxmControlInstruction::check_activation_stream_base(
                 instruction.activation_stream_base,
                 instruction.compute_mode);
-            MxmControlInstruction::check_stream_base(instruction.stream_base);
+            MxmControlInstruction::check_stream_base(
+                instruction.stream_base,
+                instruction.compute_mode);
             MxmControlInstruction::check_compute_destination(
                 instruction.compute_mode,
                 instruction.accumulator_destination);
@@ -733,6 +741,7 @@ private:
                         compute_instruction->accumulator_address,
                         compute_instruction->accumulator_row_stride,
                         compute_instruction->accumulator_destination,
+                        compute_instruction->accumulator_clear,
                         compute_instruction->data_format,
                         compute_instruction->compute_mode,
                     };

@@ -80,6 +80,8 @@ constexpr std::size_t kMxmBlockAccumulatorBytes =
 constexpr std::size_t kSxmConcurrentStreamOps = 16;
 
 constexpr std::size_t kHemispheres = 2;
+constexpr std::size_t kMxmsPerHemisphere = 1;
+constexpr std::size_t kMxmCount = kHemispheres * kMxmsPerHemisphere;
 constexpr std::size_t kModeledSramBlocks = kMemSliceColumns;
 constexpr std::size_t kPublicSramBlocks =
     kHemispheres * kModeledSramBlocks;

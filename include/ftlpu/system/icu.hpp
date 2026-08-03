@@ -23,10 +23,11 @@ class InstructionControlUnit {
 public:
     static constexpr std::size_t kVxmQueues = VxmSlice::kAluQueues;
     static constexpr std::size_t kMemQueuesPerHemisphere = hw::kSliceColumns;
-    static constexpr std::size_t kMxmQueuesPerHemisphere = 2;
+    static constexpr std::size_t kMxmQueuesPerHemisphere =
+        hw::kMxmsPerHemisphere;
     static constexpr std::size_t kSxmQueuesPerHemisphere = 2;
     static constexpr std::size_t kMemQueues = hw::kHemispheres * kMemQueuesPerHemisphere;
-    static constexpr std::size_t kMxmQueues = hw::kHemispheres * kMxmQueuesPerHemisphere;
+    static constexpr std::size_t kMxmQueues = hw::kMxmCount;
     static constexpr std::size_t kSxmQueues = hw::kHemispheres * kSxmQueuesPerHemisphere;
 
     static constexpr std::size_t mem_queue(Hemisphere hemisphere, std::size_t column)
