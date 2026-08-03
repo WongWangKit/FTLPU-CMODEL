@@ -278,9 +278,10 @@ The SVG expands eight representative windows:
   drain before changing the Permute destination from MXM0 to MXM1;
 - cycles 63108..63420: the first o_proj reduction window.
 
-Accumulator lanes are placed immediately after their hemisphere's MXMs. Purple
-bars retain a partial sum in the MXM accumulator; red bars send the final sum to the stream and
-clear the accumulator.
+Accumulator state is encoded directly on the owning MXM Compute or
+AccumulatorRead bar rather than drawn as a separate resource lane. Purple bars
+retain a sum in the MXM accumulator SRAM; red bars send the sum to the stream
+and clear the accumulator.
 
 Each bar is generated from an actual scheduled instruction rather than a
 hand-authored phase estimate. Hovering a bar exposes its exact queue and operand

@@ -40,7 +40,8 @@ int main(int argc, char** argv)
     constexpr std::size_t kBuffer = 0;
 
     for (std::size_t column = 0; column < ftlpu::hw::kMxmSupercellsPerPlane; ++column) {
-        control.issue_south(ftlpu::MxmControlInstruction::IW(kBuffer));
+        control.issue_south(
+            ftlpu::MxmControlInstruction::IWDirect16(kBuffer));
     }
     auto provider = [&control](std::size_t tile) {
         const auto token = control.cycle() - tile;

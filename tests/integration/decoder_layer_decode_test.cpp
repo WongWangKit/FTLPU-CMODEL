@@ -201,7 +201,7 @@ public:
             }
             schedule.mxm_load_at(
                 iw_cycle,
-                ftlpu::MxmControlInstruction::IW(0, block));
+                ftlpu::MxmControlInstruction::IWDirect16(0, block));
         }
 
         constexpr std::size_t kComputeCycle = kLoadStart + 10;
@@ -275,7 +275,7 @@ public:
             }
             schedule.mxm_load_at(
                 iw_cycle,
-                ftlpu::MxmControlInstruction::IW(0, block));
+                ftlpu::MxmControlInstruction::IWDirect16(0, block));
         }
 
         constexpr std::size_t kColumnCycle = kLoadStart + 8;
@@ -290,7 +290,7 @@ public:
         }
         schedule.mxm_load_at(
             kColumnCycle,
-            ftlpu::MxmControlInstruction::IWColumn(0, 0, 0));
+            ftlpu::MxmControlInstruction::IWColumnDirect16(0, 0, 0));
 
         constexpr std::size_t kComputeStart = kColumnCycle + 8;
         for (std::size_t block_start = 0;

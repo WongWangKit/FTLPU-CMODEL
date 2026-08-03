@@ -54,11 +54,28 @@ constexpr std::size_t kMxmSupercellsPerPlane = kTileRows;
 constexpr std::size_t kMxmWeightBytesPerValue = 2;
 constexpr std::size_t kMxmLoadStreamsPerCycle = kMxmSupercellColumns * kMxmWeightBytesPerValue;
 constexpr std::size_t kMxmColumnLoadStreamsPerCycle = kMxmWeightBytesPerValue;
+constexpr std::size_t kMxmInt8WeightStreamsPerCycle =
+    kMxmSupercellColumns;
+constexpr std::size_t kMxmInt8LoadStreamsPerCycle =
+    kMxmInt8WeightStreamsPerCycle;
+constexpr std::size_t kMxmInt8ColumnLoadStreamsPerCycle = 1;
+constexpr std::size_t kMxmLoadStreamStride = kMxmLoadStreamsPerCycle;
+constexpr std::size_t kMxmInt8LoadStreamStride =
+    kMxmInt8LoadStreamsPerCycle;
 constexpr std::size_t kMxmActivationStreamsPerVector = 2;
+constexpr std::size_t kMxmBlockRows = kLanesPerTile;
+constexpr std::size_t kMxmActivationStreamsPerBlock =
+    kMxmBlockRows * kMxmWeightBytesPerValue;
 constexpr std::size_t kMxmLoadBytesPerCycle = kLanesPerTile * kMxmLoadStreamsPerCycle * kStreamRegisterBytes;
 constexpr std::size_t kMxmAccumulatorRows = 8192;
 constexpr std::size_t kMxmAccumulatorBytes =
     kMxmAccumulatorRows * kMxmColumns * sizeof(float);
+constexpr std::size_t kMxmBlockAccumulatorRows =
+    kMxmAccumulatorRows / kMxmBlockRows;
+constexpr std::size_t kMxmBlockAccumulatorColumns =
+    kMxmBlockRows * kMxmColumns;
+constexpr std::size_t kMxmBlockAccumulatorBytes =
+    kMxmBlockAccumulatorRows * kMxmBlockAccumulatorColumns * sizeof(float);
 
 constexpr std::size_t kSxmConcurrentStreamOps = 16;
 
@@ -94,8 +111,16 @@ static_assert(kMemWriteBytesPerCycle == 8);
 static_assert(kMxmRows == kMxmSupercellRows * kMxmSupercellsPerPlane);
 static_assert(kMxmColumns == kMxmSupercellColumns * kMxmSupercellsPerPlane);
 static_assert(kMxmLoadStreamsPerCycle == 16);
+static_assert(kMxmInt8LoadStreamsPerCycle == 8);
+static_assert(kMxmInt8ColumnLoadStreamsPerCycle == 1);
+static_assert(kMxmLoadStreamStride == 16);
+static_assert(kMxmInt8LoadStreamStride == 8);
+static_assert(kMxmActivationStreamsPerBlock == 16);
 static_assert(kMxmLoadBytesPerCycle == 128);
 static_assert(kMxmAccumulatorBytes == 1024 * 1024);
+static_assert(kMxmBlockAccumulatorRows == 1024);
+static_assert(kMxmBlockAccumulatorColumns == 256);
+static_assert(kMxmBlockAccumulatorBytes == 1024 * 1024);
 static_assert(kSxmConcurrentStreamOps == 16);
 static_assert(kSramBlockBytes == 2 * 1024 * 1024);
 static_assert(kTotalSramBytes == 104 * 1024 * 1024);

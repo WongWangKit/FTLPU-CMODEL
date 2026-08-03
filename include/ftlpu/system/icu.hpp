@@ -54,6 +54,9 @@ public:
         for (auto& queue : mxm_load_queues_) {
             queue.reset();
         }
+        for (auto& queue : mxm_dequant_queues_) {
+            queue.reset();
+        }
         for (auto& queue : mxm_compute_queues_) {
             queue.reset();
         }
@@ -69,6 +72,9 @@ public:
             queue.push_nop(cycles);
         }
         for (auto& queue : mxm_load_queues_) {
+            queue.push_nop(cycles);
+        }
+        for (auto& queue : mxm_dequant_queues_) {
             queue.push_nop(cycles);
         }
         for (auto& queue : mxm_compute_queues_) {
@@ -132,6 +138,7 @@ public:
     {
         check_mxm_queue(mxm);
         mxm_load_queues_[mxm].push_nop(cycles);
+        mxm_dequant_queues_[mxm].push_nop(cycles);
         mxm_compute_queues_[mxm].push_nop(cycles);
     }
 
@@ -139,6 +146,20 @@ public:
     {
         check_mxm_queue(mxm);
         mxm_load_queues_[mxm].push_nop(cycles);
+    }
+
+    void enqueue_mxm_dequant(
+        std::size_t mxm,
+        MxmDequantInstruction instruction)
+    {
+        check_mxm_queue(mxm);
+        mxm_dequant_queues_[mxm].push_instruction(instruction);
+    }
+
+    void enqueue_mxm_dequant_nop(std::size_t mxm, std::size_t cycles)
+    {
+        check_mxm_queue(mxm);
+        mxm_dequant_queues_[mxm].push_nop(cycles);
     }
 
     void enqueue_mxm_compute_nop(std::size_t mxm, std::size_t cycles)
@@ -157,6 +178,16 @@ public:
     {
         check_mxm_queue(mxm);
         mxm_load_queues_[mxm].push_repeat(Repeat {count, interval, 0});
+    }
+
+    void enqueue_mxm_dequant_repeat(
+        std::size_t mxm,
+        std::size_t count,
+        std::size_t interval = 1)
+    {
+        check_mxm_queue(mxm);
+        mxm_dequant_queues_[mxm].push_repeat(
+            Repeat {count, interval, 0});
     }
 
     void enqueue_mxm_compute_repeat(std::size_t mxm, std::size_t count, std::size_t interval = 1)
@@ -298,6 +329,20 @@ public:
                     *os << "  ICU -> SXM." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
                         << ".permute " << describe_sxm(*permute) << '\n';
                 }
+            }
+        }
+
+        for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
+            const auto instruction =
+                mxm_dequant_queues_[mxm].dispatch_next();
+            if (!instruction.has_value()) {
+                continue;
+            }
+            mxms[mxm].control().issue_dequant_south(*instruction);
+            any = true;
+            if (os != nullptr) {
+                *os << "  ICU -> MXM" << mxm
+                    << ".dequant scale=" << instruction->scale() << '\n';
             }
         }
 
@@ -487,6 +532,16 @@ private:
             throw std::out_of_range("ICU MEM Repeat address stride underflow");
         }
         instruction.address = static_cast<std::size_t>(static_cast<std::int64_t>(instruction.address) + delta);
+        if (instruction.opcode == MemOpcode::ReadWrite) {
+            if (delta < 0
+                && instruction.write_address
+                    < static_cast<std::size_t>(-delta))
+                throw std::out_of_range(
+                    "ICU MEM Repeat write-address stride underflow");
+            instruction.write_address = static_cast<std::size_t>(
+                static_cast<std::int64_t>(instruction.write_address)
+                + delta);
+        }
         return instruction;
     }
 
@@ -531,6 +586,8 @@ private:
             << " vxm=" << queued_instruction_count(vxm_queues_)
             << " mem=" << queued_instruction_count(mem_queues_)
             << " mxm_load=" << queued_instruction_count(mxm_load_queues_)
+            << " mxm_dequant="
+            << queued_instruction_count(mxm_dequant_queues_)
             << " mxm_compute=" << queued_instruction_count(mxm_compute_queues_)
             << " sxm_transpose=" << queued_instruction_count(sxm_transpose_queues_)
             << " sxm_permute=" << queued_instruction_count(sxm_permute_queues_)
@@ -585,16 +642,32 @@ private:
                << " col=" << instruction.weight_column;
             if (instruction.weight_load_mode == MxmWeightLoadMode::Column) {
                 os << " inner=" << instruction.weight_inner_column
-                   << " streams=2";
+                   << " streams="
+                   << (instruction.weight_input_mode
+                               == MxmWeightInputMode::Int8DequantBf16
+                           ? 1
+                           : 2);
             }
+            os << (instruction.weight_input_mode
+                           == MxmWeightInputMode::Int8DequantBf16
+                       ? " int8"
+                       : " direct16");
         } else if (instruction.opcode == MxmControlOpcode::Compute) {
             os << "Compute b" << instruction.weight_buffer
                << " stream=" << instruction.activation_stream_base
                << " acc=" << instruction.accumulator_address
-               << " out=" << instruction.stream_base;
+               << " out=" << instruction.stream_base
+               << " mode="
+               << (instruction.compute_mode == MxmComputeMode::Block8
+                       ? "block8"
+                       : "vector");
         } else {
             os << "AccumulatorRead address=" << instruction.accumulator_address
-               << " out=" << instruction.stream_base;
+               << " out=" << instruction.stream_base
+               << " mode="
+               << (instruction.compute_mode == MxmComputeMode::Block8
+                       ? "block8"
+                       : "vector");
         }
         return os.str();
     }
@@ -633,6 +706,8 @@ private:
     std::array<DispatchQueue<VxmLaneAluInstruction>, kVxmQueues> vxm_queues_{};
     std::array<DispatchQueue<MemInstruction>, kMemQueues> mem_queues_{};
     std::array<DispatchQueue<MxmControlInstruction>, kMxmQueues> mxm_load_queues_{};
+    std::array<DispatchQueue<MxmDequantInstruction>, kMxmQueues>
+        mxm_dequant_queues_{};
     std::array<DispatchQueue<MxmControlInstruction>, kMxmQueues> mxm_compute_queues_{};
     std::array<DispatchQueue<SxmInstruction>, hw::kHemispheres> sxm_transpose_queues_{};
     std::array<DispatchQueue<SxmInstruction>, hw::kHemispheres> sxm_permute_queues_{};

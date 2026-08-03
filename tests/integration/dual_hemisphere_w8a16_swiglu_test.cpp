@@ -233,7 +233,10 @@ public:
         require_available(mxm_load_[mxm], cycle, "MXM load " + std::to_string(mxm));
         pad(mxm_load_[mxm], cycle, [&](std::size_t count) { icu_.enqueue_mxm_load_nop(mxm, count); });
         icu_.enqueue_mxm(
-            mxm, ftlpu::MxmControlInstruction::IW(weight_buffer, weight_column));
+            mxm,
+            ftlpu::MxmControlInstruction::IWDirect16(
+                weight_buffer,
+                weight_column));
         advance(mxm_load_[mxm], cycle + 1);
         trace(cycle, cycle + 1, mxm_name(mxm) + ".Load",
             "IW buffer=" + std::to_string(weight_buffer)

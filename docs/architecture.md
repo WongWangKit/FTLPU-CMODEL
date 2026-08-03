@@ -140,52 +140,76 @@ Each `Mxm` contains:
 buffer. The two-bit `column` field selects columns `0..3`; load order does not
 implicitly shift the final layout. There is no `LW` instruction.
 
-The original full-supercell form consumes 16 east streams:
+The default full-supercell form consumes eight INT8 east streams:
 
 ```text
-8 16-bit values x 2 byte streams = 16 streams
+8 INT8 values per lane x 1 byte stream = 8 streams
 ```
 
-Local MXM0 uses `E0..E15`; local MXM1 uses `E16..E31`. Four continuous IW
-pulses fill one 32-column weight tile. The peer buffer may still supply
-in-flight Compute work while IW fills the inactive buffer.
+A separate Dequant instruction queue supplies one BF16 scale immediate per
+load. Dequant and IW issue together and propagate south-to-north in lockstep.
+At each tile the load path computes `BF16(INT8 * BF16(scale))` before writing
+the selected weight buffer. A missing or misaligned Dequant pulse is an
+execution error.
+
+Local MXM0 reserves `E0..E15`; local MXM1 reserves `E16..E31`. The default
+INT8 load uses the first eight streams in each half. Four continuous IW pulses
+fill one 32-column weight tile. The peer buffer may still supply in-flight
+Compute work while IW fills the inactive buffer.
 
 `IWColumn(buffer, column, inner_column)` is the narrow form. It consumes two
-east streams and writes one of the eight columns inside the selected `8 x 8`
-supercell:
+east streams in Direct16 compatibility mode, or one INT8 stream by default,
+and writes one of the eight columns inside the selected `8 x 8` supercell:
 
 ```text
-1 16-bit value per lane x 2 byte streams = 2 streams
+default: 1 INT8 value per lane x 1 byte stream = 1 stream
+Direct16: 1 16-bit value per lane x 2 byte streams = 2 streams
 ```
 
-Local MXM0 uses `E0..E1`; local MXM1 uses `E16..E17`. On an empty buffer,
-eight narrow pulses, one for each `inner_column` in `0..7`, make that
-supercell valid for Compute. A narrow write to an already complete buffer
-updates the selected column without invalidating its other columns.
+Default INT8 narrow load uses `E0` for local MXM0 or `E16` for local MXM1;
+Direct16 uses `E0..E1` or `E16..E17`. On an empty buffer, eight narrow
+pulses, one for each `inner_column` in `0..7`, make that supercell valid for
+Compute. A narrow write to an already complete buffer updates the selected
+column without invalidating its other columns.
 
-W8 weights use symmetric per-output-column scales:
+W8 weights may use symmetric per-output-column scales:
 
 ```text
 scale[n] = max_k(abs(W[k,n])) / 127
 ```
 
-VXM multiplies INT8 values by the corresponding scale and casts them to FP16
-or BF16 before IW. IW stores the two incoming bytes unchanged and therefore
-does not carry a data-format field.
+Strict per-output-column scaling uses eight `IWColumn`/Dequant pairs. A full
+`8 x 8` IW broadcasts one scale immediate across all eight loaded columns.
+`IWDirect16` and `IWColumnDirect16` retain the compatibility path that stores
+incoming FP16/BF16 bits unchanged.
 
 ### Compute
 
-`Compute(buffer, activation_stream_base, output_stream_base, ..., data_format)`
-is a one-cycle control pulse. Consecutive pulses inject consecutive activation
-vectors. The selected buffer, stream bases, and FP16/BF16 format travel with
-the activation wave.
+`Compute(buffer, activation_stream_base, output_stream_base, ..., data_format,
+compute_mode)` is a one-cycle control pulse. The selected buffer, stream bases,
+FP16/BF16 format, and compute mode travel with the activation wave.
 
-Each supercell interprets both the activation and raw weight bits using the
-Compute format, then dots eight elements against eight weight columns.
+| Mode | Activation input per tile | Result per MXM pulse | MACs per supercell |
+|---|---:|---:|---:|
+| `Vector` | `1 x 8`, 2 byte streams | `1 x 32` | 64 |
+| `Block8` | `8 x 8`, 16 byte streams | `8 x 32` | 512 |
+
+Both modes interpret the raw weight bits using the Compute format. `Vector`
+preserves the original behavior: consecutive pulses inject consecutive rows,
+and a Stream destination emits one FP32 row over four west byte streams.
+
+`Block8` treats each stream pair as one activation row and each lane as one K
+element. One pulse computes eight output rows, advances the row counter by
+eight, and selects one logical `8 x 32` FP32 accumulator row. Each supercell
+column updates its `8 x 8` segment at that same wide-row address.
+Block8 is accumulator-only. A Block8 `AccumulatorRead` emits one `8 x 8`
+column segment per cycle over all 32 west byte streams; the four column
+segments drain the full `8 x 32` row in four cycles. Up to four consecutive
+Block8 pulses form one `32 x 32` output tile.
+
 Activations move east across the four supercell columns while partial sums move
-north and accumulate as FP32. Completed outputs are automatically written to
-four consecutive west byte streams selected by the Compute instruction. There
-is no separate MXM output command or software output queue.
+north and accumulate as FP32. There is no separate MXM output command or
+software output queue.
 
 The system owns all MXM runtime state; whole-system tests do not use a separate
 GEMM engine or runtime helper.
@@ -237,12 +261,13 @@ queue. With no issued SXM operation, east streams pass from `sreg13` to
 
 ## 8. ICU and ISA
 
-The ICU owns 132 independent queues:
+The ICU owns 136 independent queues:
 
 | Queue class | Count |
 | --- | ---: |
 | MEM | 104 |
 | MXM load | 4 |
+| MXM Dequant | 4 |
 | MXM compute | 4 |
 | VXM ALU | 16 |
 | SXM Transpose/Permute | 4 |
@@ -259,6 +284,7 @@ The compact model codec currently covers:
 
 - 32-bit MEM instructions;
 - 32-bit MXM control instructions;
+- 16-bit MXM Dequant BF16 scale immediates;
 - VXM ALU instructions encoded as four 32-bit words;
 - 32-bit ICU NOP/Repeat commands.
 
@@ -272,33 +298,42 @@ Reserved bits and field ranges are validated by
 
 ### W8A16 Weight and Activation Coexistence
 
-Raw INT8 weights travel west from MEM to VXM. Dequantized FP16 weights then
-travel east to MXM, which is the point where they may conflict with activation.
+Raw INT8 weights travel east from MEM to the MXM-local dequantizer. The scale
+comes from the independent Dequant queue, so VXM is not used by the default
+weight-load path.
 
-| Active operation | FP16 IW streams | Shared activation |
+| Active operation | INT8 IW streams | Available peer half |
 | --- | --- | --- |
-| Load local MXM0 | `E0..E15` | `E16..E17` |
-| Load local MXM1 | `E16..E31` | `E0..E1` |
+| Load local MXM0 | `E0..E7` | `E16..E31` |
+| Load local MXM1 | `E16..E23` | `E0..E15` |
 | No IW | none | normally `E0..E1` |
 
-Loading both MXMs in one cycle would occupy all 32 east streams. Offline FFN
-schedules therefore load one inactive buffer at a time and place activation in
-the opposite half. Both local MXMs broadcast-consume the same FP16 activation
-pair.
+Both local MXMs may load in one cycle using 16 total east streams. Activation
+may use an unoccupied range subject to the normal stream-collision rules.
+Direct16 compatibility loads still occupy a full 16-stream half.
 
 ### Ping-Pong Weights
 
-For projection reductions, Compute uses buffer `k mod 2` while VXM and IW
-prepare reduction `k+1` in the other buffer. SRAM slices, stream IDs, VXM ALUs,
-and MXM load queues are all explicit scheduling resources.
+For projection reductions, Compute uses buffer `k mod 2` while MEM, Dequant,
+and IW prepare reduction `k+1` in the other buffer. SRAM slices, stream IDs,
+and the MXM Dequant/load queues are explicit scheduling resources.
 
 ### Accumulator Lifetime
 
-Each MXM owns a 1 MiB FP32 accumulator with 8192 rows of 32 values. Non-final
-`Compute` instructions retain their sums in the selected MXM accumulator.
-Final `Compute` or `AccumulatorRead` instructions emit the selected segment to
-streams and may clear it. Address reuse is legal only after the final result has
-been emitted and cleared.
+Each MXM owns two mode-specific FP32 accumulator SRAMs:
+
+| Mode | SRAM geometry | Row width | Capacity |
+|---|---:|---:|---:|
+| `Vector` | `8192 x 32 FP32` | 128 bytes | 1 MiB |
+| `Block8` | `1024 x (8 x 32 FP32)` | 1024 bytes | 1 MiB |
+
+The two SRAMs total 2 MiB per MXM. Vector Compute writes one eight-column
+segment of a narrow row. Block8 Compute writes the same eight-column segment
+for all eight output rows, and the four column segments share one logical wide
+address. The Compute/AccumulatorRead mode bit selects the SRAM. A Block8 read
+occupies all 32 west streams, so its output window must be scheduled against
+the local peer MXM. Address reuse is legal only after the final result has been
+emitted and cleared.
 
 ### Single-Port MEM
 
@@ -341,6 +376,44 @@ schedule from 93,642 to 90,817 cycles.
 SwiGLU results are stored in both MEM hemispheres. Down projection reads local
 copies, uses all four MXMs, accumulates 48 K tiles, casts the final sums to FP16,
 and verifies all 73,728 output values.
+
+### Block8 + MXM Dequant FFN
+
+`smollm2_block8_dequant_ffn_test` uses the same SmolLM2 dimensions:
+
+```text
+X[128,576] BF16
+  -> gate/up[128,1536]
+  -> BF16 SwiGLU[128,1536]
+  -> down[128,576] FP32
+```
+
+Weights enter every MXM as eight INT8 streams. The independent Dequant queue
+supplies one BF16 scale per eight-column group, and the converted BF16 values
+are written directly into the weight buffers. Gate, up, and down all use
+Block8 Compute and the `1024 x (8 x 32 FP32)` wide accumulator.
+
+Four consecutive Block8 pulses cover one physical 32-row tile. The 128 input
+rows are scheduled as four such groups, with enough separation for the last
+column wave to leave the internal partial-sum rows before they are reused.
+Gate/up accumulator results are checked exactly and materialized as FP32 VXM
+inputs at an explicit test phase boundary. The six-stage VXM SwiGLU pipeline
+accepts one 32-element vector per cycle, casts the result to BF16, and writes
+the 16-stream packed activation layout into both hemispheres. Down consumes
+that VXM output through the full 48-reduction projection. Down results use a
+scaled FP32 tolerance because the hardware accumulates tile partial sums in a
+different association than the scalar golden loop.
+
+Accumulator state is encoded on the owning `MXM.*.Compute` event rather than
+drawn as a separate functional-unit lane. Partial reductions are purple; the
+final reduction is dark purple because the completed sum is ready but still
+retained in SRAM. Red is reserved for a Compute or AccumulatorRead operation
+that explicitly emits to stream and clears the slot.
+
+The generated schedule artifacts are
+[`smollm2_block8_dequant_ffn_schedule.csv`](smollm2_block8_dequant_ffn_schedule.csv)
+and
+[`smollm2_block8_dequant_ffn_schedule_detail.svg`](smollm2_block8_dequant_ffn_schedule_detail.svg).
 
 ### RMSNorm
 

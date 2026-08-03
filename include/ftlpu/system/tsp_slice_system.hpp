@@ -291,12 +291,73 @@ private:
         constexpr auto kTargetSreg = hw::kMxmBoundaryStreamRegisterColumn;
         auto input = MxmControlSlice::WeightInput {};
         const auto hemisphere = hemisphere_index(mxm_hemisphere(mxm));
-        const auto stream_base = local_mxm_index(mxm) * hw::kMxmLoadStreamsPerCycle;
         const auto& instruction = mxms_[mxm].control().instruction_at(tile);
         if (!instruction.has_value()
             || instruction->opcode != MxmControlOpcode::IW) {
             throw std::logic_error(
                 "MXM weight input requested without an active IW instruction");
+        }
+        if (instruction->weight_input_mode
+            == MxmWeightInputMode::Int8DequantBf16) {
+            const auto stream_base = local_mxm_index(mxm)
+                * hw::kMxmInt8LoadStreamStride;
+            if (instruction->weight_load_mode
+                == MxmWeightLoadMode::Column) {
+                const auto column = instruction->weight_inner_column;
+                for (std::size_t lane = 0;
+                     lane < hw::kLanesPerTile;
+                     ++lane) {
+                    const auto word =
+                        mems_[hemisphere].consume_east_register(
+                            tile,
+                            lane,
+                            kTargetSreg,
+                            stream_base);
+                    if (!word.has_value()) {
+                        throw std::logic_error(
+                            "MXM INT8 column IW reached tile before its weight stream arrived at the MXM boundary register");
+                    }
+                    input[lane][column] =
+                        MxmArray::Supercell::InputWord {
+                            word->data,
+                            lane + 1 == hw::kLanesPerTile,
+                        };
+                }
+                return input;
+            }
+
+            for (std::size_t lane = 0;
+                 lane < hw::kLanesPerTile;
+                 ++lane) {
+                for (std::size_t column = 0;
+                     column < hw::kMxmSupercellColumns;
+                     ++column) {
+                    const auto word =
+                        mems_[hemisphere].consume_east_register(
+                            tile,
+                            lane,
+                            kTargetSreg,
+                            stream_base + column);
+                    if (!word.has_value()) {
+                        throw std::logic_error(
+                            "MXM INT8 IW reached tile before all eight weight streams arrived at the MXM boundary register");
+                    }
+                    input[lane][column] =
+                        MxmArray::Supercell::InputWord {
+                            word->data,
+                            column + 1
+                                == hw::kMxmSupercellColumns,
+                        };
+                }
+            }
+            return input;
+        }
+
+        const auto stream_base =
+            local_mxm_index(mxm) * hw::kMxmLoadStreamStride;
+        if (instruction->weight_input_mode
+            != MxmWeightInputMode::Direct16) {
+            throw std::invalid_argument("MXM weight input mode is invalid");
         }
         if (instruction->weight_load_mode == MxmWeightLoadMode::Column) {
             const auto low = stream_base;

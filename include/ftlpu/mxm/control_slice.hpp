@@ -3,6 +3,7 @@
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/mxm/array.hpp"
 #include "ftlpu/mxm/supercell.hpp"
+#include "ftlpu/mxm/weight_dequantizer.hpp"
 
 #include <array>
 #include <cstddef>
@@ -28,6 +29,11 @@ enum class MxmAccumulatorDestination {
     Stream = 1,
 };
 
+enum class MxmComputeMode {
+    Vector = 0,
+    Block8 = 1,
+};
+
 struct MxmControlInstruction {
     MxmControlOpcode opcode{MxmControlOpcode::IW};
     std::size_t weight_buffer{0};
@@ -40,12 +46,17 @@ struct MxmControlInstruction {
         MxmAccumulatorDestination::Stream};
     bool accumulator_clear{true};
     MxmWeightLoadMode weight_load_mode{MxmWeightLoadMode::Supercell};
+    MxmWeightInputMode weight_input_mode{
+        MxmWeightInputMode::Int8DequantBf16};
     std::size_t weight_inner_column{0};
     MxmDataFormat data_format{MxmDataFormat::Float16};
+    MxmComputeMode compute_mode{MxmComputeMode::Vector};
 
     static MxmControlInstruction IW(
         std::size_t weight_buffer = 0,
-        std::size_t weight_column = 0)
+        std::size_t weight_column = 0,
+        MxmWeightInputMode weight_input_mode =
+            MxmWeightInputMode::Int8DequantBf16)
     {
         check_weight_buffer(weight_buffer);
         check_column(weight_column);
@@ -53,21 +64,49 @@ struct MxmControlInstruction {
         instruction.opcode = MxmControlOpcode::IW;
         instruction.weight_buffer = weight_buffer;
         instruction.weight_column = weight_column;
+        instruction.weight_input_mode = weight_input_mode;
         return instruction;
+    }
+
+    static MxmControlInstruction IWDirect16(
+        std::size_t weight_buffer = 0,
+        std::size_t weight_column = 0)
+    {
+        return IW(
+            weight_buffer,
+            weight_column,
+            MxmWeightInputMode::Direct16);
     }
 
     static MxmControlInstruction IWColumn(
         std::size_t weight_buffer,
         std::size_t weight_column,
-        std::size_t weight_inner_column)
+        std::size_t weight_inner_column,
+        MxmWeightInputMode weight_input_mode =
+            MxmWeightInputMode::Int8DequantBf16)
     {
         check_weight_buffer(weight_buffer);
         check_column(weight_column);
         check_inner_column(weight_inner_column);
-        auto instruction = IW(weight_buffer, weight_column);
+        auto instruction = IW(
+            weight_buffer,
+            weight_column,
+            weight_input_mode);
         instruction.weight_load_mode = MxmWeightLoadMode::Column;
         instruction.weight_inner_column = weight_inner_column;
         return instruction;
+    }
+
+    static MxmControlInstruction IWColumnDirect16(
+        std::size_t weight_buffer,
+        std::size_t weight_column,
+        std::size_t weight_inner_column)
+    {
+        return IWColumn(
+            weight_buffer,
+            weight_column,
+            weight_inner_column,
+            MxmWeightInputMode::Direct16);
     }
 
     static MxmControlInstruction Compute(
@@ -78,11 +117,14 @@ struct MxmControlInstruction {
         std::size_t accumulator_row_stride = 1,
         MxmAccumulatorDestination accumulator_destination =
             MxmAccumulatorDestination::Stream,
-        MxmDataFormat data_format = MxmDataFormat::Float16)
+        MxmDataFormat data_format = MxmDataFormat::Float16,
+        MxmComputeMode compute_mode = MxmComputeMode::Vector)
     {
         check_weight_buffer(weight_buffer);
-        check_activation_stream_base(activation_stream_base);
+        check_compute_mode(compute_mode);
+        check_activation_stream_base(activation_stream_base, compute_mode);
         check_stream_base(stream_base);
+        check_compute_destination(compute_mode, accumulator_destination);
         auto instruction = MxmControlInstruction {};
         instruction.opcode = MxmControlOpcode::Compute;
         instruction.weight_buffer = weight_buffer;
@@ -92,21 +134,25 @@ struct MxmControlInstruction {
         instruction.accumulator_row_stride = accumulator_row_stride;
         instruction.accumulator_destination = accumulator_destination;
         instruction.data_format = data_format;
+        instruction.compute_mode = compute_mode;
         return instruction;
     }
 
     static MxmControlInstruction AccumulatorRead(
         std::size_t accumulator_address,
         std::size_t stream_base = 0,
-        bool clear = true)
+        bool clear = true,
+        MxmComputeMode compute_mode = MxmComputeMode::Vector)
     {
-        check_accumulator_address(accumulator_address);
-        check_stream_base(stream_base);
+        check_compute_mode(compute_mode);
+        check_accumulator_address(accumulator_address, compute_mode);
+        check_accumulator_read_stream_base(stream_base, compute_mode);
         auto instruction = MxmControlInstruction {};
         instruction.opcode = MxmControlOpcode::AccumulatorRead;
         instruction.stream_base = stream_base;
         instruction.accumulator_address = accumulator_address;
         instruction.accumulator_clear = clear;
+        instruction.compute_mode = compute_mode;
         return instruction;
     }
 
@@ -150,6 +196,16 @@ struct MxmControlInstruction {
         throw std::invalid_argument("MXM weight load mode is invalid");
     }
 
+    static void check_weight_input_mode(MxmWeightInputMode mode)
+    {
+        switch (mode) {
+        case MxmWeightInputMode::Int8DequantBf16:
+        case MxmWeightInputMode::Direct16:
+            return;
+        }
+        throw std::invalid_argument("MXM weight input mode is invalid");
+    }
+
     static void check_data_format(MxmDataFormat format)
     {
         switch (format) {
@@ -160,10 +216,38 @@ struct MxmControlInstruction {
         throw std::invalid_argument("MXM data format is invalid");
     }
 
-    static void check_activation_stream_base(std::size_t activation_stream_base)
+    static void check_compute_mode(MxmComputeMode mode)
     {
-        if (activation_stream_base + hw::kMxmActivationStreamsPerVector > hw::kEastStreams) {
-            throw std::out_of_range("MXM 16-bit activation requires two consecutive east streams");
+        switch (mode) {
+        case MxmComputeMode::Vector:
+        case MxmComputeMode::Block8:
+            return;
+        }
+        throw std::invalid_argument("MXM compute mode is invalid");
+    }
+
+    static void check_activation_stream_base(
+        std::size_t activation_stream_base,
+        MxmComputeMode mode)
+    {
+        check_compute_mode(mode);
+        const auto stream_count = mode == MxmComputeMode::Block8
+            ? hw::kMxmActivationStreamsPerBlock
+            : hw::kMxmActivationStreamsPerVector;
+        if (activation_stream_base + stream_count > hw::kEastStreams) {
+            throw std::out_of_range(
+                "MXM activation stream range is outside the east stream set");
+        }
+    }
+
+    static void check_compute_destination(
+        MxmComputeMode mode,
+        MxmAccumulatorDestination destination)
+    {
+        if (mode == MxmComputeMode::Block8
+            && destination != MxmAccumulatorDestination::Sram) {
+            throw std::invalid_argument(
+                "MXM Block8 Compute must retain results in the accumulator");
         }
     }
 
@@ -174,9 +258,28 @@ struct MxmControlInstruction {
         }
     }
 
-    static void check_accumulator_address(std::size_t address)
+    static void check_accumulator_read_stream_base(
+        std::size_t stream_base,
+        MxmComputeMode mode)
     {
-        if (address >= hw::kMxmAccumulatorRows) {
+        const auto stream_count = mode == MxmComputeMode::Block8
+            ? hw::kMxmBlockRows * sizeof(float)
+            : sizeof(float);
+        if (stream_base + stream_count > hw::kWestStreams) {
+            throw std::out_of_range(
+                "MXM accumulator read stream range is outside the west stream set");
+        }
+    }
+
+    static void check_accumulator_address(
+        std::size_t address,
+        MxmComputeMode mode = MxmComputeMode::Vector)
+    {
+        check_compute_mode(mode);
+        const auto rows = mode == MxmComputeMode::Block8
+            ? hw::kMxmBlockAccumulatorRows
+            : hw::kMxmAccumulatorRows;
+        if (address >= rows) {
             throw std::out_of_range("MXM accumulator address is outside the 1 MiB SRAM");
         }
     }
@@ -184,8 +287,9 @@ struct MxmControlInstruction {
 
 class MxmControlSlice {
 public:
-    using WeightInput = MxmArray::InputVector;
+    using WeightInput = MxmWeightInput;
     using InstructionSlot = std::optional<MxmControlInstruction>;
+    using DequantInstructionSlot = std::optional<MxmDequantInstruction>;
     using WeightInputSlot = std::optional<WeightInput>;
     using WeightInputProvider = std::function<WeightInput(std::size_t)>;
 
@@ -198,12 +302,14 @@ public:
         MxmAccumulatorDestination accumulator_destination{
             MxmAccumulatorDestination::Stream};
         MxmDataFormat data_format{MxmDataFormat::Float16};
+        MxmComputeMode compute_mode{MxmComputeMode::Vector};
     };
 
     struct AccumulatorReadPulse {
         std::size_t address{0};
         std::size_t stream_base{0};
         bool clear{true};
+        MxmComputeMode compute_mode{MxmComputeMode::Vector};
     };
 
     explicit MxmControlSlice(MxmArray& array)
@@ -214,11 +320,15 @@ public:
     void reset()
     {
         load_instruction_queue_.clear();
+        dequant_instruction_queue_.clear();
         compute_instruction_queue_.clear();
         for (auto& slot : load_instruction_rows_) {
             slot.reset();
         }
         for (auto& slot : compute_instruction_rows_) {
+            slot.reset();
+        }
+        for (auto& slot : dequant_instruction_rows_) {
             slot.reset();
         }
         for (auto& slot : weight_inputs_) {
@@ -254,6 +364,11 @@ public:
         }
     }
 
+    void issue_dequant_south(MxmDequantInstruction instruction)
+    {
+        dequant_instruction_queue_.push_back(instruction);
+    }
+
     void set_weight_input(std::size_t tile, WeightInput input)
     {
         check_tile(tile);
@@ -273,6 +388,13 @@ public:
     {
         check_tile(tile);
         return compute_instruction_rows_[tile];
+    }
+
+    const DequantInstructionSlot& dequant_instruction_at(
+        std::size_t tile) const
+    {
+        check_tile(tile);
+        return dequant_instruction_rows_[tile];
     }
 
     const WeightInputSlot& weight_input_at(std::size_t tile) const
@@ -352,6 +474,7 @@ public:
             check_tile(*log_tile);
         }
         dispatch_load_instruction();
+        dispatch_dequant_instruction();
         dispatch_compute_instruction();
         fill_missing_weight_inputs(weight_provider);
         os << "mxm_control cycle " << cycle_ << '\n';
@@ -381,23 +504,38 @@ private:
         if (instruction.opcode == MxmControlOpcode::Compute) {
             MxmControlInstruction::check_data_format(
                 instruction.data_format);
-            MxmControlInstruction::check_activation_stream_base(instruction.activation_stream_base);
+            MxmControlInstruction::check_compute_mode(
+                instruction.compute_mode);
+            MxmControlInstruction::check_activation_stream_base(
+                instruction.activation_stream_base,
+                instruction.compute_mode);
             MxmControlInstruction::check_stream_base(instruction.stream_base);
+            MxmControlInstruction::check_compute_destination(
+                instruction.compute_mode,
+                instruction.accumulator_destination);
             MxmControlInstruction::check_accumulator_address(
-                instruction.accumulator_address);
+                instruction.accumulator_address,
+                instruction.compute_mode);
             if (instruction.accumulator_row_stride == 0) {
                 throw std::invalid_argument(
                     "MXM accumulator row stride must be at least one");
             }
         } else if (instruction.opcode == MxmControlOpcode::AccumulatorRead) {
+            MxmControlInstruction::check_compute_mode(
+                instruction.compute_mode);
             MxmControlInstruction::check_accumulator_address(
-                instruction.accumulator_address);
-            MxmControlInstruction::check_stream_base(instruction.stream_base);
+                instruction.accumulator_address,
+                instruction.compute_mode);
+            MxmControlInstruction::check_accumulator_read_stream_base(
+                instruction.stream_base,
+                instruction.compute_mode);
         } else {
             MxmControlInstruction::check_column(instruction.weight_column);
             MxmControlInstruction::check_weight_load(
                 instruction.weight_load_mode,
                 instruction.weight_inner_column);
+            MxmControlInstruction::check_weight_input_mode(
+                instruction.weight_input_mode);
         }
     }
 
@@ -439,6 +577,17 @@ private:
         compute_instruction_queue_.pop_front();
     }
 
+    void dispatch_dequant_instruction()
+    {
+        if (dequant_instruction_rows_[0].has_value()
+            || dequant_instruction_queue_.empty()) {
+            return;
+        }
+        dequant_instruction_rows_[0] =
+            dequant_instruction_queue_.front();
+        dequant_instruction_queue_.pop_front();
+    }
+
     void fill_missing_weight_inputs(const WeightInputProvider& weight_provider)
     {
         if (!weight_provider) {
@@ -469,6 +618,8 @@ private:
         bool any_logged = false;
         for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
             const auto& instruction = load_instruction_rows_[tile];
+            const auto& dequant_instruction =
+                dequant_instruction_rows_[tile];
             if (instruction.has_value()) {
                 any = true;
                 const auto should_log = !log_tile.has_value() || tile == *log_tile;
@@ -477,6 +628,15 @@ private:
                     os << "  tile " << tile << " ";
                 }
                 if (instruction->opcode == MxmControlOpcode::IW) {
+                    const auto needs_dequant =
+                        instruction->weight_input_mode
+                        == MxmWeightInputMode::Int8DequantBf16;
+                    if (needs_dequant != dequant_instruction.has_value()) {
+                        throw std::logic_error(
+                            needs_dequant
+                                ? "MXM INT8 IW reached tile without a matching Dequant instruction"
+                                : "MXM Dequant instruction cannot accompany a Direct16 IW");
+                    }
                     if (!weight_inputs_[tile].has_value()) {
                         throw std::logic_error("MXM IW reached tile without local weight input");
                     }
@@ -488,10 +648,22 @@ private:
                             == MxmWeightLoadMode::Column) {
                             os << " inner=" << instruction->weight_inner_column;
                         }
+                        if (needs_dequant) {
+                            os << " int8 scale="
+                               << dequant_instruction->scale();
+                        } else {
+                            os << " direct16";
+                        }
                         os << " inject ";
                     }
                     const auto column = instruction->weight_column;
-                    const auto input = *weight_inputs_[tile];
+                    const auto input = dequantizer_.convert(
+                        *weight_inputs_[tile],
+                        instruction->weight_load_mode,
+                        instruction->weight_inner_column,
+                        instruction->weight_input_mode,
+                        dequant_instruction.value_or(
+                            MxmDequantInstruction {}));
                     const auto load = instruction->weight_load_mode
                             == MxmWeightLoadMode::Column
                         ? MxmInstruction::IWColumn(
@@ -525,6 +697,9 @@ private:
                         = array_.cell(tile, column).weight_buffer_valid(
                             instruction->weight_buffer);
                 }
+            } else if (dequant_instruction.has_value()) {
+                throw std::logic_error(
+                    "MXM Dequant instruction reached tile without a matching INT8 IW");
             }
 
             const auto& compute_instruction = compute_instruction_rows_[tile];
@@ -542,6 +717,11 @@ private:
                            << " format="
                            << mxm_data_format_name(
                                   compute_instruction->data_format)
+                           << " mode="
+                           << (compute_instruction->compute_mode
+                                      == MxmComputeMode::Block8
+                                   ? "block8"
+                                   : "vector")
                            << " acc=" << compute_instruction->accumulator_address
                            << " out=" << compute_instruction->stream_base << '\n';
                     }
@@ -554,6 +734,7 @@ private:
                         compute_instruction->accumulator_row_stride,
                         compute_instruction->accumulator_destination,
                         compute_instruction->data_format,
+                        compute_instruction->compute_mode,
                     };
                 } else if (
                     compute_instruction->opcode
@@ -562,6 +743,11 @@ private:
                         os << "  tile " << tile << " AccumulatorRead address="
                            << compute_instruction->accumulator_address
                            << " out=" << compute_instruction->stream_base
+                           << " mode="
+                           << (compute_instruction->compute_mode
+                                      == MxmComputeMode::Block8
+                                   ? "block8"
+                                   : "vector")
                            << (compute_instruction->accumulator_clear
                                    ? " clear" : " retain")
                            << '\n';
@@ -570,7 +756,8 @@ private:
                         AccumulatorReadPulse {
                             compute_instruction->accumulator_address,
                             compute_instruction->stream_base,
-                            compute_instruction->accumulator_clear};
+                            compute_instruction->accumulator_clear,
+                            compute_instruction->compute_mode};
                 }
             }
         }
@@ -609,16 +796,23 @@ private:
     {
         for (std::size_t tile = hw::kMxmSupercellsPerPlane - 1; tile > 0; --tile) {
             load_instruction_rows_[tile] = load_instruction_rows_[tile - 1];
+            dequant_instruction_rows_[tile] =
+                dequant_instruction_rows_[tile - 1];
             compute_instruction_rows_[tile] = compute_instruction_rows_[tile - 1];
         }
         load_instruction_rows_[0].reset();
+        dequant_instruction_rows_[0].reset();
         compute_instruction_rows_[0].reset();
     }
 
     MxmArray& array_;
+    MxmWeightDequantizer dequantizer_{};
     std::deque<MxmControlInstruction> load_instruction_queue_{};
+    std::deque<MxmDequantInstruction> dequant_instruction_queue_{};
     std::deque<MxmControlInstruction> compute_instruction_queue_{};
     std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> load_instruction_rows_{};
+    std::array<DequantInstructionSlot, hw::kMxmSupercellsPerPlane>
+        dequant_instruction_rows_{};
     std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> compute_instruction_rows_{};
     std::array<WeightInputSlot, hw::kMxmSupercellsPerPlane> weight_inputs_{};
     std::array<bool, hw::kMxmSupercellsPerPlane> compute_pulses_{};

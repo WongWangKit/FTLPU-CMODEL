@@ -127,34 +127,55 @@ slice 组成一个 group，位于两个 stream-register boundary 之间。全部
 `IW(buffer, column)` 把一个显式 supercell-column block 写入指定 buffer。
 两位 `column` 字段选择 `0..3`，装载顺序不会隐式改变最终 layout。不存在 `LW`。
 
-一个 IW pulse 消费 16 条 east stream：
+默认一个 IW pulse 消费 8 条 INT8 east stream：
 
 ```text
-8 个 16-bit 值 x 每值 2 条 byte stream = 16 条 stream
+每个 lane 8 个 INT8 值 x 每值 1 条 byte stream = 8 条 stream
 ```
 
-本地 MXM0 使用 `E0..E15`，MXM1 使用 `E16..E31`。连续四个 IW pulse 填满一个
-32-column weight tile。向空闲 buffer 执行 IW 时，另一个 buffer 仍可支持在途 Compute。
+每个 MXM 新增一条独立 Dequant 指令队列，由该队列提供 BF16 scale immediate。
+Dequant 与对应 IW 同拍发射并从南到北同步传播；每个 tile 在写 weight buffer 前执行
+`BF16(INT8 * BF16(scale))`。Dequant pulse 缺失或与 IW 错拍都会报执行错误。
 
-W8 权重采用按输出列的对称 scale：
+本地 MXM0 保留 `E0..E15`，MXM1 保留 `E16..E31`；默认 INT8 load 使用各自半区的前
+8 条 stream。连续四个 IW pulse 填满一个 32-column weight tile。`IWColumn` 默认只
+消费 1 条 INT8 stream；Direct16 兼容模式消费 2 条 stream。向空闲 buffer 执行 IW
+时，另一个 buffer 仍可支持在途 Compute。
+
+W8 权重可以采用按输出列的对称 scale：
 
 ```text
 scale[n] = max_k(abs(W[k,n])) / 127
 ```
 
-IW 前，VXM 先把 INT8 乘对应 scale，再 cast 为 FP16 或 BF16。IW 原样保存输入的
-两个 byte，因此 IW 指令不需要 data-format 字段。
+严格按输出列缩放时使用 8 组 `IWColumn`/Dequant；一次完整 `8 x 8` IW 会把一个
+scale immediate 广播到本拍装入的 8 列。`IWDirect16` 和 `IWColumnDirect16` 保留
+直接写入 FP16/BF16 原始位的兼容路径。
 
 ### Compute
 
-`Compute(buffer, activation_stream_base, output_stream_base, ..., data_format)` 是一拍
-control pulse。连续 pulse 注入连续 activation vector；buffer、stream base 和
-FP16/BF16 格式会随 activation 波传播。
+`Compute(buffer, activation_stream_base, output_stream_base, ..., data_format,
+compute_mode)` 是一拍 control pulse。buffer、stream base、FP16/BF16 格式和 compute
+mode 会随 activation 波传播。
 
-每个 supercell 按 Compute 指定的格式解释 activation 和原始 weight bits，再完成
-8 元素与八列权重的点积。activation 向东穿过四个 supercell column，partial sum
-向北传播并按 FP32 累加。完成的输出会自动写入 Compute 指定的连续四条 west byte
-stream。不存在独立 MXM output 指令，也不存在软件输出队列。
+| 模式 | 每个 tile 的 activation 输入 | 每个 MXM pulse 的结果 | 每个 supercell 的 MAC |
+|---|---:|---:|---:|
+| `Vector` | `1 x 8`，2 条 byte stream | `1 x 32` | 64 |
+| `Block8` | `8 x 8`，16 条 byte stream | `8 x 32` | 512 |
+
+两种模式都按 Compute 指定的格式解释原始 weight bits。`Vector` 保持原行为：连续
+pulse 注入连续输出行，Stream destination 通过四条 west byte stream 输出一行
+FP32。
+
+`Block8` 把每对 stream 解释成一行 activation、把 lane 解释成 K 元素。一拍计算八行
+输出，row counter 前进 8，并选择一个逻辑 `8 x 32 FP32` accumulator 宽行；每个
+supercell column 更新该宽行地址中的一个 `8 x 8` segment。Block8 只允许 accumulator
+destination。Block8 `AccumulatorRead` 每拍使用全部 32 条 west byte stream 输出一个
+`8 x 8` 列分块，四拍读完一个 `8 x 32` 宽行。连续四拍 Block8 构成一个 `32 x 32`
+output tile。
+
+activation 向东穿过四个 supercell column，partial sum 向北传播并按 FP32 累加。
+不存在独立 MXM output 指令，也不存在软件输出队列。
 
 全部 MXM runtime state 由整系统持有；整系统测试不使用独立 GEMM engine 或 runtime
 helper。
@@ -199,12 +220,13 @@ Transpose 输出先打一拍，再由 Permute 消费。Permute 在 4 个 superla
 
 ## 8. ICU 与 ISA
 
-ICU 共拥有 132 条独立 queue：
+ICU 共拥有 136 条独立 queue：
 
 | Queue 类别 | 数量 |
 | --- | ---: |
 | MEM | 104 |
 | MXM load | 4 |
+| MXM Dequant | 4 |
 | MXM compute | 4 |
 | VXM ALU | 16 |
 | SXM Transpose/Permute | 4 |
@@ -221,6 +243,7 @@ ICU 共拥有 132 条独立 queue：
 
 - 32-bit MEM 指令；
 - 32-bit MXM control 指令；
+- 16-bit MXM Dequant BF16 scale immediate；
 - 四个 32-bit word 的 VXM ALU 指令；
 - 32-bit ICU NOP/Repeat command。
 
@@ -232,30 +255,38 @@ stream selector、tile 内 lane map 和完整跨 tile permute map。字段范围
 
 ### W8A16 权重与 Activation 共存
 
-原始 INT8 权重从 MEM 沿 west stream 到 VXM；反量化后的 FP16 权重再沿 east stream
-到 MXM，后一个阶段才可能与 activation 冲突。
+原始 INT8 权重从 MEM 沿 east stream 直接进入 MXM 本地反量化模块；scale 由独立
+Dequant queue 提供，默认权重装载路径不再使用 VXM。
 
-| 活跃操作 | FP16 IW stream | 共享 activation |
+| 活跃操作 | INT8 IW stream | 空闲半区 |
 | --- | --- | --- |
-| 装载本地 MXM0 | `E0..E15` | `E16..E17` |
-| 装载本地 MXM1 | `E16..E31` | `E0..E1` |
+| 装载本地 MXM0 | `E0..E7` | `E16..E31` |
+| 装载本地 MXM1 | `E16..E23` | `E0..E15` |
 | 没有 IW | 无 | 通常为 `E0..E1` |
 
-同拍装两个 MXM 会占满 32 条 east stream。因此离线 FFN schedule 每次只装一个
-空闲 buffer，并把 activation 放到另一半。本地两个 MXM 广播消费同一对 FP16
-activation。
+两个本地 MXM 可以同拍装载，总计使用 16 条 east stream。activation 可以使用未占用
+范围，但仍需遵守 stream collision 规则。Direct16 兼容 load 仍会占满一个 16-stream
+半区。
 
 ### 权重乒乓
 
-projection reduction 中，Compute 使用 buffer `k mod 2`，VXM 和 IW 同时把
-reduction `k+1` 准备到另一个 buffer。SRAM slice、stream ID、VXM ALU 和 MXM
+projection reduction 中，Compute 使用 buffer `k mod 2`，MEM、Dequant 和 IW 同时把
+reduction `k+1` 准备到另一个 buffer。SRAM slice、stream ID、MXM Dequant queue 和
 load queue 都是显式调度资源。
 
 ### Accumulator 生命周期
 
-每个 MXM 内置一个 1 MiB FP32 accumulator，包含 8192 行、每行 32 个 FP32。
-非最终 `Compute` 把部分和保留在对应 MXM accumulator；最终 `Compute` 或
-`AccumulatorRead` 可以把指定 segment 输出到 stream 并清零。只有最终结果输出并
+每个 MXM 内置两个按模式区分的 FP32 accumulator SRAM：
+
+| 模式 | SRAM 组织 | 行宽 | 容量 |
+|---|---:|---:|---:|
+| `Vector` | `8192 x 32 FP32` | 128 bytes | 1 MiB |
+| `Block8` | `1024 x (8 x 32 FP32)` | 1024 bytes | 1 MiB |
+
+两个 SRAM 合计每个 MXM 2 MiB。Vector Compute 每次写窄行中的一个 8 列 segment；
+Block8 Compute 同时写相同 8 列上的 8 个输出行，四个列 segment 共用一个逻辑宽行
+地址。Compute/AccumulatorRead 的 mode bit 选择目标 SRAM。Block8 read 会占满 32
+条 west stream，因此输出窗口需要与本地另一个 MXM 协同调度。只有最终结果输出并
 清零后，地址才可复用。
 
 ### 单端口 MEM
@@ -296,6 +327,39 @@ X[128,576]
 SwiGLU 结果在两个 MEM hemisphere 都保存一份。down projection 读取本地副本，
 使用全部四个 MXM，累加 48 个 K tile，把最终和 cast 为 FP16，并验证全部 73,728
 个输出值。
+
+### Block8 + MXM Dequant FFN
+
+`smollm2_block8_dequant_ffn_test` 使用相同的 SmolLM2 参数：
+
+```text
+X[128,576] BF16
+  -> gate/up[128,1536]
+  -> BF16 SwiGLU[128,1536]
+  -> down[128,576] FP32
+```
+
+权重以 8 条 INT8 stream 进入每个 MXM；独立 Dequant queue 为每个 8 列 group 提供
+一个 BF16 scale，转换后的 BF16 权重直接写入 weight buffer。gate、up 和 down 全部
+使用 Block8 Compute 与 `1024 x (8 x 32 FP32)` 宽 accumulator。
+
+连续 4 个 Block8 pulse 覆盖一个物理 32-row tile。128 行输入分成 4 组调度，组间只
+保留最后一个 column wave 离开内部 partial-sum row 所需的间隔。gate/up accumulator
+结果逐位检查，并在显式测试 phase boundary materialize 为 FP32 VXM 输入。六级 VXM
+SwiGLU 流水每拍接收一个 32-element vector，将结果 cast 为 BF16，并把 16-stream
+packed activation layout 同时写入两个半球。down 直接消费该 VXM 输出并完成全部
+48 次 reduction。down 使用带尺度的 FP32 容差，因为硬件按 K tile partial sum
+累加，与标量 golden 的线性结合顺序不同。
+
+accumulator 状态直接编码在所属的 `MXM.*.Compute` event 上，不再单独画成功能单元
+lane。非末次 reduction 用紫色表示 partial sum 留在 SRAM；末次 reduction 用深紫色
+表示结果已经 ready、但仍保留在 SRAM。红色只表示 Compute 或 AccumulatorRead 显式
+送到 stream 并清零 slot。
+
+生成的调度文件为
+[`smollm2_block8_dequant_ffn_schedule.csv`](smollm2_block8_dequant_ffn_schedule.csv)
+和
+[`smollm2_block8_dequant_ffn_schedule_detail.svg`](smollm2_block8_dequant_ffn_schedule_detail.svg)。
 
 ### RMSNorm
 

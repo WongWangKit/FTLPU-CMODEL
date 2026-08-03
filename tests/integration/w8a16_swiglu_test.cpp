@@ -93,7 +93,11 @@ public:
     void mxm_load_at(std::size_t mxm, std::size_t cycle, std::size_t weight_column)
     {
         pad(mxm_load_[mxm], cycle, [&](std::size_t n) { icu_.enqueue_mxm_load_nop(mxm, n); });
-        icu_.enqueue_mxm(mxm, ftlpu::MxmControlInstruction::IW(0, weight_column));
+        icu_.enqueue_mxm(
+            mxm,
+            ftlpu::MxmControlInstruction::IWDirect16(
+                0,
+                weight_column));
         advance(mxm_load_[mxm], cycle + 1);
     }
 

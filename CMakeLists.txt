@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(ftlpu_cmodel STATIC
     src/mem/sram.cpp
     src/mxm/accumulator.cpp
+    src/mxm/block_accumulator.cpp
 )
 target_include_directories(ftlpu_cmodel PUBLIC include)
 
@@ -43,10 +44,13 @@ ftlpu_add_test(mxm_supercell_test tests/mxm/supercell_test.cpp)
 ftlpu_add_test(mxm_array_test tests/mxm/array_test.cpp)
 ftlpu_add_test(mxm_control_slice_test tests/mxm/control_slice_test.cpp)
 ftlpu_add_test(mxm_accumulator_test tests/mxm/accumulator_test.cpp)
+ftlpu_add_test(mxm_block_accumulator_test tests/mxm/block_accumulator_test.cpp)
+ftlpu_add_test(mxm_weight_dequantizer_test tests/mxm/weight_dequantizer_test.cpp)
 ftlpu_add_test(mxm_bf16_test tests/integration/mxm_bf16_test.cpp)
 ftlpu_add_test(w8a16_projection_test tests/integration/w8a16_projection_test.cpp)
 ftlpu_add_test(w8a16_swiglu_test tests/integration/w8a16_swiglu_test.cpp)
 ftlpu_add_test(dual_hemisphere_w8a16_swiglu_test tests/integration/dual_hemisphere_w8a16_swiglu_test.cpp)
+ftlpu_add_test(smollm2_block8_dequant_ffn_test tests/integration/smollm2_block8_dequant_ffn_test.cpp)
 ftlpu_add_test(rmsnorm_test tests/integration/rmsnorm_test.cpp)
 ftlpu_add_test(smollm2_attention_test tests/integration/smollm2_attention_test.cpp)
 ftlpu_add_test(decoder_layer_decode_test tests/integration/decoder_layer_decode_test.cpp)
@@ -57,6 +61,7 @@ set_tests_properties(
     w8a16_projection_test
     w8a16_swiglu_test
     dual_hemisphere_w8a16_swiglu_test
+    smollm2_block8_dequant_ffn_test
     smollm2_attention_test
     decoder_layer_decode_test
     PROPERTIES RUN_SERIAL TRUE

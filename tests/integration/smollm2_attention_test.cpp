@@ -605,7 +605,9 @@ public:
         });
         icu_.enqueue_mxm(
             mxm,
-            ftlpu::MxmControlInstruction::IW(weight_buffer, weight_column));
+            ftlpu::MxmControlInstruction::IWDirect16(
+                weight_buffer,
+                weight_column));
         advance(mxm_load_[mxm], cycle + 1);
         trace(cycle, cycle + 1, mxm_name(mxm) + ".Load",
             "IW buffer=" + std::to_string(weight_buffer)
@@ -638,10 +640,17 @@ public:
                 destination));
         icu_.enqueue_mxm_compute_repeat(mxm, kTile - 1, 1);
         advance(mxm_compute_[mxm], cycle + kTile);
+        const auto* accumulator_state =
+            destination == ftlpu::MxmAccumulatorDestination::Sram
+            ? "dst=sram retain"
+            : "dst=stream+clear";
         trace(cycle, cycle + kTile, mxm_name(mxm) + ".Compute",
             "Compute buffer=" + std::to_string(weight_buffer)
                 + " act=E" + std::to_string(activation_stream)
-                + " out=W" + std::to_string(output_stream));
+                + " out=W" + std::to_string(output_stream)
+                + " acc=" + std::to_string(accumulator_address)
+                + " stride=" + std::to_string(accumulator_stride)
+                + " " + accumulator_state);
         trace(cycle + kTile, cycle + kMxmInputBlockIssueCycles,
             mxm_name(mxm) + ".Tail", "control + datapath drain");
     }
@@ -669,7 +678,8 @@ public:
             cycle + ftlpu::hw::kTileRows,
             mxm_name(mxm) + ".AccumulatorRead",
             "address=" + std::to_string(address)
-                + " out=W" + std::to_string(output_stream));
+                + " out=W" + std::to_string(output_stream)
+                + (clear ? " dst=stream+clear" : " dst=stream retain"));
     }
 
     std::size_t end_cycle() const { return end_cycle_; }
@@ -681,7 +691,20 @@ public:
             throw std::runtime_error("cannot open schedule trace output: " + path);
         }
         output << "start,end,resource,detail\n";
-        for (const auto& event : trace_events_) {
+        auto sorted_events = trace_events_;
+        std::stable_sort(
+            sorted_events.begin(),
+            sorted_events.end(),
+            [](const TraceEvent& lhs, const TraceEvent& rhs) {
+                if (lhs.start != rhs.start) {
+                    return lhs.start < rhs.start;
+                }
+                if (lhs.end != rhs.end) {
+                    return lhs.end < rhs.end;
+                }
+                return lhs.resource < rhs.resource;
+            });
+        for (const auto& event : sorted_events) {
             output << event.start << ',' << event.end << ','
                    << csv_field(event.resource) << ',' << csv_field(event.detail) << '\n';
         }

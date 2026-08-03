@@ -51,6 +51,9 @@ COLORS = {
     "MXM.Load": "#91b7e5",
     "MXM.Compute": "#6f9fd8",
     "MXM.Tail": "#dce5ef",
+    "ACC.Partial": "#c5a3d9",
+    "ACC.Ready": "#8f6bad",
+    "ACC.Stream": "#e16b6f",
 }
 
 
@@ -120,7 +123,9 @@ def resource_key(resource: str) -> tuple[int, int, int, str]:
     if resource.startswith("MXM"):
         op = 0 if resource.endswith("Load") else 1 if resource.endswith("Compute") else 2
         return (3, hemisphere, op, resource)
-    return (4, hemisphere, 0, resource)
+    if resource.startswith("ACC"):
+        return (4, hemisphere, 0, resource)
+    return (5, hemisphere, 0, resource)
 
 
 def event_color(event: Event) -> str:
@@ -134,9 +139,21 @@ def event_color(event: Event) -> str:
         return COLORS["SXM." + resource.rsplit(".", 1)[-1]]
     if resource.startswith("VXM"):
         return COLORS["VXM"]
+    if resource.startswith("ACC"):
+        if accumulator_stream_destination(event.detail):
+            return COLORS["ACC.Stream"]
+        if "final sum ready" in event.detail:
+            return COLORS["ACC.Ready"]
+        return COLORS["ACC.Partial"]
     if resource.endswith(".Load"):
         return COLORS["MXM.Load"]
     if resource.endswith(".Compute"):
+        if accumulator_stream_destination(event.detail):
+            return COLORS["ACC.Stream"]
+        if "final sum ready" in event.detail:
+            return COLORS["ACC.Ready"]
+        if "dst=sram" in event.detail:
+            return COLORS["ACC.Partial"]
         return COLORS["MXM.Compute"]
     return COLORS["MXM.Tail"]
 
@@ -146,6 +163,12 @@ def accumulator_stream_destination(detail: str) -> bool:
 
 
 def detail_class(event: Event) -> str:
+    if event.resource.startswith("ACC"):
+        if accumulator_stream_destination(event.detail):
+            return "accumulator -> stream + clear"
+        if "final sum ready" in event.detail:
+            return "final sum ready in SRAM"
+        return "partial sum retained in SRAM"
     if event.resource.startswith("MEM"):
         if event.resource.endswith(".Read"):
             return "continuous reads"
@@ -232,6 +255,8 @@ def render(
         '<text x="68" y="93" class="sub">Accumulator -&gt; SRAM (keep partial sum)</text>',
         '<rect x="340" y="82" width="18" height="12" rx="2" fill="#e16b6f" stroke="#52606c" stroke-width="0.7"/>',
         '<text x="366" y="93" class="sub">Accumulator -&gt; stream + clear (final sum)</text>',
+        '<rect x="690" y="82" width="18" height="12" rx="2" fill="#8f6bad" stroke="#52606c" stroke-width="0.7"/>',
+        '<text x="716" y="93" class="sub">Accumulator final sum retained in SRAM</text>',
     ]
 
     for window, selected, resources, y0, panel_height in panel_data:

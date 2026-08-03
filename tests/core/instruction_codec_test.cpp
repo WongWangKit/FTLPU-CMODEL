@@ -26,12 +26,14 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
         && lhs.activation_stream_base == rhs.activation_stream_base
         && lhs.weight_column == rhs.weight_column
         && lhs.weight_load_mode == rhs.weight_load_mode
+        && lhs.weight_input_mode == rhs.weight_input_mode
         && lhs.weight_inner_column == rhs.weight_inner_column
         && lhs.accumulator_address == rhs.accumulator_address
         && lhs.accumulator_row_stride == rhs.accumulator_row_stride
         && lhs.accumulator_destination == rhs.accumulator_destination
         && lhs.accumulator_clear == rhs.accumulator_clear
-        && lhs.data_format == rhs.data_format;
+        && lhs.data_format == rhs.data_format
+        && lhs.compute_mode == rhs.compute_mode;
 }
 
 bool same_vxm(const ftlpu::VxmLaneAluInstruction& lhs, const ftlpu::VxmLaneAluInstruction& rhs)
@@ -101,6 +103,8 @@ bool verify_mxm_codec()
     const ftlpu::MxmControlInstruction instructions[] {
         ftlpu::MxmControlInstruction::IW(1, 3),
         ftlpu::MxmControlInstruction::IWColumn(1, 2, 7),
+        ftlpu::MxmControlInstruction::IWDirect16(0, 1),
+        ftlpu::MxmControlInstruction::IWColumnDirect16(0, 3, 4),
         ftlpu::MxmControlInstruction::Compute(
             1,
             30,
@@ -116,7 +120,21 @@ bool verify_mxm_codec()
             1,
             ftlpu::MxmAccumulatorDestination::Stream,
             ftlpu::MxmDataFormat::BFloat16),
+        ftlpu::MxmControlInstruction::Compute(
+            0,
+            16,
+            0,
+            512,
+            1,
+            ftlpu::MxmAccumulatorDestination::Sram,
+            ftlpu::MxmDataFormat::Float16,
+            ftlpu::MxmComputeMode::Block8),
         ftlpu::MxmControlInstruction::AccumulatorRead(7000, 16, false),
+        ftlpu::MxmControlInstruction::AccumulatorRead(
+            700,
+            0,
+            true,
+            ftlpu::MxmComputeMode::Block8),
     };
 
     for (const auto& instruction : instructions) {
@@ -134,6 +152,23 @@ bool verify_mxm_codec()
             "MXM IW encoding changed while adding BF16")) {
         return false;
     }
+    const auto direct_iw = ftlpu::isa::encode_mxm_instruction(
+        ftlpu::MxmControlInstruction::IWDirect16(1, 3));
+    if (!require(
+            (direct_iw & (std::uint64_t {1} << 9)) != 0,
+            "MXM Direct16 IW input-mode bit was not encoded")) {
+        return false;
+    }
+    const auto dequant = ftlpu::MxmDequantInstruction::Scale(0.125f);
+    const auto encoded_dequant =
+        ftlpu::isa::encode_mxm_dequant_instruction(dequant);
+    const auto decoded_dequant =
+        ftlpu::isa::decode_mxm_dequant_instruction(encoded_dequant);
+    if (!require(
+            decoded_dequant.scale_bf16 == dequant.scale_bf16,
+            "MXM Dequant scale immediate codec round-trip failed")) {
+        return false;
+    }
     const auto bf16_compute = ftlpu::isa::encode_mxm_instruction(
         ftlpu::MxmControlInstruction::Compute(
             0,
@@ -148,12 +183,70 @@ bool verify_mxm_codec()
             "MXM BF16 Compute format bit was not encoded")) {
         return false;
     }
+    if (!require(
+            (bf16_compute & (std::uint64_t {1} << 46)) == 0,
+            "legacy Vector Compute encoding changed while adding Block8")) {
+        return false;
+    }
+    const auto block_compute = ftlpu::isa::encode_mxm_instruction(
+        ftlpu::MxmControlInstruction::Compute(
+            0,
+            0,
+            0,
+            0,
+            1,
+            ftlpu::MxmAccumulatorDestination::Sram,
+            ftlpu::MxmDataFormat::Float16,
+            ftlpu::MxmComputeMode::Block8));
+    if (!require(
+            (block_compute & (std::uint64_t {1} << 46)) != 0,
+            "MXM Block8 Compute mode bit was not encoded")) {
+        return false;
+    }
+    const auto vector_read = ftlpu::isa::encode_mxm_instruction(
+        ftlpu::MxmControlInstruction::AccumulatorRead(7000, 16, false));
+    if (!require(
+            (vector_read & (std::uint64_t {1} << 46)) == 0,
+            "legacy Vector AccumulatorRead encoding changed")) {
+        return false;
+    }
+    const auto block_read = ftlpu::isa::encode_mxm_instruction(
+        ftlpu::MxmControlInstruction::AccumulatorRead(
+            700,
+            0,
+            false,
+            ftlpu::MxmComputeMode::Block8));
+    if (!require(
+            (block_read & (std::uint64_t {1} << 46)) != 0,
+            "MXM Block8 AccumulatorRead mode bit was not encoded")) {
+        return false;
+    }
 
     return require_throws(
         [] {
             ftlpu::isa::encode_mxm_instruction(ftlpu::MxmControlInstruction::IW(32));
         },
         "MXM codec should reject weight buffers outside the two-buffer set")
+        && require_throws(
+            [] {
+                static_cast<void>(
+                    ftlpu::MxmControlInstruction::AccumulatorRead(
+                        ftlpu::hw::kMxmBlockAccumulatorRows,
+                        0,
+                        true,
+                        ftlpu::MxmComputeMode::Block8));
+            },
+            "MXM Block8 accumulator read should reject addresses past 1023")
+        && require_throws(
+            [] {
+                static_cast<void>(
+                    ftlpu::MxmControlInstruction::AccumulatorRead(
+                        0,
+                        1,
+                        true,
+                        ftlpu::MxmComputeMode::Block8));
+            },
+            "MXM Block8 accumulator read should occupy all west streams")
         && require_throws(
             [] {
                 auto invalid = ftlpu::MxmControlInstruction::IW(0, 0);

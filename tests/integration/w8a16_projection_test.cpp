@@ -227,7 +227,7 @@ int run_test()
                 schedule.mxm_load_at(
                     mxm,
                     dequant_cycle + kWeightToIwLatency,
-                    ftlpu::MxmControlInstruction::IW(0, block));
+                    ftlpu::MxmControlInstruction::IWDirect16(0, block));
                 ++weight_address;
             }
 
