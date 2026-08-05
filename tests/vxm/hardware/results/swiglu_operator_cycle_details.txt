@@ -1,0 +1,150 @@
+VXM hardware cycle details
+test=SwiGLU hardware throughput
+state: E=executed S=stalled .=idle
+
+cycle=0 event=SwiGLU config decode depth=8 pending_feedback=0 outputs=0 alu=................
+cycle=1 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=ESSSSSSSESSSSSSS
+cycle=2 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EESSSSSSEESSSSSS
+cycle=3 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EESSSSSSEESSSSSS
+cycle=4 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EESSSSSSEESSSSSS
+cycle=5 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EESSSSSSEESSSSSS
+cycle=6 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EESSSSSSEESSSSSS
+cycle=7 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EEESSSSSEEESSSSS
+cycle=8 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EEEESSSSEEEESSSS
+cycle=9 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EEEESSSSEEEESSSS
+cycle=10 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EEEESSSSEEEESSSS
+cycle=11 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EEEESSSSEEEESSSS
+cycle=12 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EEEESSSSEEEESSSS
+cycle=13 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EEEEESSSEEEEESSS
+cycle=14 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EEEEESSSEEEEESSS
+cycle=15 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EEEEEESSEEEEEESS
+cycle=16 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EEEEEESSEEEEEESS
+cycle=17 event=SwiGLU input depth=8 pending_feedback=0 outputs=0 alu=EEEEEEESEEEEEEES
+cycle=18 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=19 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=20 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=21 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=22 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=23 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=24 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=25 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=26 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=27 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=28 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=29 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=30 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=31 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=32 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=33 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=34 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=35 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=36 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=37 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=38 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=39 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=40 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=41 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=42 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=43 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=44 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=45 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=46 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=47 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=48 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=49 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=50 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=51 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=52 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=53 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=54 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=55 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=56 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=57 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=58 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=59 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=60 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=61 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=62 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=63 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=64 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=65 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=66 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=67 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=68 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=69 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=70 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=71 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=72 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=73 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=74 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=75 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=76 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=77 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=78 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=79 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=80 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=81 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=82 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=83 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=84 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=85 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=86 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=87 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=88 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=89 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=90 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=91 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=92 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=93 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=94 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=95 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=96 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=97 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=98 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=99 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=100 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=101 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=102 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=103 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=104 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=105 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=106 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=107 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=108 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=109 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=110 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=111 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=112 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=113 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=114 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=115 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=116 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=117 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=118 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=119 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=120 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=121 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=122 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=123 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=124 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=125 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=126 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=127 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=128 event=SwiGLU input depth=8 pending_feedback=0 outputs=2 alu=EEEEEEEEEEEEEEEE
+cycle=129 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=.EEEEEEE.EEEEEEE
+cycle=130 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=.EEEEEEE.EEEEEEE
+cycle=131 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=.EEEEEEE.EEEEEEE
+cycle=132 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=.EEEEEEE.EEEEEEE
+cycle=133 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=.EEEEEEE.EEEEEEE
+cycle=134 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=..EEEEEE..EEEEEE
+cycle=135 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=...EEEEE...EEEEE
+cycle=136 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=...EEEEE...EEEEE
+cycle=137 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=...EEEEE...EEEEE
+cycle=138 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=...EEEEE...EEEEE
+cycle=139 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=...EEEEE...EEEEE
+cycle=140 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=....EEEE....EEEE
+cycle=141 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=....EEEE....EEEE
+cycle=142 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=.....EEE.....EEE
+cycle=143 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=.....EEE.....EEE
+cycle=144 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=......EE......EE
+cycle=145 event=SwiGLU output drain depth=8 pending_feedback=0 outputs=2 alu=.......E.......E

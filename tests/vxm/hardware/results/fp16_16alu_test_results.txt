@@ -1,0 +1,3 @@
+VXM hardware test
+test=fp16_16alu_test
+status=PASS

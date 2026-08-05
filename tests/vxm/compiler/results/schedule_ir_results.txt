@@ -1,0 +1,73 @@
+Schedule softmax total_cycles=409
+  Phase 0 phase_0_v1_rows0_1 depth=2 elements=128 parallel_chains=1 rows=[0,1) data=[1,130)
+    input v0 row=0 -> head0.LHS each_cycle
+    ALU0 bypass lhs=StreamValue(v0) rhs=Immediate(0) repeat=128
+    ALU1 max lhs=Previous rhs=LocalScalar(v1) repeat=1 acc_reset acc_write no_emit
+    ALU1 max lhs=Previous rhs=LocalScalar(v1) repeat=126 acc_write no_emit
+    ALU1 max lhs=Previous rhs=LocalScalar(v1) repeat=1 acc_write output=v1
+    phase_output v1 row=0 <- tail1 scalar
+  Phase 1 phase_1_v5_rows0_1 depth=4 elements=128 parallel_chains=1 rows=[0,1) data=[130,265)
+    input v0 row=0 -> head0.LHS each_cycle
+    input v1 row=0 -> head0.RHS hold
+    ALU0 sub lhs=StreamValue(v0) rhs=StreamValue(v1) repeat=128
+    ALU1 exp_lut lhs=Previous rhs=Immediate(0) repeat=128
+    ALU2 bypass lhs=Previous rhs=Immediate(0) repeat=128
+    ALU3 add lhs=Previous rhs=LocalScalar(v5) repeat=1 acc_reset acc_write no_emit
+    ALU3 add lhs=Previous rhs=LocalScalar(v5) repeat=126 acc_write no_emit
+    ALU3 add lhs=Previous rhs=LocalScalar(v5) repeat=1 acc_write output=v5 feedback_only
+    phase_output v5 row=0 <- tail3 scalar feedback_only
+  Phase 2 phase_2_v6_rows0_1 depth=4 elements=1 parallel_chains=1 rows=[0,1) data=[265,273) feedback_from_previous
+    feedback v5: tail3 -> head0 direct
+    ALU0 bypass lhs=Feedback(v5) rhs=Immediate(0) repeat=1
+    ALU1 bypass lhs=Previous rhs=Immediate(0) repeat=1
+    ALU2 bypass lhs=Previous rhs=Immediate(0) repeat=1
+    ALU3 reciprocal_lut lhs=Previous rhs=Immediate(0) repeat=1 output=v6
+    phase_output v6 row=0 <- tail3 scalar
+  Phase 3 phase_3_v8_rows0_1 depth=4 elements=128 parallel_chains=1 rows=[0,1) data=[273,409)
+    input v0 row=0 -> head0.LHS each_cycle
+    input v1 row=0 -> head0.RHS hold
+    local_scalar v6 row=0 -> ALU3
+    ALU0 sub lhs=StreamValue(v0) rhs=StreamValue(v1) repeat=128
+    ALU1 exp_lut lhs=Previous rhs=Immediate(0) repeat=128
+    ALU2 bypass lhs=Previous rhs=Immediate(0) repeat=128
+    ALU3 mul lhs=Previous rhs=LocalScalar(v6) repeat=128 output=v8
+    phase_output v8 row=0 <- tail3 vector
+
+Schedule rmsnorm total_cycles=271
+  Phase 0 phase_0_v4_rows0_1 depth=2 elements=128 parallel_chains=1 rows=[0,1) data=[1,131)
+    input v0 row=0 -> head0.LHS each_cycle
+    input v0 row=0 -> head0.RHS each_cycle
+    ALU0 mul lhs=StreamValue(v0) rhs=StreamValue(v0) repeat=128
+    ALU1 add lhs=Previous rhs=LocalScalar(v4) repeat=1 acc_reset acc_write no_emit
+    ALU1 add lhs=Previous rhs=LocalScalar(v4) repeat=126 acc_write no_emit
+    ALU1 add lhs=Previous rhs=LocalScalar(v4) repeat=1 acc_write output=v4 feedback_only
+    phase_output v4 row=0 <- tail1 scalar feedback_only
+  Phase 1 phase_1_v8_rows0_1 depth=4 elements=1 parallel_chains=1 rows=[0,1) data=[131,140) feedback_from_previous
+    feedback v4: tail1 -> head0 direct
+    ALU0 mul lhs=Feedback(v4) rhs=Immediate(0.0078125) repeat=1
+    ALU1 add lhs=Previous rhs=Immediate(1e-05) repeat=1
+    ALU2 bypass lhs=Previous rhs=Immediate(0) repeat=1
+    ALU3 rsqrt_lut lhs=Previous rhs=Immediate(0) repeat=1 output=v8
+    phase_output v8 row=0 <- tail3 scalar
+  Phase 2 phase_2_v11_rows0_1 depth=2 elements=128 parallel_chains=1 rows=[0,1) data=[140,271)
+    input v0 row=0 -> head0.LHS each_cycle
+    input v1 row=0 -> head0.RHS each_cycle
+    local_scalar v8 row=0 -> ALU1
+    ALU0 mul lhs=StreamValue(v0) rhs=StreamValue(v1) repeat=128
+    ALU1 mul lhs=Previous rhs=LocalScalar(v8) repeat=128 output=v11
+    phase_output v11 row=0 <- tail1 vector
+
+Schedule swiglu total_cycles=274
+  Phase 0 phase_0_v9_rows0_1 depth=8 elements=256 parallel_chains=1 rows=[0,1) data=[1,274)
+    input v0 row=0 -> head0.LHS each_cycle
+    input v1 row=0 -> head0.RHS each_cycle
+    ALU0 neg lhs=StreamValue(v0) rhs=StreamValue(v1) repeat=256
+    ALU1 exp_lut lhs=Previous rhs=Immediate(0) repeat=256
+    ALU2 add lhs=Previous rhs=Immediate(1) repeat=256
+    ALU3 reciprocal_lut lhs=Previous rhs=Immediate(0) repeat=256
+    ALU4 mul lhs=Previous rhs=Original repeat=256
+    ALU5 mul lhs=Previous rhs=Auxiliary repeat=256
+    ALU6 bypass lhs=Previous rhs=Immediate(0) repeat=256
+    ALU7 bypass lhs=Previous rhs=Immediate(0) repeat=256 output=v9
+    phase_output v9 row=0 <- tail7 vector
+

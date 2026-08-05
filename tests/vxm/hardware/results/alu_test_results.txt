@@ -1,0 +1,3 @@
+VXM hardware test
+test=alu_test
+status=PASS

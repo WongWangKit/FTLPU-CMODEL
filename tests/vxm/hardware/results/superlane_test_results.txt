@@ -1,0 +1,3 @@
+VXM hardware test
+test=superlane_test
+status=PASS

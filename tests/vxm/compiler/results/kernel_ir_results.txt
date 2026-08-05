@@ -1,0 +1,40 @@
+Kernel softmax
+  v0 = Input type=[1,128] fp16 name=x
+  v1 = ReduceMax(v0) type=[1,1] fp16 axis=1 name=maximum
+  v2 = Broadcast(v1) type=[1,128] fp16 name=maximum_vector
+  v3 = Subtract(v0, v2) type=[1,128] fp16 name=shifted
+  v4 = Exp(v3) type=[1,128] fp16 name=exponent
+  v5 = ReduceAdd(v4) type=[1,1] fp16 axis=1 name=denominator
+  v6 = Reciprocal(v5) type=[1,1] fp16 name=inverse_denominator
+  v7 = Broadcast(v6) type=[1,128] fp16 name=inverse_vector
+  v8 = Multiply(v4, v7) type=[1,128] fp16 name=output
+  outputs: v8
+
+Kernel rmsnorm
+  v0 = Input type=[1,128] fp16 name=x
+  v1 = Input type=[128] fp16 name=gamma
+  v2 = Broadcast(v1) type=[1,128] fp16 name=gamma_vector
+  v3 = Multiply(v0, v0) type=[1,128] fp16 name=square
+  v4 = ReduceAdd(v3) type=[1,1] fp16 axis=1 name=square_sum
+  v5 = Constant type=[] fp16 value=0.0078125 name=inverse_count
+  v6 = Broadcast(v5) type=[1,1] fp16 name=inverse_count_rows
+  v7 = Multiply(v4, v6) type=[1,1] fp16 name=mean_square
+  v8 = Rsqrt(v7) type=[1,1] fp16 epsilon_fp32=1e-05 name=inverse_rms
+  v9 = Broadcast(v8) type=[1,128] fp16 name=inverse_rms_vector
+  v10 = Multiply(v0, v2) type=[1,128] fp16 name=scaled
+  v11 = Multiply(v10, v9) type=[1,128] fp16 name=output
+  outputs: v11
+
+Kernel swiglu
+  v0 = Input type=[256] fp16 name=gate
+  v1 = Input type=[256] fp16 name=up
+  v2 = Negate(v0) type=[256] fp16 name=negated_gate
+  v3 = Exp(v2) type=[256] fp16 name=exponent
+  v4 = Constant type=[] fp16 value=1 name=one
+  v5 = Broadcast(v4) type=[256] fp16 name=one_vector
+  v6 = Add(v3, v5) type=[256] fp16 name=denominator
+  v7 = Reciprocal(v6) type=[256] fp16 name=sigmoid
+  v8 = Multiply(v0, v7) type=[256] fp16 name=silu
+  v9 = Multiply(v8, v1) type=[256] fp16 name=output
+  outputs: v9
+

@@ -1,0 +1,29 @@
+VXM C Model summary
+kernel=softmax
+compact_instruction_bits=96
+phases=7
+superlanes=20
+lanes_per_superlane=16
+sram_read_latency=1
+sram_write_latency=1
+cycles=150
+sram_read_requests=8320
+output_events=3040
+phase_plan:
+  0 phase_0_v1_rows0_8 depth=2 scheduled=[1,18) actual=[1,18) dependency_shift=0 added_sram_wait=0 added_scalar_load_wait=0
+  1 phase_1_v5_rows0_4 depth=4 scheduled=[18,41) actual=[19,42) dependency_shift=1 added_sram_wait=1 added_scalar_load_wait=0
+  2 phase_2_v5_rows4_8 depth=4 scheduled=[41,64) actual=[42,65) dependency_shift=1 added_sram_wait=0 added_scalar_load_wait=0
+  3 phase_3_v6_rows0_4 depth=4 scheduled=[64,72) actual=[65,73) dependency_shift=1 added_sram_wait=0 added_scalar_load_wait=0
+  4 phase_4_v6_rows4_8 depth=4 scheduled=[72,80) actual=[73,81) dependency_shift=1 added_sram_wait=0 added_scalar_load_wait=0
+  5 phase_5_v8_rows0_4 depth=4 scheduled=[80,104) actual=[82,106) dependency_shift=2 added_sram_wait=0 added_scalar_load_wait=1
+  6 phase_6_v8_rows4_8 depth=4 scheduled=[104,128) actual=[107,131) dependency_shift=3 added_sram_wait=0 added_scalar_load_wait=1
+requests_by_value:
+  v0=7680
+  v1=320
+  v5=160
+  v6=160
+outputs_by_value:
+  v1=160 intermediate
+  v5=160 intermediate
+  v6=160 intermediate
+  v8=2560 final

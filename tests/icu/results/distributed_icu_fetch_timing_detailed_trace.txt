@@ -1,0 +1,72 @@
+cycle 000
+  MXM.Load     width= 32b iq=0->0 action=wait-start | iMEM-read pc0 [IW buffer0]
+  MXM.Compute  width= 32b iq=0->0 action=wait-start | iMEM-read pc0 [Compute buffer0]
+  MEM          width= 96b iq=0->0 action=wait-start | iMEM-read pc0 [Read row100]
+  VXM          width= 96b iq=0->0 action=wait-start | iMEM-read pc0 [VXM stage0 Bypass]
+  SXM          width= 96b iq=0->0 action=wait-start | iMEM-read pc0 [SXM Transpose]
+cycle 001
+  MXM.Load     width= 32b iq=0->1 action=wait-start | iMEM-read pc1 [NOP 2] | IQ-arrive pc0 [IW buffer0]
+  MXM.Compute  width= 32b iq=0->1 action=wait-start | iMEM-read pc1 [Repeat 3 interval2] | IQ-arrive pc0 [Compute buffer0]
+  MEM          width= 96b iq=0->1 action=wait-start | iMEM-read pc1 [Repeat 2 stride4] | IQ-arrive pc0 [Read row100]
+  VXM          width= 96b iq=0->1 action=wait-start | iMEM-read pc1 [NOP 1] | IQ-arrive pc0 [VXM stage0 Bypass]
+  SXM          width= 96b iq=0->1 action=wait-start | iMEM-read pc1 [NOP 2] | IQ-arrive pc0 [SXM Transpose]
+cycle 002
+  MXM.Load     width= 32b iq=1->2 action=wait-start | iMEM-read pc2 [IW buffer1] | IQ-arrive pc1 [NOP 2]
+  MXM.Compute  width= 32b iq=1->2 action=wait-start | iMEM-read pc2 [Compute buffer1] | IQ-arrive pc1 [Repeat 3 interval2]
+  MEM          width= 96b iq=1->2 action=wait-start | iMEM-read pc2 [Sync] | IQ-arrive pc1 [Repeat 2 stride4]
+  VXM          width= 96b iq=1->2 action=wait-start | iMEM-read pc2 [VXM stage1 Bypass] | IQ-arrive pc1 [NOP 1]
+  SXM          width= 96b iq=1->2 action=wait-start | iMEM-read pc2 [SXM Transpose] | IQ-arrive pc1 [NOP 2]
+cycle 003
+  MXM.Load     width= 32b iq=2->3 action=wait-start | iMEM-read pc3 [Notify] | IQ-arrive pc2 [IW buffer1]
+  MXM.Compute  width= 32b iq=2->3 action=wait-start | IQ-arrive pc2 [Compute buffer1]
+  MEM          width= 96b iq=2->3 action=wait-start | iMEM-read pc3 [Write row200] | IQ-arrive pc2 [Sync]
+  VXM          width= 96b iq=2->3 action=wait-start | IQ-arrive pc2 [VXM stage1 Bypass]
+  SXM          width= 96b iq=2->3 action=wait-start | IQ-arrive pc2 [SXM Transpose]
+cycle 004
+  MXM.Load     width= 32b iq=3->3 action=functional-issue | IQ-arrive pc3 [Notify] | issue pc0 [IW buffer0]
+  MXM.Compute  width= 32b iq=3->2 action=functional-issue | issue pc0 [Compute buffer0]
+  MEM          width= 96b iq=3->3 action=functional-issue | IQ-arrive pc3 [Write row200] | issue pc0 [Read row100]
+  VXM          width= 96b iq=3->2 action=functional-issue | issue pc0 [VXM stage0 Bypass]
+  SXM          width= 96b iq=3->2 action=functional-issue | issue pc0 [SXM Transpose]
+cycle 005
+  MXM.Load     width= 32b iq=3->2 action=NOP-start | issue pc1 [NOP 2]
+  MXM.Compute  width= 32b iq=2->1 action=Repeat-wait | issue pc1 [Repeat 3 interval2]
+  MEM          width= 96b iq=3->2 action=Repeat-issue | issue pc0 [Read row100]
+  VXM          width= 96b iq=2->1 action=NOP-start | issue pc1 [NOP 1]
+  SXM          width= 96b iq=2->1 action=NOP-start | issue pc1 [NOP 2]
+cycle 006
+  MXM.Load     width= 32b iq=2->2 action=NOP-wait
+  MXM.Compute  width= 32b iq=1->1 action=Repeat-issue | issue pc0 [Compute buffer0]
+  MEM          width= 96b iq=2->2 action=Repeat-issue | issue pc0 [Read row100]
+  VXM          width= 96b iq=1->0 action=functional-issue | issue pc2 [VXM stage1 Bypass]
+  SXM          width= 96b iq=1->1 action=NOP-wait
+cycle 007
+  MXM.Load     width= 32b iq=2->1 action=functional-issue | issue pc2 [IW buffer1]
+  MXM.Compute  width= 32b iq=1->1 action=Repeat-wait
+  MEM          width= 96b iq=2->2 action=Sync-wait | issue pc2 [Sync]
+  VXM          width= 96b iq=0->0 action=idle
+  SXM          width= 96b iq=1->0 action=functional-issue | issue pc2 [SXM Transpose]
+cycle 008
+  MXM.Load     width= 32b iq=1->0 action=Notify | issue pc3 [Notify]
+  MXM.Compute  width= 32b iq=1->1 action=Repeat-issue | issue pc0 [Compute buffer0]
+  MEM          width= 96b iq=2->2 action=Sync-wait | issue pc2 [Sync]
+  VXM          width= 96b iq=0->0 action=idle
+  SXM          width= 96b iq=0->0 action=idle
+cycle 009
+  MXM.Load     width= 32b iq=0->0 action=idle
+  MXM.Compute  width= 32b iq=1->1 action=Repeat-wait
+  MEM          width= 96b iq=2->1 action=Sync-release | issue pc2 [Sync]
+  VXM          width= 96b iq=0->0 action=idle
+  SXM          width= 96b iq=0->0 action=idle
+cycle 010
+  MXM.Load     width= 32b iq=0->0 action=idle
+  MXM.Compute  width= 32b iq=1->1 action=Repeat-issue | issue pc0 [Compute buffer0]
+  MEM          width= 96b iq=1->0 action=functional-issue | issue pc3 [Write row200]
+  VXM          width= 96b iq=0->0 action=idle
+  SXM          width= 96b iq=0->0 action=idle
+cycle 011
+  MXM.Load     width= 32b iq=0->0 action=idle
+  MXM.Compute  width= 32b iq=1->0 action=functional-issue | issue pc2 [Compute buffer1]
+  MEM          width= 96b iq=0->0 action=idle
+  VXM          width= 96b iq=0->0 action=idle
+  SXM          width= 96b iq=0->0 action=idle

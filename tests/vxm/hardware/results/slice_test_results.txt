@@ -1,0 +1,3 @@
+VXM hardware test
+test=slice_test
+status=PASS

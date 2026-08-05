@@ -1,0 +1,85 @@
+Compiled program softmax
+  Phase 0 phase_0_v1_rows0_1 depth=2 parallel_chains=1 rows=[0,1) config_start=0 data=[1,130)
+    Config commands:
+      cycle 0 ALU0 packet={0x4010f40,0x0} bypass lhs=StreamFloat16 rhs=Immediate(0) repeat=128
+      cycle 0 ALU1 packet={0x8cd85,0x0} max lhs=Previous rhs=Accumulator repeat=1 acc_reset acc_write no_emit
+      cycle 1 ALU1 packet={0x3f08d85,0x0} max lhs=Previous rhs=Accumulator repeat=126 acc_write no_emit
+      cycle 2 ALU1 packet={0x9ad85,0x0} max lhs=Previous rhs=Accumulator repeat=1 acc_write output_stream=0
+    Stream requirements:
+      v0 input stream=0 bytes=2 first_cycle=1 transfers=128 source_element=0 period=1
+      v1 output stream=0 bytes=2 first_cycle=129 transfers=1 source_element=0 period=1
+  Phase 1 phase_1_v5_rows0_1 depth=4 parallel_chains=1 rows=[0,1) config_start=129 data=[130,265)
+    Config commands:
+      cycle 129 ALU0 packet={0x4030e42,0x0} sub lhs=StreamFloat16 rhs=StreamFloat16 repeat=128
+      cycle 129 ALU1 packet={0x4030f06,0x0} exp_lut lhs=Previous rhs=Immediate(0) repeat=128
+      cycle 129 ALU2 packet={0x4030f00,0x0} bypass lhs=Previous rhs=Immediate(0) repeat=128
+      cycle 129 ALU3 packet={0xacd81,0x0} add lhs=Previous rhs=Accumulator repeat=1 acc_reset acc_write no_emit
+      cycle 130 ALU3 packet={0x3f28d81,0x0} add lhs=Previous rhs=Accumulator repeat=126 acc_write no_emit
+      cycle 131 ALU3 packet={0xb8d81,0x0} add lhs=Previous rhs=Accumulator repeat=1 acc_write
+    Stream requirements:
+      v0 input stream=0 bytes=2 first_cycle=130 transfers=128 source_element=0 period=1
+      v1 input stream=2 bytes=2 first_cycle=130 transfers=1 source_element=0 hold_for=128
+  Phase 2 phase_2_v6_rows0_1 depth=4 parallel_chains=1 rows=[0,1) config_start=263 data=[265,273) feedback_from_previous
+    Config commands:
+      cycle 263 ALU0 packet={0xb0f70,0x0} bypass lhs=Feedback rhs=Immediate(0) repeat=1
+      cycle 263 ALU1 packet={0xb0f00,0x0} bypass lhs=Previous rhs=Immediate(0) repeat=1
+      cycle 263 ALU2 packet={0xb0f00,0x0} bypass lhs=Previous rhs=Immediate(0) repeat=1
+      cycle 263 ALU3 packet={0xb2f07,0x0} reciprocal_lut lhs=Previous rhs=Immediate(0) repeat=1 output_stream=2
+    Stream requirements:
+      v6 output stream=2 bytes=2 first_cycle=272 transfers=1 source_element=0 period=1
+  Phase 3 phase_3_v8_rows0_1 depth=4 parallel_chains=1 rows=[0,1) config_start=272 data=[273,409)
+    Config commands:
+      cycle 272 ALU0 packet={0x4030e42,0x0} sub lhs=StreamFloat16 rhs=StreamFloat16 repeat=128
+      cycle 272 ALU1 packet={0x4030f06,0x0} exp_lut lhs=Previous rhs=Immediate(0) repeat=128
+      cycle 272 ALU2 packet={0x4030f00,0x0} bypass lhs=Previous rhs=Immediate(0) repeat=128
+      cycle 272 ALU3 packet={0x4032d83,0x0} mul lhs=Previous rhs=Accumulator repeat=128 output_stream=2
+    Stream requirements:
+      v0 input stream=0 bytes=2 first_cycle=273 transfers=128 source_element=0 period=1
+      v1 input stream=2 bytes=2 first_cycle=273 transfers=1 source_element=0 hold_for=128
+      v8 output stream=2 bytes=2 first_cycle=281 transfers=128 source_element=0 period=1
+    local scalar v6: stream=2 -> ALU3 source_element=0 at cycle 272
+
+Compiled program rmsnorm
+  Phase 0 phase_0_v4_rows0_1 depth=2 parallel_chains=1 rows=[0,1) config_start=0 data=[1,131)
+    Config commands:
+      cycle 0 ALU0 packet={0x4010e43,0x0} mul lhs=StreamFloat16 rhs=StreamFloat16 repeat=128
+      cycle 0 ALU1 packet={0x8cd81,0x0} add lhs=Previous rhs=Accumulator repeat=1 acc_reset acc_write no_emit
+      cycle 1 ALU1 packet={0x3f08d81,0x0} add lhs=Previous rhs=Accumulator repeat=126 acc_write no_emit
+      cycle 2 ALU1 packet={0x98d81,0x0} add lhs=Previous rhs=Accumulator repeat=1 acc_write
+    Stream requirements:
+      v0 input stream=0 bytes=2 first_cycle=1 transfers=128 source_element=0 period=1
+      v0 input stream=2 bytes=2 first_cycle=1 transfers=128 source_element=0 period=1
+  Phase 1 phase_1_v8_rows0_1 depth=4 parallel_chains=1 rows=[0,1) config_start=129 data=[131,140) feedback_from_previous
+    Config commands:
+      cycle 129 ALU0 packet={0xb0f73,0x3c000000} mul lhs=Feedback rhs=Immediate(0.0078125) repeat=1
+      cycle 129 ALU1 packet={0xb0f01,0x3727c5ac} add lhs=Previous rhs=Immediate(1e-05) repeat=1
+      cycle 129 ALU2 packet={0xb0f00,0x0} bypass lhs=Previous rhs=Immediate(0) repeat=1
+      cycle 129 ALU3 packet={0xb2f08,0x0} rsqrt_lut lhs=Previous rhs=Immediate(0) repeat=1 output_stream=2
+    Stream requirements:
+      v8 output stream=2 bytes=2 first_cycle=139 transfers=1 source_element=0 period=1
+  Phase 2 phase_2_v11_rows0_1 depth=2 parallel_chains=1 rows=[0,1) config_start=139 data=[140,271)
+    Config commands:
+      cycle 139 ALU0 packet={0x4010e43,0x0} mul lhs=StreamFloat16 rhs=StreamFloat16 repeat=128
+      cycle 139 ALU1 packet={0x4012d83,0x0} mul lhs=Previous rhs=Accumulator repeat=128 output_stream=0
+    Stream requirements:
+      v0 input stream=0 bytes=2 first_cycle=140 transfers=128 source_element=0 period=1
+      v1 input stream=2 bytes=2 first_cycle=140 transfers=128 source_element=0 period=1
+      v11 output stream=0 bytes=2 first_cycle=143 transfers=128 source_element=0 period=1
+    local scalar v8: stream=2 -> ALU1 source_element=0 at cycle 139
+
+Compiled program swiglu
+  Phase 0 phase_0_v9_rows0_1 depth=8 parallel_chains=1 rows=[0,1) config_start=0 data=[1,274)
+    Config commands:
+      cycle 0 ALU0 packet={0x8050e44,0x0} neg lhs=StreamFloat16 rhs=StreamFloat16 repeat=256
+      cycle 0 ALU1 packet={0x8050f06,0x0} exp_lut lhs=Previous rhs=Immediate(0) repeat=256
+      cycle 0 ALU2 packet={0x8050f01,0x3f800000} add lhs=Previous rhs=Immediate(1) repeat=256
+      cycle 0 ALU3 packet={0x8050f07,0x0} reciprocal_lut lhs=Previous rhs=Immediate(0) repeat=256
+      cycle 0 ALU4 packet={0x8050c83,0x0} mul lhs=Previous rhs=Original repeat=256
+      cycle 0 ALU5 packet={0x8050d03,0x0} mul lhs=Previous rhs=Auxiliary repeat=256
+      cycle 0 ALU6 packet={0x8050f00,0x0} bypass lhs=Previous rhs=Immediate(0) repeat=256
+      cycle 0 ALU7 packet={0x8052f00,0x0} bypass lhs=Previous rhs=Immediate(0) repeat=256 output_stream=6
+    Stream requirements:
+      v0 input stream=0 bytes=2 first_cycle=1 transfers=256 source_element=0 period=1
+      v1 input stream=2 bytes=2 first_cycle=1 transfers=256 source_element=0 period=1
+      v9 output stream=6 bytes=2 first_cycle=18 transfers=256 source_element=0 period=1
+

@@ -1,0 +1,10 @@
+VXM operator hardware throughput test
+mapping=one token per physical chain
+feedback=hardware tail-to-head path (not Stream reinjection)
+
+RMSNorm: PASS tokens=8 elements_per_token=128 cycles=273 feedback_values=8 max_relative_error=0.000785 mean_relative_error=0.000323 active_utilization=0.955128 useful_utilization=0.953297
+  depth2_active=0.979087 depth2_useful=0.979087 depth4_active=0.325000 depth4_useful=0.275000 depth8_active=0.000000 depth8_useful=0.000000
+Softmax: PASS tokens=8 elements_per_token=128 cycles=692 feedback_values=8 max_relative_error=0.001781 mean_relative_error=0.000388 active_utilization=0.937139 useful_utilization=0.657514
+  depth2_active=0.984615 depth2_useful=0.492308 depth4_active=0.926157 depth4_useful=0.695730 depth8_active=0.000000 depth8_useful=0.000000
+SwiGLU: PASS tokens=2 elements_per_token=128 cycles=146 feedback_values=0 max_relative_error=0.001660 mean_relative_error=0.000410 active_utilization=0.885274 useful_utilization=0.666096
+  depth2_active=0.000000 depth2_useful=0.000000 depth4_active=0.000000 depth4_useful=0.000000 depth8_active=0.885274 depth8_useful=0.666096

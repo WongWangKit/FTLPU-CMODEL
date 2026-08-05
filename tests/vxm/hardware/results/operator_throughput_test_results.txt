@@ -1,0 +1,3 @@
+VXM hardware test
+test=operator_throughput_test
+status=PASS
