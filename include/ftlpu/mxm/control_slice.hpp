@@ -22,11 +22,22 @@ enum class MxmControlOpcode {
     IW = 0,
     Compute = 1,
     AccumulatorRead = 2,
+    Decode = 3,
+};
+
+enum class MxmDecodeOperation {
+    LoadActivation = 0,
+    StreamCompute = 1,
 };
 
 enum class MxmAccumulatorDestination {
     Sram = 0,
     Stream = 1,
+};
+
+enum class MxmAccumulatorOutputFormat {
+    Float32 = 0,
+    BFloat16 = 1,
 };
 
 enum class MxmComputeMode {
@@ -51,6 +62,9 @@ struct MxmControlInstruction {
     std::size_t weight_inner_column{0};
     MxmDataFormat data_format{MxmDataFormat::Float16};
     MxmComputeMode compute_mode{MxmComputeMode::Vector};
+    MxmAccumulatorOutputFormat accumulator_output_format{
+        MxmAccumulatorOutputFormat::Float32};
+    MxmDecodeOperation decode_operation{MxmDecodeOperation::LoadActivation};
 
     static MxmControlInstruction IW(
         std::size_t weight_buffer = 0,
@@ -119,12 +133,15 @@ struct MxmControlInstruction {
             MxmAccumulatorDestination::Stream,
         MxmDataFormat data_format = MxmDataFormat::Float16,
         MxmComputeMode compute_mode = MxmComputeMode::Vector,
-        bool accumulator_clear = true)
+        bool accumulator_clear = true,
+        MxmAccumulatorOutputFormat accumulator_output_format =
+            MxmAccumulatorOutputFormat::Float32)
     {
         check_weight_buffer(weight_buffer);
         check_compute_mode(compute_mode);
         check_activation_stream_base(activation_stream_base, compute_mode);
-        check_stream_base(stream_base, compute_mode);
+        check_stream_base(
+            stream_base, compute_mode, accumulator_output_format);
         check_compute_destination(compute_mode, accumulator_destination);
         auto instruction = MxmControlInstruction {};
         instruction.opcode = MxmControlOpcode::Compute;
@@ -137,6 +154,7 @@ struct MxmControlInstruction {
         instruction.accumulator_clear = accumulator_clear;
         instruction.data_format = data_format;
         instruction.compute_mode = compute_mode;
+        instruction.accumulator_output_format = accumulator_output_format;
         return instruction;
     }
 
@@ -155,6 +173,55 @@ struct MxmControlInstruction {
         instruction.accumulator_address = accumulator_address;
         instruction.accumulator_clear = clear;
         instruction.compute_mode = compute_mode;
+        return instruction;
+    }
+
+    static MxmControlInstruction DecodeLoadActivation(
+        std::size_t activation_buffer = 0,
+        std::size_t activation_stream_base = 0,
+        MxmDataFormat data_format = MxmDataFormat::BFloat16)
+    {
+        check_weight_buffer(activation_buffer);
+        check_data_format(data_format);
+        check_decode_activation_stream_base(activation_stream_base);
+        auto instruction = MxmControlInstruction {};
+        instruction.opcode = MxmControlOpcode::Decode;
+        instruction.decode_operation = MxmDecodeOperation::LoadActivation;
+        instruction.weight_buffer = activation_buffer;
+        instruction.activation_stream_base = activation_stream_base;
+        instruction.data_format = data_format;
+        return instruction;
+    }
+
+    static MxmControlInstruction DecodeStreamCompute(
+        std::size_t activation_buffer,
+        std::size_t output_stream_base = 0,
+        MxmDataFormat data_format = MxmDataFormat::BFloat16,
+        std::size_t accumulator_address = 0,
+        std::size_t accumulator_column = 0,
+        MxmAccumulatorDestination accumulator_destination =
+            MxmAccumulatorDestination::Stream,
+        bool accumulator_clear = true)
+    {
+        check_weight_buffer(activation_buffer);
+        check_data_format(data_format);
+        check_accumulator_address(
+            accumulator_address, MxmComputeMode::Vector);
+        check_column(accumulator_column);
+        if (accumulator_destination
+            == MxmAccumulatorDestination::Stream) {
+            check_decode_output_stream_base(output_stream_base);
+        }
+        auto instruction = MxmControlInstruction {};
+        instruction.opcode = MxmControlOpcode::Decode;
+        instruction.decode_operation = MxmDecodeOperation::StreamCompute;
+        instruction.weight_buffer = activation_buffer;
+        instruction.stream_base = output_stream_base;
+        instruction.data_format = data_format;
+        instruction.accumulator_address = accumulator_address;
+        instruction.weight_column = accumulator_column;
+        instruction.accumulator_destination = accumulator_destination;
+        instruction.accumulator_clear = accumulator_clear;
         return instruction;
     }
 
@@ -252,10 +319,14 @@ struct MxmControlInstruction {
 
     static void check_stream_base(
         std::size_t stream_base,
-        MxmComputeMode mode)
+        MxmComputeMode mode,
+        MxmAccumulatorOutputFormat output_format =
+            MxmAccumulatorOutputFormat::Float32)
     {
         const auto stream_count = mode == MxmComputeMode::Block8
             ? hw::kMxmBlockRows * sizeof(std::uint16_t)
+            : output_format == MxmAccumulatorOutputFormat::BFloat16
+            ? sizeof(std::uint16_t)
             : sizeof(float);
         if (stream_base + stream_count > hw::kWestStreams) {
             throw std::out_of_range(
@@ -288,6 +359,27 @@ struct MxmControlInstruction {
             throw std::out_of_range("MXM accumulator address is outside the 1 MiB SRAM");
         }
     }
+
+    static void check_decode_activation_stream_base(
+        std::size_t activation_stream_base)
+    {
+        constexpr auto kActivationStreams =
+            hw::kMxmSupercellsPerPlane * sizeof(std::uint16_t);
+        if (activation_stream_base + kActivationStreams
+            > hw::kEastStreams) {
+            throw std::out_of_range(
+                "MXM decode activation stream range is outside the east stream set");
+        }
+    }
+
+    static void check_decode_output_stream_base(std::size_t stream_base)
+    {
+        constexpr auto kOutputStreams = sizeof(std::uint16_t);
+        if (stream_base + kOutputStreams > hw::kWestStreams) {
+            throw std::out_of_range(
+                "MXM decode output stream range is outside the west stream set");
+        }
+    }
 };
 
 class MxmControlSlice {
@@ -309,6 +401,27 @@ public:
         bool accumulator_clear{true};
         MxmDataFormat data_format{MxmDataFormat::Float16};
         MxmComputeMode compute_mode{MxmComputeMode::Vector};
+        MxmAccumulatorOutputFormat accumulator_output_format{
+            MxmAccumulatorOutputFormat::Float32};
+    };
+
+    struct DecodeActivationLoadPulse {
+        std::size_t activation_buffer{0};
+        std::size_t stream_base{0};
+        MxmDataFormat data_format{MxmDataFormat::BFloat16};
+    };
+
+    struct DecodeStreamComputePulse {
+        std::size_t activation_buffer{0};
+        std::size_t output_stream_base{0};
+        MxmDataFormat data_format{MxmDataFormat::BFloat16};
+        std::size_t accumulator_address{0};
+        std::size_t accumulator_column{0};
+        MxmAccumulatorDestination accumulator_destination{
+            MxmAccumulatorDestination::Stream};
+        bool accumulator_clear{true};
+        MxmDequantInstruction dequant{};
+        std::uint64_t wave_id{0};
     };
 
     struct AccumulatorReadPulse {
@@ -347,6 +460,12 @@ public:
         for (auto& pulse : accumulator_read_pulse_details_) {
             pulse.reset();
         }
+        for (auto& pulse : decode_activation_load_pulse_details_) {
+            pulse.reset();
+        }
+        for (auto& pulse : decode_stream_compute_pulse_details_) {
+            pulse.reset();
+        }
         for (auto& buffer : loaded_cells_) {
             for (auto& row : buffer) {
                 row.fill(false);
@@ -363,7 +482,10 @@ public:
     void issue_south(MxmControlInstruction instruction)
     {
         check_instruction(instruction);
-        if (instruction.opcode == MxmControlOpcode::IW) {
+        if (instruction.opcode == MxmControlOpcode::IW
+            || (instruction.opcode == MxmControlOpcode::Decode
+                && instruction.decode_operation
+                    == MxmDecodeOperation::LoadActivation)) {
             load_instruction_queue_.push_back(instruction);
         } else {
             compute_instruction_queue_.push_back(instruction);
@@ -465,6 +587,20 @@ public:
         return accumulator_read_pulse_details_[tile];
     }
 
+    std::optional<DecodeActivationLoadPulse> decode_activation_load_pulse(
+        std::size_t tile) const
+    {
+        check_tile(tile);
+        return decode_activation_load_pulse_details_[tile];
+    }
+
+    std::optional<DecodeStreamComputePulse> decode_stream_compute_pulse(
+        std::size_t tile) const
+    {
+        check_tile(tile);
+        return decode_stream_compute_pulse_details_[tile];
+    }
+
     void tick(std::ostream& os, bool print_matrix = true, std::optional<std::size_t> log_tile = std::nullopt)
     {
         tick(os, nullptr, print_matrix, log_tile);
@@ -517,7 +653,8 @@ private:
                 instruction.compute_mode);
             MxmControlInstruction::check_stream_base(
                 instruction.stream_base,
-                instruction.compute_mode);
+                instruction.compute_mode,
+                instruction.accumulator_output_format);
             MxmControlInstruction::check_compute_destination(
                 instruction.compute_mode,
                 instruction.accumulator_destination);
@@ -527,6 +664,29 @@ private:
             if (instruction.accumulator_row_stride == 0) {
                 throw std::invalid_argument(
                     "MXM accumulator row stride must be at least one");
+            }
+        } else if (instruction.opcode == MxmControlOpcode::Decode) {
+            MxmControlInstruction::check_data_format(
+                instruction.data_format);
+            if (instruction.decode_operation
+                == MxmDecodeOperation::LoadActivation) {
+                MxmControlInstruction::check_decode_activation_stream_base(
+                    instruction.activation_stream_base);
+            } else if (instruction.decode_operation
+                == MxmDecodeOperation::StreamCompute) {
+                MxmControlInstruction::check_accumulator_address(
+                    instruction.accumulator_address,
+                    MxmComputeMode::Vector);
+                MxmControlInstruction::check_column(
+                    instruction.weight_column);
+                if (instruction.accumulator_destination
+                    == MxmAccumulatorDestination::Stream) {
+                    MxmControlInstruction::check_decode_output_stream_base(
+                        instruction.stream_base);
+                }
+            } else {
+                throw std::invalid_argument(
+                    "MXM decode operation is invalid");
             }
         } else if (instruction.opcode == MxmControlOpcode::AccumulatorRead) {
             MxmControlInstruction::check_compute_mode(
@@ -622,12 +782,19 @@ private:
         for (auto& pulse : accumulator_read_pulse_details_) {
             pulse.reset();
         }
+        for (auto& pulse : decode_activation_load_pulse_details_) {
+            pulse.reset();
+        }
+        for (auto& pulse : decode_stream_compute_pulse_details_) {
+            pulse.reset();
+        }
         bool any = false;
         bool any_logged = false;
         for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
             const auto& instruction = load_instruction_rows_[tile];
             const auto& dequant_instruction =
                 dequant_instruction_rows_[tile];
+            bool dequant_consumed = false;
             if (instruction.has_value()) {
                 any = true;
                 const auto should_log = !log_tile.has_value() || tile == *log_tile;
@@ -639,6 +806,7 @@ private:
                     const auto needs_dequant =
                         instruction->weight_input_mode
                         == MxmWeightInputMode::Int8DequantBf16;
+                    dequant_consumed = needs_dequant;
                     if (needs_dequant != dequant_instruction.has_value()) {
                         throw std::logic_error(
                             needs_dequant
@@ -704,10 +872,26 @@ private:
                     loaded_cells_[instruction->weight_buffer][tile][column]
                         = array_.cell(tile, column).weight_buffer_valid(
                             instruction->weight_buffer);
+                } else if (
+                    instruction->opcode == MxmControlOpcode::Decode
+                    && instruction->decode_operation
+                        == MxmDecodeOperation::LoadActivation) {
+                    if (should_log) {
+                        os << "DecodeLoadActivation b"
+                           << instruction->weight_buffer
+                           << " stream="
+                           << instruction->activation_stream_base
+                           << " format="
+                           << mxm_data_format_name(
+                                  instruction->data_format)
+                           << '\n';
+                    }
+                    decode_activation_load_pulse_details_[tile] =
+                        DecodeActivationLoadPulse {
+                            instruction->weight_buffer,
+                            instruction->activation_stream_base,
+                            instruction->data_format};
                 }
-            } else if (dequant_instruction.has_value()) {
-                throw std::logic_error(
-                    "MXM Dequant instruction reached tile without a matching INT8 IW");
             }
 
             const auto& compute_instruction = compute_instruction_rows_[tile];
@@ -744,7 +928,52 @@ private:
                         compute_instruction->accumulator_clear,
                         compute_instruction->data_format,
                         compute_instruction->compute_mode,
+                        compute_instruction->accumulator_output_format,
                     };
+                } else if (
+                    compute_instruction->opcode == MxmControlOpcode::Decode
+                    && compute_instruction->decode_operation
+                        == MxmDecodeOperation::StreamCompute) {
+                    if (!dequant_instruction.has_value()) {
+                        throw std::logic_error(
+                            "MXM decode StreamCompute reached tile without a matching Dequant instruction");
+                    }
+                    dequant_consumed = true;
+                    if (should_log) {
+                        os << "  tile " << tile
+                           << " DecodeStreamCompute b"
+                           << compute_instruction->weight_buffer
+                           << " weight_streams=E0..E31"
+                           << " scale="
+                           << dequant_instruction->scale()
+                           << " acc="
+                           << compute_instruction->accumulator_address
+                           << ':' << compute_instruction->weight_column
+                           << (compute_instruction->accumulator_destination
+                                   == MxmAccumulatorDestination::Sram
+                               ? " dst=sram"
+                               : " dst=stream");
+                        if (compute_instruction->accumulator_destination
+                            == MxmAccumulatorDestination::Stream) {
+                            os << " out=W"
+                               << compute_instruction->stream_base
+                               << "..W"
+                               << compute_instruction->stream_base
+                                      + sizeof(std::uint16_t) - 1;
+                        }
+                        os << '\n';
+                    }
+                    decode_stream_compute_pulse_details_[tile] =
+                        DecodeStreamComputePulse {
+                            compute_instruction->weight_buffer,
+                            compute_instruction->stream_base,
+                            compute_instruction->data_format,
+                            compute_instruction->accumulator_address,
+                            compute_instruction->weight_column,
+                            compute_instruction->accumulator_destination,
+                            compute_instruction->accumulator_clear,
+                            *dequant_instruction,
+                            cycle_ - tile};
                 } else if (
                     compute_instruction->opcode
                     == MxmControlOpcode::AccumulatorRead) {
@@ -768,6 +997,10 @@ private:
                             compute_instruction->accumulator_clear,
                             compute_instruction->compute_mode};
                 }
+            }
+            if (dequant_instruction.has_value() && !dequant_consumed) {
+                throw std::logic_error(
+                    "MXM Dequant instruction reached tile without a matching INT8 weight consumer");
             }
         }
 
@@ -828,6 +1061,14 @@ private:
     std::array<std::optional<ComputePulse>, hw::kMxmSupercellsPerPlane> compute_pulse_details_{};
     std::array<std::optional<AccumulatorReadPulse>, hw::kMxmSupercellsPerPlane>
         accumulator_read_pulse_details_{};
+    std::array<
+        std::optional<DecodeActivationLoadPulse>,
+        hw::kMxmSupercellsPerPlane>
+        decode_activation_load_pulse_details_{};
+    std::array<
+        std::optional<DecodeStreamComputePulse>,
+        hw::kMxmSupercellsPerPlane>
+        decode_stream_compute_pulse_details_{};
     std::array<
         std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>,
         MxmSupercell::kWeightBuffers> loaded_cells_{};

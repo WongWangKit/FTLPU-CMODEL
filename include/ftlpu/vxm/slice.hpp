@@ -250,6 +250,9 @@ private:
             const auto capture_trace = os != nullptr
                 && (!log_tile.has_value() || tile == *log_tile);
             superlanes_[tile].tick(capture_trace);
+            if (capture_trace) {
+                superlanes_[tile].print_lane_trace(*os, 0);
+            }
             output_slots_multi_[tile] = superlanes_[tile].outputs();
             if (!output_slots_multi_[tile].empty()) {
                 output_slots_[tile] = output_slots_multi_[tile].front();

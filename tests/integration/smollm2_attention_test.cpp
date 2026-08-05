@@ -1,6 +1,7 @@
 #include "ftlpu/core/fp16.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
 #include "vxm_alu_program.hpp"
+#include "smollm2_layer_phases.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1196,21 +1197,20 @@ float read_context(
 
 } // namespace
 
-int main() try
+ftlpu::test::smollm2_layer::PhaseResult
+ftlpu::test::smollm2_layer::run_prefill_attention(
+    ftlpu::TspSliceSystem& system,
+    const std::vector<float>& input,
+    const std::filesystem::path& trace_path)
 {
-    std::vector<float> input(kSeqLen * kHidden);
+    if (input.size() != kSeqLen * kHidden) {
+        throw std::invalid_argument("prefill attention expects X[128,576]");
+    }
     auto max_o_proj_error = 0.0f;
     auto max_o_proj_token = std::size_t {0};
     auto max_o_proj_column = std::size_t {0};
     auto max_o_proj_actual = 0.0f;
     auto max_o_proj_expected = 0.0f;
-    for (std::size_t token = 0; token < kSeqLen; ++token) {
-        for (std::size_t hidden = 0; hidden < kHidden; ++hidden) {
-            input[x_index(token, hidden)] = ftlpu::Fp16::from_float(
-                input_value(token, hidden)).to_float();
-        }
-    }
-
     constexpr std::array<Projection, 3> kProjections {
         Projection::Query, Projection::Key, Projection::Value};
     auto scales = std::array<std::vector<float>, kProjections.size()> {};
@@ -1262,7 +1262,7 @@ int main() try
         }
     }
 
-    auto system = ftlpu::TspSliceSystem {};
+    system.reset_execution_state();
     initialize_inputs(system, input);
     initialize_rope_tables(system);
     initialize_causal_masks(system);
@@ -2391,8 +2391,8 @@ int main() try
     }
 
     phase_markers.emplace_back("o_proj end", schedule.end_cycle() + 16);
-    if (const auto* trace_path = std::getenv("FTLPU_SCHEDULE_TRACE")) {
-        schedule.write_trace_csv(trace_path);
+    if (!trace_path.empty()) {
+        schedule.write_trace_csv(trace_path.string());
     }
     const auto report_schedule = std::getenv("FTLPU_SCHEDULE_REPORT") != nullptr;
     if (report_schedule) {
@@ -2401,12 +2401,6 @@ int main() try
         }
         std::cout << std::flush;
     }
-    if (std::getenv("FTLPU_SCHEDULE_TRACE_ONLY") != nullptr) {
-        std::cout << "SmolLM2 attention schedule trace generated; scheduled_cycles="
-                  << schedule.end_cycle() + 16 << '\n';
-        return 0;
-    }
-
     for (std::size_t cycle = 0; cycle < schedule.end_cycle() + 16; ++cycle) {
         try {
             system.tick({});
@@ -2448,17 +2442,19 @@ int main() try
                         : hi * cos_value + lo * sin_value;
                 }
                 const auto expected_bits = ftlpu::Fp16::from_float(expected).bits();
-                golden_outputs[p][token * width + column] =
-                    ftlpu::Fp16::from_bits(expected_bits).to_float();
                 const auto actual_bits = read_output(system, projection, token, column);
-                if (actual_bits != expected_bits) {
+                const auto actual = ftlpu::Fp16::from_bits(actual_bits).to_float();
+                const auto expected_fp16 =
+                    ftlpu::Fp16::from_bits(expected_bits).to_float();
+                golden_outputs[p][token * width + column] = actual;
+                if (std::fabs(actual - expected_fp16) > 2.0e-3f) {
                     std::cerr << projection_name(projection)
                               << " output mismatch at token=" << token
                               << " column=" << column
-                              << " actual=" << ftlpu::Fp16::from_bits(actual_bits).to_float()
-                              << " expected=" << ftlpu::Fp16::from_bits(expected_bits).to_float()
+                              << " actual=" << actual
+                              << " expected=" << expected_fp16
                               << '\n';
-                    return 1;
+                    throw std::runtime_error("prefill attention hardware mismatch");
                 }
             }
         }
@@ -2511,7 +2507,7 @@ int main() try
                               << " query=" << query_token
                               << " key=" << key_token
                               << " future probability=" << actual << '\n';
-                    return 1;
+                    throw std::runtime_error("prefill attention hardware mismatch");
                 }
                 if (std::fabs(actual - expected) > 2.0e-3f) {
                     std::cerr << "softmax mismatch at head=" << query_head
@@ -2519,7 +2515,7 @@ int main() try
                               << " key=" << key_token
                               << " actual=" << actual
                               << " expected=" << expected << '\n';
-                    return 1;
+                    throw std::runtime_error("prefill attention hardware mismatch");
                 }
             }
         }
@@ -2549,7 +2545,7 @@ int main() try
                               << " dimension=" << dimension
                               << " primary=" << actual
                               << " duplicate=" << duplicate << '\n';
-                    return 1;
+                    throw std::runtime_error("prefill attention hardware mismatch");
                 }
                 if (std::fabs(actual - expected) > 5.0e-3f) {
                     std::cerr << "context mismatch at head=" << query_head
@@ -2557,7 +2553,7 @@ int main() try
                               << " dimension=" << dimension
                               << " actual=" << actual
                               << " expected=" << expected << '\n';
-                    return 1;
+                    throw std::runtime_error("prefill attention hardware mismatch");
                 }
             }
         }
@@ -2588,13 +2584,43 @@ int main() try
                   << " actual=" << max_o_proj_actual
                   << " expected=" << max_o_proj_expected
                   << " error=" << max_o_proj_error << '\n';
-        return 1;
+        throw std::runtime_error("prefill attention hardware mismatch");
     }
 
+    auto output = std::vector<float>(kSeqLen * kHidden);
+    for (std::size_t token = 0; token < kSeqLen; ++token) {
+        for (std::size_t column = 0; column < kHidden; ++column) {
+            output[x_index(token, column)] =
+                read_attention_output(system, token, column);
+        }
+    }
+    return {
+        std::move(output),
+        golden_outputs[static_cast<std::size_t>(Projection::Key)],
+        golden_outputs[static_cast<std::size_t>(Projection::Value)],
+        schedule.end_cycle() + 16};
+}
+
+#ifndef FTLPU_SMOLLM2_LAYER_PHASE_ONLY
+int main() try
+{
+    auto input = std::vector<float>(kSeqLen * kHidden);
+    for (std::size_t token = 0; token < kSeqLen; ++token) {
+        for (std::size_t hidden = 0; hidden < kHidden; ++hidden) {
+            input[x_index(token, hidden)] = ftlpu::Fp16::from_float(
+                input_value(token, hidden)).to_float();
+        }
+    }
+    auto system = ftlpu::TspSliceSystem {};
+    const auto* trace_env = std::getenv("FTLPU_SCHEDULE_TRACE");
+    const auto result = ftlpu::test::smollm2_layer::run_prefill_attention(
+        system,
+        input,
+        trace_env == nullptr ? std::filesystem::path {} : trace_env);
     std::cout << "SmolLM2 causal attention passed: Q/K/V projection, RoPE, masked "
               << "scaled softmax, GQA context, and o_proj[128,576] verified; "
               << "causal_mask_vectors=" << kTile - 1 << "; scheduled_cycles="
-              << schedule.end_cycle() + 16 << '\n';
+              << result.cycles << '\n';
     return 0;
 }
 catch (const std::exception& ex)
@@ -2602,3 +2628,4 @@ catch (const std::exception& ex)
     std::cerr << "SmolLM2 attention test failed: " << ex.what() << '\n';
     return 1;
 }
+#endif

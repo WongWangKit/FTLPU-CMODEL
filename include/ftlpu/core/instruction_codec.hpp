@@ -24,16 +24,19 @@ namespace isa {
 //   [2:0] opcode, [8:3] stream, [14:9] map stream,
 //   [30:15] slice-local SRAM row address.
 //   ReadWrite repurposes [14:9] as write stream and [46:31] as write address.
-// MXM control 48b:
+// MXM control 49b:
 //   IW      [1:0] opcode, [2] weight buffer, [4:3] weight column,
 //           [5] column mode, [8:6] inner column, [9] Direct16 input mode.
 //   Compute [1:0] opcode, [2] weight buffer, [8:3] activation stream base,
 //           [14:9] output stream base, [27:15] accumulator address,
 //           [43:28] accumulator row stride, [44] destination,
 //           [45] weight/activation data format, [46] compute mode,
-//           [47] retain accumulator after stream output.
+//           [47] retain accumulator after stream output,
+//           [48] accumulator stream format (0=FP32, 1=BF16).
 //   AccRead [1:0] opcode, [14:9] output stream base,
 //           [27:15] accumulator address, [28] clear.
+//   Decode  [1:0] opcode, [2] activation buffer, [3] operation,
+//           [9:4] activation/output stream base, [25] data format.
 // VXM ALU 4x32b:
 //   word0 [4:0] opcode, [7:5] lhs kind, [13:8] lhs index,
 //         [16:14] rhs kind, [22:17] rhs index, [24:23] cast target,
@@ -309,7 +312,65 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
             | (static_cast<std::uint64_t>(instruction.accumulator_destination) << 44)
             | (static_cast<std::uint64_t>(instruction.data_format) << 45)
             | (static_cast<std::uint64_t>(instruction.compute_mode) << 46)
-            | (static_cast<std::uint64_t>(!instruction.accumulator_clear) << 47);
+            | (static_cast<std::uint64_t>(!instruction.accumulator_clear) << 47)
+            | (static_cast<std::uint64_t>(
+                   instruction.accumulator_output_format) << 48);
+    case MxmControlOpcode::Decode:
+        MxmControlInstruction::check_data_format(instruction.data_format);
+        detail::require_unsigned_fit(
+            instruction.weight_buffer,
+            kWeightBufferMask,
+            "MXM decode activation buffer does not fit encoded instruction");
+        if (instruction.decode_operation
+            == MxmDecodeOperation::LoadActivation) {
+            MxmControlInstruction::check_decode_activation_stream_base(
+                instruction.activation_stream_base);
+            detail::require_unsigned_fit(
+                instruction.activation_stream_base,
+                kActivationStreamMask,
+                "MXM decode activation stream does not fit encoded instruction");
+            return opcode
+                | (static_cast<std::uint64_t>(instruction.weight_buffer) << 2)
+                | (static_cast<std::uint64_t>(
+                       instruction.decode_operation) << 3)
+                | (static_cast<std::uint64_t>(
+                       instruction.activation_stream_base) << 4)
+                | (static_cast<std::uint64_t>(
+                       instruction.data_format) << 25);
+        }
+        if (instruction.decode_operation
+            != MxmDecodeOperation::StreamCompute) {
+            throw std::invalid_argument("MXM decode operation is invalid");
+        }
+        if (instruction.accumulator_destination
+            == MxmAccumulatorDestination::Stream) {
+            MxmControlInstruction::check_decode_output_stream_base(
+                instruction.stream_base);
+        }
+        MxmControlInstruction::check_accumulator_address(
+            instruction.accumulator_address,
+            MxmComputeMode::Vector);
+        MxmControlInstruction::check_column(
+            instruction.weight_column);
+        detail::require_unsigned_fit(
+            instruction.stream_base,
+            kStreamBaseMask,
+            "MXM decode output stream does not fit encoded instruction");
+        return opcode
+            | (static_cast<std::uint64_t>(instruction.weight_buffer) << 2)
+            | (static_cast<std::uint64_t>(
+                   instruction.decode_operation) << 3)
+            | (static_cast<std::uint64_t>(instruction.stream_base) << 4)
+            | (static_cast<std::uint64_t>(
+                   instruction.accumulator_address) << 10)
+            | (static_cast<std::uint64_t>(
+                   instruction.weight_column) << 23)
+            | (static_cast<std::uint64_t>(
+                   instruction.data_format) << 25)
+            | (static_cast<std::uint64_t>(
+                   instruction.accumulator_destination) << 26)
+            | (static_cast<std::uint64_t>(
+                   !instruction.accumulator_clear) << 27);
     case MxmControlOpcode::AccumulatorRead:
         MxmControlInstruction::check_compute_mode(instruction.compute_mode);
         MxmControlInstruction::check_accumulator_read_stream_base(
@@ -368,7 +429,7 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
     case MxmControlOpcode::Compute:
         detail::require_reserved_zero(
             word,
-            (std::uint64_t {1} << 48) - 1,
+            (std::uint64_t {1} << 49) - 1,
             "encoded MXM Compute instruction has non-zero reserved bits");
         return MxmControlInstruction::Compute(
             compute_weight_buffer,
@@ -379,7 +440,9 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
             static_cast<MxmAccumulatorDestination>((word >> 44) & 0x1u),
             compute_data_format,
             compute_mode,
-            ((word >> 47) & 0x1u) == 0);
+            ((word >> 47) & 0x1u) == 0,
+            static_cast<MxmAccumulatorOutputFormat>(
+                (word >> 48) & 0x1u));
     case MxmControlOpcode::AccumulatorRead:
         detail::require_reserved_zero(
             word,
@@ -390,6 +453,39 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
             stream_base,
             ((word >> 28) & 0x1u) != 0,
             compute_mode);
+    case MxmControlOpcode::Decode: {
+        const auto activation_buffer =
+            static_cast<std::size_t>((word >> 2) & 0x1u);
+        const auto operation =
+            static_cast<MxmDecodeOperation>((word >> 3) & 0x1u);
+        const auto decode_stream_base =
+            static_cast<std::size_t>((word >> 4) & 0x3fu);
+        const auto data_format =
+            static_cast<MxmDataFormat>((word >> 25) & 0x1u);
+        if (operation == MxmDecodeOperation::LoadActivation) {
+            detail::require_reserved_zero(
+                word,
+                (std::uint64_t {1} << 25) | 0x3ffu,
+                "encoded MXM DecodeLoadActivation instruction has non-zero reserved bits");
+            return MxmControlInstruction::DecodeLoadActivation(
+                activation_buffer,
+                decode_stream_base,
+                data_format);
+        }
+        detail::require_reserved_zero(
+            word,
+            (std::uint64_t {1} << 28) - 1,
+            "encoded MXM DecodeStreamCompute instruction has non-zero reserved bits");
+        return MxmControlInstruction::DecodeStreamCompute(
+            activation_buffer,
+            decode_stream_base,
+            data_format,
+            static_cast<std::size_t>((word >> 10) & 0x1fffu),
+            static_cast<std::size_t>((word >> 23) & 0x3u),
+            static_cast<MxmAccumulatorDestination>(
+                (word >> 26) & 0x1u),
+            ((word >> 27) & 0x1u) == 0);
+    }
     }
     throw std::logic_error("unknown encoded MXM opcode");
 }

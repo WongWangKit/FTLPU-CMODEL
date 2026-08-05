@@ -26,8 +26,8 @@ std::size_t read_latency(std::size_t slice)
 int main()
 {
     static_assert(ftlpu::InstructionControlUnit::kMemQueues == 104);
-    static_assert(ftlpu::InstructionControlUnit::kMxmQueues == 2);
-    static_assert(ftlpu::TspSliceSystem::kMxmCount == 2);
+    static_assert(ftlpu::InstructionControlUnit::kMxmQueues == 4);
+    static_assert(ftlpu::TspSliceSystem::kMxmCount == 4);
 
     auto system = ftlpu::TspSliceSystem {};
     auto& icu = system.icu();
@@ -113,6 +113,6 @@ int main()
         return 1;
     }
 
-    std::cout << "full-chip mirrored topology passed: 104 MEM queues, 2 MXMs, dual SXM/MEM edges\n";
+    std::cout << "full-chip mirrored topology passed: 104 MEM queues, 4 MXMs, dual SXM/MEM edges\n";
     return 0;
 }

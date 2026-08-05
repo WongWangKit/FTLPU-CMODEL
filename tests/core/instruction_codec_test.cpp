@@ -33,7 +33,8 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
         && lhs.accumulator_destination == rhs.accumulator_destination
         && lhs.accumulator_clear == rhs.accumulator_clear
         && lhs.data_format == rhs.data_format
-        && lhs.compute_mode == rhs.compute_mode;
+        && lhs.compute_mode == rhs.compute_mode
+        && lhs.decode_operation == rhs.decode_operation;
 }
 
 bool same_vxm(const ftlpu::VxmLaneAluInstruction& lhs, const ftlpu::VxmLaneAluInstruction& rhs)
@@ -145,6 +146,18 @@ bool verify_mxm_codec()
             0,
             true,
             ftlpu::MxmComputeMode::Block8),
+        ftlpu::MxmControlInstruction::DecodeLoadActivation(
+            1,
+            4,
+            ftlpu::MxmDataFormat::BFloat16),
+        ftlpu::MxmControlInstruction::DecodeStreamCompute(
+            1,
+            8,
+            ftlpu::MxmDataFormat::BFloat16,
+            123,
+            2,
+            ftlpu::MxmAccumulatorDestination::Sram,
+            false),
     };
 
     for (const auto& instruction : instructions) {
@@ -196,6 +209,29 @@ bool verify_mxm_codec()
     if (!require(
             (bf16_compute & (std::uint64_t {1} << 46)) == 0,
             "legacy Vector Compute encoding changed while adding Block8")) {
+        return false;
+    }
+    const auto bf16_output_compute =
+        ftlpu::MxmControlInstruction::Compute(
+            0,
+            0,
+            0,
+            0,
+            1,
+            ftlpu::MxmAccumulatorDestination::Stream,
+            ftlpu::MxmDataFormat::BFloat16,
+            ftlpu::MxmComputeMode::Vector,
+            true,
+            ftlpu::MxmAccumulatorOutputFormat::BFloat16);
+    const auto encoded_bf16_output =
+        ftlpu::isa::encode_mxm_instruction(bf16_output_compute);
+    const auto decoded_bf16_output =
+        ftlpu::isa::decode_mxm_instruction(encoded_bf16_output);
+    if (!require(
+            (encoded_bf16_output & (std::uint64_t {1} << 48)) != 0
+                && decoded_bf16_output.accumulator_output_format
+                    == ftlpu::MxmAccumulatorOutputFormat::BFloat16,
+            "MXM accumulator BF16 output codec round-trip failed")) {
         return false;
     }
     const auto block_compute = ftlpu::isa::encode_mxm_instruction(

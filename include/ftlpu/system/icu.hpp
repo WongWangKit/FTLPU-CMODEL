@@ -128,7 +128,10 @@ public:
     void enqueue_mxm(std::size_t mxm, MxmControlInstruction instruction)
     {
         check_mxm_queue(mxm);
-        if (instruction.opcode == MxmControlOpcode::IW) {
+        if (instruction.opcode == MxmControlOpcode::IW
+            || (instruction.opcode == MxmControlOpcode::Decode
+                && instruction.decode_operation
+                    == MxmDecodeOperation::LoadActivation)) {
             mxm_load_queues_[mxm].push_instruction(instruction);
         } else {
             mxm_compute_queues_[mxm].push_instruction(instruction);
@@ -662,6 +665,20 @@ private:
                << (instruction.compute_mode == MxmComputeMode::Block8
                        ? "block8"
                        : "vector");
+        } else if (instruction.opcode == MxmControlOpcode::Decode) {
+            if (instruction.decode_operation
+                == MxmDecodeOperation::LoadActivation) {
+                os << "DecodeLoadActivation b"
+                   << instruction.weight_buffer
+                   << " stream=" << instruction.activation_stream_base
+                   << " format="
+                   << mxm_data_format_name(instruction.data_format);
+            } else {
+                os << "DecodeStreamCompute b"
+                   << instruction.weight_buffer
+                   << " out=" << instruction.stream_base
+                   << " weight_streams=E0..E31";
+            }
         } else {
             os << "AccumulatorRead address=" << instruction.accumulator_address
                << " out=" << instruction.stream_base

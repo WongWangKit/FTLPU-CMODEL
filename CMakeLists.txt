@@ -47,6 +47,7 @@ ftlpu_add_test(mxm_accumulator_test tests/mxm/accumulator_test.cpp)
 ftlpu_add_test(mxm_block_accumulator_test tests/mxm/block_accumulator_test.cpp)
 ftlpu_add_test(mxm_weight_dequantizer_test tests/mxm/weight_dequantizer_test.cpp)
 ftlpu_add_test(mxm_bf16_test tests/integration/mxm_bf16_test.cpp)
+ftlpu_add_test(mxm_decode_streamed_weight_test tests/integration/mxm_decode_streamed_weight_test.cpp)
 ftlpu_add_test(w8a16_projection_test tests/integration/w8a16_projection_test.cpp)
 ftlpu_add_test(w8a16_swiglu_test tests/integration/w8a16_swiglu_test.cpp)
 ftlpu_add_test(dual_hemisphere_w8a16_swiglu_test tests/integration/dual_hemisphere_w8a16_swiglu_test.cpp)
@@ -54,6 +55,28 @@ ftlpu_add_test(smollm2_block8_dequant_ffn_test tests/integration/smollm2_block8_
 ftlpu_add_test(rmsnorm_test tests/integration/rmsnorm_test.cpp)
 ftlpu_add_test(smollm2_attention_test tests/integration/smollm2_attention_test.cpp)
 ftlpu_add_test(decoder_layer_decode_test tests/integration/decoder_layer_decode_test.cpp)
+ftlpu_add_test(smollm2_decode_ffn_test tests/integration/smollm2_decode_ffn_test.cpp)
+ftlpu_add_test(smollm2_decode_attention_test tests/integration/smollm2_decode_attention_test.cpp)
+
+add_library(smollm2_layer_phases STATIC
+    tests/integration/smollm2_attention_test.cpp
+    tests/integration/smollm2_block8_dequant_ffn_test.cpp
+    tests/integration/smollm2_decode_attention_test.cpp
+    tests/integration/smollm2_decode_ffn_test.cpp
+)
+target_compile_definitions(
+    smollm2_layer_phases PRIVATE FTLPU_SMOLLM2_LAYER_PHASE_ONLY)
+target_link_libraries(smollm2_layer_phases PRIVATE ftlpu_cmodel)
+
+add_executable(
+    smollm2_prefill_decode_layer_test
+    tests/integration/smollm2_prefill_decode_layer_test.cpp)
+target_link_libraries(
+    smollm2_prefill_decode_layer_test
+    PRIVATE ftlpu_cmodel smollm2_layer_phases)
+add_test(
+    NAME smollm2_prefill_decode_layer_test
+    COMMAND smollm2_prefill_decode_layer_test)
 
 # These workloads saturate the simulator's CPU and memory paths. Running them
 # concurrently is substantially slower than scheduling them one at a time.
@@ -64,6 +87,9 @@ set_tests_properties(
     smollm2_block8_dequant_ffn_test
     smollm2_attention_test
     decoder_layer_decode_test
+    smollm2_decode_ffn_test
+    smollm2_decode_attention_test
+    smollm2_prefill_decode_layer_test
     PROPERTIES RUN_SERIAL TRUE
 )
 

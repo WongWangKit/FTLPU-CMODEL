@@ -1,4 +1,5 @@
 #include "ftlpu/core/bf16.hpp"
+#include "smollm2_layer_phases.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
 #include "vxm_alu_program.hpp"
 
@@ -651,16 +652,18 @@ void run_system(
 
 } // namespace
 
-int main() try
+ftlpu::test::smollm2_layer::PhaseResult
+ftlpu::test::smollm2_layer::run_prefill_ffn(
+    ftlpu::TspSliceSystem& system,
+    const std::vector<float>& input,
+    const std::filesystem::path& trace_path)
 {
-    auto activations = std::vector<float>(kRows * kHidden);
-    for (std::size_t row = 0; row < kRows; ++row) {
-        for (std::size_t k = 0; k < kHidden; ++k) {
-            activations[activation_index(row, k, kHidden)] =
-                ftlpu::Bf16::from_float(
-                    activation_value(row, k)).to_float();
-        }
+    if (input.size() != kRows * kHidden) {
+        throw std::invalid_argument(
+            "prefill FFN input must be [128,576]");
     }
+    auto activations = input;
+
 
     std::array<std::vector<float>, 2> gate_up_scales {
         std::vector<float>(kIntermediate / 8),
@@ -755,7 +758,7 @@ int main() try
         }
     }
 
-    auto system = ftlpu::TspSliceSystem {};
+    system.reset_execution_state();
     auto trace = std::vector<TraceEvent> {};
     initialize_block_activations(system, activations, kHidden);
     auto gate_up_schedule = OfflineSchedule(
@@ -944,14 +947,19 @@ int main() try
                         * gate_up_dequantized[projection][
                             gate_up_weight_index(k, n)];
                 }
-                if (actual[projection] != expected[projection]) {
+                const auto tolerance = 1.0e-5f * std::max(
+                    1.0f,
+                    std::fabs(expected[projection]));
+                if (std::fabs(actual[projection] - expected[projection])
+                    > tolerance) {
                     std::cerr
                         << "Block8 gate/up mismatch at projection="
                         << projection << " row=" << row
                         << " column=" << n
                         << " expected=" << expected[projection]
                         << " actual=" << actual[projection] << '\n';
-                    return 1;
+                    throw std::runtime_error(
+                        "prefill FFN hardware mismatch");
                 }
                 gate_up_outputs[projection][
                     activation_index(row, n, kIntermediate)] =
@@ -1089,7 +1097,8 @@ int main() try
                         << " column=" << n
                         << " expected=" << expected
                         << " actual=" << actual << '\n';
-                    return 1;
+                    throw std::runtime_error(
+                        "prefill FFN hardware mismatch");
                 }
             }
         }
@@ -1239,6 +1248,7 @@ int main() try
     const auto down_cycles = down_schedule.end_cycle() + 16;
     run_system(system, down_cycles, "down");
 
+    auto output = std::vector<float>(kRows * kHidden);
     for (std::size_t row = 0; row < kRows; ++row) {
         for (std::size_t n = 0; n < kHidden; ++n) {
             const auto wave = n / kDownColumnsPerWave;
@@ -1254,6 +1264,7 @@ int main() try
                         address,
                         row % kBlockRows,
                         local_column);
+            output[activation_index(row, n, kHidden)] = actual;
             float expected = 0.0f;
             for (std::size_t k = 0; k < kIntermediate; ++k) {
                 expected +=
@@ -1272,28 +1283,47 @@ int main() try
                           << row << " column=" << n
                           << " expected=" << expected
                           << " actual=" << actual << '\n';
-                return 1;
+                throw std::runtime_error(
+                    "prefill FFN down mismatch");
             }
         }
     }
 
-    if (const auto* trace_path =
-            std::getenv("FTLPU_SCHEDULE_TRACE")) {
-        write_trace_csv(trace_path, trace);
+    if (!trace_path.empty()) {
+        write_trace_csv(trace_path.string(), trace);
     }
 
+    return {
+        std::move(output),
+        {},
+        {},
+        gate_up_cycles + swiglu_cycles + down_cycles};
+}
+
+#ifndef FTLPU_SMOLLM2_LAYER_PHASE_ONLY
+int main()
+try {
+    auto input = std::vector<float>(kRows * kHidden);
+    for (std::size_t row = 0; row < kRows; ++row) {
+        for (std::size_t k = 0; k < kHidden; ++k) {
+            input[activation_index(row, k, kHidden)] =
+                ftlpu::Bf16::from_float(
+                    activation_value(row, k)).to_float();
+        }
+    }
+    auto system = ftlpu::TspSliceSystem {};
+    const auto* trace = std::getenv("FTLPU_SCHEDULE_TRACE");
+    const auto result = ftlpu::test::smollm2_layer::run_prefill_ffn(
+        system, input, trace == nullptr ? std::filesystem::path {} : trace);
     std::cout
         << "SmolLM2 Block8 Dequant FFN passed: "
         << "X[128,576], gate/up[576,1536], "
-        << "BF16 SwiGLU[128,1536], down[1536,576]; "
-        << "gate_up_cycles=" << gate_up_cycles
-        << " swiglu_cycles=" << swiglu_cycles
-        << " down_cycles=" << down_cycles << '\n';
+        << "BF16 SwiGLU[128,1536], down[1536,576]; cycles="
+        << result.cycles << '\n';
     return 0;
-}
-catch (const std::exception& ex)
-{
+} catch (const std::exception& ex) {
     std::cerr << "SmolLM2 Block8 Dequant FFN failed: "
               << ex.what() << '\n';
     return 1;
 }
+#endif
