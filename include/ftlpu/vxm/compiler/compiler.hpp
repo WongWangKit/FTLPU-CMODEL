@@ -1,0 +1,15 @@
+#pragma once
+
+#include "ftlpu/vxm/compiler/codegen.hpp"
+#include "ftlpu/vxm/compiler/cmodel_adapter.hpp"
+#include "ftlpu/vxm/compiler/dependency_graph.hpp"
+#include "ftlpu/vxm/compiler/external_data.hpp"
+#include "ftlpu/vxm/compiler/feedback_planner.hpp"
+#include "ftlpu/vxm/compiler/kernel_builder.hpp"
+#include "ftlpu/vxm/compiler/kernel_ir.hpp"
+#include "ftlpu/vxm/compiler/lowering.hpp"
+#include "ftlpu/vxm/compiler/operator_kernels.hpp"
+#include "ftlpu/vxm/compiler/print.hpp"
+#include "ftlpu/vxm/compiler/report.hpp"
+#include "ftlpu/vxm/compiler/schedule_ir.hpp"
+#include "ftlpu/vxm/compiler/stream_plan.hpp"
