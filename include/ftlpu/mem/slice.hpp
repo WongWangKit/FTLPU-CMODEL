@@ -17,17 +17,11 @@ enum class MemOpcode {
     ReadWrite,
     Gather,
     Scatter,
-    Accumulate,
-};
-
-enum class MemAccumulatorDestination {
-    Sram,
-    Stream,
 };
 
 struct MemInstruction {
     MemOpcode opcode{MemOpcode::Read};
-    // SRAM row address (0..8191), not a byte address.
+    // SRAM row address (0..65535), not a byte address.
     std::size_t address{0};
 
     // Packed ISA selector retained for codec compatibility:
@@ -36,10 +30,11 @@ struct MemInstruction {
     // Architectural code should call stream_id()/map_stream_id().
     std::size_t stream{0};
     std::size_t map_stream{0};
-    MemAccumulatorDestination accumulator_destination{MemAccumulatorDestination::Sram};
     // Second SRAM port fields, used only by ReadWrite.
     std::size_t write_address{0};
     std::size_t write_stream{0};
+    // A tap write observes the stream without suppressing passive forwarding.
+    bool preserve_stream{false};
 
     StreamId stream_id() const
     {
@@ -69,6 +64,19 @@ struct MemInstruction {
     static MemInstruction Write(std::size_t address, std::size_t packed_stream)
     {
         return Write(address, StreamId::from_packed(packed_stream));
+    }
+
+    static MemInstruction WriteTap(std::size_t address, StreamId stream)
+    {
+        auto instruction = Write(address, stream);
+        instruction.preserve_stream = true;
+        return instruction;
+    }
+
+    static MemInstruction WriteTap(
+        std::size_t address, std::size_t packed_stream)
+    {
+        return WriteTap(address, StreamId::from_packed(packed_stream));
     }
 
     StreamId write_stream_id() const
@@ -104,26 +112,27 @@ struct MemInstruction {
             StreamId::from_packed(write_packed_stream));
     }
 
-    static MemInstruction Accumulate(
-        std::size_t address,
-        StreamId stream,
-        MemAccumulatorDestination destination = MemAccumulatorDestination::Sram)
+    static MemInstruction ReadWriteTap(
+        std::size_t read_address,
+        StreamId read_stream,
+        std::size_t write_address,
+        StreamId write_stream)
     {
-        if (stream.direction() != StreamDirection::West) {
-            throw std::invalid_argument("MEM Accumulate requires a west stream base");
-        }
-        if (stream.index() + sizeof(float) > hw::kWestStreams) {
-            throw std::out_of_range("MEM Accumulate FP32 input exceeds west streams");
-        }
-        return MemInstruction {MemOpcode::Accumulate, address, stream.packed(), 0, destination};
+        auto instruction = ReadWrite(
+            read_address, read_stream, write_address, write_stream);
+        instruction.preserve_stream = true;
+        return instruction;
     }
 
-    static MemInstruction Accumulate(
-        std::size_t address,
-        std::size_t packed_stream,
-        MemAccumulatorDestination destination = MemAccumulatorDestination::Sram)
+    static MemInstruction ReadWriteTap(
+        std::size_t read_address,
+        std::size_t read_packed_stream,
+        std::size_t write_address,
+        std::size_t write_packed_stream)
     {
-        return Accumulate(address, StreamId::from_packed(packed_stream), destination);
+        return ReadWriteTap(read_address,
+            StreamId::from_packed(read_packed_stream), write_address,
+            StreamId::from_packed(write_packed_stream));
     }
 
     static MemInstruction Gather(StreamId stream, StreamId map_stream)
@@ -163,7 +172,7 @@ struct MemStreamWord {
 };
 
 // Small generic scalar MEM helper retained for unit-level experimentation.
-// The full 4x44 MEM functional-slice model is MemArrayModel in mem_array.hpp.
+// The full 4x52 MEM functional-slice model is MemArrayModel in mem_array.hpp.
 template <typename T>
 class MemSlice {
 public:

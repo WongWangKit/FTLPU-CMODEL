@@ -15,13 +15,15 @@
 #include <ostream>
 #include <stdexcept>
 #include <streambuf>
+#include <string>
 
 namespace ftlpu {
 
 class TspSliceSystem {
 public:
-    static constexpr std::size_t kMxmCountPerHemisphere = 2;
-    static constexpr std::size_t kMxmCount = hw::kHemispheres * kMxmCountPerHemisphere;
+    static constexpr std::size_t kMxmCountPerHemisphere =
+        hw::kMxmsPerHemisphere;
+    static constexpr std::size_t kMxmCount = hw::kMxmCount;
 
     struct LogSinks {
         std::ostream* icu{nullptr};
@@ -93,6 +95,16 @@ public:
         return icu_;
     }
 
+    Mxm& mxm_unit(std::size_t mxm)
+    {
+        return mxms_.at(mxm);
+    }
+
+    const Mxm& mxm_unit(std::size_t mxm) const
+    {
+        return mxms_.at(mxm);
+    }
+
     void tick(std::ostream& os)
     {
         LogSinks sinks {&os, &os, &os, &os, &os};
@@ -101,18 +113,88 @@ public:
 
     void tick(LogSinks sinks)
     {
+        begin_cycle_phase(sinks);
+        dispatch_phase(sinks);
+        mxm_phase(sinks);
+        vxm_phase(sinks);
+        mem_sxm_commit_phase(sinks);
+        end_cycle_phase();
+    }
+
+    std::size_t cycle() const
+    {
+        return cycle_;
+    }
+
+    void reset_execution_state()
+    {
+        require_phase(CyclePhase::Idle, "resetting execution state");
+        for (auto& mem : mems_) mem.reset_execution_state();
+        vxm_.reset();
+        for (auto& sxm : sxms_) sxm.reset();
+        for (auto& mxm : mxms_) mxm.reset();
+        icu_.reset();
+        cycle_ = 0;
+    }
+
+private:
+    enum class CyclePhase {
+        Idle,
+        Begun,
+        Dispatched,
+        MxmEvaluated,
+        VxmEvaluated,
+        MemSxmCommitted,
+    };
+
+    void require_phase(CyclePhase expected, const char* operation) const
+    {
+        if (phase_ != expected) {
+            throw std::logic_error(
+                std::string("TSP cycle phase violation while ") + operation);
+        }
+    }
+
+    void begin_cycle_phase(LogSinks sinks)
+    {
+        require_phase(CyclePhase::Idle, "beginning cycle");
         if (sinks.system != nullptr) {
             *sinks.system << "system cycle " << cycle_ << '\n';
         }
+        phase_ = CyclePhase::Begun;
+    }
+
+    void dispatch_phase(LogSinks sinks)
+    {
+        require_phase(CyclePhase::Begun, "dispatching ICU instructions");
         icu_.dispatch(mems_, vxm_, sxms_, mxms_, sinks.icu);
+        phase_ = CyclePhase::Dispatched;
+    }
+
+    void mxm_phase(LogSinks sinks)
+    {
+        require_phase(CyclePhase::Dispatched, "evaluating MXM");
         tick_mxm_controls(sinks);
         tick_mxm_datapaths(sinks);
+        phase_ = CyclePhase::MxmEvaluated;
+    }
+
+    void vxm_phase(LogSinks sinks)
+    {
+        require_phase(CyclePhase::MxmEvaluated, "evaluating VXM");
         vxm_.prepare_cycle();
         transfer_mem_edges_to_vxm(sinks);
         transfer_unconsumed_streams_across_vxm(sinks);
         vxm_.tick(sinks.vxm, sinks.vxm_log_tile);
         transfer_vxm_to_mem_edges(sinks);
+        phase_ = CyclePhase::VxmEvaluated;
+    }
+
+    void mem_sxm_commit_phase(LogSinks sinks)
+    {
+        require_phase(CyclePhase::VxmEvaluated, "committing MEM and SXM");
         for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
+            sxms_[hemisphere].set_trace_enabled(sinks.sxm != nullptr);
             if (sinks.mem != nullptr) {
                 *sinks.mem << "mem." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
                            << " cycle " << cycle_ << '\n';
@@ -127,15 +209,16 @@ public:
                 sxms_[hemisphere].log_cycle(*sinks.sxm);
             }
         }
-        ++cycle_;
+        phase_ = CyclePhase::MemSxmCommitted;
     }
 
-    std::size_t cycle() const
+    void end_cycle_phase()
     {
-        return cycle_;
+        require_phase(CyclePhase::MemSxmCommitted, "ending cycle");
+        icu_.advance_barrier_events();
+        ++cycle_;
+        phase_ = CyclePhase::Idle;
     }
-
-private:
     static SxmStreamPortMap make_sxm_port_map()
     {
         return SxmStreamPortMap::BetweenColumns(
@@ -175,7 +258,9 @@ private:
             }
             auto provider = [this, mxm, sinks](std::size_t tile) {
                 if (sinks.mxm != nullptr && (!sinks.mxm_log_tile.has_value() || tile == *sinks.mxm_log_tile)) {
-                    *sinks.mxm << "  SXM.sreg12 -> MXM" << mxm << " tile " << tile << '\n';
+                    *sinks.mxm << "  SXM.sreg"
+                               << hw::kMxmBoundaryStreamRegisterColumn
+                               << " -> MXM" << mxm << " tile " << tile << '\n';
                 }
                 try {
                     return collect_mxm_weight_input_from_streams(mxm, tile);
@@ -208,19 +293,113 @@ private:
         constexpr auto kTargetSreg = hw::kMxmBoundaryStreamRegisterColumn;
         auto input = MxmControlSlice::WeightInput {};
         const auto hemisphere = hemisphere_index(mxm_hemisphere(mxm));
-        const auto stream_base = local_mxm_index(mxm) * hw::kMxmLoadStreamsPerCycle;
+        const auto& instruction = mxms_[mxm].control().instruction_at(tile);
+        if (!instruction.has_value()
+            || instruction->opcode != MxmControlOpcode::IW) {
+            throw std::logic_error(
+                "MXM weight input requested without an active IW instruction");
+        }
+        if (instruction->weight_input_mode
+            == MxmWeightInputMode::Int8DequantBf16) {
+            const auto stream_base = local_mxm_index(mxm)
+                * hw::kMxmInt8LoadStreamStride;
+            if (instruction->weight_load_mode
+                == MxmWeightLoadMode::Column) {
+                const auto column = instruction->weight_inner_column;
+                for (std::size_t lane = 0;
+                     lane < hw::kLanesPerTile;
+                     ++lane) {
+                    const auto word =
+                        mems_[hemisphere].consume_east_register(
+                            tile,
+                            lane,
+                            kTargetSreg,
+                            stream_base);
+                    if (!word.has_value()) {
+                        throw std::logic_error(
+                            "MXM INT8 column IW reached tile before its weight stream arrived at the MXM boundary register");
+                    }
+                    input[lane][column] =
+                        MxmArray::Supercell::InputWord {
+                            word->data,
+                            lane + 1 == hw::kLanesPerTile,
+                        };
+                }
+                return input;
+            }
+
+            for (std::size_t lane = 0;
+                 lane < hw::kLanesPerTile;
+                 ++lane) {
+                for (std::size_t column = 0;
+                     column < hw::kMxmSupercellColumns;
+                     ++column) {
+                    const auto word =
+                        mems_[hemisphere].consume_east_register(
+                            tile,
+                            lane,
+                            kTargetSreg,
+                            stream_base + column);
+                    if (!word.has_value()) {
+                        throw std::logic_error(
+                            "MXM INT8 IW reached tile before all eight weight streams arrived at the MXM boundary register");
+                    }
+                    input[lane][column] =
+                        MxmArray::Supercell::InputWord {
+                            word->data,
+                            column + 1
+                                == hw::kMxmSupercellColumns,
+                        };
+                }
+            }
+            return input;
+        }
+
+        const auto stream_base =
+            local_mxm_index(mxm) * hw::kMxmLoadStreamStride;
+        if (instruction->weight_input_mode
+            != MxmWeightInputMode::Direct16) {
+            throw std::invalid_argument("MXM weight input mode is invalid");
+        }
+        if (instruction->weight_load_mode == MxmWeightLoadMode::Column) {
+            const auto low = stream_base;
+            const auto high =
+                stream_base + hw::kMxmColumnLoadStreamsPerCycle - 1;
+            const auto column = instruction->weight_inner_column;
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                const auto low_word = mems_[hemisphere].consume_east_register(
+                    tile, lane, kTargetSreg, low);
+                const auto high_word = mems_[hemisphere].consume_east_register(
+                    tile, lane, kTargetSreg, high);
+                if (!low_word.has_value() || !high_word.has_value()) {
+                    throw std::logic_error(
+                        "MXM column IW reached tile before both 16-bit weight streams arrived at the MXM boundary register");
+                }
+                const auto bits = static_cast<std::uint16_t>(
+                    static_cast<std::uint16_t>(low_word->data)
+                    | (static_cast<std::uint16_t>(high_word->data) << 8));
+                input[lane][column] = MxmArray::Supercell::InputWord {
+                    bits,
+                    lane + 1 == hw::kLanesPerTile,
+                };
+            }
+            return input;
+        }
+
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             for (std::size_t column = 0; column < hw::kMxmSupercellColumns; ++column) {
                 const auto low_stream = stream_base + column * hw::kMxmWeightBytesPerValue;
                 const auto low = mems_[hemisphere].consume_east_register(tile, lane, kTargetSreg, low_stream);
                 const auto high = mems_[hemisphere].consume_east_register(tile, lane, kTargetSreg, low_stream + 1);
                 if (!low.has_value() || !high.has_value()) {
-                    throw std::logic_error("MXM IW reached tile before both FP16 weight streams arrived at sreg12");
+                    throw std::logic_error(
+                        "MXM IW reached tile before both 16-bit weight streams arrived at the MXM boundary register");
                 }
-                const auto bits = static_cast<std::uint16_t>(low->data)
-                    | (static_cast<std::uint16_t>(high->data) << 8);
+                const auto bits = static_cast<std::uint16_t>(
+                    static_cast<std::uint16_t>(low->data)
+                    | (static_cast<std::uint16_t>(high->data) << 8));
                 input[lane][column] = MxmArray::Supercell::InputWord {
-                    Fp16::from_bits(bits).to_float(),
+                    bits,
                     column + 1 == hw::kMxmSupercellColumns,
                 };
             }
@@ -374,6 +553,7 @@ private:
     std::array<Mxm, kMxmCount> mxms_{};
     InstructionControlUnit icu_{};
     std::size_t cycle_{0};
+    CyclePhase phase_{CyclePhase::Idle};
 };
 
 } // namespace ftlpu

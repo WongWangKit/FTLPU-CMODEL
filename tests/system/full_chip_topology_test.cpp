@@ -25,7 +25,7 @@ std::size_t read_latency(std::size_t slice)
 
 int main()
 {
-    static_assert(ftlpu::InstructionControlUnit::kMemQueues == 88);
+    static_assert(ftlpu::InstructionControlUnit::kMemQueues == 104);
     static_assert(ftlpu::InstructionControlUnit::kMxmQueues == 4);
     static_assert(ftlpu::TspSliceSystem::kMxmCount == 4);
 
@@ -102,6 +102,17 @@ int main()
         }
     }
 
-    std::cout << "full-chip mirrored topology passed: 88 MEM queues, 4 MXMs, dual SXM/MEM edges\n";
+    const auto preserved = system.read_mem_sram_lane_byte(
+        ftlpu::Hemisphere::West, 0, 0, kOutputAddress, 0);
+    system.reset_execution_state();
+    if (system.cycle() != 0
+        || system.read_mem_sram_lane_byte(
+               ftlpu::Hemisphere::West, 0, 0, kOutputAddress, 0)
+            != preserved) {
+        std::cerr << "execution-state reset did not preserve MEM SRAM\n";
+        return 1;
+    }
+
+    std::cout << "full-chip mirrored topology passed: 104 MEM queues, 4 MXMs, dual SXM/MEM edges\n";
     return 0;
 }

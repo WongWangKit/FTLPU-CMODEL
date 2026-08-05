@@ -15,7 +15,8 @@ ftlpu::MxmControlSlice::WeightInput row_input(std::size_t tile, std::size_t supe
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
         for (std::size_t stream = 0; stream < ftlpu::hw::kMxmSupercellColumns; ++stream) {
             input[lane][stream] = ftlpu::MxmArray::Supercell::InputWord {
-                static_cast<float>(base + lane + stream),
+                ftlpu::Fp16::from_float(
+                    static_cast<float>(base + lane + stream)).bits(),
                 stream + 1 == ftlpu::hw::kMxmSupercellColumns,
             };
         }
@@ -39,7 +40,8 @@ int main(int argc, char** argv)
     constexpr std::size_t kBuffer = 0;
 
     for (std::size_t column = 0; column < ftlpu::hw::kMxmSupercellsPerPlane; ++column) {
-        control.issue_south(ftlpu::MxmControlInstruction::IW(kBuffer));
+        control.issue_south(
+            ftlpu::MxmControlInstruction::IWDirect16(kBuffer));
     }
     auto provider = [&control](std::size_t tile) {
         const auto token = control.cycle() - tile;

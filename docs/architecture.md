@@ -15,36 +15,37 @@ The central vector shape is:
 | Property | Value |
 | --- | ---: |
 | Hemispheres | 2 |
-| MEM slices | 44 per hemisphere, 88 total |
-| MEM groups | 11 per hemisphere, 4 slices per group |
-| Stream-register columns | 13 per hemisphere (`sreg0..sreg12`) |
+| MEM slices | 52 per hemisphere, 104 total |
+| MEM groups | 13 per hemisphere, 4 slices per group |
+| Stream-register columns | 15 per hemisphere (`sreg0..sreg14`) |
 | Streams per lane | 32 eastward + 32 westward |
 | Stream-register width | 1 byte |
-| SRAM capacity | 256 KiB per slice, 22 MiB full chip |
+| SRAM capacity | 2 MiB per slice, 208 MiB full chip |
 | MXM units | 4 total, 2 per hemisphere |
-| MXM array | 32 x 32 FP16 multiply with FP32 accumulation |
+| MXM array | 32 x 32 FP16/BF16 multiply with FP32 accumulation |
 | VXM | 1 central slice, 16 ALUs per lane |
 | SXM | 1 four-tile slice per hemisphere |
 
-One MEM slice owns an `8192 x 32-byte` SRAM block. It is logically split into
-two 4096-row banks. Each row spans all four tiles; one tile accesses its local
-8-byte segment when the instruction wave reaches that tile.
+One MEM slice owns a `65536 x 32-byte` SRAM block. Each row spans all four
+tiles; one tile accesses its local 8-byte segment when the instruction wave
+reaches that tile. The model has 104 homogeneous slices across two hemispheres,
+for `104 x 2 MiB = 208 MiB` total SRAM. There is no logical bank subdivision.
 
 ## 2. Full-Chip Topology
 
 ```text
-MXM2/MXM3 <-> SXM.W <-> MEM.W(44) <-> VXM <-> MEM.E(44) <-> SXM.E <-> MXM0/MXM1
+MXM2/MXM3 <-> SXM.W <-> MEM.W(52) <-> VXM <-> MEM.E(52) <-> SXM.E <-> MXM0/MXM1
 ```
 
 Both hemispheres use the same local orientation:
 
 - `sreg0` is adjacent to VXM.
-- Eleven MEM groups occupy the boundaries `sreg0..sreg11`.
-- SXM connects the MEM boundary `sreg11` to the MXM boundary `sreg12`.
+- Thirteen MEM groups occupy the boundaries `sreg0..sreg13`.
+- SXM connects the MEM boundary `sreg13` to the MXM boundary `sreg14`.
 - East streams move from VXM toward MXM.
 - West streams move from MXM toward VXM.
 
-Global MEM queues `0..43` and MXMs `0..1` select East. MEM queues `44..87`
+Global MEM queues `0..51` and MXMs `0..1` select East. MEM queues `52..103`
 and MXMs `2..3` select West.
 
 The shared stream fabric is double-buffered by cycle: functional units read
@@ -70,6 +71,10 @@ MEM, MXM control, and SXM Transpose instructions enter tile 0 at the south edge
 and advance north by one tile per cycle. Workloads must align data and control
 at every tile. Tests do not directly manipulate an in-flight tile.
 
+VXM follows the same offline-scheduling contract. An issued ALU instruction
+must find every stream or prior-ALU operand in that cycle. A missing operand is
+a static schedule error; the model does not insert an implicit queue stall.
+
 `TspSliceSystem::tick()` performs one complete system cycle:
 
 1. ICU dispatches the next command from every queue.
@@ -85,24 +90,18 @@ starts, they call only `tick()` until the offline schedule completes.
 
 ### Organization
 
-Each hemisphere has 44 MEM slice columns and one instruction queue per slice.
-Four adjacent slices form a group between two stream-register boundaries.
-Groups 9 and 10, slices `36..39` and `40..43`, retain normal SRAM behavior and
-also implement FP32 accumulation.
+Each hemisphere has 52 MEM slice columns and one instruction queue per slice.
+Four adjacent slices form a group between two stream-register boundaries. All
+52 slices are homogeneous SRAM; no MEM group has accumulator behavior.
 
 A MEM instruction is a single-port operation for its slice. A slice cannot read
-and write in the same cycle, even at different addresses. An accumulator
-operation reserves all four slices in its group for that tile and cycle.
+and write in the same cycle, even at different addresses.
 
 ### Instructions
 
 - `Read(address, stream)` reads the tile-local 8-byte SRAM segment and writes it
   to one stream ID.
 - `Write(address, stream)` consumes one 8-byte stream segment and stores it.
-- `Accumulate(address, west_stream_base, destination)` consumes four consecutive
-  west streams as FP32, adds the selected four-slice SRAM value, and either:
-  - writes the sum back to SRAM; or
-  - emits the sum on the same four west streams and clears the SRAM slot.
 - `Gather` and `Scatter` are encoded but intentionally reject execution because
   the address-stream datapath is not modeled yet.
 
@@ -114,16 +113,15 @@ moves one 32-byte physical vector row as four skewed 8-byte segments.
 The public-style software address layout used as reference is:
 
 ```text
-[39:24] chip
-[23]    hemisphere
-[22:17] slice
-[16]    logical SRAM bank
-[15:4]  row offset within the 4096-row bank
+[39:27] chip
+[26]    hemisphere
+[25:20] slice
+[19:4]  row offset within the slice
 [3:0]   software byte offset
 ```
 
-`MemInstruction::address` stores only the 13-bit slice-local row field
-corresponding to software bits `[16:4]`, giving rows `0..8191`. The test
+`MemInstruction::address` stores only the 16-bit slice-local row field
+corresponding to software bits `[19:4]`, giving rows `0..65535`. The test
 initialization/result APIs expose tile and lane byte selection separately.
 
 ## 5. MXM
@@ -131,7 +129,7 @@ initialization/result APIs expose tile and lane byte selection separately.
 Each `Mxm` contains:
 
 - a `4 x 4` array of supercells;
-- one `8 x 8` FP16 weight block per supercell;
+- one raw `8 x 8` 16-bit weight block per supercell;
 - two peer weight buffers per supercell;
 - a south-to-north control slice;
 - activation-flow and FP32 output state.
@@ -142,36 +140,76 @@ Each `Mxm` contains:
 buffer. The two-bit `column` field selects columns `0..3`; load order does not
 implicitly shift the final layout. There is no `LW` instruction.
 
-One IW pulse consumes 16 east streams:
+The default full-supercell form consumes eight INT8 east streams:
 
 ```text
-8 FP16 values x 2 byte streams = 16 streams
+8 INT8 values per lane x 1 byte stream = 8 streams
 ```
 
-Local MXM0 uses `E0..E15`; local MXM1 uses `E16..E31`. Four continuous IW
-pulses fill one 32-column weight tile. The peer buffer may still supply
-in-flight Compute work while IW fills the inactive buffer.
+A separate Dequant instruction queue supplies one BF16 scale immediate per
+load. Dequant and IW issue together and propagate south-to-north in lockstep.
+At each tile the load path computes `BF16(INT8 * BF16(scale))` before writing
+the selected weight buffer. A missing or misaligned Dequant pulse is an
+execution error.
 
-W8 weights use symmetric per-output-column scales:
+Local MXM0 reserves `E0..E15`; local MXM1 reserves `E16..E31`. The default
+INT8 load uses the first eight streams in each half. Four continuous IW pulses
+fill one 32-column weight tile. The peer buffer may still supply in-flight
+Compute work while IW fills the inactive buffer.
+
+`IWColumn(buffer, column, inner_column)` is the narrow form. It consumes two
+east streams in Direct16 compatibility mode, or one INT8 stream by default,
+and writes one of the eight columns inside the selected `8 x 8` supercell:
+
+```text
+default: 1 INT8 value per lane x 1 byte stream = 1 stream
+Direct16: 1 16-bit value per lane x 2 byte streams = 2 streams
+```
+
+Default INT8 narrow load uses `E0` for local MXM0 or `E16` for local MXM1;
+Direct16 uses `E0..E1` or `E16..E17`. On an empty buffer, eight narrow
+pulses, one for each `inner_column` in `0..7`, make that supercell valid for
+Compute. A narrow write to an already complete buffer updates the selected
+column without invalidating its other columns.
+
+W8 weights may use symmetric per-output-column scales:
 
 ```text
 scale[n] = max_k(abs(W[k,n])) / 127
 ```
 
-VXM multiplies INT8 values by the corresponding scale and casts them to FP16
-before IW.
+Strict per-output-column scaling uses eight `IWColumn`/Dequant pairs. A full
+`8 x 8` IW broadcasts one scale immediate across all eight loaded columns.
+`IWDirect16` and `IWColumnDirect16` retain the compatibility path that stores
+incoming FP16/BF16 bits unchanged.
 
 ### Compute
 
-`Compute(buffer, activation_stream_base, output_stream_base)` is a one-cycle
-control pulse. Consecutive pulses inject consecutive activation vectors.
-The selected buffer and stream bases travel with the activation wave.
+`Compute(buffer, activation_stream_base, output_stream_base, ..., data_format,
+compute_mode)` is a one-cycle control pulse. The selected buffer, stream bases,
+FP16/BF16 format, and compute mode travel with the activation wave.
 
-Each supercell dots an 8-element FP16 activation against eight FP16 weight
-columns. Activations move east across the four supercell columns while partial
-sums move north and accumulate as FP32. Completed outputs are automatically
-written to four consecutive west byte streams selected by the Compute
-instruction. There is no separate MXM output command or software output queue.
+| Mode | Activation input per tile | Result per MXM pulse | MACs per supercell |
+|---|---:|---:|---:|
+| `Vector` | `1 x 8`, 2 byte streams | `1 x 32` | 64 |
+| `Block8` | `8 x 8`, 16 byte streams | `8 x 32` | 512 |
+
+Both modes interpret the raw weight bits using the Compute format. `Vector`
+preserves the original behavior: consecutive pulses inject consecutive rows,
+and a Stream destination emits one FP32 row over four west byte streams.
+
+`Block8` treats each stream pair as one activation row and each lane as one K
+element. One pulse computes eight output rows, advances the row counter by
+eight, and selects one logical `8 x 32` FP32 accumulator row. Each supercell
+column updates its `8 x 8` segment at that same wide-row address.
+Block8 is accumulator-only. A Block8 `AccumulatorRead` emits one `8 x 8`
+column segment per cycle over all 32 west byte streams; the four column
+segments drain the full `8 x 32` row in four cycles. Up to four consecutive
+Block8 pulses form one `32 x 32` output tile.
+
+Activations move east across the four supercell columns while partial sums move
+north and accumulate as FP32. There is no separate MXM output command or
+software output queue.
 
 The system owns all MXM runtime state; whole-system tests do not use a separate
 GEMM engine or runtime helper.
@@ -189,9 +227,10 @@ Pass Add Subtract Multiply Divide Negate Abs Min Max Clamp
 Square Sqrt Exp Log Relu Cast
 ```
 
-Operands may come from INT8, FP16, INT32, or FP32 streams; FP32 immediates; or
-prior-cycle ALU outputs. Results may remain in an ALU register or be emitted to
-a selected stream and destination hemisphere.
+Operands may come from INT8, FP16, BF16, INT32, or FP32 streams; FP32
+immediates; or prior-cycle ALU outputs. Results may remain in an ALU register
+or be emitted to a selected stream and destination hemisphere. Cast can emit
+FP16 or BF16 as two little-endian byte streams.
 
 Quantization and dequantization are instruction graphs, not dedicated opcodes.
 For example, W8 dequant is synthesized with Multiply and Cast. SwiGLU is
@@ -207,7 +246,9 @@ streams; west streams take the symmetric register hop without transformation.
 Each SXM has four tile rows. A Transpose instruction advances south to north one
 tile per cycle so each tile captures its matching diagonal wavefront. FP16 low
 and high bytes are two planes. Tile-local Transpose exchanges rows and columns
-of an `8 x 8` block.
+of an `8 x 8` block. Transpose and Permute have one physical width only:
+16 byte streams in and 16 byte streams out. One beat therefore carries all
+eight FP16 rows; the former two-stream serial mode is not supported.
 
 Transpose output is registered for one cycle before Permute may consume it.
 Permute rearranges complete blocks across four superlanes/32 lanes. The current
@@ -215,17 +256,18 @@ implementation uses one transpose buffer; same-destination blocks can pipeline
 at `II=4`.
 
 Each hemisphere has two ICU queues for SXM: one Transpose queue and one Permute
-queue. With no issued SXM operation, east streams pass from `sreg11` to
-`sreg12` as an ordinary one-cycle link.
+queue. With no issued SXM operation, east streams pass from `sreg13` to
+`sreg14` as an ordinary one-cycle link.
 
 ## 8. ICU and ISA
 
-The ICU owns 116 independent queues:
+The ICU owns 136 independent queues:
 
 | Queue class | Count |
 | --- | ---: |
-| MEM | 88 |
+| MEM | 104 |
 | MXM load | 4 |
+| MXM Dequant | 4 |
 | MXM compute | 4 |
 | VXM ALU | 16 |
 | SXM Transpose/Permute | 4 |
@@ -242,10 +284,13 @@ The compact model codec currently covers:
 
 - 32-bit MEM instructions;
 - 32-bit MXM control instructions;
+- 16-bit MXM Dequant BF16 scale immediates;
 - VXM ALU instructions encoded as four 32-bit words;
 - 32-bit ICU NOP/Repeat commands.
 
-SXM instructions are C++ control objects and do not yet have a binary codec.
+SXM instructions use a fixed 13 x 32-bit packet encoding. The packet carries
+the header, 16 source and destination stream selectors, the intra-tile lane
+map, and the full cross-tile permute map.
 Reserved bits and field ranges are validated by
 `tests/core/instruction_codec_test.cpp`.
 
@@ -253,37 +298,47 @@ Reserved bits and field ranges are validated by
 
 ### W8A16 Weight and Activation Coexistence
 
-Raw INT8 weights travel west from MEM to VXM. Dequantized FP16 weights then
-travel east to MXM, which is the point where they may conflict with activation.
+Raw INT8 weights travel east from MEM to the MXM-local dequantizer. The scale
+comes from the independent Dequant queue, so VXM is not used by the default
+weight-load path.
 
-| Active operation | FP16 IW streams | Shared activation |
+| Active operation | INT8 IW streams | Available peer half |
 | --- | --- | --- |
-| Load local MXM0 | `E0..E15` | `E16..E17` |
-| Load local MXM1 | `E16..E31` | `E0..E1` |
+| Load local MXM0 | `E0..E7` | `E16..E31` |
+| Load local MXM1 | `E16..E23` | `E0..E15` |
 | No IW | none | normally `E0..E1` |
 
-Loading both MXMs in one cycle would occupy all 32 east streams. Offline FFN
-schedules therefore load one inactive buffer at a time and place activation in
-the opposite half. Both local MXMs broadcast-consume the same FP16 activation
-pair.
+Both local MXMs may load in one cycle using 16 total east streams. Activation
+may use an unoccupied range subject to the normal stream-collision rules.
+Direct16 compatibility loads still occupy a full 16-stream half.
 
 ### Ping-Pong Weights
 
-For projection reductions, Compute uses buffer `k mod 2` while VXM and IW
-prepare reduction `k+1` in the other buffer. SRAM slices, stream IDs, VXM ALUs,
-and MXM load queues are all explicit scheduling resources.
+For projection reductions, Compute uses buffer `k mod 2` while MEM, Dequant,
+and IW prepare reduction `k+1` in the other buffer. SRAM slices, stream IDs,
+and the MXM Dequant/load queues are explicit scheduling resources.
 
 ### Accumulator Lifetime
 
-Non-final reductions use `Accumulate(..., SRAM)`. Final reductions use
-`Accumulate(..., Stream)`, which emits and clears the slot. Address reuse is
-legal only after the final stream result has been issued.
+Each MXM owns two mode-specific FP32 accumulator SRAMs:
+
+| Mode | SRAM geometry | Row width | Capacity |
+|---|---:|---:|---:|
+| `Vector` | `8192 x 32 FP32` | 128 bytes | 1 MiB |
+| `Block8` | `1024 x (8 x 32 FP32)` | 1024 bytes | 1 MiB |
+
+The two SRAMs total 2 MiB per MXM. Vector Compute writes one eight-column
+segment of a narrow row. Block8 Compute writes the same eight-column segment
+for all eight output rows, and the four column segments share one logical wide
+address. The Compute/AccumulatorRead mode bit selects the SRAM. A Block8 read
+occupies all 32 west streams, so its output window must be scheduled against
+the local peer MXM. Address reuse is legal only after the final result has been
+emitted and cleared.
 
 ### Single-Port MEM
 
-Different addresses do not remove a slice conflict. Read, Write, and
-Accumulate windows must be disjoint whenever they reserve the same physical
-slice.
+Different addresses do not remove a slice conflict. Read and Write windows must
+be disjoint whenever they reserve the same physical slice.
 
 ## 10. Validated Whole-System Workloads
 
@@ -296,7 +351,7 @@ A[128,576] fp16 x W[576,1536] int8 -> C[128,1536] fp32
 ```
 
 Weights use symmetric per-output-column W8 scales. VXM dequantizes weights,
-MXM0/1 compute adjacent output blocks, and the two MEM accumulator groups sum
+MXM0/1 compute adjacent output blocks, and their MXM-local accumulators sum
 18 K tiles. All 196,608 outputs are compared against an FP16-aware scalar
 golden model.
 
@@ -322,13 +377,52 @@ SwiGLU results are stored in both MEM hemispheres. Down projection reads local
 copies, uses all four MXMs, accumulates 48 K tiles, casts the final sums to FP16,
 and verifies all 73,728 output values.
 
+### Block8 + MXM Dequant FFN
+
+`smollm2_block8_dequant_ffn_test` uses the same SmolLM2 dimensions:
+
+```text
+X[128,576] BF16
+  -> gate/up[128,1536]
+  -> BF16 SwiGLU[128,1536]
+  -> down[128,576] FP32
+```
+
+Weights enter every MXM as eight INT8 streams. The independent Dequant queue
+supplies one BF16 scale per eight-column group, and the converted BF16 values
+are written directly into the weight buffers. Gate, up, and down all use
+Block8 Compute and the `1024 x (8 x 32 FP32)` wide accumulator.
+
+Four consecutive Block8 pulses cover one physical 32-row tile. The 128 input
+rows are scheduled as four such groups, with enough separation for the last
+column wave to leave the internal partial-sum rows before they are reused.
+Gate/up accumulator results are checked exactly and materialized as FP32 VXM
+inputs at an explicit test phase boundary. The six-stage VXM SwiGLU pipeline
+accepts one 32-element vector per cycle, casts the result to BF16, and writes
+the 16-stream packed activation layout into both hemispheres. Down consumes
+that VXM output through the full 48-reduction projection. Down results use a
+scaled FP32 tolerance because the hardware accumulates tile partial sums in a
+different association than the scalar golden loop.
+
+Accumulator state is encoded on the owning `MXM.*.Compute` event rather than
+drawn as a separate functional-unit lane. Partial reductions are purple; the
+final reduction is dark purple because the completed sum is ready but still
+retained in SRAM. Red is reserved for a Compute or AccumulatorRead operation
+that explicitly emits to stream and clears the slot.
+
+The generated schedule artifacts are
+[`smollm2_block8_dequant_ffn_schedule.csv`](smollm2_block8_dequant_ffn_schedule.csv)
+and
+[`smollm2_block8_dequant_ffn_schedule_detail.svg`](smollm2_block8_dequant_ffn_schedule_detail.svg).
+
 ### RMSNorm
 
 `rmsnorm_test` computes `[32,32]` FP16 RMSNorm entirely through MEM and VXM.
 ALU0 squares one hidden column per cycle; ALU1 recurrently accumulates
 `sum(x^2)` independently in all 32 physical lanes. VXM then computes inverse
-RMS and applies it to streamed `x` and `gamma`. No MXM or MEM accumulator is
-used.
+RMS and keeps it resident in an ALU. MEM schedules each `x` vector one cycle
+before its matching `gamma`, so two multiply ALUs consume them directly without
+Pass stages. No MXM or MEM accumulator is used.
 
 ### SmolLM2 Attention
 
@@ -343,16 +437,63 @@ The configuration is sequence length 128, hidden size 576, 9 query heads,
 3 KV heads, and head dimension 64. QK, P x V, and o_proj use independent work
 across all four MXMs where stream and accumulator resources allow. SXM prepares
 packed/transpose layouts for attention replay. The complete numerical golden
-check passes at 81,273 scheduled cycles.
+check passes at 94,761 scheduled cycles.
 
 See [attention_pipeline_optimization.md](attention_pipeline_optimization.md) for
 phase timing, measured MXM utilization, and remaining overlap opportunities.
+
+### Decoder-Layer Decode
+
+`decoder_layer_decode_test` starts from a materialized 128-token K/V cache and
+executes token 128 through one tile-scale decoder layer:
+
+```text
+RMSNorm -> Q/K/V -> RoPE -> append K/V
+        -> QK -> softmax -> P x V -> O -> residual
+        -> RMSNorm -> Gate/Up -> SwiGLU -> Down -> residual
+```
+
+The test uses hidden/head dimension 32 and intermediate dimension 64 so every
+matrix edge is an exact MXM tile. All GEMV, QK, and P x V work is issued through
+the system MEM/MXM paths. Decode Q is installed as one weight column with the
+two-stream `IWColumn` form, then all 129 cached K rows stream through the MXM.
+The nonlinear composition follows the FP16 boundaries already validated by the
+dedicated RMSNorm, VXM, attention, and SwiGLU tests. Scaling to the SmolLM2
+576/1536/9-head shape repeats these tile mappings across four MXMs.
+
+Decode control supports two explicitly encoded layouts:
+
+- `Linear1x16` retains the original 16-supercell serial reduction. Each tile
+  loads four independent activation vectors from eight BF16 streams, and one
+  wave produces eight outputs after 16 cell stages.
+- `Native4x4` treats the physical array as four columns of four cells. Each
+  tile loads one 8-element activation vector from two BF16 streams and
+  broadcasts it across its row. Weight column `c` is scheduled `c` cycles
+  after column 0, so `(tile,column)` executes at `launch + tile + column`.
+  Four 8-output vertical reductions complete together after seven stages.
+
+`mxm_decode_layout_comparison_test` executes the same `K=128, N=32` GEMV in
+both layouts and requires bit-identical BF16 results. The full decode FFN uses
+`Native4x4`; decode attention keeps `Linear1x16` until its RoPE and cache
+resident layouts are migrated as a unit.
+
+### Multi-executable boundaries
+
+`TspSliceSystem::reset_execution_state()` establishes a clean cycle-zero
+boundary between command binaries. It resets ICU queues, MEM instruction and
+stream state, MXM datapaths and accumulators, VXM, SXM, and the system cycle,
+while preserving MEM SRAM contents. This distinction is required for
+model-level execution: decoder activations can remain resident in SRAM while
+each layer starts with no stale pipeline or stream state.
 
 ## 11. Logs and Diagrams
 
 Long regressions disable logging by default because per-cycle stream dumps
 dominate wall time. `TspSliceSystem::LogSinks` can independently capture ICU,
 MEM, MXM, VXM, SXM, and system logs.
+With all sinks null, MEM transfer traces, VXM operand strings, and SXM event
+strings are not constructed. SRAM uses sparse 4 KiB backing pages while
+preserving the complete architectural address space.
 
 Schedule CSV export is controlled by:
 
@@ -363,14 +504,13 @@ Schedule CSV export is controlled by:
 Detailed diagrams are generated by `scripts/render_schedule_trace.py` and
 `scripts/render_swiglu_schedule_trace.py`. Accumulator colors are:
 
-- purple: retain partial sum in SRAM;
+- purple: retain partial sum in the MXM accumulator;
 - red: emit final sum to stream and clear the slot.
 
 ## 12. Known Limitations
 
 - The model is not bit-accurate to private Groq hardware or ISA.
 - Gather/Scatter lack the address-stream execution datapath.
-- SXM has no binary instruction codec yet.
 - Offline schedules are still constructed inside integration tests; there is
   no standalone compiler or reusable program file format.
 - Resource allocation uses workload-specific SRAM slices and stream IDs rather

@@ -2,10 +2,12 @@
 
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/hemisphere.hpp"
+#include "ftlpu/icu/distributed_queue.hpp"
+#include "ftlpu/icu/location.hpp"
 #include "ftlpu/mem/tile_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
 #include "ftlpu/sxm/slice.hpp"
-#include "ftlpu/vxm/slice.hpp"
+#include "ftlpu/vxm/backend.hpp"
 
 #include <array>
 #include <cstddef>
@@ -22,11 +24,14 @@ namespace ftlpu {
 class InstructionControlUnit {
 public:
     static constexpr std::size_t kVxmQueues = VxmSlice::kAluQueues;
+    static constexpr std::size_t kDistributedVxmQueues =
+        DistributedVxmSlice::kAluQueues;
     static constexpr std::size_t kMemQueuesPerHemisphere = hw::kSliceColumns;
-    static constexpr std::size_t kMxmQueuesPerHemisphere = 2;
+    static constexpr std::size_t kMxmQueuesPerHemisphere =
+        hw::kMxmsPerHemisphere;
     static constexpr std::size_t kSxmQueuesPerHemisphere = 2;
     static constexpr std::size_t kMemQueues = hw::kHemispheres * kMemQueuesPerHemisphere;
-    static constexpr std::size_t kMxmQueues = hw::kHemispheres * kMxmQueuesPerHemisphere;
+    static constexpr std::size_t kMxmQueues = hw::kMxmCount;
     static constexpr std::size_t kSxmQueues = hw::kHemispheres * kSxmQueuesPerHemisphere;
 
     static constexpr std::size_t mem_queue(Hemisphere hemisphere, std::size_t column)
@@ -39,19 +44,60 @@ public:
         return hemisphere_index(hemisphere) * kMxmQueuesPerHemisphere + local_mxm;
     }
 
-    struct Repeat {
-        std::size_t count{0};
-        std::size_t interval{1};
-        std::int64_t address_stride{0};
-    };
+    using Repeat = IcuRepeat;
+    using VxmIcu = DistributedIcuQueue<
+        VxmLaneAluInstruction,
+        hw::kIcuVxmInstructionBits,
+        hw::kIcuVxmImemDepth,
+        hw::kIcuVxmIqDepth,
+        hw::kIcuFetchLatencyCycles>;
+    using DistributedVxmIcu = DistributedIcuQueue<
+        distributed_vxm::VxmCompactInstruction,
+        hw::kIcuVxmInstructionBits,
+        hw::kIcuDistributedVxmImemDepth,
+        hw::kIcuVxmIqDepth,
+        hw::kIcuFetchLatencyCycles>;
+    using MemIcu = DistributedIcuQueue<
+        MemInstruction,
+        hw::kIcuMemInstructionBits,
+        hw::kIcuMemImemDepth,
+        hw::kIcuMemIqDepth,
+        hw::kIcuFetchLatencyCycles>;
+    using MxmIcu = DistributedIcuQueue<
+        MxmControlInstruction,
+        hw::kIcuMxmInstructionBits,
+        hw::kIcuMxmImemDepth,
+        hw::kIcuMxmIqDepth,
+        hw::kIcuFetchLatencyCycles>;
+    using MxmDequantIcu = DistributedIcuQueue<
+        MxmDequantInstruction,
+        hw::kIcuMxmInstructionBits,
+        hw::kIcuMxmImemDepth,
+        hw::kIcuMxmIqDepth,
+        hw::kIcuFetchLatencyCycles>;
+    using SxmIcu = DistributedIcuQueue<
+        SxmInstruction,
+        hw::kIcuSxmInstructionBits,
+        hw::kIcuSxmImemDepth,
+        hw::kIcuSxmIqDepth,
+        hw::kIcuFetchLatencyCycles>;
 
+    explicit InstructionControlUnit(
+        std::size_t barrier_latency_cycles = hw::kIcuBarrierLatencyCycles)
+        : barrier_latency_cycles_(barrier_latency_cycles)
+    {
+    }
     void reset()
     {
         for (auto& queue : vxm_queues_) queue.reset();
+        for (auto& queue : distributed_vxm_queues_) queue.reset();
         for (auto& queue : mem_queues_) {
             queue.reset();
         }
         for (auto& queue : mxm_load_queues_) {
+            queue.reset();
+        }
+        for (auto& queue : mxm_dequant_queues_) {
             queue.reset();
         }
         for (auto& queue : mxm_compute_queues_) {
@@ -59,6 +105,7 @@ public:
         }
         for (auto& queue : sxm_transpose_queues_) queue.reset();
         for (auto& queue : sxm_permute_queues_) queue.reset();
+        barrier_events_.clear();
         cycle_ = 0;
     }
 
@@ -71,6 +118,9 @@ public:
         for (auto& queue : mxm_load_queues_) {
             queue.push_nop(cycles);
         }
+        for (auto& queue : mxm_dequant_queues_) {
+            queue.push_nop(cycles);
+        }
         for (auto& queue : mxm_compute_queues_) {
             queue.push_nop(cycles);
         }
@@ -78,6 +128,57 @@ public:
         for (auto& queue : sxm_permute_queues_) queue.push_nop(cycles);
     }
 
+    void enqueue_control(
+        IcuLocation location,
+        IcuControlInstruction instruction)
+    {
+        switch (location.kind) {
+        case IcuLocationKind::Mem:
+            mem_queues_[mem_queue(
+                static_cast<Hemisphere>(location.unit),
+                location.index)].append_control(instruction);
+            return;
+        case IcuLocationKind::Vxm:
+            check_vxm_queue(location.index);
+            vxm_queues_[location.index].append_control(instruction);
+            return;
+        case IcuLocationKind::DistributedVxm:
+            check_distributed_vxm_queue(location.index);
+            distributed_vxm_queues_[location.index].append_control(
+                instruction);
+            return;
+        case IcuLocationKind::MxmLoad:
+            check_mxm_queue(location.unit);
+            mxm_load_queues_[location.unit].append_control(instruction);
+            return;
+        case IcuLocationKind::MxmCompute:
+            check_mxm_queue(location.unit);
+            mxm_compute_queues_[location.unit].append_control(instruction);
+            return;
+        case IcuLocationKind::MxmDequant:
+            check_mxm_queue(location.unit);
+            mxm_dequant_queues_[location.unit].append_control(instruction);
+            return;
+        case IcuLocationKind::Sxm:
+            if (location.unit >= hw::kHemispheres) {
+                throw std::out_of_range(
+                    "ICU SXM hemisphere is outside the chip");
+            }
+            if (location.index == 0) {
+                sxm_transpose_queues_[location.unit].append_control(
+                    instruction);
+                return;
+            }
+            if (location.index == 1) {
+                sxm_permute_queues_[location.unit].append_control(
+                    instruction);
+                return;
+            }
+            throw std::out_of_range(
+                "ICU SXM control port must be transpose(0) or permute(1)");
+        }
+        throw std::logic_error("unknown ICU location kind");
+    }
     void enqueue_vxm(std::size_t alu, VxmLaneAluInstruction instruction)
     {
         check_vxm_queue(alu);
@@ -96,6 +197,31 @@ public:
         vxm_queues_[alu].push_repeat(Repeat {count, interval, 0});
     }
 
+    void enqueue_distributed_vxm(
+        std::size_t alu,
+        distributed_vxm::VxmCompactInstruction instruction)
+    {
+        check_distributed_vxm_queue(alu);
+        distributed_vxm_queues_[alu].push_instruction(
+            std::move(instruction));
+    }
+
+    void enqueue_distributed_vxm_nop(
+        std::size_t alu, std::size_t cycles)
+    {
+        check_distributed_vxm_queue(alu);
+        distributed_vxm_queues_[alu].push_nop(cycles);
+    }
+
+    void enqueue_distributed_vxm_repeat(
+        std::size_t alu,
+        std::size_t count,
+        std::size_t interval = 1)
+    {
+        check_distributed_vxm_queue(alu);
+        distributed_vxm_queues_[alu].push_repeat(
+            Repeat {count, interval, 0});
+    }
     void enqueue_mem(std::size_t column, MemInstruction instruction)
     {
         check_mem_queue(column);
@@ -121,10 +247,13 @@ public:
     void enqueue_mxm(std::size_t mxm, MxmControlInstruction instruction)
     {
         check_mxm_queue(mxm);
-        if (instruction.opcode == MxmControlOpcode::Compute) {
-            mxm_compute_queues_[mxm].push_instruction(instruction);
-        } else {
+        if (instruction.opcode == MxmControlOpcode::IW
+            || (instruction.opcode == MxmControlOpcode::Decode
+                && instruction.decode_operation
+                    == MxmDecodeOperation::LoadActivation)) {
             mxm_load_queues_[mxm].push_instruction(instruction);
+        } else {
+            mxm_compute_queues_[mxm].push_instruction(instruction);
         }
     }
 
@@ -132,6 +261,7 @@ public:
     {
         check_mxm_queue(mxm);
         mxm_load_queues_[mxm].push_nop(cycles);
+        mxm_dequant_queues_[mxm].push_nop(cycles);
         mxm_compute_queues_[mxm].push_nop(cycles);
     }
 
@@ -139,6 +269,20 @@ public:
     {
         check_mxm_queue(mxm);
         mxm_load_queues_[mxm].push_nop(cycles);
+    }
+
+    void enqueue_mxm_dequant(
+        std::size_t mxm,
+        MxmDequantInstruction instruction)
+    {
+        check_mxm_queue(mxm);
+        mxm_dequant_queues_[mxm].push_instruction(instruction);
+    }
+
+    void enqueue_mxm_dequant_nop(std::size_t mxm, std::size_t cycles)
+    {
+        check_mxm_queue(mxm);
+        mxm_dequant_queues_[mxm].push_nop(cycles);
     }
 
     void enqueue_mxm_compute_nop(std::size_t mxm, std::size_t cycles)
@@ -157,6 +301,16 @@ public:
     {
         check_mxm_queue(mxm);
         mxm_load_queues_[mxm].push_repeat(Repeat {count, interval, 0});
+    }
+
+    void enqueue_mxm_dequant_repeat(
+        std::size_t mxm,
+        std::size_t count,
+        std::size_t interval = 1)
+    {
+        check_mxm_queue(mxm);
+        mxm_dequant_queues_[mxm].push_repeat(
+            Repeat {count, interval, 0});
     }
 
     void enqueue_mxm_compute_repeat(std::size_t mxm, std::size_t count, std::size_t interval = 1)
@@ -231,6 +385,90 @@ public:
         sxm_permute_queues_[hemisphere_index(hemisphere)].push_repeat(Repeat {count, interval, 0});
     }
 
+    void notify(IcuLocation location)
+    {
+        switch (location.kind) {
+        case IcuLocationKind::Mem:
+            mem_iq(mem_queue(
+                static_cast<Hemisphere>(location.unit),
+                location.index)).notify();
+            return;
+        case IcuLocationKind::Vxm:
+            vxm_iq(location.index).notify();
+            return;
+        case IcuLocationKind::DistributedVxm:
+            distributed_vxm_iq(location.index).notify();
+            return;
+        case IcuLocationKind::MxmLoad:
+            mxm_load_iq(location.unit).notify();
+            return;
+        case IcuLocationKind::MxmCompute:
+            mxm_compute_iq(location.unit).notify();
+            return;
+        case IcuLocationKind::MxmDequant:
+            mxm_dequant_iq(location.unit).notify();
+            return;
+        case IcuLocationKind::Sxm:
+            if (location.unit >= hw::kHemispheres) {
+                throw std::out_of_range(
+                    "ICU SXM hemisphere is outside the chip");
+            }
+            if (location.index == 0) {
+                sxm_transpose_queues_[location.unit].notify();
+                return;
+            }
+            if (location.index == 1) {
+                sxm_permute_queues_[location.unit].notify();
+                return;
+            }
+            throw std::out_of_range(
+                "ICU SXM control port must be transpose(0) or permute(1)");
+        }
+        throw std::logic_error("unknown ICU location kind");
+    }
+
+    void advance_barrier_events()
+    {
+        for (auto& remaining : barrier_events_) {
+            if (remaining != 0) --remaining;
+        }
+        while (!barrier_events_.empty()
+               && barrier_events_.front() == 0) {
+            barrier_events_.pop_front();
+            broadcast_notification();
+        }
+
+        const auto emitted = take_emitted_notifications();
+        for (std::size_t event = 0; event < emitted; ++event) {
+            if (barrier_latency_cycles_ == 0) {
+                broadcast_notification();
+            } else {
+                barrier_events_.push_back(barrier_latency_cycles_);
+            }
+        }
+    }
+
+    void broadcast_notification()
+    {
+        for (auto& queue : vxm_queues_) queue.notify();
+        for (auto& queue : distributed_vxm_queues_) queue.notify();
+        for (auto& queue : mem_queues_) queue.notify();
+        for (auto& queue : mxm_load_queues_) queue.notify();
+        for (auto& queue : mxm_dequant_queues_) queue.notify();
+        for (auto& queue : mxm_compute_queues_) queue.notify();
+        for (auto& queue : sxm_transpose_queues_) queue.notify();
+        for (auto& queue : sxm_permute_queues_) queue.notify();
+    }
+
+    std::size_t barrier_latency_cycles() const noexcept
+    {
+        return barrier_latency_cycles_;
+    }
+
+    std::size_t pending_barrier_event_count() const noexcept
+    {
+        return barrier_events_.size();
+    }
     void dispatch_vxm(VxmSlice& vxm, std::ostream* os = nullptr)
     {
         log_cycle_header(os);
@@ -246,6 +484,26 @@ public:
         ++cycle_;
     }
 
+    void dispatch_vxm(
+        DistributedVxmSlice& vxm,
+        std::ostream* os = nullptr)
+    {
+        log_cycle_header(os);
+        bool any = false;
+        for (std::size_t alu = 0; alu < kDistributedVxmQueues; ++alu) {
+            const auto instruction =
+                distributed_vxm_queues_[alu].dispatch_next();
+            if (!instruction.has_value()) continue;
+            vxm.issue_south(alu, *instruction);
+            any = true;
+            if (os != nullptr) {
+                *os << "  ICU -> VXM.distributed.q" << alu
+                    << " compact\n";
+            }
+        }
+        log_dispatch_idle(os, any);
+        ++cycle_;
+    }
     void dispatch(
         std::array<TileArrayModel, hw::kHemispheres>& mems,
         VxmSlice& vxm,
@@ -302,6 +560,20 @@ public:
         }
 
         for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
+            const auto instruction =
+                mxm_dequant_queues_[mxm].dispatch_next();
+            if (!instruction.has_value()) {
+                continue;
+            }
+            mxms[mxm].control().issue_dequant_south(*instruction);
+            any = true;
+            if (os != nullptr) {
+                *os << "  ICU -> MXM" << mxm
+                    << ".dequant scale=" << instruction->scale() << '\n';
+            }
+        }
+
+        for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
             const auto instruction = mxm_load_queues_[mxm].dispatch_next();
             if (!instruction.has_value()) {
                 continue;
@@ -329,171 +601,80 @@ public:
         ++cycle_;
     }
 
+    VxmIcu& vxm_iq(std::size_t alu)
+    {
+        check_vxm_queue(alu);
+        return vxm_queues_[alu];
+    }
+
+    DistributedVxmIcu& distributed_vxm_iq(std::size_t queue)
+    {
+        check_distributed_vxm_queue(queue);
+        return distributed_vxm_queues_[queue];
+    }
+
+    MemIcu& mem_iq(std::size_t queue)
+    {
+        check_mem_queue(queue);
+        return mem_queues_[queue];
+    }
+
+    MxmIcu& mxm_load_iq(std::size_t mxm)
+    {
+        check_mxm_queue(mxm);
+        return mxm_load_queues_[mxm];
+    }
+
+    MxmDequantIcu& mxm_dequant_iq(std::size_t mxm)
+    {
+        check_mxm_queue(mxm);
+        return mxm_dequant_queues_[mxm];
+    }
+
+    MxmIcu& mxm_compute_iq(std::size_t mxm)
+    {
+        check_mxm_queue(mxm);
+        return mxm_compute_queues_[mxm];
+    }
+
+    SxmIcu& sxm_transpose_iq(Hemisphere hemisphere)
+    {
+        return sxm_transpose_queues_[hemisphere_index(hemisphere)];
+    }
+
+    SxmIcu& sxm_permute_iq(Hemisphere hemisphere)
+    {
+        return sxm_permute_queues_[hemisphere_index(hemisphere)];
+    }
     std::size_t cycle() const
     {
         return cycle_;
     }
 
 private:
-    enum class QueueCommandKind {
-        Instruction,
-        Nop,
-        Repeat,
-    };
-
-    template <typename Instruction>
-    struct QueueCommand {
-        QueueCommandKind kind{QueueCommandKind::Instruction};
-        Instruction instruction{};
-        Repeat repeat{};
-        std::size_t nop_cycles{0};
-    };
-
-    template <typename Instruction>
-    class DispatchQueue {
-    public:
-        void reset()
-        {
-            commands_.clear();
-            last_instruction_.reset();
-            repeat_instruction_.reset();
-            repeat_remaining_ = 0;
-            repeat_interval_ = 1;
-            repeat_cooldown_ = 0;
-            repeat_address_stride_ = 0;
-            repeat_index_ = 0;
-            nop_remaining_ = 0;
-        }
-
-        void push_instruction(Instruction instruction)
-        {
-            commands_.push_back(QueueCommand<Instruction> {QueueCommandKind::Instruction, instruction});
-        }
-
-        void push_nop(std::size_t cycles)
-        {
-            if (cycles == 0) {
-                return;
-            }
-            auto command = QueueCommand<Instruction> {};
-            command.kind = QueueCommandKind::Nop;
-            command.nop_cycles = cycles;
-            commands_.push_back(command);
-        }
-
-        void push_repeat(Repeat repeat)
-        {
-            if (repeat.count == 0) {
-                return;
-            }
-            if (repeat.interval == 0) {
-                throw std::invalid_argument("ICU repeat interval must be at least one cycle");
-            }
-            auto command = QueueCommand<Instruction> {};
-            command.kind = QueueCommandKind::Repeat;
-            command.repeat = repeat;
-            commands_.push_back(command);
-        }
-
-        std::optional<Instruction> dispatch_next()
-        {
-            if (nop_remaining_ > 0) {
-                --nop_remaining_;
-                return std::nullopt;
-            }
-
-            if (repeat_remaining_ > 0) {
-                if (repeat_cooldown_ > 0) {
-                    --repeat_cooldown_;
-                    return std::nullopt;
-                }
-                auto instruction = apply_repeat_stride(*repeat_instruction_, repeat_address_stride_, repeat_index_);
-                --repeat_remaining_;
-                ++repeat_index_;
-                if (repeat_remaining_ > 0) {
-                    repeat_cooldown_ = repeat_interval_ - 1;
-                }
-                last_instruction_ = instruction;
-                return instruction;
-            }
-
-            while (!commands_.empty()) {
-                const auto command = commands_.front();
-                commands_.pop_front();
-                if (command.kind == QueueCommandKind::Instruction) {
-                    last_instruction_ = command.instruction;
-                    return command.instruction;
-                }
-                if (command.kind == QueueCommandKind::Nop) {
-                    nop_remaining_ = command.nop_cycles - 1;
-                    return std::nullopt;
-                }
-                if (!last_instruction_.has_value()) {
-                    throw std::logic_error("ICU Repeat needs a previous instruction in the same queue");
-                }
-                repeat_instruction_ = *last_instruction_;
-                repeat_remaining_ = command.repeat.count;
-                repeat_interval_ = command.repeat.interval;
-                repeat_cooldown_ = command.repeat.interval - 1;
-                repeat_address_stride_ = command.repeat.address_stride;
-                repeat_index_ = 1;
-                if (repeat_cooldown_ > 0) {
-                    --repeat_cooldown_;
-                    return std::nullopt;
-                }
-                auto instruction = apply_repeat_stride(*repeat_instruction_, repeat_address_stride_, repeat_index_);
-                --repeat_remaining_;
-                ++repeat_index_;
-                if (repeat_remaining_ > 0) {
-                    repeat_cooldown_ = repeat_interval_ - 1;
-                }
-                last_instruction_ = instruction;
-                return instruction;
-            }
-
-            return std::nullopt;
-        }
-
-        std::size_t queued_count() const
-        {
-            return commands_.size() + repeat_remaining_ + nop_remaining_;
-        }
-
-    private:
-        std::deque<QueueCommand<Instruction>> commands_{};
-        std::optional<Instruction> last_instruction_{};
-        std::optional<Instruction> repeat_instruction_{};
-        std::size_t repeat_remaining_{0};
-        std::size_t repeat_interval_{1};
-        std::size_t repeat_cooldown_{0};
-        std::int64_t repeat_address_stride_{0};
-        std::size_t repeat_index_{0};
-        std::size_t nop_remaining_{0};
-    };
-
-    template <typename Instruction>
-    static Instruction apply_repeat_stride(Instruction instruction, std::int64_t, std::size_t)
+    std::size_t take_emitted_notifications()
     {
-        return instruction;
+        std::size_t count = 0;
+        const auto collect = [&count](auto& queues) {
+            for (auto& queue : queues) {
+                count += queue.take_notify() ? 1U : 0U;
+            }
+        };
+        collect(vxm_queues_);
+        collect(distributed_vxm_queues_);
+        collect(mem_queues_);
+        collect(mxm_load_queues_);
+        collect(mxm_dequant_queues_);
+        collect(mxm_compute_queues_);
+        collect(sxm_transpose_queues_);
+        collect(sxm_permute_queues_);
+        return count;
     }
-
-    static MemInstruction apply_repeat_stride(
-        MemInstruction instruction,
-        std::int64_t address_stride,
-        std::size_t repeat_index)
-    {
-        const auto delta = address_stride * static_cast<std::int64_t>(repeat_index);
-        if (delta < 0 && instruction.address < static_cast<std::size_t>(-delta)) {
-            throw std::out_of_range("ICU MEM Repeat address stride underflow");
-        }
-        instruction.address = static_cast<std::size_t>(static_cast<std::int64_t>(instruction.address) + delta);
-        return instruction;
-    }
-
     static void check_mem_queue(std::size_t column)
     {
         if (column >= kMemQueues) {
-            throw std::out_of_range("ICU MEM queue is outside the 88 full-chip MEM queues");
+            throw std::out_of_range(
+                "ICU MEM queue is outside the configured full-chip MEM queues");
         }
     }
 
@@ -509,6 +690,13 @@ private:
         if (alu >= kVxmQueues) throw std::out_of_range("ICU VXM queue is outside the 16 ALU queues");
     }
 
+    static void check_distributed_vxm_queue(std::size_t alu)
+    {
+        if (alu >= kDistributedVxmQueues) {
+            throw std::out_of_range(
+                "ICU distributed VXM queue is outside the 8 compact queues");
+        }
+    }
     template <typename QueueArray>
     static std::size_t queued_instruction_count(const QueueArray& queues)
     {
@@ -530,6 +718,8 @@ private:
             << " vxm=" << queued_instruction_count(vxm_queues_)
             << " mem=" << queued_instruction_count(mem_queues_)
             << " mxm_load=" << queued_instruction_count(mxm_load_queues_)
+            << " mxm_dequant="
+            << queued_instruction_count(mxm_dequant_queues_)
             << " mxm_compute=" << queued_instruction_count(mxm_compute_queues_)
             << " sxm_transpose=" << queued_instruction_count(sxm_transpose_queues_)
             << " sxm_permute=" << queued_instruction_count(sxm_permute_queues_)
@@ -556,8 +746,6 @@ private:
             return "Gather";
         case MemOpcode::Scatter:
             return "Scatter";
-        case MemOpcode::Accumulate:
-            return "Accumulate";
         }
         return "?";
     }
@@ -572,11 +760,6 @@ private:
             os << " write_address=" << instruction.write_address
                << " write_stream=" << instruction.write_stream;
         }
-        if (instruction.opcode == MemOpcode::Accumulate) {
-            os << " destination="
-               << (instruction.accumulator_destination == MemAccumulatorDestination::Sram
-                       ? "sram" : "stream");
-        }
         if (instruction.opcode == MemOpcode::Gather || instruction.opcode == MemOpcode::Scatter) {
             os << " map_stream=" << instruction.map_stream;
         }
@@ -589,10 +772,48 @@ private:
         if (instruction.opcode == MxmControlOpcode::IW) {
             os << "IW b" << instruction.weight_buffer
                << " col=" << instruction.weight_column;
-        } else {
+            if (instruction.weight_load_mode == MxmWeightLoadMode::Column) {
+                os << " inner=" << instruction.weight_inner_column
+                   << " streams="
+                   << (instruction.weight_input_mode
+                               == MxmWeightInputMode::Int8DequantBf16
+                           ? 1
+                           : 2);
+            }
+            os << (instruction.weight_input_mode
+                           == MxmWeightInputMode::Int8DequantBf16
+                       ? " int8"
+                       : " direct16");
+        } else if (instruction.opcode == MxmControlOpcode::Compute) {
             os << "Compute b" << instruction.weight_buffer
                << " stream=" << instruction.activation_stream_base
-               << " out=" << instruction.stream_base;
+               << " acc=" << instruction.accumulator_address
+               << " out=" << instruction.stream_base
+               << " mode="
+               << (instruction.compute_mode == MxmComputeMode::Block8
+                       ? "block8"
+                       : "vector");
+        } else if (instruction.opcode == MxmControlOpcode::Decode) {
+            if (instruction.decode_operation
+                == MxmDecodeOperation::LoadActivation) {
+                os << "DecodeLoadActivation b"
+                   << instruction.weight_buffer
+                   << " stream=" << instruction.activation_stream_base
+                   << " format="
+                   << mxm_data_format_name(instruction.data_format);
+            } else {
+                os << "DecodeStreamCompute b"
+                   << instruction.weight_buffer
+                   << " out=" << instruction.stream_base
+                   << " weight_streams=E0..E31";
+            }
+        } else {
+            os << "AccumulatorRead address=" << instruction.accumulator_address
+               << " out=" << instruction.stream_base
+               << " mode="
+               << (instruction.compute_mode == MxmComputeMode::Block8
+                       ? "block8"
+                       : "vector");
         }
         return os.str();
     }
@@ -628,12 +849,18 @@ private:
         return os.str();
     }
 
-    std::array<DispatchQueue<VxmLaneAluInstruction>, kVxmQueues> vxm_queues_{};
-    std::array<DispatchQueue<MemInstruction>, kMemQueues> mem_queues_{};
-    std::array<DispatchQueue<MxmControlInstruction>, kMxmQueues> mxm_load_queues_{};
-    std::array<DispatchQueue<MxmControlInstruction>, kMxmQueues> mxm_compute_queues_{};
-    std::array<DispatchQueue<SxmInstruction>, hw::kHemispheres> sxm_transpose_queues_{};
-    std::array<DispatchQueue<SxmInstruction>, hw::kHemispheres> sxm_permute_queues_{};
+    std::array<VxmIcu, kVxmQueues> vxm_queues_{};
+    std::array<DistributedVxmIcu, kDistributedVxmQueues>
+        distributed_vxm_queues_{};
+    std::array<MemIcu, kMemQueues> mem_queues_{};
+    std::array<MxmIcu, kMxmQueues> mxm_load_queues_{};
+    std::array<MxmDequantIcu, kMxmQueues>
+        mxm_dequant_queues_{};
+    std::array<MxmIcu, kMxmQueues> mxm_compute_queues_{};
+    std::array<SxmIcu, hw::kHemispheres> sxm_transpose_queues_{};
+    std::array<SxmIcu, hw::kHemispheres> sxm_permute_queues_{};
+    std::size_t barrier_latency_cycles_{hw::kIcuBarrierLatencyCycles};
+    std::deque<std::size_t> barrier_events_{};
     std::size_t cycle_{0};
 };
 

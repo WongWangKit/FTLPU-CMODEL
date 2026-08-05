@@ -48,7 +48,7 @@ public:
         return fabric_.cell(column_, tile, lane, stream_id(stream_index));
     }
 
-    StreamSegment16 peek_segment(
+    StreamTileSegment peek_segment(
         std::size_t tile,
         std::size_t stream_index) const
     {
@@ -62,7 +62,7 @@ public:
         return fabric_.segment_valid(column_, tile, stream_id(stream_index));
     }
 
-    StreamSegment16 consume_segment(
+    StreamTileSegment consume_segment(
         std::size_t tile,
         std::size_t stream_index)
     {
@@ -116,7 +116,7 @@ public:
     void write_segment(
         std::size_t tile,
         std::size_t stream_index,
-        const StreamSegment16& values)
+        const StreamTileSegment& values)
     {
         fabric_.stage_segment(
             column_,
@@ -129,7 +129,7 @@ public:
     void write_payload_segment(
         std::size_t tile,
         std::size_t stream_index,
-        const StreamPayloadSegment16& values,
+        const StreamPayloadTileSegment& values,
         std::uint64_t vector_tag = 0)
     {
         fabric_.stage_payload_segment(

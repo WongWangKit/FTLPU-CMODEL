@@ -23,6 +23,7 @@ struct SwishSpec {
     std::size_t output_stream_base{0};
     Hemisphere input_hemisphere{Hemisphere::East};
     Hemisphere output_hemisphere{Hemisphere::East};
+    VxmCastTarget output_cast{VxmCastTarget::Float16};
 };
 
 inline void enqueue_alu_at(
@@ -98,7 +99,7 @@ inline void enqueue_swish(
         VxmLaneOperand::Alu(7), VxmLaneOperand::Alu(4)));
     enqueue_alu_at(icu, cursors, 9, cycle + 5, inst(VxmAluOpcode::Cast,
         VxmLaneOperand::Alu(8), VxmLaneOperand::Imm(0.0f),
-        VxmCastTarget::Float16, spec.output_stream_base));
+        spec.output_cast, spec.output_stream_base));
 }
 
 } // namespace ftlpu::test

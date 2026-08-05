@@ -56,22 +56,27 @@ int main()
                 for (std::size_t query_local = 0; query_local < kBlockSize; ++query_local) {
                     const auto query = query_block * kBlockSize + query_local;
                     const auto key = key_block * kBlockSize + key_local;
-                    input[key_local][query_local] = UnitGroup::Word {
+                    input[2 * key_local][query_local] = UnitGroup::Word {
                         column_stream_input[query][key],
+                        query_local + 1 == kBlockSize,
+                    };
+                    input[2 * key_local + 1][query_local] = UnitGroup::Word {
+                        0,
                         query_local + 1 == kBlockSize,
                     };
                 }
             }
 
             transpose_unit.issue(ftlpu::SxmInstruction::Transpose(
-                stream_range(0, kBlockSize),
-                stream_range(kBlockSize, kBlockSize)));
+                stream_range(0, 2 * kBlockSize),
+                stream_range(2 * kBlockSize, 2 * kBlockSize)));
             const auto transposed = transpose_unit.evaluate(input);
             transpose_unit.complete_cycle();
             for (std::size_t query_local = 0; query_local < kBlockSize; ++query_local) {
                 const auto query = query_block * kBlockSize + query_local;
                 for (std::size_t key_local = 0; key_local < kBlockSize; ++key_local) {
-                    const auto& output = transposed.outputs[kBlockSize + query_local][key_local];
+                    const auto& output =
+                        transposed.outputs[2 * kBlockSize + 2 * query_local][key_local];
                     assert(output.has_value());
                     transposed_chunks[query][key_block][key_local] = output->data;
                 }

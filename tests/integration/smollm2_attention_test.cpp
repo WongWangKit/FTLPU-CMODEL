@@ -1,6 +1,7 @@
 #include "ftlpu/core/fp16.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
 #include "vxm_alu_program.hpp"
+#include "smollm2_layer_phases.hpp"
 
 #include <algorithm>
 #include <array>
@@ -27,8 +28,10 @@ constexpr std::size_t kKvWidth = kKvHeads * kHeadDim;
 constexpr std::size_t kQueryWidth = kQueryHeads * kHeadDim;
 constexpr std::size_t kTile = ftlpu::hw::kMxmRows;
 constexpr float kRopeTheta = 100000.0f;
-constexpr std::size_t kWeightToIwLatency = 14;
-constexpr std::size_t kActivationLatency = 5;
+constexpr std::size_t kWeightToIwLatency =
+    ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 2;
+constexpr std::size_t kActivationLatency =
+    ftlpu::hw::kMemGroups - 32 / ftlpu::hw::kMemSlicesPerGroup + 2;
 constexpr std::size_t kMxm0AccumulatorLatency = 6;
 constexpr std::size_t kMxm1AccumulatorLatency = 5;
 constexpr std::size_t kMxmInputBlockIssueCycles =
@@ -59,8 +62,21 @@ constexpr std::size_t kQueryIwAddressBase = 7600;
 constexpr std::size_t kValuePackAddressBase = 7800;
 constexpr std::size_t kCausalMaskAddressBase = 8128;
 constexpr std::size_t kProbabilityDiagonalAddressBase = kRopeTableAddressBase;
-constexpr std::size_t kMemToSxmLatency = 12;
-constexpr std::size_t kMemToMxmLatency = 13;
+constexpr std::size_t kMemToSxmLatency = ftlpu::hw::kMemGroups + 1;
+constexpr std::size_t kMemToMxmLatency = ftlpu::hw::kMemGroups + 2;
+constexpr std::size_t kMxmToVxmLatency =
+    ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 1;
+constexpr std::size_t kMxmOutputToVxmLatency =
+    ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 4;
+constexpr std::size_t kProjectionFinalTail =
+    kMxmOutputToVxmLatency + 2;
+constexpr std::size_t kProjectionFinalBlockCycles =
+    kMxmOutputToVxmLatency
+    + kTile - 1
+    + kRopeWriteLatency
+    + 32 / ftlpu::hw::kMemSlicesPerGroup
+    + 1
+    + kActivationLatency;
 constexpr float kAttentionScale = 1.0f / 8.0f;
 constexpr float kCausalMaskValue = -1.0e9f;
 constexpr float kOProjAbsoluteTolerance = 1.0e-1f;
@@ -590,7 +606,9 @@ public:
         });
         icu_.enqueue_mxm(
             mxm,
-            ftlpu::MxmControlInstruction::IW(weight_buffer, weight_column));
+            ftlpu::MxmControlInstruction::IWDirect16(
+                weight_buffer,
+                weight_column));
         advance(mxm_load_[mxm], cycle + 1);
         trace(cycle, cycle + 1, mxm_name(mxm) + ".Load",
             "IW buffer=" + std::to_string(weight_buffer)
@@ -602,7 +620,11 @@ public:
         std::size_t cycle,
         std::size_t activation_stream,
         std::size_t output_stream,
-        std::size_t weight_buffer = 0)
+        std::size_t weight_buffer = 0,
+        std::size_t accumulator_address = 0,
+        std::size_t accumulator_stride = 1,
+        ftlpu::MxmAccumulatorDestination destination =
+            ftlpu::MxmAccumulatorDestination::Stream)
     {
         require_available(mxm_compute_[mxm], cycle, "MXM compute " + std::to_string(mxm));
         pad(mxm_compute_[mxm], cycle, [&](std::size_t count) {
@@ -611,15 +633,54 @@ public:
         icu_.enqueue_mxm(
             mxm,
             ftlpu::MxmControlInstruction::Compute(
-                weight_buffer, activation_stream, output_stream));
+                weight_buffer,
+                activation_stream,
+                output_stream,
+                accumulator_address,
+                accumulator_stride,
+                destination));
         icu_.enqueue_mxm_compute_repeat(mxm, kTile - 1, 1);
         advance(mxm_compute_[mxm], cycle + kTile);
+        const auto* accumulator_state =
+            destination == ftlpu::MxmAccumulatorDestination::Sram
+            ? "dst=sram retain"
+            : "dst=stream+clear";
         trace(cycle, cycle + kTile, mxm_name(mxm) + ".Compute",
             "Compute buffer=" + std::to_string(weight_buffer)
                 + " act=E" + std::to_string(activation_stream)
-                + " out=W" + std::to_string(output_stream));
+                + " out=W" + std::to_string(output_stream)
+                + " acc=" + std::to_string(accumulator_address)
+                + " stride=" + std::to_string(accumulator_stride)
+                + " " + accumulator_state);
         trace(cycle + kTile, cycle + kMxmInputBlockIssueCycles,
             mxm_name(mxm) + ".Tail", "control + datapath drain");
+    }
+
+    void mxm_accumulator_read_at(
+        std::size_t mxm,
+        std::size_t cycle,
+        std::size_t address,
+        std::size_t output_stream,
+        bool clear = true)
+    {
+        require_available(
+            mxm_compute_[mxm], cycle,
+            "MXM accumulator read " + std::to_string(mxm));
+        pad(mxm_compute_[mxm], cycle, [&](std::size_t count) {
+            icu_.enqueue_mxm_compute_nop(mxm, count);
+        });
+        icu_.enqueue_mxm(
+            mxm,
+            ftlpu::MxmControlInstruction::AccumulatorRead(
+                address, output_stream, clear));
+        advance(mxm_compute_[mxm], cycle + 1);
+        trace(
+            cycle,
+            cycle + ftlpu::hw::kTileRows,
+            mxm_name(mxm) + ".AccumulatorRead",
+            "address=" + std::to_string(address)
+                + " out=W" + std::to_string(output_stream)
+                + (clear ? " dst=stream+clear" : " dst=stream retain"));
     }
 
     std::size_t end_cycle() const { return end_cycle_; }
@@ -631,7 +692,20 @@ public:
             throw std::runtime_error("cannot open schedule trace output: " + path);
         }
         output << "start,end,resource,detail\n";
-        for (const auto& event : trace_events_) {
+        auto sorted_events = trace_events_;
+        std::stable_sort(
+            sorted_events.begin(),
+            sorted_events.end(),
+            [](const TraceEvent& lhs, const TraceEvent& rhs) {
+                if (lhs.start != rhs.start) {
+                    return lhs.start < rhs.start;
+                }
+                if (lhs.end != rhs.end) {
+                    return lhs.end < rhs.end;
+                }
+                return lhs.resource < rhs.resource;
+            });
+        for (const auto& event : sorted_events) {
             output << event.start << ',' << event.end << ','
                    << csv_field(event.resource) << ',' << csv_field(event.detail) << '\n';
         }
@@ -646,7 +720,6 @@ private:
         case ftlpu::MemOpcode::ReadWrite: return "ReadWrite";
         case ftlpu::MemOpcode::Gather: return "Gather";
         case ftlpu::MemOpcode::Scatter: return "Scatter";
-        case ftlpu::MemOpcode::Accumulate: return "Accumulate";
         }
         return "Unknown";
     }
@@ -698,11 +771,6 @@ private:
         if (end > start + 1) {
             detail += " count=" + std::to_string(end - start);
             detail += " stride=" + std::to_string(stride);
-        }
-        if (instruction.opcode == ftlpu::MemOpcode::Accumulate) {
-            detail += instruction.accumulator_destination
-                    == ftlpu::MemAccumulatorDestination::Stream
-                ? " dst=stream+clear" : " dst=sram";
         }
         trace(start, end,
             std::string("MEM.") + (hemisphere == 0 ? "E." : "W.")
@@ -1129,21 +1197,20 @@ float read_context(
 
 } // namespace
 
-int main() try
+ftlpu::test::smollm2_layer::PhaseResult
+ftlpu::test::smollm2_layer::run_prefill_attention(
+    ftlpu::TspSliceSystem& system,
+    const std::vector<float>& input,
+    const std::filesystem::path& trace_path)
 {
-    std::vector<float> input(kSeqLen * kHidden);
+    if (input.size() != kSeqLen * kHidden) {
+        throw std::invalid_argument("prefill attention expects X[128,576]");
+    }
     auto max_o_proj_error = 0.0f;
     auto max_o_proj_token = std::size_t {0};
     auto max_o_proj_column = std::size_t {0};
     auto max_o_proj_actual = 0.0f;
     auto max_o_proj_expected = 0.0f;
-    for (std::size_t token = 0; token < kSeqLen; ++token) {
-        for (std::size_t hidden = 0; hidden < kHidden; ++hidden) {
-            input[x_index(token, hidden)] = ftlpu::Fp16::from_float(
-                input_value(token, hidden)).to_float();
-        }
-    }
-
     constexpr std::array<Projection, 3> kProjections {
         Projection::Query, Projection::Key, Projection::Value};
     auto scales = std::array<std::vector<float>, kProjections.size()> {};
@@ -1195,7 +1262,7 @@ int main() try
         }
     }
 
-    auto system = ftlpu::TspSliceSystem {};
+    system.reset_execution_state();
     initialize_inputs(system, input);
     initialize_rope_tables(system);
     initialize_causal_masks(system);
@@ -1266,7 +1333,7 @@ int main() try
                 const auto first_compute = dequant_start + 32;
                 const auto final_reduction = k_block + 1 == kHidden / kTile;
                 const auto compute_block_cycles = final_reduction
-                    ? 2 * kTile : kMxmInputBlockIssueCycles;
+                    ? kProjectionFinalBlockCycles : kMxmInputBlockIssueCycles;
                 for (std::size_t token_block = 0; token_block < kSeqLen / kTile; ++token_block) {
                     for (std::size_t hemisphere_index = 0;
                          hemisphere_index < ftlpu::hw::kHemispheres;
@@ -1289,38 +1356,32 @@ int main() try
                                 1);
                         }
                         const auto destination = k_block + 1 == kHidden / kTile
-                            ? ftlpu::MemAccumulatorDestination::Stream
-                            : ftlpu::MemAccumulatorDestination::Sram;
-                        schedule.mem_repeat_at(
-                            mem_queue(hemisphere, ftlpu::hw::kWestAccumulatorMemSliceBase),
-                            compute_cycle + kMxm0AccumulatorLatency,
-                            ftlpu::MemInstruction::Accumulate(
-                                output_address, ftlpu::StreamId::West(0), destination),
-                            kTile,
-                            1);
-                        schedule.mem_repeat_at(
-                            mem_queue(hemisphere, ftlpu::hw::kEastAccumulatorMemSliceBase),
-                            compute_cycle + kMxm1AccumulatorLatency,
-                            ftlpu::MemInstruction::Accumulate(
-                                output_address, ftlpu::StreamId::West(4), destination),
-                            kTile,
-                            1);
+                            ? ftlpu::MxmAccumulatorDestination::Stream
+                            : ftlpu::MxmAccumulatorDestination::Sram;
                         schedule.mxm_compute_at(
                             ftlpu::InstructionControlUnit::mxm_queue(hemisphere, 0),
-                            compute_cycle, 0, 0);
+                            compute_cycle,
+                            0,
+                            0,
+                            0,
+                            output_address,
+                            1,
+                            destination);
                         schedule.mxm_compute_at(
                             ftlpu::InstructionControlUnit::mxm_queue(hemisphere, 1),
-                            compute_cycle, 2, 4);
+                            compute_cycle,
+                            2,
+                            4,
+                            0,
+                            output_address,
+                            1,
+                            destination);
 
-                        if (destination == ftlpu::MemAccumulatorDestination::Stream) {
-                            constexpr auto kAccumulatorToVxmLatency =
-                                kMxm0AccumulatorLatency
-                                + (ftlpu::hw::kWestAccumulatorMemSliceBase
-                                    / ftlpu::hw::kMemSlicesPerGroup + 1);
+                        if (destination == ftlpu::MxmAccumulatorDestination::Stream) {
                             for (std::size_t token_offset = 0; token_offset < kTile; ++token_offset) {
                                 const auto token = token_block * kTile + token_offset;
                                 const auto vxm_cycle = compute_cycle
-                                    + kAccumulatorToVxmLatency + token_offset;
+                                    + kMxmOutputToVxmLatency + token_offset;
                                 if (projection != Projection::Value) {
                                     for (std::size_t byte = 0; byte < kRopeTableSlices.size(); ++byte) {
                                         const auto slice = kRopeTableSlices[byte];
@@ -1399,7 +1460,7 @@ int main() try
                 }
                 phase_start = first_compute
                     + (kSeqLen / kTile) * compute_block_cycles
-                    + (final_reduction ? 16 : 0);
+                    + (final_reduction ? kProjectionFinalTail : 0);
             }
         }
         phase_markers.emplace_back(
@@ -1537,7 +1598,7 @@ int main() try
         ftlpu::hw::kHemispheres>;
 
     // A wave contains independent query blocks: MXM0 and MXM1 receive their
-    // own Q weights, K replicas, accumulator group, and west output streams.
+    // own Q weights, K replicas, MXM accumulator, and west output streams.
     auto qk_waves = std::vector<QkWave> {};
     const auto add_cross_hemisphere_heads = [&] (
         std::size_t east_head,
@@ -1608,11 +1669,6 @@ int main() try
                 const auto kv_head = work->query_head / (kQueryHeads / kKvHeads);
                 const auto key_slices = work->local_mxm == 0
                     ? kOutputSlices : kKeyReplicaSlices;
-                const auto accumulator_base = work->local_mxm == 0
-                    ? ftlpu::hw::kWestAccumulatorMemSliceBase
-                    : ftlpu::hw::kEastAccumulatorMemSliceBase;
-                const auto accumulator_latency = work->local_mxm == 0
-                    ? kMxm0AccumulatorLatency : kMxm1AccumulatorLatency;
                 const auto activation_stream = work->local_mxm * 2;
                 const auto output_stream = work->local_mxm * 4;
                 const auto global_mxm = ftlpu::InstructionControlUnit::mxm_queue(
@@ -1639,20 +1695,18 @@ int main() try
                                     ftlpu::StreamId::East(activation_stream + byte)),
                                 kTile, 1);
                         }
-                        schedule.mem_repeat_at(
-                            mem_queue(work->hemisphere, accumulator_base),
-                            compute_cycle + accumulator_latency,
-                            ftlpu::MemInstruction::Accumulate(
-                                score_address(
-                                    work->query_head,
-                                    work->query_block,
-                                    key_block * kTile),
-                                ftlpu::StreamId::West(output_stream),
-                                ftlpu::MemAccumulatorDestination::Sram),
-                            kTile, 1);
                         schedule.mxm_compute_at(
-                            global_mxm, compute_cycle, activation_stream, output_stream,
-                            reduction_block);
+                            global_mxm,
+                            compute_cycle,
+                            activation_stream,
+                            output_stream,
+                            reduction_block,
+                            score_address(
+                                work->query_head,
+                                work->query_block,
+                                key_block * kTile),
+                            1,
+                            ftlpu::MxmAccumulatorDestination::Sram);
                     }
                 }
             }
@@ -1664,27 +1718,23 @@ int main() try
 
     // VXM has one 16-ALU lane.  The four MXMs produce score matrices in
     // parallel, then the three recurrent softmax passes drain those matrices
-    // one at a time from their independent accumulator groups.
+    // one at a time from their independent MXM accumulators.
     auto softmax_cycle = phase_start + 16;
     constexpr std::size_t kSoftmaxKeyStride = 1;
     for (const auto& work : completed_qk_works) {
-        const auto accumulator_base = work.local_mxm == 0
-            ? ftlpu::hw::kWestAccumulatorMemSliceBase
-            : ftlpu::hw::kEastAccumulatorMemSliceBase;
+        const auto global_mxm = ftlpu::InstructionControlUnit::mxm_queue(
+            work.hemisphere, work.local_mxm);
         for (std::size_t key = 0; key < kSeqLen; ++key) {
             const auto vxm_cycle = softmax_cycle + key * kSoftmaxKeyStride;
             const auto query_block = work.query_block;
             const auto key_block = key / kTile;
             const auto local_key = key % kTile;
-            for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
-                const auto slice = accumulator_base + byte;
-                schedule.mem_at(
-                    mem_queue(work.hemisphere, slice),
-                    vxm_cycle - west_read_latency(slice),
-                    ftlpu::MemInstruction::Read(
-                        score_address(work.query_head, work.query_block, key),
-                        ftlpu::StreamId::West(byte)));
-            }
+            schedule.mxm_accumulator_read_at(
+                global_mxm,
+                vxm_cycle - kMxmToVxmLatency,
+                score_address(work.query_head, work.query_block, key),
+                0,
+                true);
             auto immediate_mask = std::optional<float> {0.0f};
             if (key_block > query_block) {
                 immediate_mask = kCausalMaskValue;
@@ -1767,7 +1817,7 @@ int main() try
 
     // P3 writes each FP16 probability directly into a 16-stream packed row.
     // Once softmax releases its scratch slices, SXM transposes every P block
-    // into the persistent diagonal layout consumed by the 2-stream replay.
+    // into the persistent diagonal layout consumed by the 16-stream replay.
     auto probability_transpose_ready =
         std::array<std::size_t, ftlpu::hw::kHemispheres> {
             phase_start, phase_start};
@@ -1910,8 +1960,7 @@ int main() try
                         sxm_stream_range(
                             mxm * ftlpu::hw::kMxmLoadStreamsPerCycle,
                             ftlpu::hw::kMxmLoadStreamsPerCycle),
-                        block_diagonal_map(wave),
-                        ftlpu::SxmWeightLayout::MatrixColumns));
+                        block_diagonal_map(wave)));
                 schedule.mxm_load_at(global_mxm, permute_cycle + 1, 0, wave);
             }
             // The next MXM uses a different 16-stream destination. Drain the
@@ -1927,8 +1976,7 @@ int main() try
                         sxm_stream_range(
                             mxm * ftlpu::hw::kMxmLoadStreamsPerCycle,
                             ftlpu::hw::kMxmLoadStreamsPerCycle),
-                        block_diagonal_map(wave),
-                        ftlpu::SxmWeightLayout::MatrixColumns),
+                        block_diagonal_map(wave)),
                     true);
             }
             ready_cycle = std::max(
@@ -1966,52 +2014,27 @@ int main() try
                 }
             }
         }
-        if (key_block == 0) {
-            for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
-                schedule.mem_repeat_at(
-                    mem_queue(
-                        work.destination,
-                        ftlpu::hw::kWestAccumulatorMemSliceBase + byte),
-                    first_compute + kMxm0AccumulatorLatency,
-                    ftlpu::MemInstruction::Write(
-                        context_accumulator_address(
-                            work.query_head, query_block * kTile),
-                        ftlpu::StreamId::West(byte)),
-                    kTile, 1);
-                schedule.mem_repeat_at(
-                    mem_queue(
-                        work.destination,
-                        ftlpu::hw::kEastAccumulatorMemSliceBase + byte),
-                    first_compute + kMxm1AccumulatorLatency,
-                    ftlpu::MemInstruction::Write(
-                        context_accumulator_address(
-                            work.query_head, query_block * kTile),
-                        ftlpu::StreamId::West(4 + byte)),
-                    kTile, 1);
-            }
-        } else {
-            const auto destination = ftlpu::MemAccumulatorDestination::Sram;
-            schedule.mem_repeat_at(
-                mem_queue(work.destination, ftlpu::hw::kWestAccumulatorMemSliceBase),
-                first_compute + kMxm0AccumulatorLatency,
-                ftlpu::MemInstruction::Accumulate(
-                    context_accumulator_address(work.query_head, query_block * kTile),
-                    ftlpu::StreamId::West(0), destination),
-                kTile, 1);
-            schedule.mem_repeat_at(
-                mem_queue(work.destination, ftlpu::hw::kEastAccumulatorMemSliceBase),
-                first_compute + kMxm1AccumulatorLatency,
-                ftlpu::MemInstruction::Accumulate(
-                    context_accumulator_address(work.query_head, query_block * kTile),
-                    ftlpu::StreamId::West(4), destination),
-                kTile, 1);
-        }
+        const auto accumulator_address =
+            context_accumulator_address(
+                work.query_head, query_block * kTile);
         schedule.mxm_compute_at(
             ftlpu::InstructionControlUnit::mxm_queue(work.destination, 0),
-            first_compute, 0, 0);
+            first_compute,
+            0,
+            0,
+            0,
+            accumulator_address,
+            1,
+            ftlpu::MxmAccumulatorDestination::Sram);
         schedule.mxm_compute_at(
             ftlpu::InstructionControlUnit::mxm_queue(work.destination, 1),
-            first_compute, 0, 4);
+            first_compute,
+            0,
+            4,
+            0,
+            accumulator_address,
+            1,
+            ftlpu::MxmAccumulatorDestination::Sram);
         if (key_block + 1 == kSeqLen / kTile) {
             const auto context_read_start = first_compute
                 + kMxm0AccumulatorLatency + kTile + 12;
@@ -2019,24 +2042,20 @@ int main() try
             for (std::size_t offset = 0; offset < kTile; ++offset) {
                 const auto token = query_block * kTile + offset;
                 const auto vxm_cycle = context_read_start + offset;
-                for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
-                    const auto west_slice = ftlpu::hw::kWestAccumulatorMemSliceBase + byte;
-                    const auto east_slice = ftlpu::hw::kEastAccumulatorMemSliceBase + byte;
-                    schedule.mem_at(
-                        mem_queue(work.destination, west_slice),
-                        vxm_cycle - west_read_latency(west_slice),
-                        ftlpu::MemInstruction::Read(
-                            context_accumulator_address(
-                                work.query_head, query_block * kTile + offset),
-                            ftlpu::StreamId::West(byte)));
-                    schedule.mem_at(
-                        mem_queue(work.destination, east_slice),
-                        vxm_cycle - west_read_latency(east_slice),
-                        ftlpu::MemInstruction::Read(
-                            context_accumulator_address(
-                                work.query_head, query_block * kTile + offset),
-                            ftlpu::StreamId::West(4 + byte)));
-                }
+                schedule.mxm_accumulator_read_at(
+                    ftlpu::InstructionControlUnit::mxm_queue(
+                        work.destination, 0),
+                    vxm_cycle - kMxmToVxmLatency,
+                    context_accumulator_address(work.query_head, token),
+                    0,
+                    true);
+                schedule.mxm_accumulator_read_at(
+                    ftlpu::InstructionControlUnit::mxm_queue(
+                        work.destination, 1),
+                    vxm_cycle - kMxmToVxmLatency,
+                    context_accumulator_address(work.query_head, token),
+                    4,
+                    true);
                 schedule.cast_pair_with_duplicate_at(vxm_cycle, work.destination, alu_base);
                 for (std::size_t byte = 0; byte < 4; ++byte) {
                     const auto slice = kContextSlices[byte];
@@ -2266,65 +2285,36 @@ int main() try
                     : kOProjContextStreamBase;
                 const auto destination =
                     reduction_block + 1 == kHidden / kTile
-                    ? ftlpu::MemAccumulatorDestination::Stream
-                    : ftlpu::MemAccumulatorDestination::Sram;
-                if (reduction_block == 0) {
-                    for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
-                        schedule.mem_repeat_at(
-                            mem_queue(output_hemisphere,
-                                ftlpu::hw::kWestAccumulatorMemSliceBase + byte),
-                            compute_cycle + kMxm0AccumulatorLatency,
-                            ftlpu::MemInstruction::Write(
-                                output_accumulator_address(
-                                    output_pair, token_block * kTile),
-                                ftlpu::StreamId::West(byte)),
-                            kTile, 1);
-                        schedule.mem_repeat_at(
-                            mem_queue(output_hemisphere,
-                                ftlpu::hw::kEastAccumulatorMemSliceBase + byte),
-                            compute_cycle + kMxm1AccumulatorLatency,
-                            ftlpu::MemInstruction::Write(
-                                output_accumulator_address(
-                                    output_pair, token_block * kTile),
-                                ftlpu::StreamId::West(4 + byte)),
-                            kTile, 1);
-                    }
-                } else {
-                    schedule.mem_repeat_at(
-                        mem_queue(output_hemisphere,
-                            ftlpu::hw::kWestAccumulatorMemSliceBase),
-                        compute_cycle + kMxm0AccumulatorLatency,
-                        ftlpu::MemInstruction::Accumulate(
-                            output_accumulator_address(
-                                output_pair, token_block * kTile),
-                            ftlpu::StreamId::West(0), destination),
-                        kTile, 1);
-                    schedule.mem_repeat_at(
-                        mem_queue(output_hemisphere,
-                            ftlpu::hw::kEastAccumulatorMemSliceBase),
-                        compute_cycle + kMxm1AccumulatorLatency,
-                        ftlpu::MemInstruction::Accumulate(
-                            output_accumulator_address(
-                                output_pair, token_block * kTile),
-                            ftlpu::StreamId::West(4), destination),
-                        kTile, 1);
-                }
+                    ? ftlpu::MxmAccumulatorDestination::Stream
+                    : ftlpu::MxmAccumulatorDestination::Sram;
+                const auto accumulator_address =
+                    output_accumulator_address(
+                        output_pair, token_block * kTile);
                 schedule.mxm_compute_at(
                         ftlpu::InstructionControlUnit::mxm_queue(
                         output_hemisphere, 0),
-                    compute_cycle, activation_stream, 0);
+                    compute_cycle,
+                    activation_stream,
+                    0,
+                    0,
+                    accumulator_address,
+                    1,
+                    destination);
                 schedule.mxm_compute_at(
                         ftlpu::InstructionControlUnit::mxm_queue(
                         output_hemisphere, 1),
-                    compute_cycle, activation_stream + 2, 4);
-                if (destination == ftlpu::MemAccumulatorDestination::Stream) {
-                    constexpr auto kOutputToVxmLatency = kMxm0AccumulatorLatency
-                        + (ftlpu::hw::kWestAccumulatorMemSliceBase
-                            / ftlpu::hw::kMemSlicesPerGroup + 1);
+                    compute_cycle,
+                    activation_stream + 2,
+                    4,
+                    0,
+                    accumulator_address,
+                    1,
+                    destination);
+                if (destination == ftlpu::MxmAccumulatorDestination::Stream) {
                     for (std::size_t offset = 0; offset < kTile; ++offset) {
                         const auto token = token_block * kTile + offset;
                         const auto vxm_cycle = compute_cycle
-                            + kOutputToVxmLatency + offset;
+                            + kMxmOutputToVxmLatency + offset;
                         schedule.cast_pair_to_at(
                             vxm_cycle, output_hemisphere, kSoftmaxOutputStream,
                             output_hemisphere == ftlpu::Hemisphere::East ? 0 : 8);
@@ -2346,40 +2336,34 @@ int main() try
                 }
                 if (west_output_pair.has_value()) {
                     constexpr auto west_hemisphere = ftlpu::Hemisphere::West;
-                    schedule.mem_repeat_at(
-                        mem_queue(west_hemisphere,
-                            ftlpu::hw::kWestAccumulatorMemSliceBase),
-                        compute_cycle + kMxm0AccumulatorLatency,
-                        ftlpu::MemInstruction::Accumulate(
-                            output_accumulator_address(
-                                *west_output_pair, token_block * kTile),
-                            ftlpu::StreamId::West(0), destination),
-                        kTile, 1);
-                    schedule.mem_repeat_at(
-                        mem_queue(west_hemisphere,
-                            ftlpu::hw::kEastAccumulatorMemSliceBase),
-                        compute_cycle + kMxm1AccumulatorLatency,
-                        ftlpu::MemInstruction::Accumulate(
-                            output_accumulator_address(
-                                *west_output_pair, token_block * kTile),
-                            ftlpu::StreamId::West(4), destination),
-                        kTile, 1);
+                    const auto west_accumulator_address =
+                        output_accumulator_address(
+                            *west_output_pair, token_block * kTile);
                     schedule.mxm_compute_at(
                             ftlpu::InstructionControlUnit::mxm_queue(
                             west_hemisphere, 0),
-                        compute_cycle, 0, 0);
+                        compute_cycle,
+                        0,
+                        0,
+                        0,
+                        west_accumulator_address,
+                        1,
+                        destination);
                     schedule.mxm_compute_at(
                             ftlpu::InstructionControlUnit::mxm_queue(
                             west_hemisphere, 1),
-                        compute_cycle, 2, 4);
-                    if (destination == ftlpu::MemAccumulatorDestination::Stream) {
-                        constexpr auto kOutputToVxmLatency = kMxm0AccumulatorLatency
-                            + (ftlpu::hw::kWestAccumulatorMemSliceBase
-                                / ftlpu::hw::kMemSlicesPerGroup + 1);
+                        compute_cycle,
+                        2,
+                        4,
+                        0,
+                        west_accumulator_address,
+                        1,
+                        destination);
+                    if (destination == ftlpu::MxmAccumulatorDestination::Stream) {
                         for (std::size_t offset = 0; offset < kTile; ++offset) {
                             const auto token = token_block * kTile + offset;
                             const auto vxm_cycle = compute_cycle
-                                + kOutputToVxmLatency + offset;
+                                + kMxmOutputToVxmLatency + offset;
                             schedule.cast_pair_to_at(
                                 vxm_cycle, west_hemisphere, kSoftmaxOutputStream, 8);
                             for (std::size_t byte = 0;
@@ -2407,8 +2391,8 @@ int main() try
     }
 
     phase_markers.emplace_back("o_proj end", schedule.end_cycle() + 16);
-    if (const auto* trace_path = std::getenv("FTLPU_SCHEDULE_TRACE")) {
-        schedule.write_trace_csv(trace_path);
+    if (!trace_path.empty()) {
+        schedule.write_trace_csv(trace_path.string());
     }
     const auto report_schedule = std::getenv("FTLPU_SCHEDULE_REPORT") != nullptr;
     if (report_schedule) {
@@ -2417,12 +2401,6 @@ int main() try
         }
         std::cout << std::flush;
     }
-    if (std::getenv("FTLPU_SCHEDULE_TRACE_ONLY") != nullptr) {
-        std::cout << "SmolLM2 attention schedule trace generated; scheduled_cycles="
-                  << schedule.end_cycle() + 16 << '\n';
-        return 0;
-    }
-
     for (std::size_t cycle = 0; cycle < schedule.end_cycle() + 16; ++cycle) {
         try {
             system.tick({});
@@ -2464,17 +2442,19 @@ int main() try
                         : hi * cos_value + lo * sin_value;
                 }
                 const auto expected_bits = ftlpu::Fp16::from_float(expected).bits();
-                golden_outputs[p][token * width + column] =
-                    ftlpu::Fp16::from_bits(expected_bits).to_float();
                 const auto actual_bits = read_output(system, projection, token, column);
-                if (actual_bits != expected_bits) {
+                const auto actual = ftlpu::Fp16::from_bits(actual_bits).to_float();
+                const auto expected_fp16 =
+                    ftlpu::Fp16::from_bits(expected_bits).to_float();
+                golden_outputs[p][token * width + column] = actual;
+                if (std::fabs(actual - expected_fp16) > 2.0e-3f) {
                     std::cerr << projection_name(projection)
                               << " output mismatch at token=" << token
                               << " column=" << column
-                              << " actual=" << ftlpu::Fp16::from_bits(actual_bits).to_float()
-                              << " expected=" << ftlpu::Fp16::from_bits(expected_bits).to_float()
+                              << " actual=" << actual
+                              << " expected=" << expected_fp16
                               << '\n';
-                    return 1;
+                    throw std::runtime_error("prefill attention hardware mismatch");
                 }
             }
         }
@@ -2527,7 +2507,7 @@ int main() try
                               << " query=" << query_token
                               << " key=" << key_token
                               << " future probability=" << actual << '\n';
-                    return 1;
+                    throw std::runtime_error("prefill attention hardware mismatch");
                 }
                 if (std::fabs(actual - expected) > 2.0e-3f) {
                     std::cerr << "softmax mismatch at head=" << query_head
@@ -2535,7 +2515,7 @@ int main() try
                               << " key=" << key_token
                               << " actual=" << actual
                               << " expected=" << expected << '\n';
-                    return 1;
+                    throw std::runtime_error("prefill attention hardware mismatch");
                 }
             }
         }
@@ -2565,7 +2545,7 @@ int main() try
                               << " dimension=" << dimension
                               << " primary=" << actual
                               << " duplicate=" << duplicate << '\n';
-                    return 1;
+                    throw std::runtime_error("prefill attention hardware mismatch");
                 }
                 if (std::fabs(actual - expected) > 5.0e-3f) {
                     std::cerr << "context mismatch at head=" << query_head
@@ -2573,7 +2553,7 @@ int main() try
                               << " dimension=" << dimension
                               << " actual=" << actual
                               << " expected=" << expected << '\n';
-                    return 1;
+                    throw std::runtime_error("prefill attention hardware mismatch");
                 }
             }
         }
@@ -2604,13 +2584,43 @@ int main() try
                   << " actual=" << max_o_proj_actual
                   << " expected=" << max_o_proj_expected
                   << " error=" << max_o_proj_error << '\n';
-        return 1;
+        throw std::runtime_error("prefill attention hardware mismatch");
     }
 
+    auto output = std::vector<float>(kSeqLen * kHidden);
+    for (std::size_t token = 0; token < kSeqLen; ++token) {
+        for (std::size_t column = 0; column < kHidden; ++column) {
+            output[x_index(token, column)] =
+                read_attention_output(system, token, column);
+        }
+    }
+    return {
+        std::move(output),
+        golden_outputs[static_cast<std::size_t>(Projection::Key)],
+        golden_outputs[static_cast<std::size_t>(Projection::Value)],
+        schedule.end_cycle() + 16};
+}
+
+#ifndef FTLPU_SMOLLM2_LAYER_PHASE_ONLY
+int main() try
+{
+    auto input = std::vector<float>(kSeqLen * kHidden);
+    for (std::size_t token = 0; token < kSeqLen; ++token) {
+        for (std::size_t hidden = 0; hidden < kHidden; ++hidden) {
+            input[x_index(token, hidden)] = ftlpu::Fp16::from_float(
+                input_value(token, hidden)).to_float();
+        }
+    }
+    auto system = ftlpu::TspSliceSystem {};
+    const auto* trace_env = std::getenv("FTLPU_SCHEDULE_TRACE");
+    const auto result = ftlpu::test::smollm2_layer::run_prefill_attention(
+        system,
+        input,
+        trace_env == nullptr ? std::filesystem::path {} : trace_env);
     std::cout << "SmolLM2 causal attention passed: Q/K/V projection, RoPE, masked "
               << "scaled softmax, GQA context, and o_proj[128,576] verified; "
               << "causal_mask_vectors=" << kTile - 1 << "; scheduled_cycles="
-              << schedule.end_cycle() + 16 << '\n';
+              << result.cycles << '\n';
     return 0;
 }
 catch (const std::exception& ex)
@@ -2618,3 +2628,4 @@ catch (const std::exception& ex)
     std::cerr << "SmolLM2 attention test failed: " << ex.what() << '\n';
     return 1;
 }
+#endif

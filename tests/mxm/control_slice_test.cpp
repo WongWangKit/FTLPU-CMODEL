@@ -26,10 +26,29 @@ ftlpu::MxmControlSlice::WeightInput row_input(std::size_t tile, std::size_t supe
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
         for (std::size_t stream = 0; stream < ftlpu::hw::kMxmSupercellColumns; ++stream) {
             input[lane][stream] = ftlpu::MxmArray::Supercell::InputWord {
-                static_cast<float>(base + lane + stream),
+                ftlpu::Fp16::from_float(
+                    static_cast<float>(base + lane + stream)).bits(),
                 stream + 1 == ftlpu::hw::kMxmSupercellColumns,
             };
         }
+    }
+    return input;
+}
+
+ftlpu::MxmControlSlice::WeightInput column_input(
+    std::size_t tile,
+    std::size_t supercell_column,
+    std::size_t inner_column)
+{
+    auto input = ftlpu::MxmControlSlice::WeightInput {};
+    const auto base = static_cast<std::uint8_t>(
+        (tile * ftlpu::hw::kMxmSupercellsPerPlane + supercell_column) & 0xff);
+    for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+        input[lane][inner_column] = ftlpu::MxmArray::Supercell::InputWord {
+            ftlpu::Fp16::from_float(
+                static_cast<float>(base + lane + inner_column)).bits(),
+            lane + 1 == ftlpu::hw::kLanesPerTile,
+        };
     }
     return input;
 }
@@ -51,7 +70,7 @@ int main()
     constexpr std::size_t kBuffer = 1;
 
     for (std::size_t column = 0; column < ftlpu::hw::kMxmSupercellsPerPlane; ++column) {
-        control.issue_south(ftlpu::MxmControlInstruction::IW(
+        control.issue_south(ftlpu::MxmControlInstruction::IWDirect16(
             kBuffer, ftlpu::hw::kMxmSupercellsPerPlane - 1 - column));
     }
 
@@ -79,11 +98,60 @@ int main()
         }
     }
 
+    auto column_array = std::make_unique<ftlpu::MxmArray>();
+    ftlpu::MxmControlSlice column_control(*column_array);
+    constexpr std::size_t kTargetSupercellColumn = 2;
+    for (std::size_t inner_column = 0;
+         inner_column < ftlpu::hw::kMxmSupercellColumns;
+         ++inner_column) {
+        column_control.issue_south(ftlpu::MxmControlInstruction::IWColumnDirect16(
+            kBuffer, kTargetSupercellColumn, inner_column));
+    }
+    auto column_provider = [&column_control](std::size_t tile) {
+        const auto inner_column = column_control.cycle() - tile;
+        return column_input(
+            tile, kTargetSupercellColumn, inner_column);
+    };
+    for (std::size_t cycle = 0;
+         cycle < ftlpu::hw::kMxmSupercellColumns
+             + ftlpu::hw::kMxmSupercellsPerPlane - 1;
+         ++cycle) {
+        column_control.tick(log, column_provider);
+    }
+    for (std::size_t tile = 0; tile < ftlpu::hw::kMxmSupercellsPerPlane; ++tile) {
+        if (!require(
+                column_control.loaded_cell(
+                    kBuffer, tile, kTargetSupercellColumn),
+                "eight column IW instructions should complete the supercell")) {
+            return 1;
+        }
+        for (std::size_t inner_column = 0;
+             inner_column < ftlpu::hw::kMxmSupercellColumns;
+             ++inner_column) {
+            if (!require(
+                    column_array->weight(
+                        kBuffer,
+                        tile,
+                        kTargetSupercellColumn,
+                        5,
+                        inner_column)
+                        == expected_weight(
+                            tile,
+                            kTargetSupercellColumn,
+                            5,
+                            inner_column),
+                    "column IW weight mismatch")) {
+                return 1;
+            }
+        }
+    }
+
     auto parallel_array = std::make_unique<ftlpu::MxmArray>();
     ftlpu::MxmControlSlice parallel_control(*parallel_array);
     constexpr std::size_t kActivationStream = 7;
     constexpr std::size_t kOutputStream = 20;
-    parallel_control.issue_south(ftlpu::MxmControlInstruction::IW(kBuffer));
+    parallel_control.issue_south(
+        ftlpu::MxmControlInstruction::IWDirect16(kBuffer));
     parallel_control.issue_south(ftlpu::MxmControlInstruction::Compute(kBuffer, kActivationStream, kOutputStream));
     parallel_control.set_weight_input(0, row_input(0, 0));
     parallel_control.tick(log);
@@ -101,6 +169,12 @@ int main()
     if (!require(
             parallel_control.output_stream_base(0).value_or(99) == kOutputStream,
             "Compute should carry output stream base")) {
+        return 1;
+    }
+    if (!require(
+            parallel_control.compute_pulse(0)->compute_mode
+                == ftlpu::MxmComputeMode::Vector,
+            "legacy Compute should default to vector mode")) {
         return 1;
     }
     if (!require(
@@ -141,6 +215,76 @@ int main()
         caught = true;
     }
     if (!require(caught, "expected bad weight column to throw")) {
+        return 1;
+    }
+
+    caught = false;
+    try {
+        control.issue_south(ftlpu::MxmControlInstruction::IWColumn(
+            0, 0, ftlpu::hw::kMxmSupercellColumns));
+    } catch (const std::out_of_range&) {
+        caught = true;
+    }
+    if (!require(caught, "expected bad inner weight column to throw")) {
+        return 1;
+    }
+
+    const auto block_stream_compute =
+        ftlpu::MxmControlInstruction::Compute(
+            0,
+            0,
+            0,
+            0,
+            1,
+            ftlpu::MxmAccumulatorDestination::Stream,
+            ftlpu::MxmDataFormat::BFloat16,
+            ftlpu::MxmComputeMode::Block8,
+            true);
+    if (!require(
+            block_stream_compute.accumulator_destination
+                    == ftlpu::MxmAccumulatorDestination::Stream
+                && block_stream_compute.accumulator_clear,
+            "Block8 Compute should support clear-on-stream output")) {
+        return 1;
+    }
+
+    caught = false;
+    try {
+        static_cast<void>(ftlpu::MxmControlInstruction::Compute(
+            0,
+            ftlpu::hw::kEastStreams
+                - ftlpu::hw::kMxmActivationStreamsPerBlock + 1,
+            0,
+            0,
+            1,
+            ftlpu::MxmAccumulatorDestination::Sram,
+            ftlpu::MxmDataFormat::Float16,
+            ftlpu::MxmComputeMode::Block8));
+    } catch (const std::out_of_range&) {
+        caught = true;
+    }
+    if (!require(
+            caught,
+            "Block8 Compute should require 16 consecutive activation streams")) {
+        return 1;
+    }
+
+    auto read_array = std::make_unique<ftlpu::MxmArray>();
+    ftlpu::MxmControlSlice read_control(*read_array);
+    read_control.issue_south(
+        ftlpu::MxmControlInstruction::AccumulatorRead(
+            17,
+            0,
+            false,
+            ftlpu::MxmComputeMode::Block8));
+    read_control.tick(log);
+    const auto block_read = read_control.accumulator_read_pulse(0);
+    if (!require(
+            block_read.has_value()
+                && block_read->compute_mode == ftlpu::MxmComputeMode::Block8
+                && block_read->address == 17
+                && !block_read->clear,
+            "Block8 accumulator read pulse should retain its mode and controls")) {
         return 1;
     }
 

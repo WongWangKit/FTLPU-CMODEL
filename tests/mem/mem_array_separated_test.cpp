@@ -90,6 +90,52 @@ int main()
     {
         ftlpu::StreamRegisterFabric fabric(ftlpu::hw::kMemBoundaryStreamRegisterColumns);
         ftlpu::MemArrayModel mem;
+        constexpr std::size_t kWriteAddress = 160;
+        constexpr std::size_t kWriteIssueCycle = 3;
+        constexpr std::size_t kLastTile = ftlpu::hw::kTileRows - 1;
+
+        for (std::size_t cycle = 0;
+             cycle < kWriteIssueCycle + ftlpu::hw::kTileRows;
+             ++cycle) {
+            if (cycle == kWriteIssueCycle) {
+                mem.enqueue_instruction(
+                    kMemSlice,
+                    ftlpu::MemInstruction::WriteTap(kWriteAddress, stream));
+            }
+
+            fabric.begin_cycle();
+            mem.evaluate(fabric);
+            fabric.stage_linear_links();
+            if (cycle < ftlpu::hw::kTileRows) {
+                ftlpu::StreamPayloadSegment16 bytes{};
+                for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+                    bytes[lane] = static_cast<std::uint8_t>(0x60 + cycle * 8 + lane);
+                }
+                fabric.stage_payload_segment(
+                    0, cycle, stream, bytes, cycle, "tap source");
+            }
+            fabric.commit_cycle();
+        }
+
+        for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+            for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+                assert(mem.sram_lane_byte(kMemSlice, tile, kWriteAddress, lane)
+                    == static_cast<std::uint8_t>(0x60 + tile * 8 + lane));
+            }
+        }
+
+        const auto inputColumn =
+            mem.ports().input_column(kMemSlice, stream.direction());
+        const auto& forwarded =
+            fabric.cell(inputColumn + 1, kLastTile, 0, stream);
+        assert(forwarded.valid);
+        assert(forwarded.data
+            == static_cast<std::uint8_t>(0x60 + kLastTile * 8));
+    }
+
+    {
+        ftlpu::StreamRegisterFabric fabric(ftlpu::hw::kMemBoundaryStreamRegisterColumns);
+        ftlpu::MemArrayModel mem;
         constexpr std::size_t kReadAddress = 192;
         constexpr std::size_t kWriteAddress = 193;
         constexpr std::size_t kIssueCycle = 3;
@@ -149,6 +195,61 @@ int main()
             rejected_same_address = true;
         }
         assert(rejected_same_address);
+    }
+
+    {
+        ftlpu::StreamRegisterFabric fabric(ftlpu::hw::kMemBoundaryStreamRegisterColumns);
+        ftlpu::MemArrayModel mem;
+        constexpr std::size_t kReadAddress = 224;
+        constexpr std::size_t kWriteAddress = 225;
+        constexpr std::size_t kIssueCycle = 3;
+        constexpr std::size_t kLastTile = ftlpu::hw::kTileRows - 1;
+        const auto read_stream = ftlpu::StreamId::East(12);
+        const auto write_stream = ftlpu::StreamId::East(13);
+
+        for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+            for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+                mem.set_sram_lane_byte(kMemSlice, tile, kReadAddress, lane,
+                    static_cast<std::uint8_t>(0xc0 + tile * 8 + lane));
+            }
+        }
+
+        for (std::size_t cycle = 0;
+             cycle < kIssueCycle + ftlpu::hw::kTileRows;
+             ++cycle) {
+            if (cycle == kIssueCycle) {
+                mem.enqueue_instruction(kMemSlice,
+                    ftlpu::MemInstruction::ReadWriteTap(kReadAddress,
+                        read_stream, kWriteAddress, write_stream));
+            }
+            fabric.begin_cycle();
+            mem.evaluate(fabric);
+            fabric.stage_linear_links();
+            if (cycle < ftlpu::hw::kTileRows) {
+                ftlpu::StreamPayloadSegment16 bytes{};
+                for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+                    bytes[lane] = static_cast<std::uint8_t>(
+                        0x80 + cycle * 8 + lane);
+                }
+                fabric.stage_payload_segment(0, cycle, write_stream,
+                    bytes, cycle, "dual-port tap source");
+            }
+            fabric.commit_cycle();
+        }
+
+        for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+            for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+                assert(mem.sram_lane_byte(kMemSlice, tile, kWriteAddress, lane)
+                    == static_cast<std::uint8_t>(0x80 + tile * 8 + lane));
+            }
+        }
+        const auto inputColumn =
+            mem.ports().input_column(kMemSlice, write_stream.direction());
+        const auto& forwarded =
+            fabric.cell(inputColumn + 1, kLastTile, 0, write_stream);
+        assert(forwarded.valid);
+        assert(forwarded.data
+            == static_cast<std::uint8_t>(0x80 + kLastTile * 8));
     }
 
     return 0;

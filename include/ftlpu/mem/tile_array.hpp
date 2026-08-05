@@ -50,6 +50,15 @@ public:
         pending_consumptions_.clear();
     }
 
+    void reset_execution_state()
+    {
+        cycle_ = 0;
+        mem_.reset_execution_state();
+        streams_.reset();
+        pending_inputs_.clear();
+        pending_consumptions_.clear();
+    }
+
     std::size_t cycle() const noexcept
     {
         return cycle_;
@@ -249,7 +258,7 @@ private:
         // Functional slices read current SR state, consume operands and stage
         // results into next state.  No functional slice can see another
         // slice's same-cycle result through an SR boundary.
-        mem_.evaluate(streams_);
+        mem_.evaluate(streams_, os != nullptr);
         if (sxm != nullptr) {
             sxm->evaluate(streams_);
         }
@@ -294,7 +303,7 @@ private:
         StreamId stream{StreamId::East(0)};
     };
 
-    static void print_hex_bytes(std::ostream& os, const StreamPayloadSegment16& bytes)
+    static void print_hex_bytes(std::ostream& os, const StreamPayloadTileSegment& bytes)
     {
         const auto old_flags = os.flags();
         const auto old_fill = os.fill();
@@ -310,7 +319,7 @@ private:
         std::size_t tile,
         std::size_t reg_column,
         StreamId stream,
-        StreamPayloadSegment16& bytes) const
+        StreamPayloadTileSegment& bytes) const
     {
         bool any = false;
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
@@ -333,7 +342,7 @@ private:
                 bool any = false;
 
                 for (std::size_t stream = 0; stream < hw::kEastStreams; ++stream) {
-                    StreamPayloadSegment16 bytes{};
+                    StreamPayloadTileSegment bytes{};
                     if (collect_stream_bytes(tile, reg, StreamId::East(stream), bytes)) {
                         any = true;
                         os << " E" << stream << "=0x";
@@ -342,7 +351,7 @@ private:
                 }
 
                 for (std::size_t stream = 0; stream < hw::kWestStreams; ++stream) {
-                    StreamPayloadSegment16 bytes{};
+                    StreamPayloadTileSegment bytes{};
                     if (collect_stream_bytes(tile, reg, StreamId::West(stream), bytes)) {
                         any = true;
                         os << " W" << stream << "=0x";

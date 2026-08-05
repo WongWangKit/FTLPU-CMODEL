@@ -1,9 +1,10 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
-#include "ftlpu/core/fp16.hpp"
 #include "ftlpu/core/stream.hpp"
+#include "ftlpu/mxm/data_format.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -19,20 +20,43 @@ enum class MxmOpcode {
     IW,
 };
 
+enum class MxmWeightLoadMode {
+    Supercell,
+    Column,
+};
+
 struct MxmInstruction {
     MxmOpcode opcode{MxmOpcode::IW};
     std::size_t weight_buffer{0};
+    MxmWeightLoadMode weight_load_mode{MxmWeightLoadMode::Supercell};
+    std::size_t weight_inner_column{0};
 
     static MxmInstruction IW(std::size_t weight_buffer = 0)
     {
-        return MxmInstruction {MxmOpcode::IW, weight_buffer};
+        return MxmInstruction {
+            MxmOpcode::IW,
+            weight_buffer,
+            MxmWeightLoadMode::Supercell,
+            0};
+    }
+
+    static MxmInstruction IWColumn(
+        std::size_t weight_buffer,
+        std::size_t inner_column)
+    {
+        return MxmInstruction {
+            MxmOpcode::IW,
+            weight_buffer,
+            MxmWeightLoadMode::Column,
+            inner_column};
     }
 };
 
 class MxmSupercell {
 public:
     using Weight = float;
-    using InputWord = StreamWord<Weight>;
+    using WeightBits = std::uint16_t;
+    using InputWord = StreamWord<WeightBits>;
     using InputSlot = std::optional<InputWord>;
     using InputLane = std::array<InputSlot, hw::kMxmSupercellColumns>;
     using InputVector = std::array<InputLane, hw::kLanesPerTile>;
@@ -40,7 +64,7 @@ public:
     using ActivationSlot = std::optional<ActivationWord>;
     using ActivationVector = std::array<ActivationSlot, hw::kLanesPerTile>;
     using ActivationData = std::array<float, hw::kLanesPerTile>;
-    using WeightRow = std::array<Weight, hw::kMxmSupercellColumns>;
+    using WeightRow = std::array<WeightBits, hw::kMxmSupercellColumns>;
     using WeightMatrix = std::array<WeightRow, hw::kMxmSupercellRows>;
     static constexpr std::size_t kWeightBuffers = 2;
 
@@ -52,6 +76,7 @@ public:
     struct ActivationPayload {
         ActivationData data{};
         std::size_t weight_buffer{0};
+        MxmDataFormat data_format{MxmDataFormat::Float16};
     };
 
     void reset()
@@ -62,6 +87,9 @@ public:
             }
         }
         weight_buffer_valid_.fill(false);
+        for (auto& columns : weight_column_valid_) {
+            columns.fill(false);
+        }
         input_ = {};
         activation_input_.reset();
         for (auto& stage : activation_stages_) {
@@ -76,13 +104,17 @@ public:
         input_ = input;
     }
 
-    void set_activation_input(ActivationVector input, std::size_t weight_buffer = 0)
+    void set_activation_input(
+        ActivationVector input,
+        std::size_t weight_buffer = 0,
+        MxmDataFormat data_format = MxmDataFormat::Float16)
     {
         check_buffer(weight_buffer);
         if (activation_input_.has_value()) {
             throw std::logic_error("MXM supercell already has an activation input for this cycle");
         }
-        activation_input_ = ActivationPayload {decode_activation(input), weight_buffer};
+        activation_input_ = ActivationPayload {
+            decode_activation(input), weight_buffer, data_format};
     }
 
     void issue(MxmInstruction instruction)
@@ -93,18 +125,53 @@ public:
         instruction_ = instruction;
     }
 
-    const WeightMatrix& weight_buffer(std::size_t buffer) const
+    const WeightMatrix& weight_buffer_bits(std::size_t buffer) const
     {
         check_buffer(buffer);
         return weight_buffers_[buffer];
     }
 
+    const WeightMatrix& weight_buffer_bits() const
+    {
+        return weight_buffer_bits(0);
+    }
+
+    const WeightMatrix& weight_buffer(std::size_t buffer) const
+    {
+        return weight_buffer_bits(buffer);
+    }
+
     const WeightMatrix& weight_buffer() const
     {
-        return weight_buffer(0);
+        return weight_buffer_bits();
     }
 
     Weight weight(std::size_t buffer, std::size_t row, std::size_t column) const
+    {
+        check_buffer(buffer);
+        check_row(row);
+        check_column(column);
+        return decode_mxm_16bit(
+            weight_buffers_[buffer][row][column],
+            MxmDataFormat::Float16);
+    }
+
+    Weight weight(
+        std::size_t buffer,
+        std::size_t row,
+        std::size_t column,
+        MxmDataFormat format) const
+    {
+        check_buffer(buffer);
+        check_row(row);
+        check_column(column);
+        return decode_mxm_16bit(weight_buffers_[buffer][row][column], format);
+    }
+
+    WeightBits weight_bits(
+        std::size_t buffer,
+        std::size_t row,
+        std::size_t column) const
     {
         check_buffer(buffer);
         check_row(row);
@@ -227,7 +294,9 @@ private:
         float sum = 0.0f;
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             sum += activation.data[lane]
-                * static_cast<float>(weight_buffers_[activation.weight_buffer][lane][column]);
+                * decode_mxm_16bit(
+                    weight_buffers_[activation.weight_buffer][lane][column],
+                    activation.data_format);
         }
         return sum;
     }
@@ -250,16 +319,40 @@ private:
 
     void write_buffer_from_input()
     {
+        const auto buffer = instruction_->weight_buffer;
+        if (instruction_->weight_load_mode == MxmWeightLoadMode::Column) {
+            const auto column = instruction_->weight_inner_column;
+            check_column(column);
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                if (!input_[lane][column].has_value()) {
+                    throw std::logic_error(
+                        "MXM column IW requires both weight streams on every lane");
+                }
+                weight_buffers_[buffer][lane][column]
+                    = input_[lane][column]->data;
+            }
+            weight_column_valid_[buffer][column] = true;
+            weight_buffer_valid_[buffer] = std::all_of(
+                weight_column_valid_[buffer].begin(),
+                weight_column_valid_[buffer].end(),
+                [](bool valid) { return valid; });
+            return;
+        }
+        if (instruction_->weight_load_mode != MxmWeightLoadMode::Supercell) {
+            throw std::invalid_argument("MXM weight load mode is invalid");
+        }
+
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             for (std::size_t column = 0; column < hw::kMxmSupercellColumns; ++column) {
                 if (!input_[lane][column].has_value()) {
                     throw std::logic_error("MXM IW requires every weight stream on every lane to be valid");
                 }
-                weight_buffers_[instruction_->weight_buffer][lane][column]
-                    = Fp16::from_float(input_[lane][column]->data).to_float();
+                weight_buffers_[buffer][lane][column]
+                    = input_[lane][column]->data;
             }
         }
-        weight_buffer_valid_[instruction_->weight_buffer] = true;
+        weight_column_valid_[buffer].fill(true);
+        weight_buffer_valid_[buffer] = true;
     }
 
     static void print_matrix_hex(std::ostream& os, const WeightMatrix& matrix)
@@ -268,8 +361,8 @@ private:
         const auto old_fill = os.fill();
         os << std::hex << std::setfill('0');
         for (const auto& row : matrix) {
-            for (const auto value : row) {
-                os << std::setw(4) << static_cast<unsigned>(Fp16::from_float(value).bits());
+            for (const auto bits : row) {
+                os << std::setw(4) << static_cast<unsigned>(bits);
             }
         }
         os.flags(old_flags);
@@ -282,6 +375,9 @@ private:
     std::array<std::optional<ActivationPayload>, hw::kMxmSupercellColumns> activation_stages_{};
     std::vector<ComputeResult> outputs_{};
     std::optional<MxmInstruction> instruction_{};
+    std::array<
+        std::array<bool, hw::kMxmSupercellColumns>,
+        kWeightBuffers> weight_column_valid_{};
     std::array<bool, kWeightBuffers> weight_buffer_valid_{};
 };
 

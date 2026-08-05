@@ -100,7 +100,7 @@ inline std::size_t sram_byte_address(
 }
 
 // Compatibility aliases for existing examples.  New code should use the
-// MEM-specific names so that 44 MEM slices/12 MEM boundaries are not mistaken
+// MEM-specific names so that MEM slices/boundaries are not mistaken
 // for the complete functional-slice/SR topology.
 using TileCoord = MemTileCoord;
 using SliceGroupCoord = MemGroupCoord;

@@ -29,7 +29,7 @@ schedule still passes the complete numerical golden check.
 
 P3 writes packed x16 directly, removing the former two-slice output and VXM
 repacking pass. SXM converts P to its persistent replay layout immediately after
-softmax, so P x V contains only the 2-stream replay. V packing is not a separate
+softmax, so P x V contains only the 16-stream parallel replay. V packing is not a separate
 phase: V projection writes the packed MEM layout as its architectural output.
 
 ### Current SXM and IW dataflow
@@ -110,8 +110,8 @@ The current schedule replicates K into the released RoPE-table slices, so local
 MXM0 reads original K and local MXM1 reads the replica. The stream fabric now
 supports same-cycle broadcast consumption, so a future schedule can remove this
 replica when both MXMs consume the same register column and stream. The two
-arrays accumulate independent complete score tiles in their separate MEM
-accumulator groups.
+arrays accumulate independent complete score tiles in their own MXM
+accumulators.
 
 The recurrent softmax max/sum state and its temporary SRAM streams remain
 serial, so VXM drains the completed score tiles one at a time. This preserves
@@ -220,8 +220,8 @@ run at `II=4` with one buffer. Changing the Permute destination, such as MXM0
 ### 8. Completed: safe accumulator lifetimes
 
 Context accumulator addresses include the query head. During o_proj, each
-hemisphere has only one active output pair, and its two local MXMs use the two
-physical accumulator groups. The final reduction emits each sum with
+hemisphere has only one active output pair, and its two local MXMs use their
+independent accumulators. The final reduction emits each sum with
 `stream+clear` before that hemisphere reuses the row for its next pair.
 
 ## SRAM and Stream Allocation
@@ -236,14 +236,14 @@ by lifetime and concurrent access:
 - reserve separate stream ranges for simultaneously active VXM passes;
 - model every MEM slice as a one-operation-per-cycle resource.
 
-This bank-aware allocation should be part of offline instruction generation,
+This slice-aware allocation should be part of offline instruction generation,
 not a collection of additional fixed delay constants.
 
 ## Recommended Implementation Order
 
 1. Add a resource-calendar/list scheduler and remove the global `phase_start` barrier.
 2. Overlap completed P-block transposes with the remaining QK/softmax tail.
-3. Add bank-aware MEM and stream-ID allocation.
+3. Add slice-aware MEM and stream-ID allocation.
 4. Pipeline softmax passes with separate stream ranges.
 5. Partition remaining shared VXM ALUs by hemisphere.
 6. Coalesce adjacent same-route SXM blocks at `II=4`; insert a three-cycle
@@ -255,7 +255,7 @@ Hardware cycle optimization and simulator wall-time optimization are separate.
 After schedule work, the CModel can be accelerated by storing NOP spans as
 `next_issue_cycle` values, fast-forwarding globally idle intervals, and scanning
 only active SR streams and units. These changes preserve cycle results while
-avoiding a full 44-slice, 64-stream state scan on every empty tick.
+avoiding a full 52-slice, 64-stream state scan on every empty tick.
 
 ## Exact Schedule Visualization
 
@@ -278,9 +278,10 @@ The SVG expands eight representative windows:
   drain before changing the Permute destination from MXM0 to MXM1;
 - cycles 63108..63420: the first o_proj reduction window.
 
-Accumulator lanes are placed immediately after their hemisphere's MXMs. Purple
-bars retain a partial sum in SRAM; red bars send the final sum to the stream and
-clear the accumulator.
+Accumulator state is encoded directly on the owning MXM Compute or
+AccumulatorRead bar rather than drawn as a separate resource lane. Purple bars
+retain a sum in the MXM accumulator SRAM; red bars send the sum to the stream
+and clear the accumulator.
 
 Each bar is generated from an actual scheduled instruction rather than a
 hand-authored phase estimate. Hovering a bar exposes its exact queue and operand
