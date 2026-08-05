@@ -454,7 +454,9 @@ private:
             "MEM Write");
 
         if (input.segment_valid(tile, stream.index())) {
-            const auto segment = input.consume_segment(tile, stream.index());
+            const auto segment = instruction.preserve_stream
+                ? input.peek_segment(tile, stream.index())
+                : input.consume_segment(tile, stream.index());
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                 bytes[lane] = segment[lane].data;
             }
@@ -494,7 +496,13 @@ private:
             fabric,
             mem_slice,
             tile,
-            MemInstruction::Write(instruction.write_address, instruction.write_stream_id()));
+            instruction.preserve_stream
+                ? MemInstruction::WriteTap(
+                      instruction.write_address,
+                      instruction.write_stream_id())
+                : MemInstruction::Write(
+                      instruction.write_address,
+                      instruction.write_stream_id()));
     }
 
     void advance_instructions()

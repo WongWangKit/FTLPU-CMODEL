@@ -404,6 +404,21 @@ Decode Q 使用两条 stream 的 `IWColumn` 写入一个 weight column，随后�
 独立测试已经验证的 FP16 边界。扩展到 SmolLM2 的 576/1536/9-head 配置时，只需
 把相同 tile 映射平铺到四个 MXM。
 
+Decode control 显式编码两种 layout：
+
+- `Linear1x16` 保留原有的 16-supercell 串行 reduction。每个 tile 从 8 条 BF16
+  stream 装入 4 个独立 activation vector，一个 wave 经过 16 个 cell stage 后
+  产生 8 个输出。
+- `Native4x4` 按物理结构使用 4 列、每列 4 个 cell。每个 tile 从 2 条 BF16
+  stream 装入一个 8 元素 activation vector，并广播到该行 4 个 cell。权重第
+  `c` 列比第 0 列晚 `c` 拍发射，因此 `(tile,column)` 在
+  `launch + tile + column` 执行；4 条 8-output 纵向 reduction 在 7 个 stage 后
+  同时完成。
+
+`mxm_decode_layout_comparison_test` 用两种 layout 执行同一个 `K=128, N=32`
+GEMV，并要求 BF16 输出逐 bit 相同。完整 decode FFN 使用 `Native4x4`；decode
+attention 在 RoPE/cache resident layout 整体迁移前继续使用 `Linear1x16`。
+
 ### 多 executable 边界
 
 `TspSliceSystem::reset_execution_state()` 在 command binary 之间建立干净的

@@ -33,6 +33,8 @@ struct MemInstruction {
     // Second SRAM port fields, used only by ReadWrite.
     std::size_t write_address{0};
     std::size_t write_stream{0};
+    // A tap write observes the stream without suppressing passive forwarding.
+    bool preserve_stream{false};
 
     StreamId stream_id() const
     {
@@ -62,6 +64,19 @@ struct MemInstruction {
     static MemInstruction Write(std::size_t address, std::size_t packed_stream)
     {
         return Write(address, StreamId::from_packed(packed_stream));
+    }
+
+    static MemInstruction WriteTap(std::size_t address, StreamId stream)
+    {
+        auto instruction = Write(address, stream);
+        instruction.preserve_stream = true;
+        return instruction;
+    }
+
+    static MemInstruction WriteTap(
+        std::size_t address, std::size_t packed_stream)
+    {
+        return WriteTap(address, StreamId::from_packed(packed_stream));
     }
 
     StreamId write_stream_id() const
@@ -94,6 +109,29 @@ struct MemInstruction {
             read_address,
             StreamId::from_packed(read_packed_stream),
             write_address,
+            StreamId::from_packed(write_packed_stream));
+    }
+
+    static MemInstruction ReadWriteTap(
+        std::size_t read_address,
+        StreamId read_stream,
+        std::size_t write_address,
+        StreamId write_stream)
+    {
+        auto instruction = ReadWrite(
+            read_address, read_stream, write_address, write_stream);
+        instruction.preserve_stream = true;
+        return instruction;
+    }
+
+    static MemInstruction ReadWriteTap(
+        std::size_t read_address,
+        std::size_t read_packed_stream,
+        std::size_t write_address,
+        std::size_t write_packed_stream)
+    {
+        return ReadWriteTap(read_address,
+            StreamId::from_packed(read_packed_stream), write_address,
             StreamId::from_packed(write_packed_stream));
     }
 

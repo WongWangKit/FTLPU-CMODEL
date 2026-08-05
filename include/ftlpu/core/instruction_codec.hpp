@@ -20,10 +20,12 @@ namespace isa {
 
 // FTLPU hardware ISA encoding for the modeled slice.
 //
-// MEM instruction word (31b normally, 47b for ReadWrite):
+// MEM instruction word (32b normally, 48b for ReadWrite):
 //   [2:0] opcode, [8:3] stream, [14:9] map stream,
 //   [30:15] slice-local SRAM row address.
-//   ReadWrite repurposes [14:9] as write stream and [46:31] as write address.
+//   ReadWrite repurposes [14:9] as write stream and [46:31] as write address;
+//   [47] preserves the write stream for passive forwarding. Plain Write uses
+//   [31] for the same preserve behavior.
 // MXM control 49b:
 //   IW      [1:0] opcode, [2] weight buffer, [4:3] weight column,
 //           [5] column mode, [8:6] inner column, [9] Direct16 input mode.
@@ -36,7 +38,8 @@ namespace isa {
 //   AccRead [1:0] opcode, [14:9] output stream base,
 //           [27:15] accumulator address, [28] clear.
 //   Decode  [1:0] opcode, [2] activation buffer, [3] operation,
-//           [9:4] activation/output stream base, [25] data format.
+//           [9:4] activation/output stream base, [25] data format,
+//           [28] layout (0=Linear1x16, 1=Native4x4).
 // VXM ALU 4x32b:
 //   word0 [4:0] opcode, [7:5] lhs kind, [13:8] lhs index,
 //         [16:14] rhs kind, [22:17] rhs index, [24:23] cast target,
@@ -161,6 +164,11 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
         static_cast<std::uint64_t>(instruction.address),
         kAddressMask,
         "MEM row address does not fit encoded instruction");
+    if (instruction.preserve_stream
+        && instruction.opcode != MemOpcode::Write
+        && instruction.opcode != MemOpcode::ReadWrite)
+        throw std::logic_error(
+            "only MEM Write or ReadWrite can preserve its input stream");
 
     if (instruction.opcode == MemOpcode::ReadWrite) {
         if (instruction.address == instruction.write_address) {
@@ -178,7 +186,8 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
             | (static_cast<std::uint64_t>(instruction.stream) << 3)
             | (static_cast<std::uint64_t>(instruction.write_stream) << 9)
             | (static_cast<std::uint64_t>(instruction.address) << 15)
-            | (static_cast<std::uint64_t>(instruction.write_address) << 31);
+            | (static_cast<std::uint64_t>(instruction.write_address) << 31)
+            | (static_cast<std::uint64_t>(instruction.preserve_stream) << 47);
     }
     detail::require_unsigned_fit(
         static_cast<std::uint64_t>(instruction.map_stream),
@@ -188,7 +197,8 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
         static_cast<std::uint64_t>(instruction.opcode)
         | (static_cast<std::uint64_t>(instruction.stream) << 3)
         | (static_cast<std::uint64_t>(instruction.map_stream) << 9)
-        | (static_cast<std::uint64_t>(instruction.address) << 15));
+        | (static_cast<std::uint64_t>(instruction.address) << 15)
+        | (static_cast<std::uint64_t>(instruction.preserve_stream) << 31));
 }
 
 inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
@@ -197,21 +207,32 @@ inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
     const auto stream = static_cast<std::size_t>(detail::low_bits(word, 3, 0x3f));
     const auto address = static_cast<std::size_t>(detail::low_bits(word, 15, 0xffff));
     if (opcode == MemOpcode::ReadWrite) {
-        constexpr std::uint64_t kReadWriteMask = (std::uint64_t {1} << 47) - 1;
+        constexpr std::uint64_t kReadWriteMask = (std::uint64_t {1} << 48) - 1;
         detail::require_reserved_zero(
             word, kReadWriteMask, "encoded MEM ReadWrite instruction has non-zero reserved bits");
         const auto write_stream = static_cast<std::size_t>(detail::low_bits(word, 9, 0x3f));
         const auto write_address = static_cast<std::size_t>(detail::low_bits(word, 31, 0xffff));
-        return MemInstruction::ReadWrite(address, stream, write_address, write_stream);
+        const bool preserve_stream = detail::low_bits(word, 47, 0x1) != 0;
+        return preserve_stream
+            ? MemInstruction::ReadWriteTap(
+                  address, stream, write_address, write_stream)
+            : MemInstruction::ReadWrite(
+                  address, stream, write_address, write_stream);
     }
-    constexpr std::uint64_t kUsedMask = 0x7fffffffull;
+    constexpr std::uint64_t kUsedMask = 0xffffffffull;
     detail::require_reserved_zero(word, kUsedMask, "encoded MEM instruction has non-zero reserved bits");
     const auto map_stream = static_cast<std::size_t>(detail::low_bits(word, 9, 0x3f));
+    const bool preserve_stream = detail::low_bits(word, 31, 0x1) != 0;
+    if (preserve_stream && opcode != MemOpcode::Write)
+        throw std::logic_error(
+            "only encoded MEM Write can preserve its input stream");
     switch (opcode) {
     case MemOpcode::Read:
         return MemInstruction::Read(address, stream);
     case MemOpcode::Write:
-        return MemInstruction::Write(address, stream);
+        return preserve_stream
+            ? MemInstruction::WriteTap(address, stream)
+            : MemInstruction::Write(address, stream);
     case MemOpcode::ReadWrite:
         break;
     case MemOpcode::Gather:
@@ -317,6 +338,7 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
                    instruction.accumulator_output_format) << 48);
     case MxmControlOpcode::Decode:
         MxmControlInstruction::check_data_format(instruction.data_format);
+        MxmControlInstruction::check_decode_layout(instruction.decode_layout);
         detail::require_unsigned_fit(
             instruction.weight_buffer,
             kWeightBufferMask,
@@ -324,7 +346,8 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
         if (instruction.decode_operation
             == MxmDecodeOperation::LoadActivation) {
             MxmControlInstruction::check_decode_activation_stream_base(
-                instruction.activation_stream_base);
+                instruction.activation_stream_base,
+                instruction.decode_layout);
             detail::require_unsigned_fit(
                 instruction.activation_stream_base,
                 kActivationStreamMask,
@@ -336,7 +359,9 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
                 | (static_cast<std::uint64_t>(
                        instruction.activation_stream_base) << 4)
                 | (static_cast<std::uint64_t>(
-                       instruction.data_format) << 25);
+                       instruction.data_format) << 25)
+                | (static_cast<std::uint64_t>(
+                       instruction.decode_layout) << 28);
         }
         if (instruction.decode_operation
             != MxmDecodeOperation::StreamCompute) {
@@ -370,7 +395,9 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
             | (static_cast<std::uint64_t>(
                    instruction.accumulator_destination) << 26)
             | (static_cast<std::uint64_t>(
-                   !instruction.accumulator_clear) << 27);
+                   !instruction.accumulator_clear) << 27)
+            | (static_cast<std::uint64_t>(
+                   instruction.decode_layout) << 28);
     case MxmControlOpcode::AccumulatorRead:
         MxmControlInstruction::check_compute_mode(instruction.compute_mode);
         MxmControlInstruction::check_accumulator_read_stream_base(
@@ -462,19 +489,23 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
             static_cast<std::size_t>((word >> 4) & 0x3fu);
         const auto data_format =
             static_cast<MxmDataFormat>((word >> 25) & 0x1u);
+        const auto decode_layout =
+            static_cast<MxmDecodeLayout>((word >> 28) & 0x1u);
         if (operation == MxmDecodeOperation::LoadActivation) {
             detail::require_reserved_zero(
                 word,
-                (std::uint64_t {1} << 25) | 0x3ffu,
+                (std::uint64_t {1} << 28)
+                    | (std::uint64_t {1} << 25) | 0x3ffu,
                 "encoded MXM DecodeLoadActivation instruction has non-zero reserved bits");
             return MxmControlInstruction::DecodeLoadActivation(
                 activation_buffer,
                 decode_stream_base,
-                data_format);
+                data_format,
+                decode_layout);
         }
         detail::require_reserved_zero(
             word,
-            (std::uint64_t {1} << 28) - 1,
+            (std::uint64_t {1} << 29) - 1,
             "encoded MXM DecodeStreamCompute instruction has non-zero reserved bits");
         return MxmControlInstruction::DecodeStreamCompute(
             activation_buffer,
@@ -484,7 +515,8 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
             static_cast<std::size_t>((word >> 23) & 0x3u),
             static_cast<MxmAccumulatorDestination>(
                 (word >> 26) & 0x1u),
-            ((word >> 27) & 0x1u) == 0);
+            ((word >> 27) & 0x1u) == 0,
+            decode_layout);
     }
     }
     throw std::logic_error("unknown encoded MXM opcode");

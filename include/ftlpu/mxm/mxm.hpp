@@ -138,6 +138,7 @@ public:
             stage.reset();
         }
         decode_streaming_active_ = false;
+        decode_layout_ = MxmDecodeLayout::Linear1x16;
         compute_active_by_buffer_.fill(false);
         last_outputs_.clear();
         active_ = false;
@@ -301,8 +302,12 @@ public:
     }
 
 private:
-    static constexpr std::size_t kDecodeStages =
-        hw::kMxmSupercellsPerPlane * hw::kMxmSupercellsPerPlane;
+    static constexpr std::size_t kLinearDecodeStages =
+        hw::kTileRows * hw::kMxmSupercellsPerPlane;
+    static constexpr std::size_t kNativeDecodeStages =
+        hw::kTileRows + hw::kMxmSupercellsPerPlane - 1;
+    static constexpr std::size_t kDecodePipelineStages =
+        kLinearDecodeStages;
 
     using DecodeWeightCell = std::array<
         std::array<float, hw::kMxmSupercellColumns>,
@@ -317,13 +322,14 @@ private:
         MxmAccumulatorDestination accumulator_destination{
             MxmAccumulatorDestination::Stream};
         bool accumulator_clear{true};
-        std::array<float, hw::kMxmSupercellColumns> partial{};
+        MxmDecodeLayout layout{MxmDecodeLayout::Linear1x16};
+        std::array<ResultValues, hw::kMxmSupercellsPerPlane> partial{};
     };
 
     struct DecodeCompletedOutput {
         std::uint64_t wave_id{0};
         std::size_t output_stream_base{0};
-        std::array<float, hw::kMxmSupercellColumns> values{};
+        std::array<ResultValues, hw::kMxmSupercellsPerPlane> values{};
     };
 
     struct ActivationEvent {
@@ -448,8 +454,10 @@ private:
         for (std::size_t column = 0;
              column < hw::kMxmSupercellsPerPlane;
              ++column) {
-            const auto stream_base =
-                pulse.stream_base + column * sizeof(std::uint16_t);
+            const auto stream_base = pulse.stream_base
+                + (pulse.layout == MxmDecodeLayout::Linear1x16
+                    ? column * sizeof(std::uint16_t)
+                    : 0);
             for (std::size_t lane = 0;
                  lane < hw::kLanesPerTile;
                  ++lane) {
@@ -461,7 +469,7 @@ private:
                     throw std::logic_error(
                         "MXM decode activation load reached tile "
                         + std::to_string(tile)
-                        + " before all four local activation vectors arrived");
+                        + " before its activation vector arrived");
                 }
                 const auto bits = static_cast<std::uint16_t>(
                     static_cast<std::uint16_t>(low->data)
@@ -477,9 +485,11 @@ private:
             *os << "  MXM" << mxm_id
                 << " decode activation load tile=" << tile
                 << " buffer=" << pulse.activation_buffer
-                << " cells=0.."
+                << (pulse.layout == MxmDecodeLayout::Native4x4
+                        ? " broadcast_cells=0.."
+                        : " cells=0..")
                 << hw::kMxmSupercellsPerPlane - 1
-                << " elements_per_cell=" << hw::kLanesPerTile
+                << " elements=" << hw::kLanesPerTile
                 << '\n';
         }
     }
@@ -494,6 +504,10 @@ private:
             throw std::logic_error(
                 "MXM decode launched more than one wave in a cycle");
         }
+        if (decode_streaming_active_ && pulse.layout != decode_layout_) {
+            throw std::logic_error(
+                "MXM decode layout cannot change while waves are in flight");
+        }
         decode_launch_ = DecodeWaveState {
             pulse.wave_id,
             pulse.activation_buffer,
@@ -503,11 +517,17 @@ private:
             pulse.accumulator_column,
             pulse.accumulator_destination,
             pulse.accumulator_clear,
+            pulse.layout,
             {}};
         decode_streaming_active_ = true;
+        decode_layout_ = pulse.layout;
         if (os != nullptr) {
             *os << "  MXM" << mxm_id
                 << " decode launch wave=" << pulse.wave_id
+                << " layout="
+                << (pulse.layout == MxmDecodeLayout::Native4x4
+                        ? "4x4"
+                        : "1x16")
                 << " scale=" << pulse.dequant.scale()
                 << '\n';
         }
@@ -515,13 +535,12 @@ private:
 
     std::optional<DecodeWeightCell> consume_decode_weight_cell(
         TileArrayModel& mem,
-        std::size_t stage,
+        std::size_t tile,
+        std::size_t column,
         std::optional<MxmDequantInstruction> dequant)
     {
         constexpr auto kTargetSreg =
             hw::kMxmBoundaryStreamRegisterColumn;
-        const auto tile = stage % hw::kTileRows;
-        const auto column = stage / hw::kTileRows;
         const auto stream_base =
             column * hw::kMxmInt8LoadStreamsPerCycle;
         bool any = false;
@@ -545,8 +564,30 @@ private:
             return std::nullopt;
         }
         if (!all) {
+            auto missing = std::string {};
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                for (std::size_t output_lane = 0;
+                     output_lane < hw::kMxmSupercellColumns;
+                     ++output_lane) {
+                    if (!mem.east_register(
+                            tile,
+                            lane,
+                            kTargetSreg,
+                            stream_base + output_lane).has_value()) {
+                        missing = " lane=" + std::to_string(lane)
+                            + " stream="
+                            + std::to_string(stream_base + output_lane);
+                        break;
+                    }
+                }
+                if (!missing.empty()) {
+                    break;
+                }
+            }
             throw std::logic_error(
-                "MXM decode diamond weight block is only partially valid");
+                "MXM decode diamond weight block is only partially valid"
+                " tile=" + std::to_string(tile)
+                + " column=" + std::to_string(column) + missing);
         }
 
         auto quantized = MxmWeightInput {};
@@ -598,40 +639,66 @@ private:
     void execute_decode_stage(
         TileArrayModel& mem,
         DecodeWaveState& state,
-        std::size_t stage)
+        std::size_t stage,
+        std::ostream* os = nullptr)
     {
-        const auto tile = stage % hw::kTileRows;
-        const auto column = stage / hw::kTileRows;
-        const auto weights = consume_decode_weight_cell(
-            mem, stage, state.dequant);
-        if (!weights.has_value()) {
-            throw std::logic_error(
-                "MXM decode partial sum reached a stage before its diamond weight arrived");
-        }
-        for (std::size_t lane = 0;
-             lane < hw::kLanesPerTile;
-             ++lane) {
-            if (!decode_activation_valid_[state.activation_buffer]
-                                         [tile][column][lane]) {
+        const auto execute_cell = [&](std::size_t tile,
+                                      std::size_t column,
+                                      std::size_t partial_column) {
+            const auto weights = consume_decode_weight_cell(
+                mem, tile, column, state.dequant);
+            if (!weights.has_value()) {
                 throw std::logic_error(
-                    "MXM decode stage used an unloaded local activation vector");
+                    "MXM decode partial sum reached a row before its streamed weight arrived");
             }
-        }
-        for (std::size_t output_lane = 0;
-             output_lane < hw::kMxmSupercellColumns;
-             ++output_lane) {
-            auto partial = 0.0f;
             for (std::size_t lane = 0;
                  lane < hw::kLanesPerTile;
                  ++lane) {
-                partial +=
-                    decode_activation_buffers_[state.activation_buffer]
-                                              [tile][column][lane]
-                    * (*weights)[lane][output_lane];
+                if (!decode_activation_valid_[state.activation_buffer]
+                                             [tile][column][lane]) {
+                    throw std::logic_error(
+                        "MXM decode stage used an unloaded broadcast activation vector");
+                }
             }
-            state.partial[output_lane] += partial;
+            for (std::size_t output_lane = 0;
+                 output_lane < hw::kMxmSupercellColumns;
+                 ++output_lane) {
+                auto partial = 0.0f;
+                for (std::size_t lane = 0;
+                     lane < hw::kLanesPerTile;
+                     ++lane) {
+                    partial +=
+                        decode_activation_buffers_[state.activation_buffer]
+                                                  [tile][column][lane]
+                        * (*weights)[lane][output_lane];
+                }
+                state.partial[partial_column][output_lane] += partial;
+            }
+            last_computing_[tile][column] = true;
+            if (os != nullptr) {
+                *os << "  decode wave=" << state.wave_id
+                    << " stage=" << stage
+                    << " cell=(" << tile << ',' << column << ')'
+                    << " partial0=" << state.partial[partial_column][0]
+                    << '\n';
+            }
+        };
+
+        if (state.layout == MxmDecodeLayout::Linear1x16) {
+            execute_cell(
+                stage % hw::kTileRows,
+                stage / hw::kTileRows,
+                0);
+            return;
         }
-        last_computing_[tile][column] = true;
+
+        for (std::size_t column = 0;
+             column < hw::kMxmSupercellsPerPlane;
+             ++column) {
+            if (stage >= column && stage - column < hw::kTileRows) {
+                execute_cell(stage - column, column, column);
+            }
+        }
     }
 
     void advance_decode_pipeline(
@@ -641,43 +708,69 @@ private:
     {
         auto next = std::array<
             std::optional<DecodeWaveState>,
-            kDecodeStages> {};
+            kDecodePipelineStages> {};
         auto completed = std::optional<DecodeCompletedOutput> {};
-        auto consumed_weights = std::array<bool, kDecodeStages> {};
 
         if (decode_launch_.has_value()) {
             auto state = *decode_launch_;
-            execute_decode_stage(mem, state, 0);
-            consumed_weights[0] = true;
+            execute_decode_stage(mem, state, 0, os);
             next[0] = std::move(state);
         }
         decode_launch_.reset();
 
-        for (std::size_t stage = 1; stage < kDecodeStages; ++stage) {
+        for (std::size_t stage = 1;
+             stage < kDecodePipelineStages;
+             ++stage) {
             if (!decode_stages_[stage - 1].has_value()) {
                 continue;
             }
             auto state = *decode_stages_[stage - 1];
-            execute_decode_stage(mem, state, stage);
-            consumed_weights[stage] = true;
-            if (stage + 1 == kDecodeStages) {
+            execute_decode_stage(mem, state, stage, os);
+            const auto stage_count = state.layout
+                    == MxmDecodeLayout::Native4x4
+                ? kNativeDecodeStages
+                : kLinearDecodeStages;
+            if (stage + 1 == stage_count) {
                 completed = DecodeCompletedOutput {
                     state.wave_id,
                     state.output_stream_base,
-                    state.partial};
-                accumulator_.accumulate(
-                    state.accumulator_address,
-                    state.accumulator_column,
-                    state.partial);
+                    {}};
+                const auto segment_count = state.layout
+                        == MxmDecodeLayout::Native4x4
+                    ? hw::kMxmSupercellsPerPlane
+                    : std::size_t {1};
+                for (std::size_t column = 0;
+                     column < segment_count;
+                     ++column) {
+                    const auto linear_segment =
+                        state.accumulator_column + column;
+                    const auto address = state.accumulator_address
+                        + linear_segment / hw::kMxmSupercellsPerPlane;
+                    const auto segment =
+                        linear_segment % hw::kMxmSupercellsPerPlane;
+                    accumulator_.accumulate(
+                        address, segment, state.partial[column]);
+                }
                 if (state.accumulator_destination
                     == MxmAccumulatorDestination::Stream) {
-                    completed->values = accumulator_.read(
-                        state.accumulator_address,
-                        state.accumulator_column);
-                    if (state.accumulator_clear) {
-                        accumulator_.clear_segment(
-                            state.accumulator_address,
-                            state.accumulator_column);
+                    for (std::size_t column = 0;
+                         column < segment_count;
+                         ++column) {
+                        const auto linear_segment =
+                            state.accumulator_column + column;
+                        const auto address = state.accumulator_address
+                            + linear_segment / hw::kMxmSupercellsPerPlane;
+                        const auto segment =
+                            linear_segment % hw::kMxmSupercellsPerPlane;
+                        const auto output_tile = state.layout
+                                == MxmDecodeLayout::Native4x4
+                            ? column
+                            : hw::kTileRows - 1;
+                        completed->values[output_tile] =
+                            accumulator_.read(address, segment);
+                        if (state.accumulator_clear) {
+                            accumulator_.clear_segment(address, segment);
+                        }
                     }
                 } else {
                     completed.reset();
@@ -685,7 +778,7 @@ private:
                 if (os != nullptr) {
                     *os << "  MXM" << mxm_id
                         << " decode complete wave=" << state.wave_id
-                        << " after " << kDecodeStages
+                        << " after " << stage_count
                         << " stages\n";
                 }
             } else {
@@ -693,21 +786,14 @@ private:
             }
         }
 
-        if (decode_streaming_active_) {
-            for (std::size_t stage = 0;
-                 stage < kDecodeStages;
-                 ++stage) {
-                if (!consumed_weights[stage]) {
-                    static_cast<void>(consume_decode_weight_cell(
-                        mem, stage, std::nullopt));
-                }
-            }
-        }
         decode_stages_ = std::move(next);
         decode_streaming_active_ = std::any_of(
             decode_stages_.begin(),
             decode_stages_.end(),
             [](const auto& stage) { return stage.has_value(); });
+        if (!decode_streaming_active_) {
+            decode_layout_ = MxmDecodeLayout::Linear1x16;
+        }
         advance_decode_output_pipeline(mem, std::move(completed));
     }
 
@@ -732,9 +818,7 @@ private:
             for (std::size_t lane = 0;
                  lane < hw::kMxmSupercellColumns;
                  ++lane) {
-                const auto value = tile + 1 == hw::kTileRows
-                    ? output.values[lane]
-                    : 0.0f;
+                const auto value = output.values[tile][lane];
                 const auto raw = Bf16::from_float(value).bits();
                 for (std::size_t byte = 0;
                      byte < sizeof(std::uint16_t);
@@ -1068,13 +1152,14 @@ private:
         kWeightBuffers>
         decode_activation_valid_{};
     std::optional<DecodeWaveState> decode_launch_{};
-    std::array<std::optional<DecodeWaveState>, kDecodeStages>
+    std::array<std::optional<DecodeWaveState>, kDecodePipelineStages>
         decode_stages_{};
     std::array<
         std::optional<DecodeCompletedOutput>,
         hw::kTileRows>
         decode_output_pipeline_{};
     bool decode_streaming_active_{false};
+    MxmDecodeLayout decode_layout_{MxmDecodeLayout::Linear1x16};
     MxmControlSlice control_;
     bool active_{false};
     std::array<std::array<std::deque<ActivationEvent>, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>

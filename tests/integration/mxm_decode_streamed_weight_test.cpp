@@ -17,22 +17,21 @@ constexpr std::size_t kOutputAddress = 96;
 constexpr std::size_t kActivationCycle = 20;
 constexpr std::size_t kComputeCycle = 30;
 constexpr float kScale = 0.125f;
-constexpr std::array<std::size_t, 8> kActivationSlices {
-    44, 45, 46, 47, 48, 49, 50, 51};
+constexpr std::array<std::size_t, 2> kActivationSlices {50, 51};
 constexpr std::array<std::size_t, 2> kOutputSlices {40, 41};
 
 static_assert(ftlpu::hw::kMxmRows == 32);
 static_assert(ftlpu::hw::kEastStreams == 32);
 static_assert(ftlpu::hw::kMxmSupercellsPerPlane == 4);
 constexpr std::size_t kDecodeStages =
-    ftlpu::hw::kTileRows * ftlpu::hw::kMxmSupercellsPerPlane;
+    ftlpu::hw::kTileRows
+    + ftlpu::hw::kMxmSupercellsPerPlane - 1;
 constexpr std::size_t kDecodeK =
-    kDecodeStages * ftlpu::hw::kLanesPerTile;
+    ftlpu::hw::kTileRows * ftlpu::hw::kLanesPerTile;
 constexpr std::size_t kDecodeN =
-    ftlpu::hw::kMxmSupercellsPerPlane
-    * ftlpu::hw::kMxmSupercellColumns;
+    ftlpu::hw::kMxmColumns;
 constexpr std::size_t kOutputBlocks =
-    kDecodeN / ftlpu::hw::kMxmSupercellColumns;
+    kDecodeN / ftlpu::hw::kMxmColumns;
 constexpr std::size_t kWeightWaves = kOutputBlocks;
 
 std::size_t east_latency(std::size_t slice)
@@ -127,26 +126,17 @@ void initialize(ftlpu::TspSliceSystem& system)
 {
     for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-            for (std::size_t column = 0;
-                 column < ftlpu::hw::kMxmSupercellsPerPlane;
-                 ++column) {
-                const auto stage =
-                    column * ftlpu::hw::kTileRows + tile;
-                const auto k = stage * ftlpu::hw::kLanesPerTile + lane;
-                const auto activation =
-                    ftlpu::Bf16::from_float(activation_value(k)).bits();
+            const auto k = tile * ftlpu::hw::kLanesPerTile + lane;
+            const auto activation =
+                ftlpu::Bf16::from_float(activation_value(k)).bits();
+            for (std::size_t byte = 0; byte < kActivationSlices.size(); ++byte) {
                 system.initialize_mem_sram_lane_byte(
-                    kActivationSlices[column * 2],
+                    kActivationSlices[byte],
                     tile,
                     kActivationAddress,
                     lane,
-                    static_cast<std::uint8_t>(activation & 0xffu));
-                system.initialize_mem_sram_lane_byte(
-                    kActivationSlices[column * 2 + 1],
-                    tile,
-                    kActivationAddress,
-                    lane,
-                    static_cast<std::uint8_t>(activation >> 8));
+                    static_cast<std::uint8_t>(
+                        (activation >> (byte * 8)) & 0xffu));
             }
 
             for (std::size_t output_block = 0;
@@ -159,14 +149,13 @@ void initialize(ftlpu::TspSliceSystem& system)
                         stream / ftlpu::hw::kMxmSupercellColumns;
                     const auto output_lane =
                         stream % ftlpu::hw::kMxmSupercellColumns;
-                    const auto stage =
-                        column * ftlpu::hw::kTileRows + tile;
-                    const auto k =
-                        stage * ftlpu::hw::kLanesPerTile + lane;
+                    const auto weight_k =
+                        tile * ftlpu::hw::kLanesPerTile + lane;
                     const auto output =
-                        output_block * ftlpu::hw::kMxmSupercellColumns
+                        output_block * ftlpu::hw::kMxmColumns
+                        + column * ftlpu::hw::kMxmSupercellColumns
                         + output_lane;
-                    const auto quantized = quantized_weight(k, output);
+                    const auto quantized = quantized_weight(weight_k, output);
                     system.initialize_mem_sram_lane_byte(
                         stream,
                         tile,
@@ -182,7 +171,7 @@ void initialize(ftlpu::TspSliceSystem& system)
 ftlpu::Bf16 reference(std::size_t output)
 {
     float sum = 0.0f;
-    for (std::size_t stage = 0; stage < kDecodeStages; ++stage) {
+    for (std::size_t stage = 0; stage < ftlpu::hw::kTileRows; ++stage) {
         float partial = 0.0f;
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
             const auto k = stage * ftlpu::hw::kLanesPerTile + lane;
@@ -209,7 +198,11 @@ void program(Schedule& schedule)
     }
     schedule.load_at(
         kActivationCycle,
-        ftlpu::MxmControlInstruction::DecodeLoadActivation());
+        ftlpu::MxmControlInstruction::DecodeLoadActivation(
+            0,
+            0,
+            ftlpu::MxmDataFormat::BFloat16,
+            ftlpu::MxmDecodeLayout::Native4x4));
 
     for (std::size_t column = 0;
          column < ftlpu::hw::kMxmSupercellsPerPlane;
@@ -217,9 +210,7 @@ void program(Schedule& schedule)
         for (std::size_t output_block = 0;
              output_block < kWeightWaves;
              ++output_block) {
-            const auto cycle =
-                kComputeCycle + output_block
-                + column * ftlpu::hw::kTileRows;
+            const auto cycle = kComputeCycle + output_block + column;
             for (std::size_t output_lane = 0;
                  output_lane < ftlpu::hw::kMxmSupercellColumns;
                  ++output_lane) {
@@ -244,11 +235,18 @@ void program(Schedule& schedule)
         schedule.compute_at(
             cycle,
             ftlpu::MxmControlInstruction::DecodeStreamCompute(
-                0, 0, ftlpu::MxmDataFormat::BFloat16));
+                0,
+                0,
+                ftlpu::MxmDataFormat::BFloat16,
+                0,
+                0,
+                ftlpu::MxmAccumulatorDestination::Stream,
+                true,
+                ftlpu::MxmDecodeLayout::Native4x4));
     }
 
     for (std::size_t output_block = 0;
-         output_block < ftlpu::hw::kMxmSupercellsPerPlane;
+         output_block < kOutputBlocks;
          ++output_block) {
         for (std::size_t stream = 0;
              stream < kOutputSlices.size();
@@ -268,18 +266,19 @@ void program(Schedule& schedule)
 bool verify(const ftlpu::TspSliceSystem& system)
 {
     for (std::size_t output = 0; output < kDecodeN; ++output) {
-        const auto output_block =
-            output / ftlpu::hw::kMxmSupercellColumns;
+        const auto output_block = output / ftlpu::hw::kMxmColumns;
+        const auto output_tile =
+            (output % ftlpu::hw::kMxmColumns)
+            / ftlpu::hw::kMxmSupercellColumns;
         const auto lane = output % ftlpu::hw::kMxmSupercellColumns;
-        constexpr auto kOutputTile = ftlpu::hw::kTileRows - 1;
         const auto low = system.read_mem_sram_lane_byte(
             kOutputSlices[0],
-            kOutputTile,
+            output_tile,
             kOutputAddress + output_block,
             lane);
         const auto high = system.read_mem_sram_lane_byte(
             kOutputSlices[1],
-            kOutputTile,
+            output_tile,
             kOutputAddress + output_block,
             lane);
         const auto actual = ftlpu::Bf16::from_bits(
@@ -305,7 +304,8 @@ try {
     std::filesystem::create_directories(log_dir);
     auto icu_log = std::ofstream(log_dir / "icu.log", std::ios::trunc);
     auto mem_log = std::ofstream(log_dir / "mem.log", std::ios::trunc);
-    if (!icu_log || !mem_log) {
+    auto mxm_log = std::ofstream(log_dir / "mxm.log", std::ios::trunc);
+    if (!icu_log || !mem_log || !mxm_log) {
         throw std::runtime_error("cannot open decode streamed-weight logs");
     }
 
@@ -317,12 +317,15 @@ try {
         system.tick({
             .icu = &icu_log,
             .mem = &mem_log,
+            .mxm = &mxm_log,
+            .mxm_log_tile = 0,
         });
     }
     if (!verify(system)) return 1;
-    std::cout << "MXM decode streamed-weight passed: K=128 N=32, "
-                 "16 local activation[8] buffers, 32 INT8 streams, "
-                 "diamond weights, 16-stage partial-sum pipeline, "
+    std::cout << "MXM decode streamed-weight passed: K=32 N=32, "
+                 "4 activation[8] vectors broadcast across columns, "
+                 "32 INT8 streams, tile+column diamond weights, "
+                 "four parallel 4-stage partial-sum chains in a 7-cycle wave, "
                  "INT8 to BF16 dequant "
                  "and BF16 MAC; logs=" << log_dir.string() << '\n';
     return 0;

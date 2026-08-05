@@ -215,6 +215,7 @@ private:
     void end_cycle_phase()
     {
         require_phase(CyclePhase::MemSxmCommitted, "ending cycle");
+        icu_.advance_barrier_events();
         ++cycle_;
         phase_ = CyclePhase::Idle;
     }

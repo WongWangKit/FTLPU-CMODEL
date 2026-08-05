@@ -1,45 +1,66 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <stdexcept>
+#include <string>
 
 namespace ftlpu {
 
-enum class IcuOpcode {
-    Dispatch,
-    Nop,
-    Repeat,
-    Sync,
-    Notify,
+// Fail-fast error for a statically scheduled program that exceeds a modeled
+// finite resource or requests an impossible overlap.
+class StaticScheduleError : public std::logic_error {
+public:
+    explicit StaticScheduleError(const std::string& message)
+        : std::logic_error(message)
+    {
+    }
 };
 
-struct IcuInstruction {
-    IcuOpcode opcode{IcuOpcode::Dispatch};
-    std::size_t repeat_count{1};
-    std::size_t repeat_interval{1};
+enum class IcuControlOpcode : std::uint8_t {
+    Nop = 1,
+    Repeat = 2,
+    Sync = 3,
+    Notify = 4,
+};
 
-    static IcuInstruction Dispatch()
+struct IcuRepeat {
+    std::size_t count{0};
+    std::size_t interval{1};
+    std::int64_t address_stride{0};
+};
+
+struct IcuControlInstruction {
+    IcuControlOpcode opcode{IcuControlOpcode::Nop};
+    std::size_t count{0};
+    std::size_t interval{1};
+    std::int64_t address_stride{0};
+
+    static constexpr IcuControlInstruction Nop(std::size_t cycles) noexcept
     {
-        return IcuInstruction{IcuOpcode::Dispatch, 0, 0};
+        return IcuControlInstruction {IcuControlOpcode::Nop, cycles};
     }
 
-    static IcuInstruction Nop(std::size_t count)
+    static constexpr IcuControlInstruction Repeat(
+        std::size_t count,
+        std::size_t interval = 1,
+        std::int64_t address_stride = 0) noexcept
     {
-        return IcuInstruction{IcuOpcode::Nop, count, 0};
+        return IcuControlInstruction {
+            IcuControlOpcode::Repeat,
+            count,
+            interval,
+            address_stride};
     }
 
-    static IcuInstruction Repeat(std::size_t count, std::size_t interval = 1)
+    static constexpr IcuControlInstruction Sync() noexcept
     {
-        return IcuInstruction{IcuOpcode::Repeat, count, interval};
+        return IcuControlInstruction {IcuControlOpcode::Sync};
     }
 
-    static IcuInstruction Sync()
+    static constexpr IcuControlInstruction Notify() noexcept
     {
-        return IcuInstruction{IcuOpcode::Sync, 0, 0};
-    }
-
-    static IcuInstruction Notify()
-    {
-        return IcuInstruction{IcuOpcode::Notify, 0, 0};
+        return IcuControlInstruction {IcuControlOpcode::Notify};
     }
 };
 

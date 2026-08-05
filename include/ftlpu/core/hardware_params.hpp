@@ -79,6 +79,27 @@ constexpr std::size_t kMxmBlockAccumulatorBytes =
 
 constexpr std::size_t kSxmConcurrentStreamOps = 16;
 
+// Distributed ICU geometry. Every functional queue owns local instruction
+// memory and a finite prefetch IQ; instruction fetch never consumes MEM/SR
+// bandwidth.
+constexpr std::size_t kIcuFetchLatencyCycles = 1;
+constexpr std::size_t kIcuBarrierLatencyCycles = 35;
+constexpr std::size_t kIcuVxmInstructionBits = 96;
+constexpr std::size_t kIcuMemInstructionBits = 96;
+constexpr std::size_t kIcuMxmInstructionBits = 128;
+constexpr std::size_t kIcuSxmInstructionBits = 96;
+constexpr std::size_t kIcuVxmImemDepth = 32768;
+constexpr std::size_t kIcuDistributedVxmImemDepth = 2048;
+// Existing whole-layer schedules are emitted as one flat program image. The
+// runtime frontend still exposes only a 16-entry IQ and one fetch per cycle.
+constexpr std::size_t kIcuMemImemDepth = 131072;
+constexpr std::size_t kIcuMxmImemDepth = 32768;
+constexpr std::size_t kIcuSxmImemDepth = 2048;
+constexpr std::size_t kIcuVxmIqDepth = 16;
+constexpr std::size_t kIcuMemIqDepth = 16;
+constexpr std::size_t kIcuMxmIqDepth = 16;
+constexpr std::size_t kIcuSxmIqDepth = 16;
+
 constexpr std::size_t kHemispheres = 2;
 constexpr std::size_t kMxmsPerHemisphere = 2;
 constexpr std::size_t kMxmCount = kHemispheres * kMxmsPerHemisphere;
@@ -124,6 +145,11 @@ static_assert(kMxmBlockAccumulatorRows == 1024);
 static_assert(kMxmBlockAccumulatorColumns == 256);
 static_assert(kMxmBlockAccumulatorBytes == 1024 * 1024);
 static_assert(kSxmConcurrentStreamOps == 16);
+static_assert(kIcuVxmImemDepth >= kIcuVxmIqDepth);
+static_assert(kIcuDistributedVxmImemDepth >= kIcuVxmIqDepth);
+static_assert(kIcuMemImemDepth >= kIcuMemIqDepth);
+static_assert(kIcuMxmImemDepth >= kIcuMxmIqDepth);
+static_assert(kIcuSxmImemDepth >= kIcuSxmIqDepth);
 static_assert(kSramBlockBytes == 2 * 1024 * 1024);
 static_assert(kTotalSramBytes == 104 * 1024 * 1024);
 static_assert(kPublicTotalSramBytes == 208 * 1024 * 1024);

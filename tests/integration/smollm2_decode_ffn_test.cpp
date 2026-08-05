@@ -23,18 +23,24 @@ namespace {
 constexpr std::size_t kHidden = 576;
 constexpr std::size_t kIntermediate = 1536;
 constexpr std::size_t kDecodeBlock =
-    ftlpu::hw::kTileRows * ftlpu::hw::kMxmSupercellsPerPlane
-    * ftlpu::hw::kLanesPerTile;
+    ftlpu::hw::kTileRows * ftlpu::hw::kLanesPerTile;
 constexpr std::size_t kOutputGroup = ftlpu::hw::kMxmSupercellColumns;
+constexpr std::size_t kDecodeOutputWidth = ftlpu::hw::kMxmColumns;
+constexpr std::size_t kDecodeWaveStages =
+    ftlpu::hw::kTileRows
+    + ftlpu::hw::kMxmSupercellsPerPlane - 1;
 constexpr std::size_t kGroupsPerAccumulatorRow =
     ftlpu::hw::kMxmSupercellsPerPlane;
 constexpr std::size_t kGateUpGroups = kIntermediate / kOutputGroup;
+constexpr std::size_t kGateUpWaves = kIntermediate / kDecodeOutputWidth;
 constexpr std::size_t kGateUpAccumulatorRows =
     kGateUpGroups / kGroupsPerAccumulatorRow;
 constexpr std::size_t kGateUpReductions =
     (kHidden + kDecodeBlock - 1) / kDecodeBlock;
 constexpr std::size_t kDownGroupsPerMxm =
     (kHidden / 2) / kOutputGroup;
+constexpr std::size_t kDownWavesPerMxm =
+    (kHidden / 2) / kDecodeOutputWidth;
 constexpr std::size_t kDownAccumulatorRows =
     kDownGroupsPerMxm / kGroupsPerAccumulatorRow;
 constexpr std::size_t kDownReductions = kIntermediate / kDecodeBlock;
@@ -45,8 +51,7 @@ constexpr std::size_t kUpWeightAddressBase = 10000;
 constexpr std::size_t kDownWeightAddressBase = 12000;
 constexpr std::size_t kFinalOutputAddressBase = 16000;
 constexpr std::size_t kDownAccumulatorAddressBase = 1024;
-constexpr std::array<std::size_t, 8> kActivationSlices {
-    44, 45, 46, 47, 48, 49, 50, 51};
+constexpr std::array<std::size_t, 2> kActivationSlices {50, 51};
 constexpr std::array<std::size_t, 8> kSwigluSlices {
     36, 37, 38, 39, 40, 41, 42, 43};
 constexpr std::array<std::size_t, 4> kFinalSlices {48, 49, 50, 51};
@@ -59,8 +64,9 @@ constexpr std::size_t kWestMxm =
     ftlpu::InstructionControlUnit::mxm_queue(
         ftlpu::Hemisphere::West, 0);
 
-static_assert(kDecodeBlock == 128);
+static_assert(kDecodeBlock == 32);
 static_assert(kGateUpGroups == 192);
+static_assert(kGateUpWaves == 48);
 static_assert(kGateUpAccumulatorRows == 48);
 static_assert(kDownGroupsPerMxm == 36);
 static_assert(kDownAccumulatorRows == 9);
@@ -148,7 +154,11 @@ public:
         });
         icu_.enqueue_mxm(
             mxm,
-            ftlpu::MxmControlInstruction::DecodeLoadActivation(buffer));
+            ftlpu::MxmControlInstruction::DecodeLoadActivation(
+                buffer,
+                0,
+                ftlpu::MxmDataFormat::BFloat16,
+                ftlpu::MxmDecodeLayout::Native4x4));
         advance(mxm_load_[mxm], cycle + 1);
     }
 
@@ -179,7 +189,8 @@ public:
                 accumulator_address,
                 accumulator_column,
                 ftlpu::MxmAccumulatorDestination::Sram,
-                false));
+                false,
+                ftlpu::MxmDecodeLayout::Native4x4));
         advance(mxm_compute_[mxm], cycle + 1);
     }
 
@@ -313,23 +324,26 @@ QuantizedMatrix quantize_matrix(
     Generator generator)
 {
     auto result = QuantizedMatrix {
-        std::vector<float>(columns / kOutputGroup),
+        std::vector<float>(columns / kDecodeOutputWidth),
         std::vector<std::int8_t>(rows * columns),
         std::vector<float>(rows * columns)};
-    for (std::size_t group = 0; group < columns / kOutputGroup; ++group) {
+    for (std::size_t group = 0;
+         group < columns / kDecodeOutputWidth;
+         ++group) {
         float max_abs = 0.0f;
         for (std::size_t row = 0; row < rows; ++row) {
-            for (std::size_t lane = 0; lane < kOutputGroup; ++lane) {
+            for (std::size_t lane = 0; lane < kDecodeOutputWidth; ++lane) {
                 max_abs = std::max(
                     max_abs,
-                    std::fabs(generator(row, group * kOutputGroup + lane)));
+                    std::fabs(generator(
+                        row, group * kDecodeOutputWidth + lane)));
             }
         }
         const auto scale = ftlpu::Bf16::from_float(max_abs / 127.0f).to_float();
         result.scales[group] = scale;
         for (std::size_t row = 0; row < rows; ++row) {
-            for (std::size_t lane = 0; lane < kOutputGroup; ++lane) {
-                const auto column = group * kOutputGroup + lane;
+            for (std::size_t lane = 0; lane < kDecodeOutputWidth; ++lane) {
+                const auto column = group * kDecodeOutputWidth + lane;
                 const auto quantized = std::clamp(
                     static_cast<int>(std::lround(generator(row, column) / scale)),
                     -127,
@@ -351,25 +365,20 @@ void initialize_activation_source(
     std::size_t reduction_count)
 {
     for (std::size_t reduction = 0; reduction < reduction_count; ++reduction) {
-        for (std::size_t column = 0;
-             column < ftlpu::hw::kMxmSupercellsPerPlane;
-             ++column) {
-            for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
-                for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-                    const auto stage = column * ftlpu::hw::kTileRows + tile;
-                    const auto index = reduction * kDecodeBlock
-                        + stage * ftlpu::hw::kLanesPerTile + lane;
-                    const auto value = index < values.size() ? values[index] : 0.0f;
-                    const auto bits = ftlpu::Bf16::from_float(value).bits();
-                    for (std::size_t byte = 0; byte < 2; ++byte) {
-                        system.initialize_mem_sram_lane_byte(
-                            hemisphere,
-                            kActivationSlices[column * 2 + byte],
-                            tile,
-                            kActivationAddressBase + reduction,
-                            lane,
-                            static_cast<std::uint8_t>((bits >> (byte * 8)) & 0xffu));
-                    }
+        for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+            for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
+                const auto index = reduction * kDecodeBlock
+                    + tile * ftlpu::hw::kLanesPerTile + lane;
+                const auto value = index < values.size() ? values[index] : 0.0f;
+                const auto bits = ftlpu::Bf16::from_float(value).bits();
+                for (std::size_t byte = 0; byte < 2; ++byte) {
+                    system.initialize_mem_sram_lane_byte(
+                        hemisphere,
+                        kActivationSlices[byte],
+                        tile,
+                        kActivationAddressBase + reduction,
+                        lane,
+                        static_cast<std::uint8_t>((bits >> (byte * 8)) & 0xffu));
                 }
             }
         }
@@ -383,23 +392,25 @@ void initialize_weight_streams(
     std::size_t matrix_rows,
     std::size_t matrix_columns,
     std::size_t global_output_base,
-    std::size_t output_groups,
+    std::size_t output_waves,
     std::size_t address_base)
 {
     const auto reductions = (matrix_rows + kDecodeBlock - 1) / kDecodeBlock;
     for (std::size_t reduction = 0; reduction < reductions; ++reduction) {
-        for (std::size_t group = 0; group < output_groups; ++group) {
-            const auto address = address_base + reduction * output_groups + group;
+        for (std::size_t wave = 0; wave < output_waves; ++wave) {
+            const auto address = address_base + reduction * output_waves + wave;
             for (std::size_t stream = 0; stream < ftlpu::hw::kEastStreams; ++stream) {
                 const auto column = stream / kOutputGroup;
                 const auto output_lane = stream % kOutputGroup;
-                const auto output = global_output_base + group * kOutputGroup + output_lane;
                 for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+                    const auto output = global_output_base
+                        + wave * kDecodeOutputWidth
+                        + column * kOutputGroup + output_lane;
                     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-                        const auto stage = column * ftlpu::hw::kTileRows + tile;
                         const auto row = reduction * kDecodeBlock
-                            + stage * ftlpu::hw::kLanesPerTile + lane;
-                        const auto value = row < matrix_rows && output < matrix_columns
+                            + tile * ftlpu::hw::kLanesPerTile + lane;
+                        const auto value = row < matrix_rows
+                                && output < matrix_columns
                             ? matrix.values[row * matrix_columns + output]
                             : std::int8_t {0};
                         system.initialize_mem_sram_lane_byte(
@@ -443,19 +454,18 @@ void schedule_weight_waves(
     std::size_t mxm,
     std::size_t compute_start,
     std::size_t reduction,
-    std::size_t output_groups,
+    std::size_t output_waves,
     std::size_t address_base,
     const std::vector<float>& scales,
-    std::size_t global_group_base,
+    std::size_t global_wave_base,
     std::size_t accumulator_address_base,
     std::size_t buffer)
 {
-    for (std::size_t group = 0; group < output_groups; ++group) {
-        for (std::size_t column = 0;
-             column < ftlpu::hw::kMxmSupercellsPerPlane;
-             ++column) {
-            const auto boundary_cycle = compute_start + group
-                + column * ftlpu::hw::kTileRows;
+    for (std::size_t column = 0;
+         column < ftlpu::hw::kMxmSupercellsPerPlane;
+         ++column) {
+        for (std::size_t wave = 0; wave < output_waves; ++wave) {
+            const auto boundary_cycle = compute_start + wave + column;
             for (std::size_t output_lane = 0;
                  output_lane < kOutputGroup;
                  ++output_lane) {
@@ -465,18 +475,19 @@ void schedule_weight_waves(
                     stream,
                     boundary_cycle - east_latency(stream),
                     ftlpu::MemInstruction::Read(
-                        address_base + reduction * output_groups + group,
+                        address_base + reduction * output_waves + wave,
                         ftlpu::StreamId::East(stream)));
             }
         }
+    }
+    for (std::size_t wave = 0; wave < output_waves; ++wave) {
         schedule.decode_compute_at(
             mxm,
-            compute_start + group,
+            compute_start + wave,
             buffer,
-            scales[global_group_base + group],
-            accumulator_address_base
-                + group / kGroupsPerAccumulatorRow,
-            group % kGroupsPerAccumulatorRow);
+            scales[global_wave_base + wave],
+            accumulator_address_base + wave,
+            0);
     }
 }
 
@@ -593,7 +604,7 @@ ftlpu::test::smollm2_layer::run_decode_ffn(
         kHidden,
         kIntermediate,
         0,
-        kGateUpGroups,
+        kGateUpWaves,
         kGateWeightAddressBase);
     initialize_weight_streams(
         system,
@@ -602,7 +613,7 @@ ftlpu::test::smollm2_layer::run_decode_ffn(
         kHidden,
         kIntermediate,
         0,
-        kGateUpGroups,
+        kGateUpWaves,
         kUpWeightAddressBase);
     initialize_weight_streams(
         system,
@@ -611,7 +622,7 @@ ftlpu::test::smollm2_layer::run_decode_ffn(
         kIntermediate,
         kHidden,
         0,
-        kDownGroupsPerMxm,
+        kDownWavesPerMxm,
         kDownWeightAddressBase);
     initialize_weight_streams(
         system,
@@ -620,7 +631,7 @@ ftlpu::test::smollm2_layer::run_decode_ffn(
         kIntermediate,
         kHidden,
         kHidden / 2,
-        kDownGroupsPerMxm,
+        kDownWavesPerMxm,
         kDownWeightAddressBase);
 
     auto schedule = Schedule(system.icu());
@@ -641,14 +652,14 @@ ftlpu::test::smollm2_layer::run_decode_ffn(
             phase_cycle, phase_cycle + 1,
             "MXM.W0.ActivationLoad",
             "up activation block=" + std::to_string(reduction));
-        const auto compute_start = phase_cycle + 2;
+        const auto compute_start = phase_cycle + ftlpu::hw::kTileRows;
         schedule_weight_waves(
             schedule,
             ftlpu::Hemisphere::East,
             kEastMxm,
             compute_start,
             reduction,
-            kGateUpGroups,
+            kGateUpWaves,
             kGateWeightAddressBase,
             gate.scales,
             0,
@@ -660,7 +671,7 @@ ftlpu::test::smollm2_layer::run_decode_ffn(
             kWestMxm,
             compute_start,
             reduction,
-            kGateUpGroups,
+            kGateUpWaves,
             kUpWeightAddressBase,
             up.scales,
             0,
@@ -668,33 +679,31 @@ ftlpu::test::smollm2_layer::run_decode_ffn(
             buffer);
         schedule.trace(
             compute_start - east_latency(0),
-            compute_start + kGateUpGroups
-                + (ftlpu::hw::kMxmSupercellsPerPlane - 1)
-                    * ftlpu::hw::kTileRows
+            compute_start + kGateUpWaves
+                + ftlpu::hw::kMxmSupercellsPerPlane - 1
                 - east_latency(ftlpu::hw::kEastStreams - 1),
             "MEM.E.Read",
             "gate streamed INT8 weights reduction="
                 + std::to_string(reduction));
         schedule.trace(
             compute_start - east_latency(0),
-            compute_start + kGateUpGroups
-                + (ftlpu::hw::kMxmSupercellsPerPlane - 1)
-                    * ftlpu::hw::kTileRows
+            compute_start + kGateUpWaves
+                + ftlpu::hw::kMxmSupercellsPerPlane - 1
                 - east_latency(ftlpu::hw::kEastStreams - 1),
             "MEM.W.Read",
             "up streamed INT8 weights reduction="
                 + std::to_string(reduction));
         schedule.trace(
-            compute_start, compute_start + kGateUpGroups,
+            compute_start, compute_start + kGateUpWaves,
             "MXM.E0.Compute",
             "gate decode waves reduction=" + std::to_string(reduction)
                 + " dst=sram");
         schedule.trace(
-            compute_start, compute_start + kGateUpGroups,
+            compute_start, compute_start + kGateUpWaves,
             "MXM.W0.Compute",
             "up decode waves reduction=" + std::to_string(reduction)
                 + " dst=sram");
-        phase_cycle = compute_start + kGateUpGroups + kDecodeBlock / 8 + 4;
+        phase_cycle = compute_start + kGateUpWaves + kDecodeWaveStages + 4;
     }
 
     const auto swiglu_read_start = phase_cycle + 4;
@@ -760,8 +769,14 @@ ftlpu::test::smollm2_layer::run_decode_ffn(
     phase_cycle = down_start;
     for (std::size_t reduction = 0; reduction < kDownReductions; ++reduction) {
         const auto buffer = reduction % 2;
-        for (std::size_t stream = 0; stream < kSwigluSlices.size(); ++stream) {
-            const auto slice = kSwigluSlices[stream];
+        const auto swiglu_vector = reduction;
+        const auto swiglu_slice_pair =
+            swiglu_vector % ftlpu::hw::kMxmSupercellsPerPlane;
+        const auto swiglu_address =
+            swiglu_vector / ftlpu::hw::kMxmSupercellsPerPlane;
+        for (std::size_t stream = 0; stream < 2; ++stream) {
+            const auto slice =
+                kSwigluSlices[swiglu_slice_pair * 2 + stream];
             for (std::size_t hemisphere_index = 0;
                  hemisphere_index < ftlpu::hw::kHemispheres;
                  ++hemisphere_index) {
@@ -770,7 +785,7 @@ ftlpu::test::smollm2_layer::run_decode_ffn(
                     slice,
                     phase_cycle - east_latency(slice),
                     ftlpu::MemInstruction::Read(
-                        reduction, ftlpu::StreamId::East(stream)));
+                        swiglu_address, ftlpu::StreamId::East(stream)));
             }
         }
         schedule.load_at(kEastMxm, phase_cycle, buffer);
@@ -783,14 +798,14 @@ ftlpu::test::smollm2_layer::run_decode_ffn(
             phase_cycle, phase_cycle + 1,
             "MXM.W0.ActivationLoad",
             "down SwiGLU block=" + std::to_string(reduction));
-        const auto compute_start = phase_cycle + 2;
+        const auto compute_start = phase_cycle + ftlpu::hw::kTileRows;
         schedule_weight_waves(
             schedule,
             ftlpu::Hemisphere::East,
             kEastMxm,
             compute_start,
             reduction,
-            kDownGroupsPerMxm,
+            kDownWavesPerMxm,
             kDownWeightAddressBase,
             down.scales,
             0,
@@ -802,42 +817,40 @@ ftlpu::test::smollm2_layer::run_decode_ffn(
             kWestMxm,
             compute_start,
             reduction,
-            kDownGroupsPerMxm,
+            kDownWavesPerMxm,
             kDownWeightAddressBase,
             down.scales,
-            kDownGroupsPerMxm,
+            kDownWavesPerMxm,
             kDownAccumulatorAddressBase,
             buffer);
         schedule.trace(
             compute_start - east_latency(0),
-            compute_start + kDownGroupsPerMxm
-                + (ftlpu::hw::kMxmSupercellsPerPlane - 1)
-                    * ftlpu::hw::kTileRows
+            compute_start + kDownWavesPerMxm
+                + ftlpu::hw::kMxmSupercellsPerPlane - 1
                 - east_latency(ftlpu::hw::kEastStreams - 1),
             "MEM.E.Read",
             "down weights columns 0..287 reduction="
                 + std::to_string(reduction));
         schedule.trace(
             compute_start - east_latency(0),
-            compute_start + kDownGroupsPerMxm
-                + (ftlpu::hw::kMxmSupercellsPerPlane - 1)
-                    * ftlpu::hw::kTileRows
+            compute_start + kDownWavesPerMxm
+                + ftlpu::hw::kMxmSupercellsPerPlane - 1
                 - east_latency(ftlpu::hw::kEastStreams - 1),
             "MEM.W.Read",
             "down weights columns 288..575 reduction="
                 + std::to_string(reduction));
         schedule.trace(
-            compute_start, compute_start + kDownGroupsPerMxm,
+            compute_start, compute_start + kDownWavesPerMxm,
             "MXM.E0.Compute",
             "down columns 0..287 reduction=" + std::to_string(reduction)
                 + " dst=sram");
         schedule.trace(
-            compute_start, compute_start + kDownGroupsPerMxm,
+            compute_start, compute_start + kDownWavesPerMxm,
             "MXM.W0.Compute",
             "down columns 288..575 reduction=" + std::to_string(reduction)
                 + " dst=sram");
-        phase_cycle = compute_start + kDownGroupsPerMxm
-            + kDecodeBlock / 8 + 4;
+        phase_cycle = compute_start + kDownWavesPerMxm
+            + kDecodeWaveStages + 4;
     }
 
     const auto output_read_start = phase_cycle + 4;

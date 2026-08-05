@@ -15,7 +15,8 @@ bool same_mem(const ftlpu::MemInstruction& lhs, const ftlpu::MemInstruction& rhs
         && lhs.stream == rhs.stream
         && lhs.map_stream == rhs.map_stream
         && lhs.write_address == rhs.write_address
-        && lhs.write_stream == rhs.write_stream;
+        && lhs.write_stream == rhs.write_stream
+        && lhs.preserve_stream == rhs.preserve_stream;
 }
 
 bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlInstruction& rhs)
@@ -34,7 +35,8 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
         && lhs.accumulator_clear == rhs.accumulator_clear
         && lhs.data_format == rhs.data_format
         && lhs.compute_mode == rhs.compute_mode
-        && lhs.decode_operation == rhs.decode_operation;
+        && lhs.decode_operation == rhs.decode_operation
+        && lhs.decode_layout == rhs.decode_layout;
 }
 
 bool same_vxm(const ftlpu::VxmLaneAluInstruction& lhs, const ftlpu::VxmLaneAluInstruction& rhs)
@@ -75,6 +77,8 @@ bool verify_mem_codec()
     const ftlpu::MemInstruction instructions[] {
         ftlpu::MemInstruction::Read(4096, 45),
         ftlpu::MemInstruction::Write(ftlpu::hw::kSramDepthRows - 1, 63),
+        ftlpu::MemInstruction::WriteTap(123, 34),
+        ftlpu::MemInstruction::ReadWriteTap(22, 3, 44, 35),
         ftlpu::MemInstruction::ReadWrite(4095, 7, 4096, 55),
         ftlpu::MemInstruction::Gather(7, 55),
         ftlpu::MemInstruction::Scatter(36, 12),
@@ -158,6 +162,20 @@ bool verify_mxm_codec()
             2,
             ftlpu::MxmAccumulatorDestination::Sram,
             false),
+        ftlpu::MxmControlInstruction::DecodeLoadActivation(
+            0,
+            30,
+            ftlpu::MxmDataFormat::BFloat16,
+            ftlpu::MxmDecodeLayout::Native4x4),
+        ftlpu::MxmControlInstruction::DecodeStreamCompute(
+            0,
+            4,
+            ftlpu::MxmDataFormat::BFloat16,
+            321,
+            0,
+            ftlpu::MxmAccumulatorDestination::Stream,
+            true,
+            ftlpu::MxmDecodeLayout::Native4x4),
     };
 
     for (const auto& instruction : instructions) {
