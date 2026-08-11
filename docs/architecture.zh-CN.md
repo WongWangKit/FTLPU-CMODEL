@@ -282,10 +282,10 @@ load queue 都是显式调度资源。
 
 | 模式 | SRAM 组织 | 行宽 | 容量 |
 |---|---:|---:|---:|
-| `Vector` | `(block_count * 32) x 32 FP32` | 128 bytes | 32 blocks 时 128 KiB |
-| `Block8` | `(block_count * 4) x (8 x 32 FP32)` | 1024 bytes | 32 blocks 时 128 KiB |
+| `Vector` | `(block_count * 32) x 32 FP32` | 128 bytes | 96 blocks 时 384 KiB |
+| `Block8` | `(block_count * 4) x (8 x 32 FP32)` | 1024 bytes | 96 blocks 时 384 KiB |
 
-`FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT` 是 CMake cache 参数，默认容量为 32 个完整
+`FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT` 是 CMake cache 参数，默认容量为 96 个完整
 32x32 部分和 block。Vector Compute 每次写窄行中的一个 8 列 segment；
 Block8 Compute 同时写相同 8 列上的 8 个输出行，四个列 segment 共用一个逻辑宽行
 地址。Compute/AccumulatorRead 的 mode bit 选择目标 SRAM。Block8 read 会占满 32

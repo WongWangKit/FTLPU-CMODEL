@@ -326,11 +326,11 @@ Each MXM owns two mode-specific FP32 accumulator SRAMs:
 
 | Mode | SRAM geometry | Row width | Capacity |
 |---|---:|---:|---:|
-| `Vector` | `(block_count * 32) x 32 FP32` | 128 bytes | 128 KiB at 32 blocks |
-| `Block8` | `(block_count * 4) x (8 x 32 FP32)` | 1024 bytes | 128 KiB at 32 blocks |
+| `Vector` | `(block_count * 32) x 32 FP32` | 128 bytes | 384 KiB at 96 blocks |
+| `Block8` | `(block_count * 4) x (8 x 32 FP32)` | 1024 bytes | 384 KiB at 96 blocks |
 
 `FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT` is a CMake cache parameter and defaults to
-32 complete 32x32 partial-sum blocks. Vector Compute writes one eight-column
+96 complete 32x32 partial-sum blocks. Vector Compute writes one eight-column
 segment of a narrow row. Block8 Compute writes the same eight-column segment
 for all eight output rows, and the four column segments share one logical wide
 address. The Compute/AccumulatorRead mode bit selects the SRAM. A Block8 read
