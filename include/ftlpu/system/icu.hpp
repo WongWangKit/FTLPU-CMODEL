@@ -112,8 +112,8 @@ public:
         }
         for (auto& queue : sxm_transpose_queues_) queue.reset();
         for (auto& queue : sxm_permute_queues_) queue.reset();
-        c2c_tx_queue_.reset();
-        c2c_rx_queue_.reset();
+        for (auto& queue : c2c_tx_queues_) queue.reset();
+        for (auto& queue : c2c_rx_queues_) queue.reset();
         barrier_events_.clear();
         cycle_ = 0;
     }
@@ -135,8 +135,8 @@ public:
         }
         for (auto& queue : sxm_transpose_queues_) queue.push_nop(cycles);
         for (auto& queue : sxm_permute_queues_) queue.push_nop(cycles);
-        c2c_tx_queue_.push_nop(cycles);
-        c2c_rx_queue_.push_nop(cycles);
+        for (auto& queue : c2c_tx_queues_) queue.push_nop(cycles);
+        for (auto& queue : c2c_rx_queues_) queue.push_nop(cycles);
     }
 
     void enqueue_control(
@@ -188,10 +188,18 @@ public:
             throw std::out_of_range(
                 "ICU SXM control port must be transpose(0) or permute(1)");
         case IcuLocationKind::C2cTx:
-            c2c_tx_queue_.append_control(instruction);
+            if (location.unit >= hw::kHemispheres) {
+                throw std::out_of_range(
+                    "ICU C2C TX hemisphere is outside the chip");
+            }
+            c2c_tx_queues_[location.unit].append_control(instruction);
             return;
         case IcuLocationKind::C2cRx:
-            c2c_rx_queue_.append_control(instruction);
+            if (location.unit >= hw::kHemispheres) {
+                throw std::out_of_range(
+                    "ICU C2C RX hemisphere is outside the chip");
+            }
+            c2c_rx_queues_[location.unit].append_control(instruction);
             return;
         }
         throw std::logic_error("unknown ICU location kind");
@@ -402,37 +410,49 @@ public:
         sxm_permute_queues_[hemisphere_index(hemisphere)].push_repeat(Repeat {count, interval, 0});
     }
 
-    void enqueue_c2c(C2cInstruction instruction)
+    void enqueue_c2c(
+        Hemisphere endpoint_hemisphere,
+        C2cInstruction instruction)
     {
+        const auto endpoint = hemisphere_index(endpoint_hemisphere);
         if (instruction.opcode == C2cOpcode::Send) {
-            c2c_tx_queue_.push_instruction(std::move(instruction));
+            c2c_tx_queues_[endpoint].push_instruction(std::move(instruction));
         } else {
-            c2c_rx_queue_.push_instruction(std::move(instruction));
+            c2c_rx_queues_[endpoint].push_instruction(std::move(instruction));
         }
     }
 
-    void enqueue_c2c_send(std::size_t stream_index)
+    void enqueue_c2c_send(
+        Hemisphere endpoint_hemisphere,
+        std::size_t stream_index)
     {
-        enqueue_c2c(C2cInstruction::Send(stream_index));
+        enqueue_c2c(
+            endpoint_hemisphere,
+            C2cInstruction::Send(stream_index));
     }
 
     void enqueue_c2c_receive(
+        Hemisphere endpoint_hemisphere,
         std::size_t stream_index,
         Hemisphere consumer_hemisphere,
         std::size_t consumer_mem_slice)
     {
-        enqueue_c2c(C2cInstruction::Receive(
+        enqueue_c2c(endpoint_hemisphere, C2cInstruction::Receive(
             stream_index, consumer_hemisphere, consumer_mem_slice));
     }
 
-    void enqueue_c2c_tx_nop(std::size_t cycles)
+    void enqueue_c2c_tx_nop(
+        Hemisphere endpoint_hemisphere,
+        std::size_t cycles)
     {
-        c2c_tx_queue_.push_nop(cycles);
+        c2c_tx_queues_[hemisphere_index(endpoint_hemisphere)].push_nop(cycles);
     }
 
-    void enqueue_c2c_rx_nop(std::size_t cycles)
+    void enqueue_c2c_rx_nop(
+        Hemisphere endpoint_hemisphere,
+        std::size_t cycles)
     {
-        c2c_rx_queue_.push_nop(cycles);
+        c2c_rx_queues_[hemisphere_index(endpoint_hemisphere)].push_nop(cycles);
     }
 
     void notify(IcuLocation location)
@@ -474,10 +494,18 @@ public:
             throw std::out_of_range(
                 "ICU SXM control port must be transpose(0) or permute(1)");
         case IcuLocationKind::C2cTx:
-            c2c_tx_queue_.notify();
+            if (location.unit >= hw::kHemispheres) {
+                throw std::out_of_range(
+                    "ICU C2C TX hemisphere is outside the chip");
+            }
+            c2c_tx_queues_[location.unit].notify();
             return;
         case IcuLocationKind::C2cRx:
-            c2c_rx_queue_.notify();
+            if (location.unit >= hw::kHemispheres) {
+                throw std::out_of_range(
+                    "ICU C2C RX hemisphere is outside the chip");
+            }
+            c2c_rx_queues_[location.unit].notify();
             return;
         }
         throw std::logic_error("unknown ICU location kind");
@@ -514,8 +542,8 @@ public:
         for (auto& queue : mxm_compute_queues_) queue.notify();
         for (auto& queue : sxm_transpose_queues_) queue.notify();
         for (auto& queue : sxm_permute_queues_) queue.notify();
-        c2c_tx_queue_.notify();
-        c2c_rx_queue_.notify();
+        for (auto& queue : c2c_tx_queues_) queue.notify();
+        for (auto& queue : c2c_rx_queues_) queue.notify();
     }
 
     std::size_t barrier_latency_cycles() const noexcept
@@ -568,38 +596,48 @@ public:
         std::array<SxmSlice, hw::kHemispheres>& sxms,
         std::array<Mxm, kMxmQueues>& mxms,
         std::ostream* os = nullptr,
-        C2cEndpoint* c2c = nullptr)
+        std::array<C2cEndpoint*, hw::kHemispheres> c2cs = {})
     {
         log_cycle_header(os);
 
         bool any = false;
-        const auto c2c_tx = c2c_tx_queue_.dispatch_next();
-        if (c2c_tx.has_value()) {
-            if (c2c == nullptr) {
-                throw std::logic_error(
-                    "ICU issued C2C TX without an attached C2C endpoint");
+        for (std::size_t hemisphere = 0;
+             hemisphere < hw::kHemispheres;
+             ++hemisphere) {
+            const auto c2c_tx = c2c_tx_queues_[hemisphere].dispatch_next();
+            if (c2c_tx.has_value()) {
+                if (c2cs[hemisphere] == nullptr) {
+                    throw std::logic_error(
+                        "ICU issued C2C TX without an attached hemisphere endpoint");
+                }
+                c2cs[hemisphere]->tx().issue(*c2c_tx);
+                any = true;
+                if (os != nullptr) {
+                    *os << "  ICU -> C2C."
+                        << hemisphere_short_name(
+                               static_cast<Hemisphere>(hemisphere))
+                        << ".tx Send stream="
+                        << c2c_tx->stream_index << '\n';
+                }
             }
-            c2c->tx().issue(*c2c_tx);
-            any = true;
-            if (os != nullptr) {
-                *os << "  ICU -> C2C.tx Send stream="
-                    << c2c_tx->stream_index << '\n';
-            }
-        }
 
-        const auto c2c_rx = c2c_rx_queue_.dispatch_next();
-        if (c2c_rx.has_value()) {
-            if (c2c == nullptr) {
-                throw std::logic_error(
-                    "ICU issued C2C RX without an attached C2C endpoint");
-            }
-            c2c->rx().issue(*c2c_rx);
-            any = true;
-            if (os != nullptr) {
-                *os << "  ICU -> C2C.rx Receive stream="
-                    << c2c_rx->stream_index << " consumer=MEM."
-                    << hemisphere_short_name(c2c_rx->consumer.hemisphere)
-                    << '.' << c2c_rx->consumer.mem_slice << '\n';
+            const auto c2c_rx = c2c_rx_queues_[hemisphere].dispatch_next();
+            if (c2c_rx.has_value()) {
+                if (c2cs[hemisphere] == nullptr) {
+                    throw std::logic_error(
+                        "ICU issued C2C RX without an attached hemisphere endpoint");
+                }
+                c2cs[hemisphere]->rx().issue(*c2c_rx);
+                any = true;
+                if (os != nullptr) {
+                    *os << "  ICU -> C2C."
+                        << hemisphere_short_name(
+                               static_cast<Hemisphere>(hemisphere))
+                        << ".rx Receive stream="
+                        << c2c_rx->stream_index << " consumer=MEM."
+                        << hemisphere_short_name(c2c_rx->consumer.hemisphere)
+                        << '.' << c2c_rx->consumer.mem_slice << '\n';
+                }
             }
         }
         for (std::size_t alu = 0; alu < kVxmQueues; ++alu) {
@@ -735,8 +773,14 @@ public:
         return sxm_permute_queues_[hemisphere_index(hemisphere)];
     }
 
-    C2cIcu& c2c_tx_iq() noexcept { return c2c_tx_queue_; }
-    C2cIcu& c2c_rx_iq() noexcept { return c2c_rx_queue_; }
+    C2cIcu& c2c_tx_iq(Hemisphere hemisphere) noexcept
+    {
+        return c2c_tx_queues_[hemisphere_index(hemisphere)];
+    }
+    C2cIcu& c2c_rx_iq(Hemisphere hemisphere) noexcept
+    {
+        return c2c_rx_queues_[hemisphere_index(hemisphere)];
+    }
     std::size_t cycle() const
     {
         return cycle_;
@@ -759,8 +803,8 @@ private:
         collect(mxm_compute_queues_);
         collect(sxm_transpose_queues_);
         collect(sxm_permute_queues_);
-        count += c2c_tx_queue_.take_notify() ? 1U : 0U;
-        count += c2c_rx_queue_.take_notify() ? 1U : 0U;
+        collect(c2c_tx_queues_);
+        collect(c2c_rx_queues_);
         return count;
     }
     static void check_mem_queue(std::size_t column)
@@ -816,8 +860,8 @@ private:
             << " mxm_compute=" << queued_instruction_count(mxm_compute_queues_)
             << " sxm_transpose=" << queued_instruction_count(sxm_transpose_queues_)
             << " sxm_permute=" << queued_instruction_count(sxm_permute_queues_)
-            << " c2c_tx=" << c2c_tx_queue_.queued_count()
-            << " c2c_rx=" << c2c_rx_queue_.queued_count()
+            << " c2c_tx=" << queued_instruction_count(c2c_tx_queues_)
+            << " c2c_rx=" << queued_instruction_count(c2c_rx_queues_)
             << '\n';
     }
 
@@ -954,8 +998,8 @@ private:
     std::array<MxmIcu, kMxmQueues> mxm_compute_queues_{};
     std::array<SxmIcu, hw::kHemispheres> sxm_transpose_queues_{};
     std::array<SxmIcu, hw::kHemispheres> sxm_permute_queues_{};
-    C2cIcu c2c_tx_queue_{};
-    C2cIcu c2c_rx_queue_{};
+    std::array<C2cIcu, hw::kHemispheres> c2c_tx_queues_{};
+    std::array<C2cIcu, hw::kHemispheres> c2c_rx_queues_{};
     std::size_t barrier_latency_cycles_{hw::kIcuBarrierLatencyCycles};
     std::deque<std::size_t> barrier_events_{};
     std::size_t cycle_{0};

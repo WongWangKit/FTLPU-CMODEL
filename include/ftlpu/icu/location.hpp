@@ -66,14 +66,16 @@ struct IcuLocation {
         return {IcuLocationKind::Sxm, hemisphere_index(hemisphere), port};
     }
 
-    static constexpr IcuLocation C2cTx() noexcept
+    static constexpr IcuLocation C2cTx(
+        Hemisphere hemisphere) noexcept
     {
-        return {IcuLocationKind::C2cTx, 0, 0};
+        return {IcuLocationKind::C2cTx, hemisphere_index(hemisphere), 0};
     }
 
-    static constexpr IcuLocation C2cRx() noexcept
+    static constexpr IcuLocation C2cRx(
+        Hemisphere hemisphere) noexcept
     {
-        return {IcuLocationKind::C2cRx, 0, 0};
+        return {IcuLocationKind::C2cRx, hemisphere_index(hemisphere), 0};
     }
 
     friend bool operator==(const IcuLocation&, const IcuLocation&) = default;

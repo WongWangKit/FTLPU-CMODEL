@@ -2,6 +2,7 @@
 #include "ftlpu/icu/location.hpp"
 #include "ftlpu/system/dual_chip_c2c_system.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -51,6 +52,9 @@ void test_dual_chip_rx_notifies_mem_and_writes_sram()
     constexpr auto kTargetRow = 41U;
     constexpr auto kTargetGroup =
         kTargetSlice / hw::kMemSlicesPerGroup;
+    constexpr auto kRxToTargetNops =
+        hw::kMemEastBoundaryStreamRegisterColumn
+        - (kTargetGroup + 1) - 1;
     static_assert(kTargetGroup == 4);
 
     auto system = DualChipC2cSystem(C2cLinkConfig {
@@ -81,19 +85,20 @@ void test_dual_chip_rx_notifies_mem_and_writes_sram()
     source.icu().enqueue_mem(
         source_queue,
         MemInstruction::Read(kSourceRow, StreamId::East(kStream)));
-    source.icu().enqueue_c2c_send(kStream);
+    source.icu().enqueue_c2c_send(Hemisphere::East, kStream);
 
     destination.icu().enqueue_c2c_receive(
+        Hemisphere::West,
         kStream, Hemisphere::West, kTargetSlice);
     destination.icu().enqueue_control(
         IcuLocation::Mem(Hemisphere::West, kTargetSlice),
         IcuControlInstruction::Sync());
     destination.icu().enqueue_mem_nop(
         target_queue,
-        kTargetGroup - 1);
+        kRxToTargetNops);
     destination.icu().enqueue_mem(
         target_queue,
-        MemInstruction::Write(kTargetRow, StreamId::East(kStream)));
+        MemInstruction::Write(kTargetRow, StreamId::West(kStream)));
 
     bool observed_sync_wait = false;
     bool observed_sync_release = false;
@@ -108,8 +113,10 @@ void test_dual_chip_rx_notifies_mem_and_writes_sram()
 
     require(observed_sync_wait, "destination MEM did not wait on C2C receive");
     require(observed_sync_release, "C2C receive did not notify destination MEM ICU");
-    require(source.c2c_endpoint().tx().idle(), "C2C TX did not finish four-tile gather");
-    require(destination.c2c_endpoint().rx().idle(), "C2C RX did not finish four-tile replay");
+    require(source.c2c_endpoint(Hemisphere::East).tx().idle(),
+        "C2C TX did not finish four-tile gather");
+    require(destination.c2c_endpoint(Hemisphere::West).rx().idle(),
+        "C2C RX did not finish four-tile replay");
 
     for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
@@ -131,10 +138,101 @@ void test_dual_chip_rx_notifies_mem_and_writes_sram()
     }
 }
 
+void test_dual_hemisphere_endpoints_transfer_in_parallel()
+{
+    constexpr auto kStream = 7U;
+    constexpr auto kSourceSlice = 48U;
+    constexpr auto kTargetSlice = 16U;
+    constexpr auto kTargetGroup =
+        kTargetSlice / hw::kMemSlicesPerGroup;
+    constexpr auto kRxToTargetNops =
+        hw::kMemEastBoundaryStreamRegisterColumn
+        - (kTargetGroup + 1) - 1;
+    constexpr std::array kSourceRows {51U, 52U};
+    constexpr std::array kTargetRows {61U, 62U};
+
+    auto system = DualChipC2cSystem(C2cLinkConfig {
+        hw::kPhysicalVectorBytes,
+        0,
+        2,
+    });
+    auto& source = system.chip(0);
+    auto& destination = system.chip(1);
+
+    for (std::size_t source_index = 0; source_index < hw::kHemispheres;
+         ++source_index) {
+        const auto source_hemisphere =
+            static_cast<Hemisphere>(source_index);
+        const auto destination_hemisphere = source_hemisphere == Hemisphere::East
+            ? Hemisphere::West
+            : Hemisphere::East;
+
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                source.initialize_mem_sram_lane_byte(
+                    source_hemisphere,
+                    kSourceSlice,
+                    tile,
+                    kSourceRows[source_index],
+                    lane,
+                    static_cast<std::uint8_t>(
+                        0x20 + source_index * 0x40 + tile * 8 + lane));
+            }
+        }
+
+        const auto source_queue = InstructionControlUnit::mem_queue(
+            source_hemisphere, kSourceSlice);
+        const auto target_queue = InstructionControlUnit::mem_queue(
+            destination_hemisphere, kTargetSlice);
+        source.icu().enqueue_mem(
+            source_queue,
+            MemInstruction::Read(
+                kSourceRows[source_index], StreamId::East(kStream)));
+        source.icu().enqueue_c2c_send(source_hemisphere, kStream);
+        destination.icu().enqueue_c2c_receive(
+            destination_hemisphere,
+            kStream,
+            destination_hemisphere,
+            kTargetSlice);
+        destination.icu().enqueue_control(
+            IcuLocation::Mem(destination_hemisphere, kTargetSlice),
+            IcuControlInstruction::Sync());
+        destination.icu().enqueue_mem_nop(target_queue, kRxToTargetNops);
+        destination.icu().enqueue_mem(
+            target_queue,
+            MemInstruction::Write(
+                kTargetRows[source_index], StreamId::West(kStream)));
+    }
+
+    for (std::size_t cycle = 0; cycle < 24; ++cycle) system.tick();
+
+    for (std::size_t source_index = 0; source_index < hw::kHemispheres;
+         ++source_index) {
+        const auto destination_hemisphere = source_index == 0
+            ? Hemisphere::West
+            : Hemisphere::East;
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                const auto expected = static_cast<std::uint8_t>(
+                    0x20 + source_index * 0x40 + tile * 8 + lane);
+                require(
+                    destination.read_mem_sram_lane_byte(
+                        destination_hemisphere,
+                        kTargetSlice,
+                        tile,
+                        kTargetRows[source_index],
+                        lane) == expected,
+                    "parallel C2C hemisphere transfer wrote an incorrect byte");
+            }
+        }
+    }
+}
+
 } // namespace
 
 int main()
 {
     test_link_credit_and_serialization();
     test_dual_chip_rx_notifies_mem_and_writes_sram();
+    test_dual_hemisphere_endpoints_transfer_in_parallel();
 }

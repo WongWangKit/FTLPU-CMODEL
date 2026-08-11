@@ -16,7 +16,7 @@
 | Hemisphere | 2 |
 | MEM slice | 每侧 52 个，全芯片 104 个 |
 | MEM group | 每侧 13 个，每组 4 个 slice |
-| Stream-register column | 每侧 15 个（`sreg0..sreg14`） |
+| Stream-register column | 每侧 16 个（`sreg0..sreg15`） |
 | 每 lane stream | 32 条 eastward + 32 条 westward |
 | Stream-register 位宽 | 1 byte |
 | SRAM 容量 | 每 slice 2 MiB，全芯片 208 MiB |
@@ -33,14 +33,16 @@ logical bank。
 ## 2. 完整芯片拓扑
 
 ```text
-MXM2/MXM3 <-> SXM.W <-> MEM.W(52) <-> VXM <-> MEM.E(52) <-> SXM.E <-> MXM0/MXM1
+MXM2/MXM3 <-> SXM.W <-> C2C.W <-> MEM.W(52) <-> VXM <-> MEM.E(52) <-> C2C.E <-> SXM.E <-> MXM0/MXM1
 ```
 
 两个 hemisphere 使用相同的局部朝向：
 
 - `sreg0` 靠近 VXM；
 - 13 个 MEM group 位于 `sreg0..sreg13`；
-- SXM 把 MEM 边界 `sreg13` 连接到 MXM 边界 `sreg14`；
+- 每个 hemisphere 在 MEM 边界 `sreg13` 各有独立的 C2C TX/RX endpoint；
+- C2C 与 SXM 之间增加一拍 SR，`sreg14` 是 C2C/SXM 边界；
+- SXM 把 `sreg14` 连接到 MXM 边界 `sreg15`；
 - east stream 从 VXM 流向 MXM；
 - west stream 从 MXM 流向 VXM。
 
@@ -249,7 +251,7 @@ ICU 共拥有 136 条独立 queue：
 
 SXM 指令使用固定的 13 x 32-bit packet 编码，包含 header、16 个输入/输出
 stream selector、tile 内 lane map 和完整跨 tile permute map。字段范围和保留位由
-`tests/core/instruction_codec_test.cpp` 验证。
+`tests/unit/core/instruction_codec_test.cpp` 验证。
 
 ## 9. 调度模式
 
@@ -308,26 +310,6 @@ A[128,576] fp16 x W[576,1536] int8 -> C[128,1536] fp32
 权重采用按输出列的 W8 对称 scale。VXM 反量化权重，MXM0/1 计算相邻 output block，
 两个 MXM 本地 accumulator 累加 18 个 K tile。全部 196,608 个输出与考虑 FP16
 舍入的 scalar golden model 比较。
-
-### 完整 FFN
-
-`dual_hemisphere_w8a16_swiglu_test` 计算：
-
-```text
-X[128,576]
-  -> gate/up[128,1536]
-  -> SwiGLU[128,1536]
-  -> down[128,576]
-```
-
-四个 MXM 全部参与。gate/up 的非最终 reduction 中，两个 hemisphere 并行工作；
-最终 reduction 中，East/West 的 32-row block 交替进入唯一的共享 VXM SwiGLU
-流水线，因此每个交替 block 都会让另一侧 MXM 空闲。这是明确的吞吐取舍：它删除了
-独立 accumulator readback/SwiGLU 阶段，使验证调度从 93,642 拍降到 90,817 拍。
-
-SwiGLU 结果在两个 MEM hemisphere 都保存一份。down projection 读取本地副本，
-使用全部四个 MXM，累加 48 个 K tile，把最终和 cast 为 FP16，并验证全部 73,728
-个输出值。
 
 ### Block8 + MXM Dequant FFN
 

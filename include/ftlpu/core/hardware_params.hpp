@@ -21,12 +21,17 @@ constexpr std::size_t kMemSliceColumns = 52;
 constexpr std::size_t kMemSlicesPerGroup = 4;
 constexpr std::size_t kMemGroups = kMemSliceColumns / kMemSlicesPerGroup;
 constexpr std::size_t kMemBoundaryStreamRegisterColumns = kMemGroups + 1;
+constexpr std::size_t kC2cToSxmStreamRegisterColumns = 1;
 constexpr std::size_t kSxmToMxmStreamRegisterColumns = 1;
 constexpr std::size_t kSystemStreamRegisterColumns =
-    kMemBoundaryStreamRegisterColumns + kSxmToMxmStreamRegisterColumns;
+    kMemBoundaryStreamRegisterColumns
+    + kC2cToSxmStreamRegisterColumns
+    + kSxmToMxmStreamRegisterColumns;
 constexpr std::size_t kMemWestBoundaryStreamRegisterColumn = 0;
 constexpr std::size_t kMemEastBoundaryStreamRegisterColumn =
     kMemBoundaryStreamRegisterColumns - 1;
+constexpr std::size_t kC2cSxmBoundaryStreamRegisterColumn =
+    kMemEastBoundaryStreamRegisterColumn + kC2cToSxmStreamRegisterColumns;
 constexpr std::size_t kMxmBoundaryStreamRegisterColumn =
     kSystemStreamRegisterColumns - 1;
 
@@ -131,9 +136,10 @@ constexpr std::size_t kPublicTotalSramBytes = kPublicSramBlocks * kSramBlockByte
 static_assert(kPhysicalVectorBytes == 32);
 static_assert(kMemSliceColumns % kMemSlicesPerGroup == 0);
 static_assert(kMemBoundaryStreamRegisterColumns == 14);
-static_assert(kSystemStreamRegisterColumns == 15);
+static_assert(kSystemStreamRegisterColumns == 16);
 static_assert(kMemEastBoundaryStreamRegisterColumn == 13);
-static_assert(kMxmBoundaryStreamRegisterColumn == 14);
+static_assert(kC2cSxmBoundaryStreamRegisterColumn == 14);
+static_assert(kMxmBoundaryStreamRegisterColumn == 15);
 static_assert(kModeledSramBlocks == kMemSliceColumns);
 static_assert(kPublicSramBlocks == 104);
 static_assert(kSramBlocks == 52);

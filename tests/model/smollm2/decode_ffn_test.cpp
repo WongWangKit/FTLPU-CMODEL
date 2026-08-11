@@ -1,7 +1,7 @@
 #include "ftlpu/core/bf16.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
 #include "vxm_alu_program.hpp"
-#include "smollm2_layer_phases.hpp"
+#include "layer_phases.hpp"
 
 #include <algorithm>
 #include <array>
@@ -105,7 +105,8 @@ float down_weight_value(std::size_t k, std::size_t n)
 
 std::size_t east_latency(std::size_t slice)
 {
-    return ftlpu::hw::kMemGroups + 2
+    return ftlpu::hw::kMemGroups
+        + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 2
         - slice / ftlpu::hw::kMemSlicesPerGroup;
 }
 

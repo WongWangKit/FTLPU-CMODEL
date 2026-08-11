@@ -35,7 +35,8 @@ constexpr std::size_t kComputeCycle = 30;
 
 std::size_t east_read_to_mxm_latency(std::size_t slice)
 {
-    return ftlpu::hw::kMemGroups + 2
+    return ftlpu::hw::kMemGroups
+        + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 2
         - slice / ftlpu::hw::kMemSlicesPerGroup;
 }
 

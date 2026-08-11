@@ -1,6 +1,6 @@
 #include "ftlpu/core/fp16.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
-#include "../integration/vxm_alu_program.hpp"
+#include "vxm_alu_program.hpp"
 
 #include <array>
 #include <cmath>

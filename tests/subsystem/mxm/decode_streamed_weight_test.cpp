@@ -36,7 +36,8 @@ constexpr std::size_t kWeightWaves = kOutputBlocks;
 
 std::size_t east_latency(std::size_t slice)
 {
-    return ftlpu::hw::kMemGroups + 2
+    return ftlpu::hw::kMemGroups
+        + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 2
         - slice / ftlpu::hw::kMemSlicesPerGroup;
 }
 

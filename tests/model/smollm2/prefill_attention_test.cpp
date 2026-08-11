@@ -1,7 +1,7 @@
 #include "ftlpu/core/fp16.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
 #include "vxm_alu_program.hpp"
-#include "smollm2_layer_phases.hpp"
+#include "layer_phases.hpp"
 
 #include <algorithm>
 #include <array>
@@ -31,7 +31,9 @@ constexpr float kRopeTheta = 100000.0f;
 constexpr std::size_t kWeightToIwLatency =
     ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 2;
 constexpr std::size_t kActivationLatency =
-    ftlpu::hw::kMemGroups - 32 / ftlpu::hw::kMemSlicesPerGroup + 2;
+    ftlpu::hw::kMemGroups
+    + ftlpu::hw::kC2cToSxmStreamRegisterColumns
+    - 32 / ftlpu::hw::kMemSlicesPerGroup + 2;
 constexpr std::size_t kMxm0AccumulatorLatency = 6;
 constexpr std::size_t kMxm1AccumulatorLatency = 5;
 constexpr std::size_t kMxmInputBlockIssueCycles =
@@ -62,8 +64,12 @@ constexpr std::size_t kQueryIwAddressBase = 7600;
 constexpr std::size_t kValuePackAddressBase = 7800;
 constexpr std::size_t kCausalMaskAddressBase = 8128;
 constexpr std::size_t kProbabilityDiagonalAddressBase = kRopeTableAddressBase;
-constexpr std::size_t kMemToSxmLatency = ftlpu::hw::kMemGroups + 1;
-constexpr std::size_t kMemToMxmLatency = ftlpu::hw::kMemGroups + 2;
+constexpr std::size_t kMemToSxmLatency =
+    ftlpu::hw::kMemGroups
+    + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 1;
+constexpr std::size_t kMemToMxmLatency =
+    ftlpu::hw::kMemGroups
+    + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 2;
 constexpr std::size_t kMxmToVxmLatency =
     ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 1;
 constexpr std::size_t kMxmOutputToVxmLatency =
@@ -1868,6 +1874,7 @@ ftlpu::test::smollm2_layer::run_prefill_attention(
                     schedule.mem_at(
                         mem_queue(work.hemisphere, slice),
                         permute_cycle + ftlpu::hw::kMemGroups
+                            + ftlpu::hw::kC2cToSxmStreamRegisterColumns
                             - slice / ftlpu::hw::kMemSlicesPerGroup,
                         ftlpu::MemInstruction::Write(
                             probability_diagonal_address(

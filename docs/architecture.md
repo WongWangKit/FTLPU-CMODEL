@@ -17,7 +17,7 @@ The central vector shape is:
 | Hemispheres | 2 |
 | MEM slices | 52 per hemisphere, 104 total |
 | MEM groups | 13 per hemisphere, 4 slices per group |
-| Stream-register columns | 15 per hemisphere (`sreg0..sreg14`) |
+| Stream-register columns | 16 per hemisphere (`sreg0..sreg15`) |
 | Streams per lane | 32 eastward + 32 westward |
 | Stream-register width | 1 byte |
 | SRAM capacity | 2 MiB per slice, 208 MiB full chip |
@@ -34,14 +34,16 @@ for `104 x 2 MiB = 208 MiB` total SRAM. There is no logical bank subdivision.
 ## 2. Full-Chip Topology
 
 ```text
-MXM2/MXM3 <-> SXM.W <-> MEM.W(52) <-> VXM <-> MEM.E(52) <-> SXM.E <-> MXM0/MXM1
+MXM2/MXM3 <-> SXM.W <-> C2C.W <-> MEM.W(52) <-> VXM <-> MEM.E(52) <-> C2C.E <-> SXM.E <-> MXM0/MXM1
 ```
 
 Both hemispheres use the same local orientation:
 
 - `sreg0` is adjacent to VXM.
 - Thirteen MEM groups occupy the boundaries `sreg0..sreg13`.
-- SXM connects the MEM boundary `sreg13` to the MXM boundary `sreg14`.
+- Each hemisphere has independent C2C TX/RX endpoints attached at the MEM boundary `sreg13`.
+- One SR hop separates C2C from SXM: `sreg14` is the C2C/SXM boundary.
+- SXM connects `sreg14` to the MXM boundary `sreg15`.
 - East streams move from VXM toward MXM.
 - West streams move from MXM toward VXM.
 
@@ -292,7 +294,7 @@ SXM instructions use a fixed 13 x 32-bit packet encoding. The packet carries
 the header, 16 source and destination stream selectors, the intra-tile lane
 map, and the full cross-tile permute map.
 Reserved bits and field ranges are validated by
-`tests/core/instruction_codec_test.cpp`.
+`tests/unit/core/instruction_codec_test.cpp`.
 
 ## 9. Scheduling Patterns
 
@@ -355,28 +357,6 @@ Weights use symmetric per-output-column W8 scales. VXM dequantizes weights,
 MXM0/1 compute adjacent output blocks, and their MXM-local accumulators sum
 18 K tiles. All 196,608 outputs are compared against an FP16-aware scalar
 golden model.
-
-### Full FFN
-
-`dual_hemisphere_w8a16_swiglu_test` computes:
-
-```text
-X[128,576]
-  -> gate/up[128,1536]
-  -> SwiGLU[128,1536]
-  -> down[128,576]
-```
-
-All four MXMs participate. Non-final gate/up reductions run both hemispheres in
-parallel. During the final reduction, East and West 32-row blocks alternate
-through the single shared VXM SwiGLU pipeline, so one hemisphere's MXMs are idle
-for each alternating block. This is a deliberate throughput tradeoff: it removes
-the standalone accumulator readback/SwiGLU phase and reduces the validated
-schedule from 93,642 to 90,817 cycles.
-
-SwiGLU results are stored in both MEM hemispheres. Down projection reads local
-copies, uses all four MXMs, accumulates 48 K tiles, casts the final sums to FP16,
-and verifies all 73,728 output values.
 
 ### Block8 + MXM Dequant FFN
 

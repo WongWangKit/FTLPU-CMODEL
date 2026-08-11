@@ -17,7 +17,11 @@ constexpr std::size_t kBlocks = ftlpu::hw::kTileRows;
 constexpr std::size_t kStreams = 2 * kBlockSize;
 constexpr std::size_t kMatrixCount = 4;
 constexpr std::size_t kInputBeats = kMatrixCount * kBlocks;
-constexpr std::size_t kCaptureStart = 16;
+constexpr std::size_t kRouteStart = 3;
+constexpr std::size_t kMemToSxmLatency =
+    ftlpu::hw::kMemGroups
+    + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 1;
+constexpr std::size_t kCaptureStart = kRouteStart + kMemToSxmLatency;
 constexpr std::size_t kOutputAddressBase = 32;
 
 static_assert(kMatrixSize == 32);
@@ -143,7 +147,7 @@ void build_schedule(Schedule& schedule)
 
     for (std::size_t stream = 0; stream < kStreams; ++stream) {
         const auto group = stream / ftlpu::hw::kMemSlicesPerGroup;
-        const auto read_cycle = kCaptureStart - (12 - group);
+        const auto read_cycle = kRouteStart + group;
         schedule.mem_repeat(
             stream,
             read_cycle,
@@ -151,7 +155,9 @@ void build_schedule(Schedule& schedule)
             kInputBeats,
             1);
 
-        const auto write_cycle = kCaptureStart + 12 - group;
+        const auto write_cycle = kCaptureStart + 1
+            + ftlpu::hw::kMemGroups
+            + ftlpu::hw::kC2cToSxmStreamRegisterColumns - group;
         schedule.mem_repeat(
             stream,
             write_cycle,
@@ -222,7 +228,8 @@ try {
     auto sxm_log = std::ofstream(log_dir / "sxm.log", std::ios::trunc);
     if (!icu_log || !mem_log || !sxm_log) throw std::runtime_error("cannot open test logs");
 
-    constexpr std::size_t kRunCycles = kCaptureStart + kInputBeats + 16;
+    constexpr std::size_t kRunCycles =
+        kCaptureStart + kInputBeats + 16 + kBlocks;
     for (std::size_t cycle = 0; cycle < kRunCycles; ++cycle) {
         system.tick({
             .icu = &icu_log,

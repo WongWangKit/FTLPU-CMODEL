@@ -20,7 +20,9 @@ constexpr std::size_t kHidden = 576;
 constexpr std::size_t kIntermediate = 1536;
 constexpr std::size_t kTile = ftlpu::hw::kMxmRows;
 constexpr std::size_t kActivationLatency =
-    ftlpu::hw::kMemGroups - 32 / ftlpu::hw::kMemSlicesPerGroup + 2;
+    ftlpu::hw::kMemGroups
+    + ftlpu::hw::kC2cToSxmStreamRegisterColumns
+    - 32 / ftlpu::hw::kMemSlicesPerGroup + 2;
 constexpr std::size_t kWeightToIwLatency =
     ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 2;
 constexpr std::size_t kWestAccumulatorLatency = 6;

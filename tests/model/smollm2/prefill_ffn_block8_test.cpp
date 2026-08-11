@@ -1,5 +1,5 @@
 #include "ftlpu/core/bf16.hpp"
-#include "smollm2_layer_phases.hpp"
+#include "layer_phases.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
 #include "vxm_alu_program.hpp"
 
@@ -122,7 +122,9 @@ std::size_t mem_queue(
 
 std::size_t east_read_latency(std::size_t slice)
 {
-    return ftlpu::hw::kMemGroups + 2
+    return ftlpu::hw::kMemGroups
+        + ftlpu::hw::kC2cToSxmStreamRegisterColumns
+        + 2
         - slice / ftlpu::hw::kMemSlicesPerGroup;
 }
 
@@ -809,7 +811,7 @@ std::size_t transfer_down_output(
     std::vector<TraceEvent>& trace,
     std::size_t trace_offset)
 {
-    if (system.has_c2c()) {
+    if (system.has_c2c(hemisphere)) {
         throw std::logic_error(
             "prefill FFN outbound transfer needs an unattached C2C port");
     }
@@ -822,15 +824,14 @@ std::size_t transfer_down_output(
         ftlpu::hw::kPhysicalVectorBytes, 0, 4});
     system.attach_c2c(
         hemisphere,
-        ftlpu::C2cStreamPortMap::WestEdge(
-            ftlpu::hw::kMemWestBoundaryStreamRegisterColumn),
         outbound_link,
         inbound_link);
 
     auto mem_cursor = std::array<
         std::size_t,
         ftlpu::InstructionControlUnit::kMemQueues> {};
-    system.icu().enqueue_c2c_tx_nop(kOutboundLeadCycles);
+    system.icu().enqueue_c2c_tx_nop(
+        hemisphere, kOutboundLeadCycles);
     auto vector_index = std::size_t {0};
     for (const auto& block : blocks) {
         for (std::size_t slice = 0;
@@ -841,7 +842,7 @@ std::size_t transfer_down_output(
                 + vector_index * kC2cInstructionSpacing;
             const auto route_cycles =
                 slice / ftlpu::hw::kMemSlicesPerGroup;
-            const auto read_cycle = send_cycle - route_cycles;
+            const auto read_cycle = send_cycle + route_cycles;
             const auto queue = mem_queue(hemisphere, slice);
             system.icu().enqueue_mem_nop(
                 queue, read_cycle - mem_cursor[queue]);
@@ -849,11 +850,11 @@ std::size_t transfer_down_output(
                 queue,
                 ftlpu::MemInstruction::Read(
                     block.staging_address,
-                    ftlpu::StreamId::West(kOutboundStream)));
+                    ftlpu::StreamId::East(kOutboundStream)));
             mem_cursor[queue] = read_cycle + 1;
-            system.icu().enqueue_c2c_send(kOutboundStream);
+            system.icu().enqueue_c2c_send(hemisphere, kOutboundStream);
             system.icu().enqueue_c2c_tx_nop(
-                kC2cInstructionSpacing - 1);
+                hemisphere, kC2cInstructionSpacing - 1);
         }
     }
 
@@ -876,20 +877,20 @@ std::size_t transfer_down_output(
             }
         }
     } catch (const std::exception& ex) {
-        system.detach_c2c();
+        system.detach_c2c(hemisphere);
         throw std::runtime_error(
             "prefill FFN C2C outbound transfer: "
             + std::string(ex.what()));
     }
 
     if (received != vector_count
-        || !system.c2c_endpoint().tx().idle()
+        || !system.c2c_endpoint(hemisphere).tx().idle()
         || outbound_link.outstanding_vector_count() != 0) {
-        system.detach_c2c();
+        system.detach_c2c(hemisphere);
         throw std::runtime_error(
             "prefill FFN C2C outbound transfer did not drain");
     }
-    system.detach_c2c();
+    system.detach_c2c(hemisphere);
 
     const auto hemisphere_name =
         ftlpu::hemisphere_short_name(hemisphere);
@@ -909,18 +910,14 @@ std::size_t transfer_down_output(
 }
 
 std::size_t inbound_route_nop_cycles(
-    ftlpu::Hemisphere hemisphere,
     std::size_t target_slice)
 {
     const auto group =
         target_slice / ftlpu::hw::kMemSlicesPerGroup;
-    if (hemisphere == ftlpu::Hemisphere::East) {
-        const auto distance =
-            ftlpu::hw::kMxmBoundaryStreamRegisterColumn
-            - (group + 1);
-        return distance - 1;
-    }
-    return group - 1;
+    const auto distance =
+        ftlpu::hw::kMemEastBoundaryStreamRegisterColumn
+        - (group + 1);
+    return distance - 1;
 }
 
 std::size_t transfer_block_activations(
@@ -930,32 +927,15 @@ std::size_t transfer_block_activations(
     std::vector<TraceEvent>& trace,
     std::size_t trace_offset)
 {
-    if (destination.has_c2c()) {
+    if (destination.has_c2c(destination_hemisphere)) {
         throw std::logic_error(
             "prefill FFN inbound transfer needs an unattached C2C port");
     }
 
-    const auto westbound =
-        destination_hemisphere == ftlpu::Hemisphere::East;
-    const auto source_hemisphere = westbound
-        ? ftlpu::Hemisphere::West
-        : ftlpu::Hemisphere::East;
-    const auto source_slice = westbound
-        ? std::size_t {0}
-        : std::size_t {48};
-    const auto stream = westbound
-        ? ftlpu::StreamId::West(kInboundStream)
-        : ftlpu::StreamId::East(kInboundStream);
-    const auto source_ports = westbound
-        ? ftlpu::C2cStreamPortMap::WestEdge(
-              ftlpu::hw::kMemWestBoundaryStreamRegisterColumn)
-        : ftlpu::C2cStreamPortMap::EastEdge(
-              ftlpu::hw::kMxmBoundaryStreamRegisterColumn);
-    const auto destination_ports = westbound
-        ? ftlpu::C2cStreamPortMap::EastEdge(
-              ftlpu::hw::kMxmBoundaryStreamRegisterColumn)
-        : ftlpu::C2cStreamPortMap::WestEdge(
-              ftlpu::hw::kMemWestBoundaryStreamRegisterColumn);
+    const auto source_hemisphere = destination_hemisphere;
+    constexpr std::size_t kSourceSlice = 48;
+    const auto source_stream = ftlpu::StreamId::East(kInboundStream);
+    const auto target_stream = ftlpu::StreamId::West(kInboundStream);
 
     auto source = ftlpu::TspSliceSystem {};
     auto forward_link = ftlpu::C2cLink(ftlpu::C2cLinkConfig {
@@ -964,17 +944,15 @@ std::size_t transfer_block_activations(
         ftlpu::hw::kPhysicalVectorBytes, 0, 4});
     source.attach_c2c(
         source_hemisphere,
-        source_ports,
         forward_link,
         reverse_link);
     destination.attach_c2c(
         destination_hemisphere,
-        destination_ports,
         reverse_link,
         forward_link);
 
     const auto source_queue = mem_queue(
-        source_hemisphere, source_slice);
+        source_hemisphere, kSourceSlice);
     auto vector_index = std::size_t {0};
     for (std::size_t reduction = 0;
          reduction < kHidden / kTile;
@@ -1005,7 +983,7 @@ std::size_t transfer_block_activations(
                                 row, k, kHidden)]).bits();
                         source.initialize_mem_sram_lane_byte(
                             source_hemisphere,
-                            source_slice,
+                            kSourceSlice,
                             tile,
                             vector_index,
                             lane,
@@ -1017,24 +995,26 @@ std::size_t transfer_block_activations(
                 source.icu().enqueue_mem(
                     source_queue,
                     ftlpu::MemInstruction::Read(
-                        vector_index, stream));
+                        vector_index, source_stream));
                 source.icu().enqueue_mem_nop(
                     source_queue,
                     kC2cInstructionSpacing - 1);
-                source.icu().enqueue_c2c_send(kInboundStream);
+                source.icu().enqueue_c2c_send(
+                    source_hemisphere, kInboundStream);
                 source.icu().enqueue_c2c_tx_nop(
-                    kC2cInstructionSpacing - 1);
+                    source_hemisphere, kC2cInstructionSpacing - 1);
 
                 const auto target_slice =
                     kActivationSlices[activation_stream];
                 const auto target_queue = mem_queue(
                     destination_hemisphere, target_slice);
                 destination.icu().enqueue_c2c_receive(
+                    destination_hemisphere,
                     kInboundStream,
                     destination_hemisphere,
                     target_slice);
                 destination.icu().enqueue_c2c_rx_nop(
-                    kC2cInstructionSpacing - 1);
+                    destination_hemisphere, kC2cInstructionSpacing - 1);
                 destination.icu().enqueue_control(
                     ftlpu::IcuLocation::Mem(
                         destination_hemisphere, target_slice),
@@ -1042,11 +1022,11 @@ std::size_t transfer_block_activations(
                 destination.icu().enqueue_mem_nop(
                     target_queue,
                     inbound_route_nop_cycles(
-                        destination_hemisphere, target_slice));
+                        target_slice));
                 destination.icu().enqueue_mem(
                     target_queue,
                     ftlpu::MemInstruction::Write(
-                        target_address, stream));
+                        target_address, target_stream));
             }
         }
     }
@@ -1067,23 +1047,23 @@ std::size_t transfer_block_activations(
             reverse_link.tick();
         }
     } catch (const std::exception& ex) {
-        source.detach_c2c();
-        destination.detach_c2c();
+        source.detach_c2c(source_hemisphere);
+        destination.detach_c2c(destination_hemisphere);
         throw std::runtime_error(
             "prefill FFN C2C inbound transfer: "
             + std::string(ex.what()));
     }
 
-    if (!source.c2c_endpoint().tx().idle()
-        || !destination.c2c_endpoint().rx().idle()
+    if (!source.c2c_endpoint(source_hemisphere).tx().idle()
+        || !destination.c2c_endpoint(destination_hemisphere).rx().idle()
         || forward_link.outstanding_vector_count() != 0) {
-        source.detach_c2c();
-        destination.detach_c2c();
+        source.detach_c2c(source_hemisphere);
+        destination.detach_c2c(destination_hemisphere);
         throw std::runtime_error(
             "prefill FFN C2C inbound transfer did not drain");
     }
-    source.detach_c2c();
-    destination.detach_c2c();
+    source.detach_c2c(source_hemisphere);
+    destination.detach_c2c(destination_hemisphere);
 
     const auto hemisphere_name =
         ftlpu::hemisphere_short_name(destination_hemisphere);

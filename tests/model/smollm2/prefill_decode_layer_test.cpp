@@ -1,5 +1,5 @@
 #include "ftlpu/system/tsp_slice_system.hpp"
-#include "smollm2_layer_phases.hpp"
+#include "layer_phases.hpp"
 #include "vxm_alu_program.hpp"
 
 #include <algorithm>

@@ -9,6 +9,7 @@
 #include "ftlpu/system/hardware_configuration.hpp"
 #include "ftlpu/system/icu.hpp"
 #include "ftlpu/vxm/slice.hpp"
+#include <algorithm>
 
 #include <array>
 #include <cstddef>
@@ -66,41 +67,66 @@ public:
 
     void attach_c2c(
         Hemisphere hemisphere,
-        C2cStreamPortMap ports,
         C2cLink& outbound_link,
         C2cLink& inbound_link)
     {
         require_phase(CyclePhase::Idle, "attaching C2C");
-        c2c_.emplace(std::move(ports));
-        c2c_hemisphere_ = hemisphere;
-        c2c_outbound_link_ = &outbound_link;
-        c2c_inbound_link_ = &inbound_link;
+        const auto index = hemisphere_index(hemisphere);
+        c2cs_[index].emplace(C2cStreamPortMap::EastEdge(
+            hw::kMemEastBoundaryStreamRegisterColumn));
+        c2c_outbound_links_[index] = &outbound_link;
+        c2c_inbound_links_[index] = &inbound_link;
     }
 
-    bool has_c2c() const noexcept { return c2c_.has_value(); }
+    bool has_c2c(Hemisphere hemisphere) const noexcept
+    {
+        return c2cs_[hemisphere_index(hemisphere)].has_value();
+    }
+
+    bool has_c2c() const noexcept
+    {
+        return std::any_of(
+            c2cs_.begin(), c2cs_.end(),
+            [](const auto& endpoint) { return endpoint.has_value(); });
+    }
+
+    void detach_c2c(Hemisphere hemisphere)
+    {
+        require_phase(CyclePhase::Idle, "detaching C2C");
+        const auto index = hemisphere_index(hemisphere);
+        c2cs_[index].reset();
+        c2c_outbound_links_[index] = nullptr;
+        c2c_inbound_links_[index] = nullptr;
+    }
 
     void detach_c2c()
     {
-        require_phase(CyclePhase::Idle, "detaching C2C");
-        c2c_.reset();
-        c2c_outbound_link_ = nullptr;
-        c2c_inbound_link_ = nullptr;
+        require_phase(CyclePhase::Idle, "detaching all C2C endpoints");
+        for (std::size_t index = 0; index < hw::kHemispheres; ++index) {
+            c2cs_[index].reset();
+            c2c_outbound_links_[index] = nullptr;
+            c2c_inbound_links_[index] = nullptr;
+        }
     }
 
-    C2cEndpoint& c2c_endpoint()
+    C2cEndpoint& c2c_endpoint(Hemisphere hemisphere)
     {
-        if (!c2c_.has_value()) {
-            throw std::logic_error("TSP has no attached C2C endpoint");
+        auto& endpoint = c2cs_[hemisphere_index(hemisphere)];
+        if (!endpoint.has_value()) {
+            throw std::logic_error(
+                "TSP hemisphere has no attached C2C endpoint");
         }
-        return *c2c_;
+        return *endpoint;
     }
 
-    const C2cEndpoint& c2c_endpoint() const
+    const C2cEndpoint& c2c_endpoint(Hemisphere hemisphere) const
     {
-        if (!c2c_.has_value()) {
-            throw std::logic_error("TSP has no attached C2C endpoint");
+        const auto& endpoint = c2cs_[hemisphere_index(hemisphere)];
+        if (!endpoint.has_value()) {
+            throw std::logic_error(
+                "TSP hemisphere has no attached C2C endpoint");
         }
-        return *c2c_;
+        return *endpoint;
     }
 
     void initialize_mem_sram_lane_byte(
@@ -205,7 +231,9 @@ public:
         for (auto& sxm : sxms_) sxm.reset();
         for (auto& mxm : mxms_) mxm.reset();
         icu_.reset();
-        if (c2c_.has_value()) c2c_->reset();
+        for (auto& endpoint : c2cs_) {
+            if (endpoint.has_value()) endpoint->reset();
+        }
         cycle_ = 0;
     }
 
@@ -248,8 +276,16 @@ private:
     void dispatch_phase(LogSinks sinks)
     {
         require_phase(CyclePhase::Begun, "dispatching ICU instructions");
+        auto c2c_endpoints =
+            std::array<C2cEndpoint*, hw::kHemispheres> {};
+        for (std::size_t hemisphere = 0;
+             hemisphere < hw::kHemispheres;
+             ++hemisphere) {
+            c2c_endpoints[hemisphere] = c2cs_[hemisphere].has_value()
+                ? &*c2cs_[hemisphere] : nullptr;
+        }
         icu_.dispatch(
-            mems_, vxm_, sxms_, mxms_, sinks.icu, c2c_ ? &*c2c_ : nullptr);
+            mems_, vxm_, sxms_, mxms_, sinks.icu, c2c_endpoints);
         phase_ = CyclePhase::Dispatched;
     }
 
@@ -280,10 +316,9 @@ private:
             if (sinks.mem != nullptr) {
                 *sinks.mem << "mem." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
                            << " cycle " << cycle_ << '\n';
-                if (c2c_.has_value()
-                    && hemisphere == hemisphere_index(c2c_hemisphere_)) {
-                    const auto evaluate = [this](StreamRegisterFabric& fabric) {
-                        evaluate_c2c(fabric);
+                if (c2cs_[hemisphere].has_value()) {
+                    const auto evaluate = [this, hemisphere](StreamRegisterFabric& fabric) {
+                        evaluate_c2c(hemisphere, fabric);
                     };
                     mems_[hemisphere].tick(
                         sxms_[hemisphere], evaluate, *sinks.mem,
@@ -294,10 +329,9 @@ private:
                         sinks.mem_log_tile);
                 }
             } else {
-                if (c2c_.has_value()
-                    && hemisphere == hemisphere_index(c2c_hemisphere_)) {
-                    const auto evaluate = [this](StreamRegisterFabric& fabric) {
-                        evaluate_c2c(fabric);
+                if (c2cs_[hemisphere].has_value()) {
+                    const auto evaluate = [this, hemisphere](StreamRegisterFabric& fabric) {
+                        evaluate_c2c(hemisphere, fabric);
                     };
                     mems_[hemisphere].tick(sxms_[hemisphere], evaluate);
                 } else {
@@ -322,14 +356,20 @@ private:
         phase_ = CyclePhase::Idle;
     }
 
-    void evaluate_c2c(StreamRegisterFabric& fabric)
+    void evaluate_c2c(
+        std::size_t hemisphere,
+        StreamRegisterFabric& fabric)
     {
-        if (!c2c_.has_value() || c2c_outbound_link_ == nullptr
-            || c2c_inbound_link_ == nullptr) {
+        auto& endpoint = c2cs_[hemisphere];
+        if (!endpoint.has_value()
+            || c2c_outbound_links_[hemisphere] == nullptr
+            || c2c_inbound_links_[hemisphere] == nullptr) {
             throw std::logic_error("incomplete TSP C2C attachment");
         }
-        const auto notification = c2c_->evaluate(
-            fabric, *c2c_outbound_link_, *c2c_inbound_link_);
+        const auto notification = endpoint->evaluate(
+            fabric,
+            *c2c_outbound_links_[hemisphere],
+            *c2c_inbound_links_[hemisphere]);
         if (notification.has_value()) {
             icu_.notify(IcuLocation::Mem(
                 notification->consumer.hemisphere,
@@ -340,10 +380,10 @@ private:
     static SxmStreamPortMap make_sxm_port_map()
     {
         return SxmStreamPortMap::BetweenColumns(
-            hw::kMemEastBoundaryStreamRegisterColumn,
+            hw::kC2cSxmBoundaryStreamRegisterColumn,
             hw::kMxmBoundaryStreamRegisterColumn,
             hw::kMxmBoundaryStreamRegisterColumn,
-            hw::kMemEastBoundaryStreamRegisterColumn);
+            hw::kC2cSxmBoundaryStreamRegisterColumn);
     }
 
     static Hemisphere mxm_hemisphere(std::size_t mxm)
@@ -671,10 +711,9 @@ private:
     std::array<SxmSlice, hw::kHemispheres> sxms_;
     std::array<Mxm, kMxmCount> mxms_{};
     InstructionControlUnit icu_{};
-    std::optional<C2cEndpoint> c2c_{};
-    Hemisphere c2c_hemisphere_{Hemisphere::East};
-    C2cLink* c2c_outbound_link_{nullptr};
-    C2cLink* c2c_inbound_link_{nullptr};
+    std::array<std::optional<C2cEndpoint>, hw::kHemispheres> c2cs_{};
+    std::array<C2cLink*, hw::kHemispheres> c2c_outbound_links_{};
+    std::array<C2cLink*, hw::kHemispheres> c2c_inbound_links_{};
     std::size_t cycle_{0};
     CyclePhase phase_{CyclePhase::Idle};
 };
