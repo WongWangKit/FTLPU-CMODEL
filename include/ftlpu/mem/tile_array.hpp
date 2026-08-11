@@ -9,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iomanip>
 #include <optional>
 #include <ostream>
@@ -32,6 +33,7 @@ public:
     using InstructionSlot = MemArrayModel::InstructionSlot;
     using MemTransfer = MemArrayModel::MemTransfer;
     using InstructionTrace = MemArrayModel::InstructionTrace;
+    using FabricEvaluator = std::function<void(StreamRegisterFabric&)>;
 
     TileArrayModel()
         : mem_(
@@ -57,6 +59,11 @@ public:
         streams_.reset();
         pending_inputs_.clear();
         pending_consumptions_.clear();
+    }
+
+    void set_sram_depth_rows(std::size_t rows)
+    {
+        mem_.set_sram_depth_rows(rows);
     }
 
     std::size_t cycle() const noexcept
@@ -220,26 +227,44 @@ public:
 
     void tick()
     {
-        tick_impl(nullptr, nullptr, std::nullopt);
+        tick_impl(nullptr, nullptr, nullptr, std::nullopt);
     }
 
     void tick(std::ostream& os, std::optional<std::size_t> log_tile = std::nullopt)
     {
-        tick_impl(nullptr, &os, log_tile);
+        tick_impl(nullptr, nullptr, &os, log_tile);
     }
 
     void tick(SxmSlice& sxm)
     {
-        tick_impl(&sxm, nullptr, std::nullopt);
+        tick_impl(&sxm, nullptr, nullptr, std::nullopt);
     }
 
     void tick(SxmSlice& sxm, std::ostream& os, std::optional<std::size_t> log_tile = std::nullopt)
     {
-        tick_impl(&sxm, &os, log_tile);
+        tick_impl(&sxm, nullptr, &os, log_tile);
+    }
+
+    void tick(SxmSlice& sxm, const FabricEvaluator& evaluator)
+    {
+        tick_impl(&sxm, &evaluator, nullptr, std::nullopt);
+    }
+
+    void tick(
+        SxmSlice& sxm,
+        const FabricEvaluator& evaluator,
+        std::ostream& os,
+        std::optional<std::size_t> log_tile = std::nullopt)
+    {
+        tick_impl(&sxm, &evaluator, &os, log_tile);
     }
 
 private:
-    void tick_impl(SxmSlice* sxm, std::ostream* os, std::optional<std::size_t> log_tile)
+    void tick_impl(
+        SxmSlice* sxm,
+        const FabricEvaluator* evaluator,
+        std::ostream* os,
+        std::optional<std::size_t> log_tile)
     {
         streams_.begin_cycle();
 
@@ -261,6 +286,9 @@ private:
         mem_.evaluate(streams_, os != nullptr);
         if (sxm != nullptr) {
             sxm->evaluate(streams_);
+        }
+        if (evaluator != nullptr) {
+            (*evaluator)(streams_);
         }
 
         // Unconsumed streams move one physical SR hop in their direction.

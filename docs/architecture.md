@@ -411,9 +411,9 @@ retained in SRAM. Red is reserved for a Compute or AccumulatorRead operation
 that explicitly emits to stream and clears the slot.
 
 The generated schedule artifacts are
-[`smollm2_block8_dequant_ffn_schedule.csv`](smollm2_block8_dequant_ffn_schedule.csv)
+[`smollm2_block8_dequant_ffn_schedule.csv`](traces/smollm2_block8_dequant_ffn_schedule.csv)
 and
-[`smollm2_block8_dequant_ffn_schedule_detail.svg`](smollm2_block8_dequant_ffn_schedule_detail.svg).
+[`smollm2_block8_dequant_ffn_schedule_detail.svg`](figures/smollm2_block8_dequant_ffn_schedule_detail.svg).
 
 ### RMSNorm
 

@@ -357,9 +357,9 @@ lane。非末次 reduction 用紫色表示 partial sum 留在 SRAM；末次 redu
 送到 stream 并清零 slot。
 
 生成的调度文件为
-[`smollm2_block8_dequant_ffn_schedule.csv`](smollm2_block8_dequant_ffn_schedule.csv)
+[`smollm2_block8_dequant_ffn_schedule.csv`](traces/smollm2_block8_dequant_ffn_schedule.csv)
 和
-[`smollm2_block8_dequant_ffn_schedule_detail.svg`](smollm2_block8_dequant_ffn_schedule_detail.svg)。
+[`smollm2_block8_dequant_ffn_schedule_detail.svg`](figures/smollm2_block8_dequant_ffn_schedule_detail.svg)。
 
 ### RMSNorm
 

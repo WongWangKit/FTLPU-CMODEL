@@ -33,6 +33,8 @@ public:
     Sram(const Sram&) = delete;
     Sram& operator=(const Sram&) = delete;
 
+    void set_active_rows(std::size_t rows);
+    std::size_t active_rows() const noexcept { return active_rows_; }
     void clear();
     std::uint8_t byte(std::size_t row, std::size_t byte_offset) const;
     void set_byte(std::size_t row, std::size_t byte_offset, std::uint8_t value);
@@ -48,18 +50,20 @@ private:
         (kCapacityBytes + kPageBytes - 1) / kPageBytes;
     using Page = std::array<std::uint8_t, kPageBytes>;
 
-    static void check_row(std::size_t row);
+    void check_row(std::size_t row) const;
     static std::size_t tile_byte_offset(std::size_t tile);
-    static std::size_t flat_index(std::size_t row, std::size_t byte_offset);
+    std::size_t flat_index(std::size_t row, std::size_t byte_offset) const;
     Page& ensure_page(std::size_t page);
 
     std::array<std::unique_ptr<Page>, kPageCount> pages_{};
+    std::size_t active_rows_{kRows};
 };
 
 class SramArray {
 public:
     SramArray();
 
+    void set_active_rows(std::size_t rows);
     void clear();
 
     Sram& slice(std::size_t mem_slice);

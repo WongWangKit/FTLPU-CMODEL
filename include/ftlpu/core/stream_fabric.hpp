@@ -25,6 +25,12 @@ struct StreamRegisterColumn {
 
 class StreamRegisterFabric {
 public:
+    struct CycleActivity {
+        std::size_t staged_writes{0};
+        std::size_t east_staged_writes{0};
+        std::size_t west_staged_writes{0};
+    };
+
     struct Link {
         std::size_t source_column{0};
         std::size_t destination_column{0};
@@ -49,6 +55,8 @@ public:
         clear_consumed();
         cycle_ = 0;
         cycle_open_ = false;
+        current_activity_ = {};
+        last_activity_ = {};
     }
 
     std::size_t column_count() const noexcept
@@ -66,6 +74,11 @@ public:
         return cycle_open_;
     }
 
+    const CycleActivity& last_cycle_activity() const noexcept
+    {
+        return last_activity_;
+    }
+
     void begin_cycle()
     {
         if (cycle_open_) {
@@ -73,6 +86,7 @@ public:
         }
         // commit_cycle() leaves the staging state clean. Do not rescan the
         // complete fabric a second time at the start of every cycle.
+        current_activity_ = {};
         cycle_open_ = true;
     }
 
@@ -141,6 +155,11 @@ public:
                 + " while staging " + producer);
         }
         destination = value;
+        ++current_activity_.staged_writes;
+        if (stream.direction() == StreamDirection::East)
+            ++current_activity_.east_staged_writes;
+        else
+            ++current_activity_.west_staged_writes;
     }
 
     void stage_segment(
@@ -267,6 +286,7 @@ public:
     {
         require_open_cycle();
         current_.swap(next_);
+        last_activity_ = current_activity_;
         clear_columns(next_);
         clear_consumed();
         cycle_open_ = false;
@@ -398,6 +418,8 @@ private:
     std::vector<ColumnConsumeMask> consumed_{};
     std::size_t cycle_{0};
     bool cycle_open_{false};
+    CycleActivity current_activity_{};
+    CycleActivity last_activity_{};
 };
 
 } // namespace ftlpu

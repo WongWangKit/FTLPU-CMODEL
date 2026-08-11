@@ -1,10 +1,12 @@
 #pragma once
 
+#include "ftlpu/c2c/slice.hpp"
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/mem/tile_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
 #include "ftlpu/sxm/slice.hpp"
+#include "ftlpu/system/hardware_configuration.hpp"
 #include "ftlpu/system/icu.hpp"
 #include "ftlpu/vxm/slice.hpp"
 
@@ -37,12 +39,68 @@ public:
         std::ostream* sxm{nullptr};
     };
 
-    TspSliceSystem()
-        : sxms_ {
+    explicit TspSliceSystem(
+        SystemHardwareConfiguration hardware = {})
+        : hardware_configuration_(hardware)
+        , sxms_ {
             SxmSlice(make_sxm_port_map()),
             SxmSlice(make_sxm_port_map()),
         }
     {
+        configure_hardware(hardware_configuration_);
+    }
+
+    void configure_hardware(SystemHardwareConfiguration hardware)
+    {
+        require_phase(CyclePhase::Idle, "configuring hardware");
+        hardware.validate();
+        hardware_configuration_ = hardware;
+        for (auto& mem : mems_)
+            mem.set_sram_depth_rows(hardware.sram_depth_rows);
+    }
+
+    const SystemHardwareConfiguration& hardware_configuration() const noexcept
+    {
+        return hardware_configuration_;
+    }
+
+    void attach_c2c(
+        Hemisphere hemisphere,
+        C2cStreamPortMap ports,
+        C2cLink& outbound_link,
+        C2cLink& inbound_link)
+    {
+        require_phase(CyclePhase::Idle, "attaching C2C");
+        c2c_.emplace(std::move(ports));
+        c2c_hemisphere_ = hemisphere;
+        c2c_outbound_link_ = &outbound_link;
+        c2c_inbound_link_ = &inbound_link;
+    }
+
+    bool has_c2c() const noexcept { return c2c_.has_value(); }
+
+    void detach_c2c()
+    {
+        require_phase(CyclePhase::Idle, "detaching C2C");
+        c2c_.reset();
+        c2c_outbound_link_ = nullptr;
+        c2c_inbound_link_ = nullptr;
+    }
+
+    C2cEndpoint& c2c_endpoint()
+    {
+        if (!c2c_.has_value()) {
+            throw std::logic_error("TSP has no attached C2C endpoint");
+        }
+        return *c2c_;
+    }
+
+    const C2cEndpoint& c2c_endpoint() const
+    {
+        if (!c2c_.has_value()) {
+            throw std::logic_error("TSP has no attached C2C endpoint");
+        }
+        return *c2c_;
     }
 
     void initialize_mem_sram_lane_byte(
@@ -95,13 +153,26 @@ public:
         return icu_;
     }
 
+    const VxmSlice& vxm_unit() const noexcept
+    {
+        return vxm_;
+    }
+
+    const StreamRegisterFabric& stream_fabric(
+        Hemisphere hemisphere) const noexcept
+    {
+        return mems_[hemisphere_index(hemisphere)].stream_fabric();
+    }
+
     Mxm& mxm_unit(std::size_t mxm)
     {
+        require_active_mxm(mxm);
         return mxms_.at(mxm);
     }
 
     const Mxm& mxm_unit(std::size_t mxm) const
     {
+        require_active_mxm(mxm);
         return mxms_.at(mxm);
     }
 
@@ -134,10 +205,20 @@ public:
         for (auto& sxm : sxms_) sxm.reset();
         for (auto& mxm : mxms_) mxm.reset();
         icu_.reset();
+        if (c2c_.has_value()) c2c_->reset();
         cycle_ = 0;
     }
 
 private:
+    void require_active_mxm(std::size_t mxm) const
+    {
+        if (mxm >= kMxmCount
+            || mxm % hw::kMxmsPerHemisphere
+                >= hardware_configuration_.mxms_per_hemisphere)
+            throw std::out_of_range(
+                "MXM unit is disabled by the system hardware configuration");
+    }
+
     enum class CyclePhase {
         Idle,
         Begun,
@@ -167,7 +248,8 @@ private:
     void dispatch_phase(LogSinks sinks)
     {
         require_phase(CyclePhase::Begun, "dispatching ICU instructions");
-        icu_.dispatch(mems_, vxm_, sxms_, mxms_, sinks.icu);
+        icu_.dispatch(
+            mems_, vxm_, sxms_, mxms_, sinks.icu, c2c_ ? &*c2c_ : nullptr);
         phase_ = CyclePhase::Dispatched;
     }
 
@@ -198,9 +280,29 @@ private:
             if (sinks.mem != nullptr) {
                 *sinks.mem << "mem." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
                            << " cycle " << cycle_ << '\n';
-                mems_[hemisphere].tick(sxms_[hemisphere], *sinks.mem, sinks.mem_log_tile);
+                if (c2c_.has_value()
+                    && hemisphere == hemisphere_index(c2c_hemisphere_)) {
+                    const auto evaluate = [this](StreamRegisterFabric& fabric) {
+                        evaluate_c2c(fabric);
+                    };
+                    mems_[hemisphere].tick(
+                        sxms_[hemisphere], evaluate, *sinks.mem,
+                        sinks.mem_log_tile);
+                } else {
+                    mems_[hemisphere].tick(
+                        sxms_[hemisphere], *sinks.mem,
+                        sinks.mem_log_tile);
+                }
             } else {
-                mems_[hemisphere].tick(sxms_[hemisphere]);
+                if (c2c_.has_value()
+                    && hemisphere == hemisphere_index(c2c_hemisphere_)) {
+                    const auto evaluate = [this](StreamRegisterFabric& fabric) {
+                        evaluate_c2c(fabric);
+                    };
+                    mems_[hemisphere].tick(sxms_[hemisphere], evaluate);
+                } else {
+                    mems_[hemisphere].tick(sxms_[hemisphere]);
+                }
             }
             if (sinks.sxm != nullptr) {
                 *sinks.sxm << "sxm."
@@ -219,6 +321,22 @@ private:
         ++cycle_;
         phase_ = CyclePhase::Idle;
     }
+
+    void evaluate_c2c(StreamRegisterFabric& fabric)
+    {
+        if (!c2c_.has_value() || c2c_outbound_link_ == nullptr
+            || c2c_inbound_link_ == nullptr) {
+            throw std::logic_error("incomplete TSP C2C attachment");
+        }
+        const auto notification = c2c_->evaluate(
+            fabric, *c2c_outbound_link_, *c2c_inbound_link_);
+        if (notification.has_value()) {
+            icu_.notify(IcuLocation::Mem(
+                notification->consumer.hemisphere,
+                notification->consumer.mem_slice));
+        }
+    }
+
     static SxmStreamPortMap make_sxm_port_map()
     {
         return SxmStreamPortMap::BetweenColumns(
@@ -547,11 +665,16 @@ private:
         std::ostream stream_{&buffer_};
     };
 
+    SystemHardwareConfiguration hardware_configuration_{};
     std::array<TileArrayModel, hw::kHemispheres> mems_{};
     VxmSlice vxm_{};
     std::array<SxmSlice, hw::kHemispheres> sxms_;
     std::array<Mxm, kMxmCount> mxms_{};
     InstructionControlUnit icu_{};
+    std::optional<C2cEndpoint> c2c_{};
+    Hemisphere c2c_hemisphere_{Hemisphere::East};
+    C2cLink* c2c_outbound_link_{nullptr};
+    C2cLink* c2c_inbound_link_{nullptr};
     std::size_t cycle_{0};
     CyclePhase phase_{CyclePhase::Idle};
 };

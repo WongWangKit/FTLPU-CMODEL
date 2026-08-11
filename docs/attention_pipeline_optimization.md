@@ -263,7 +263,7 @@ avoiding a full 52-slice, 64-stream state scan on every empty tick.
 setting `FTLPU_SCHEDULE_TRACE`. `FTLPU_SCHEDULE_TRACE_ONLY=1` stops after queue
 construction, so regenerating a diagram does not run the full numerical model.
 The standard detailed view is
-[`smollm2_attention_schedule_detail.svg`](smollm2_attention_schedule_detail.svg).
+[`smollm2_attention_schedule_detail.svg`](figures/smollm2_attention_schedule_detail.svg).
 
 The SVG expands eight representative windows:
 

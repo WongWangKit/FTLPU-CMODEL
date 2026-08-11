@@ -32,6 +32,11 @@ public:
         StreamMatrix streams{};
     };
 
+    struct CycleActivity {
+        std::size_t executed_instruction_rows{0};
+        std::size_t useful_instruction_rows{0};
+    };
+
     void reset()
     {
         for (auto& queue : instruction_queues_) {
@@ -55,6 +60,8 @@ public:
         for (auto& hemisphere_required : required_streams_) for (auto& required : hemisphere_required) required.reset();
         cycle_ = 0;
         prepared_ = false;
+        current_cycle_activity_ = {};
+        last_cycle_activity_ = {};
     }
 
     void issue_south(std::size_t alu, AluInstruction instruction)
@@ -89,8 +96,10 @@ public:
             log_status(*os, log_tile);
         }
 
+        current_cycle_activity_ = {};
         execute_instructions(os, log_tile);
         tick_superlanes(os, log_tile);
+        last_cycle_activity_ = current_cycle_activity_;
         advance_instructions();
         for (auto& hemisphere_inputs : input_slots_) for (auto& input : hemisphere_inputs) input.reset();
         prepared_ = false;
@@ -110,6 +119,11 @@ public:
     std::size_t cycle() const
     {
         return cycle_;
+    }
+
+    const CycleActivity& last_cycle_activity() const noexcept
+    {
+        return last_cycle_activity_;
     }
 
     const InstructionSlot& instruction_at(std::size_t alu, std::size_t tile) const
@@ -215,6 +229,9 @@ private:
                 }
 
                 any = true;
+                ++current_cycle_activity_.executed_instruction_rows;
+                if (instruction->opcode != VxmAluOpcode::Pass)
+                    ++current_cycle_activity_.useful_instruction_rows;
                 superlanes_[tile].enqueue_instruction(alu, *instruction);
                 if (os != nullptr && (!log_tile.has_value() || tile == *log_tile)) {
                     any_logged = true;
@@ -341,6 +358,8 @@ private:
     std::array<OutputSlot, kTileCount> output_slots_{};
     std::array<std::vector<Superlane::Output>, kTileCount> output_slots_multi_{};
     std::array<std::array<std::optional<RequiredStreams>, kTileCount>, hw::kHemispheres> required_streams_{};
+    CycleActivity current_cycle_activity_{};
+    CycleActivity last_cycle_activity_{};
     std::size_t cycle_{0};
     bool prepared_{false};
 };

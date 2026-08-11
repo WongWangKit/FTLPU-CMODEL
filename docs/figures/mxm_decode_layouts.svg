@@ -1,0 +1,170 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="context-stroke"/>
+    </marker>
+    <style>
+      .title { font: 700 28px Arial, sans-serif; fill: #17202a; }
+      .panel-title { font: 700 23px Arial, sans-serif; fill: #17202a; }
+      .subtitle { font: 15px Arial, sans-serif; fill: #566573; }
+      .label { font: 600 14px Arial, sans-serif; fill: #273746; }
+      .small { font: 13px Arial, sans-serif; fill: #34495e; }
+      .tiny { font: 12px Consolas, monospace; fill: #273746; }
+      .cell { fill: #f7f9f9; stroke: #566573; stroke-width: 1.5; rx: 4; }
+      .cell-native { fill: #eaf2f8; stroke: #2874a6; stroke-width: 1.5; rx: 4; }
+      .activation { stroke: #239b56; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .weight { stroke: #c0392b; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .partial { stroke: #7d3c98; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .muted { stroke: #aab7b8; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+      .divider { stroke: #d5d8dc; stroke-width: 1; }
+      .stage { fill: #f4f6f7; stroke: #aab7b8; rx: 3; }
+      .active { fill: #d6eaf8; stroke: #2874a6; rx: 3; }
+    </style>
+  </defs>
+
+  <rect width="1440" height="900" fill="#ffffff"/>
+  <text x="720" y="42" text-anchor="middle" class="title">MXM Decode: Native 4x4 vs Linear 1x16</text>
+  <text x="720" y="68" text-anchor="middle" class="subtitle">Each supercell computes an 8-element BF16 dot-product block from streamed INT8 weights</text>
+  <line x1="720" y1="92" x2="720" y2="855" class="divider"/>
+
+  <!-- Native 4x4 panel -->
+  <text x="355" y="112" text-anchor="middle" class="panel-title">Native4x4: activation-stationary</text>
+  <text x="355" y="137" text-anchor="middle" class="subtitle">K block = 4 tiles x 8 lanes = 32, output wave = 4 columns x 8 = 32</text>
+
+  <text x="48" y="191" class="label">2 BF16 streams</text>
+  <text x="48" y="210" class="small">one A[r][8] per tile row</text>
+
+  <!-- Native grid row labels and activation broadcasts -->
+  <text x="168" y="225" text-anchor="end" class="label">tile 0</text>
+  <text x="168" y="307" text-anchor="end" class="label">tile 1</text>
+  <text x="168" y="389" text-anchor="end" class="label">tile 2</text>
+  <text x="168" y="471" text-anchor="end" class="label">tile 3</text>
+  <path d="M62 235 H655" class="activation"/>
+  <path d="M62 317 H655" class="activation"/>
+  <path d="M62 399 H655" class="activation"/>
+  <path d="M62 481 H655" class="activation"/>
+  <text x="76" y="230" class="tiny">A0[8]</text>
+  <text x="76" y="312" class="tiny">A1[8]</text>
+  <text x="76" y="394" class="tiny">A2[8]</text>
+  <text x="76" y="476" class="tiny">A3[8]</text>
+
+  <!-- Native cells -->
+  <g>
+    <rect x="185" y="205" width="92" height="58" class="cell-native"/><text x="231" y="229" text-anchor="middle" class="label">SC(0,0)</text><text x="231" y="249" text-anchor="middle" class="tiny">stage 0</text>
+    <rect x="310" y="205" width="92" height="58" class="cell-native"/><text x="356" y="229" text-anchor="middle" class="label">SC(0,1)</text><text x="356" y="249" text-anchor="middle" class="tiny">stage 1</text>
+    <rect x="435" y="205" width="92" height="58" class="cell-native"/><text x="481" y="229" text-anchor="middle" class="label">SC(0,2)</text><text x="481" y="249" text-anchor="middle" class="tiny">stage 2</text>
+    <rect x="560" y="205" width="92" height="58" class="cell-native"/><text x="606" y="229" text-anchor="middle" class="label">SC(0,3)</text><text x="606" y="249" text-anchor="middle" class="tiny">stage 3</text>
+
+    <rect x="185" y="287" width="92" height="58" class="cell-native"/><text x="231" y="311" text-anchor="middle" class="label">SC(1,0)</text><text x="231" y="331" text-anchor="middle" class="tiny">stage 1</text>
+    <rect x="310" y="287" width="92" height="58" class="cell-native"/><text x="356" y="311" text-anchor="middle" class="label">SC(1,1)</text><text x="356" y="331" text-anchor="middle" class="tiny">stage 2</text>
+    <rect x="435" y="287" width="92" height="58" class="cell-native"/><text x="481" y="311" text-anchor="middle" class="label">SC(1,2)</text><text x="481" y="331" text-anchor="middle" class="tiny">stage 3</text>
+    <rect x="560" y="287" width="92" height="58" class="cell-native"/><text x="606" y="311" text-anchor="middle" class="label">SC(1,3)</text><text x="606" y="331" text-anchor="middle" class="tiny">stage 4</text>
+
+    <rect x="185" y="369" width="92" height="58" class="cell-native"/><text x="231" y="393" text-anchor="middle" class="label">SC(2,0)</text><text x="231" y="413" text-anchor="middle" class="tiny">stage 2</text>
+    <rect x="310" y="369" width="92" height="58" class="cell-native"/><text x="356" y="393" text-anchor="middle" class="label">SC(2,1)</text><text x="356" y="413" text-anchor="middle" class="tiny">stage 3</text>
+    <rect x="435" y="369" width="92" height="58" class="cell-native"/><text x="481" y="393" text-anchor="middle" class="label">SC(2,2)</text><text x="481" y="413" text-anchor="middle" class="tiny">stage 4</text>
+    <rect x="560" y="369" width="92" height="58" class="cell-native"/><text x="606" y="393" text-anchor="middle" class="label">SC(2,3)</text><text x="606" y="413" text-anchor="middle" class="tiny">stage 5</text>
+
+    <rect x="185" y="451" width="92" height="58" class="cell-native"/><text x="231" y="475" text-anchor="middle" class="label">SC(3,0)</text><text x="231" y="495" text-anchor="middle" class="tiny">stage 3</text>
+    <rect x="310" y="451" width="92" height="58" class="cell-native"/><text x="356" y="475" text-anchor="middle" class="label">SC(3,1)</text><text x="356" y="495" text-anchor="middle" class="tiny">stage 4</text>
+    <rect x="435" y="451" width="92" height="58" class="cell-native"/><text x="481" y="475" text-anchor="middle" class="label">SC(3,2)</text><text x="481" y="495" text-anchor="middle" class="tiny">stage 5</text>
+    <rect x="560" y="451" width="92" height="58" class="cell-native"/><text x="606" y="475" text-anchor="middle" class="label">SC(3,3)</text><text x="606" y="495" text-anchor="middle" class="tiny">stage 6</text>
+  </g>
+
+  <!-- Native vertical reductions and weights -->
+  <path d="M231 263 V287 M231 345 V369 M231 427 V451" class="partial"/>
+  <path d="M356 263 V287 M356 345 V369 M356 427 V451" class="partial"/>
+  <path d="M481 263 V287 M481 345 V369 M481 427 V451" class="partial"/>
+  <path d="M606 263 V287 M606 345 V369 M606 427 V451" class="partial"/>
+  <text x="231" y="535" text-anchor="middle" class="tiny">Y[0:7]</text>
+  <text x="356" y="535" text-anchor="middle" class="tiny">Y[8:15]</text>
+  <text x="481" y="535" text-anchor="middle" class="tiny">Y[16:23]</text>
+  <text x="606" y="535" text-anchor="middle" class="tiny">Y[24:31]</text>
+  <path d="M231 509 V523 M356 509 V523 M481 509 V523 M606 509 V523" class="partial"/>
+
+  <text x="197" y="174" text-anchor="middle" class="tiny">W col0 @ t</text>
+  <text x="322" y="174" text-anchor="middle" class="tiny">W col1 @ t+1</text>
+  <text x="447" y="174" text-anchor="middle" class="tiny">W col2 @ t+2</text>
+  <text x="572" y="174" text-anchor="middle" class="tiny">W col3 @ t+3</text>
+  <path d="M231 180 V201 M356 180 V201 M481 180 V201 M606 180 V201" class="weight"/>
+
+  <!-- Native timing -->
+  <text x="48" y="581" class="label">7-stage diagonal wavefront</text>
+  <g transform="translate(48,596)">
+    <text x="0" y="19" class="tiny">cycle</text>
+    <g transform="translate(72,0)">
+      <rect x="0" y="0" width="78" height="30" class="active"/><text x="39" y="19" text-anchor="middle" class="tiny">t: 00</text>
+      <rect x="82" y="0" width="78" height="30" class="active"/><text x="121" y="19" text-anchor="middle" class="tiny">t+1: 10,01</text>
+      <rect x="164" y="0" width="92" height="30" class="active"/><text x="210" y="19" text-anchor="middle" class="tiny">t+2: 20,11,02</text>
+      <rect x="260" y="0" width="106" height="30" class="active"/><text x="313" y="19" text-anchor="middle" class="tiny">t+3: 30,21,12,03</text>
+      <rect x="370" y="0" width="92" height="30" class="active"/><text x="416" y="19" text-anchor="middle" class="tiny">t+4: 31,22,13</text>
+      <rect x="466" y="0" width="78" height="30" class="active"/><text x="505" y="19" text-anchor="middle" class="tiny">t+5: 32,23</text>
+      <rect x="548" y="0" width="62" height="30" class="active"/><text x="579" y="19" text-anchor="middle" class="tiny">t+6: 33</text>
+    </g>
+  </g>
+  <text x="48" y="653" class="small">Four independent vertical partial sums run concurrently; one completed wave produces 32 BF16 values.</text>
+
+  <!-- Linear 1x16 panel -->
+  <text x="1080" y="112" text-anchor="middle" class="panel-title">Linear1x16: one serial reduction chain</text>
+  <text x="1080" y="137" text-anchor="middle" class="subtitle">K block = 16 cells x 8 lanes = 128, output wave = 8</text>
+  <text x="758" y="174" class="label">8 BF16 streams load four A[r,c][8] vectors per tile</text>
+
+  <!-- Linear chain cells: four vertical columns, connected column-major -->
+  <g>
+    <rect x="770" y="205" width="118" height="54" class="cell"/><text x="829" y="227" text-anchor="middle" class="label">SC(0,0)</text><text x="829" y="246" text-anchor="middle" class="tiny">stage 0</text>
+    <rect x="770" y="276" width="118" height="54" class="cell"/><text x="829" y="298" text-anchor="middle" class="label">SC(1,0)</text><text x="829" y="317" text-anchor="middle" class="tiny">stage 1</text>
+    <rect x="770" y="347" width="118" height="54" class="cell"/><text x="829" y="369" text-anchor="middle" class="label">SC(2,0)</text><text x="829" y="388" text-anchor="middle" class="tiny">stage 2</text>
+    <rect x="770" y="418" width="118" height="54" class="cell"/><text x="829" y="440" text-anchor="middle" class="label">SC(3,0)</text><text x="829" y="459" text-anchor="middle" class="tiny">stage 3</text>
+
+    <rect x="930" y="205" width="118" height="54" class="cell"/><text x="989" y="227" text-anchor="middle" class="label">SC(0,1)</text><text x="989" y="246" text-anchor="middle" class="tiny">stage 4</text>
+    <rect x="930" y="276" width="118" height="54" class="cell"/><text x="989" y="298" text-anchor="middle" class="label">SC(1,1)</text><text x="989" y="317" text-anchor="middle" class="tiny">stage 5</text>
+    <rect x="930" y="347" width="118" height="54" class="cell"/><text x="989" y="369" text-anchor="middle" class="label">SC(2,1)</text><text x="989" y="388" text-anchor="middle" class="tiny">stage 6</text>
+    <rect x="930" y="418" width="118" height="54" class="cell"/><text x="989" y="440" text-anchor="middle" class="label">SC(3,1)</text><text x="989" y="459" text-anchor="middle" class="tiny">stage 7</text>
+
+    <rect x="1090" y="205" width="118" height="54" class="cell"/><text x="1149" y="227" text-anchor="middle" class="label">SC(0,2)</text><text x="1149" y="246" text-anchor="middle" class="tiny">stage 8</text>
+    <rect x="1090" y="276" width="118" height="54" class="cell"/><text x="1149" y="298" text-anchor="middle" class="label">SC(1,2)</text><text x="1149" y="317" text-anchor="middle" class="tiny">stage 9</text>
+    <rect x="1090" y="347" width="118" height="54" class="cell"/><text x="1149" y="369" text-anchor="middle" class="label">SC(2,2)</text><text x="1149" y="388" text-anchor="middle" class="tiny">stage 10</text>
+    <rect x="1090" y="418" width="118" height="54" class="cell"/><text x="1149" y="440" text-anchor="middle" class="label">SC(3,2)</text><text x="1149" y="459" text-anchor="middle" class="tiny">stage 11</text>
+
+    <rect x="1250" y="205" width="118" height="54" class="cell"/><text x="1309" y="227" text-anchor="middle" class="label">SC(0,3)</text><text x="1309" y="246" text-anchor="middle" class="tiny">stage 12</text>
+    <rect x="1250" y="276" width="118" height="54" class="cell"/><text x="1309" y="298" text-anchor="middle" class="label">SC(1,3)</text><text x="1309" y="317" text-anchor="middle" class="tiny">stage 13</text>
+    <rect x="1250" y="347" width="118" height="54" class="cell"/><text x="1309" y="369" text-anchor="middle" class="label">SC(2,3)</text><text x="1309" y="388" text-anchor="middle" class="tiny">stage 14</text>
+    <rect x="1250" y="418" width="118" height="54" class="cell"/><text x="1309" y="440" text-anchor="middle" class="label">SC(3,3)</text><text x="1309" y="459" text-anchor="middle" class="tiny">stage 15</text>
+  </g>
+
+  <!-- Linear serial path -->
+  <path d="M829 259 V276 M829 330 V347 M829 401 V418" class="partial"/>
+  <path d="M888 445 H909 V232 H930" class="partial"/>
+  <path d="M989 259 V276 M989 330 V347 M989 401 V418" class="partial"/>
+  <path d="M1048 445 H1069 V232 H1090" class="partial"/>
+  <path d="M1149 259 V276 M1149 330 V347 M1149 401 V418" class="partial"/>
+  <path d="M1208 445 H1229 V232 H1250" class="partial"/>
+  <path d="M1309 259 V276 M1309 330 V347 M1309 401 V418" class="partial"/>
+  <path d="M1309 472 V518" class="partial"/>
+  <text x="1309" y="539" text-anchor="middle" class="tiny">Y[0:7]</text>
+
+  <text x="829" y="191" text-anchor="middle" class="tiny">W col0 @ t</text>
+  <text x="989" y="191" text-anchor="middle" class="tiny">W col1 @ t+4</text>
+  <text x="1149" y="191" text-anchor="middle" class="tiny">W col2 @ t+8</text>
+  <text x="1309" y="191" text-anchor="middle" class="tiny">W col3 @ t+12</text>
+
+  <text x="758" y="581" class="label">16-stage serial wave</text>
+  <g transform="translate(758,596)">
+    <rect x="0" y="0" width="146" height="30" class="active"/><text x="73" y="19" text-anchor="middle" class="tiny">t..t+3: col0, tile0..3</text>
+    <rect x="150" y="0" width="146" height="30" class="active"/><text x="223" y="19" text-anchor="middle" class="tiny">t+4..7: col1</text>
+    <rect x="300" y="0" width="146" height="30" class="active"/><text x="373" y="19" text-anchor="middle" class="tiny">t+8..11: col2</text>
+    <rect x="450" y="0" width="146" height="30" class="active"/><text x="523" y="19" text-anchor="middle" class="tiny">t+12..15: col3</text>
+  </g>
+  <text x="758" y="653" class="small">One partial sum visits all 16 cells; one completed wave produces 8 BF16 values.</text>
+
+  <!-- Comparison footer -->
+  <line x1="40" y1="693" x2="1400" y2="693" class="divider"/>
+  <text x="720" y="730" text-anchor="middle" class="panel-title">Why both layouts are useful</text>
+  <rect x="70" y="757" width="600" height="82" fill="#eafaf1" stroke="#239b56" rx="5"/>
+  <text x="92" y="786" class="label">Native4x4 favors wide output projections</text>
+  <text x="92" y="811" class="small">32 outputs per wave and four concurrent reduction chains amortize the shorter K block.</text>
+  <rect x="770" y="757" width="600" height="82" fill="#f5eef8" stroke="#7d3c98" rx="5"/>
+  <text x="792" y="786" class="label">Linear1x16 favors narrow output projections</text>
+  <text x="792" y="811" class="small">A 128-element K block needs fewer reduction rounds when only a modest number of outputs is required.</text>
+  <text x="720" y="876" text-anchor="middle" class="subtitle">SmolLM2 decode FFN: Native4x4 for Gate/Up, Linear1x16 for each Down half</text>
+</svg>

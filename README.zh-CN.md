@@ -111,12 +111,12 @@ build-vs2026\Release\smollm2_attention_test.exe
 
 ## 调度图
 
-- [W8A16 projection pipeline](docs/w8a16_projection_pipeline.svg)
-- [完整 FFN pipeline](docs/w8a16_swiglu_pipeline.svg)
-- [完整 FFN 详细 ICU 调度](docs/w8a16_swiglu_schedule_detail.svg)
-- [SmolLM2 attention pipeline](docs/smollm2_attention_pipeline.svg)
-- [Attention 优化对比](docs/smollm2_attention_pipeline_optimization.svg)
-- [Attention 详细 ICU 调度](docs/smollm2_attention_schedule_detail.svg)
+- [W8A16 projection pipeline](docs/figures/w8a16_projection_pipeline.svg)
+- [完整 FFN pipeline](docs/figures/w8a16_swiglu_pipeline.svg)
+- [完整 FFN 详细 ICU 调度](docs/figures/w8a16_swiglu_schedule_detail.svg)
+- [SmolLM2 attention pipeline](docs/figures/smollm2_attention_pipeline.svg)
+- [Attention 优化对比](docs/figures/smollm2_attention_pipeline_optimization.svg)
+- [Attention 详细 ICU 调度](docs/figures/smollm2_attention_schedule_detail.svg)
 
 重新生成 FFN 调度图：
 
@@ -126,7 +126,7 @@ $env:FTLPU_SCHEDULE_TRACE_ONLY = "1"
 build-vs2026\Release\dual_hemisphere_w8a16_swiglu_test.exe
 python scripts\render_swiglu_schedule_trace.py `
   logs\w8a16_swiglu\schedule.csv `
-  docs\w8a16_swiglu_schedule_detail.svg
+  docs\figures\w8a16_swiglu_schedule_detail.svg
 ```
 
 重新生成 attention 调度图：
@@ -137,7 +137,7 @@ $env:FTLPU_SCHEDULE_TRACE_ONLY = "1"
 build-vs2026\Release\smollm2_attention_test.exe
 python scripts\render_schedule_trace.py `
   logs\smollm2_attention\schedule.csv `
-  docs\smollm2_attention_schedule_detail.svg
+  docs\figures\smollm2_attention_schedule_detail.svg
 ```
 
 详细图中，紫色 accumulator 条带表示 partial sum 保留在 MXM 本地 accumulator；红色表示最终

@@ -191,6 +191,11 @@ public:
         executed_instructions_.clear();
     }
 
+    void set_sram_depth_rows(std::size_t rows)
+    {
+        sram_.set_active_rows(rows);
+    }
+
     std::size_t cycle() const noexcept
     {
         return cycle_;

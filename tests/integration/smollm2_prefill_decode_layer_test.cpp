@@ -603,7 +603,7 @@ std::vector<float> make_decode_input()
 
 int main() try
 {
-    const auto docs = std::filesystem::path("docs");
+    const auto docs = std::filesystem::path("docs") / "traces";
     std::filesystem::create_directories(docs);
     const auto trace_paths = std::array<std::filesystem::path, 13> {
         docs / "smollm2_layer_00_prefill_norm1.csv",

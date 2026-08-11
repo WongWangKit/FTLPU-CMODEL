@@ -9,6 +9,14 @@ Sram::~Sram() = default;
 Sram::Sram(Sram&&) noexcept = default;
 Sram& Sram::operator=(Sram&&) noexcept = default;
 
+void Sram::set_active_rows(std::size_t rows)
+{
+    if (rows == 0 || rows > kRows)
+        throw std::invalid_argument(
+            "SRAM active depth exceeds its physical capacity");
+    active_rows_ = rows;
+}
+
 void Sram::clear()
 {
     for (auto& page : pages_) {
@@ -56,10 +64,10 @@ void Sram::write_segment(
     }
 }
 
-void Sram::check_row(std::size_t row)
+void Sram::check_row(std::size_t row) const
 {
-    if (row >= kRows) {
-        throw std::out_of_range("SRAM row is outside the 65536-row slice SRAM");
+    if (row >= active_rows_) {
+        throw std::out_of_range("SRAM row is outside the configured slice SRAM");
     }
 }
 
@@ -71,7 +79,8 @@ std::size_t Sram::tile_byte_offset(std::size_t tile)
     return tile * kBytesPerTileSegment;
 }
 
-std::size_t Sram::flat_index(std::size_t row, std::size_t byte_offset)
+std::size_t Sram::flat_index(
+    std::size_t row, std::size_t byte_offset) const
 {
     check_row(row);
     if (byte_offset >= kBytesPerRow) {
@@ -92,6 +101,11 @@ Sram::Page& Sram::ensure_page(std::size_t page)
 SramArray::SramArray()
     : slices_(hw::kMemSliceColumns)
 {
+}
+
+void SramArray::set_active_rows(std::size_t rows)
+{
+    for (auto& sram : slices_) sram.set_active_rows(rows);
 }
 
 void SramArray::clear()

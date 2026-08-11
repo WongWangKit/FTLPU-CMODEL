@@ -120,12 +120,12 @@ pages, so sparse workloads do not eagerly reserve all 208 MiB.
 
 ## Schedule Diagrams
 
-- [W8A16 projection pipeline](docs/w8a16_projection_pipeline.svg)
-- [Full FFN pipeline](docs/w8a16_swiglu_pipeline.svg)
-- [Full FFN detailed ICU schedule](docs/w8a16_swiglu_schedule_detail.svg)
-- [SmolLM2 attention pipeline](docs/smollm2_attention_pipeline.svg)
-- [Attention optimization comparison](docs/smollm2_attention_pipeline_optimization.svg)
-- [Attention detailed ICU schedule](docs/smollm2_attention_schedule_detail.svg)
+- [W8A16 projection pipeline](docs/figures/w8a16_projection_pipeline.svg)
+- [Full FFN pipeline](docs/figures/w8a16_swiglu_pipeline.svg)
+- [Full FFN detailed ICU schedule](docs/figures/w8a16_swiglu_schedule_detail.svg)
+- [SmolLM2 attention pipeline](docs/figures/smollm2_attention_pipeline.svg)
+- [Attention optimization comparison](docs/figures/smollm2_attention_pipeline_optimization.svg)
+- [Attention detailed ICU schedule](docs/figures/smollm2_attention_schedule_detail.svg)
 
 Regenerate the FFN schedule:
 
@@ -135,7 +135,7 @@ $env:FTLPU_SCHEDULE_TRACE_ONLY = "1"
 build-vs2026\Release\dual_hemisphere_w8a16_swiglu_test.exe
 python scripts\render_swiglu_schedule_trace.py `
   logs\w8a16_swiglu\schedule.csv `
-  docs\w8a16_swiglu_schedule_detail.svg
+  docs\figures\w8a16_swiglu_schedule_detail.svg
 ```
 
 Regenerate the attention schedule:
@@ -146,7 +146,7 @@ $env:FTLPU_SCHEDULE_TRACE_ONLY = "1"
 build-vs2026\Release\smollm2_attention_test.exe
 python scripts\render_schedule_trace.py `
   logs\smollm2_attention\schedule.csv `
-  docs\smollm2_attention_schedule_detail.svg
+  docs\figures\smollm2_attention_schedule_detail.svg
 ```
 
 Accumulator bars in detailed diagrams use purple for partial sums retained in

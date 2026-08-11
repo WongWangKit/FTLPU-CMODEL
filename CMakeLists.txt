@@ -33,12 +33,15 @@ ftlpu_add_test(stream_fabric_test tests/stream/stream_fabric_test.cpp)
 ftlpu_add_test(stream_port_test tests/stream/stream_port_test.cpp)
 
 ftlpu_add_test(mem_slice_test tests/mem/slice_test.cpp)
+
+ftlpu_add_test(c2c_test tests/c2c/c2c_test.cpp)
 ftlpu_add_test(mem_array_separated_test tests/mem/mem_array_separated_test.cpp)
 ftlpu_add_test(tile_array_test tests/mem/tile_array_test.cpp)
 ftlpu_add_test(vector_roundtrip_test tests/mem/vector_roundtrip_test.cpp)
 
 ftlpu_add_test(stream_topology_test tests/system/stream_topology_test.cpp)
 ftlpu_add_test(full_chip_topology_test tests/system/full_chip_topology_test.cpp)
+ftlpu_add_test(hardware_configuration_test tests/system/hardware_configuration_test.cpp)
 
 ftlpu_add_test(mxm_supercell_test tests/mxm/supercell_test.cpp)
 ftlpu_add_test(mxm_array_test tests/mxm/array_test.cpp)
@@ -49,6 +52,7 @@ ftlpu_add_test(mxm_weight_dequantizer_test tests/mxm/weight_dequantizer_test.cpp
 ftlpu_add_test(mxm_bf16_test tests/integration/mxm_bf16_test.cpp)
 ftlpu_add_test(mxm_decode_streamed_weight_test tests/integration/mxm_decode_streamed_weight_test.cpp)
 ftlpu_add_test(mxm_decode_layout_comparison_test tests/integration/mxm_decode_layout_comparison_test.cpp)
+ftlpu_add_test(smollm2_decode_layout_comparison_test tests/integration/smollm2_decode_layout_comparison_test.cpp)
 ftlpu_add_test(w8a16_projection_test tests/integration/w8a16_projection_test.cpp)
 ftlpu_add_test(w8a16_swiglu_test tests/integration/w8a16_swiglu_test.cpp)
 ftlpu_add_test(dual_hemisphere_w8a16_swiglu_test tests/integration/dual_hemisphere_w8a16_swiglu_test.cpp)
@@ -90,6 +94,7 @@ set_tests_properties(
     decoder_layer_decode_test
     smollm2_decode_ffn_test
     smollm2_decode_attention_test
+    smollm2_decode_layout_comparison_test
     smollm2_prefill_decode_layer_test
     PROPERTIES RUN_SERIAL TRUE
 )
