@@ -46,11 +46,15 @@ constexpr std::array<std::size_t, 8> kSwigluInputSlices {
     0, 1, 2, 3, 4, 5, 6, 7,
 };
 constexpr std::size_t kInboundStream = 31;
-constexpr std::size_t kInboundInstructionSpacing =
+constexpr std::size_t kC2cInstructionSpacing =
     ftlpu::hw::kTileRows;
 constexpr std::size_t kInboundVectorsPerHemisphere =
     (kHidden / kTile) * kRowBlocks * kActivationSlices.size();
 constexpr std::size_t kInboundTailCycles = 24;
+constexpr std::size_t kOutputStreamCount = ftlpu::hw::kWestStreams;
+constexpr std::size_t kOutboundStream = 31;
+constexpr std::size_t kOutboundLeadCycles = 8;
+constexpr std::size_t kOutboundTailCycles = 16;
 
 static_assert(kRows % kBlockRows == 0);
 static_assert(kHidden % kTile == 0);
@@ -125,6 +129,12 @@ std::size_t east_read_latency(std::size_t slice)
 std::size_t west_read_latency(std::size_t slice)
 {
     return slice / ftlpu::hw::kMemSlicesPerGroup + 2;
+}
+
+std::size_t mxm_west_write_latency(std::size_t slice)
+{
+    return ftlpu::hw::kSystemStreamRegisterColumns - 1
+        - slice / ftlpu::hw::kMemSlicesPerGroup;
 }
 
 std::size_t swiglu_write_latency(std::size_t slice)
@@ -232,6 +242,28 @@ public:
                 1,
                 ftlpu::MxmAccumulatorDestination::Sram,
                 ftlpu::MxmDataFormat::BFloat16,
+                ftlpu::MxmComputeMode::Block8));
+        advance(mxm_compute_[mxm], cycle + 1);
+    }
+
+    void accumulator_read_at(
+        std::size_t mxm,
+        std::size_t cycle,
+        std::size_t address)
+    {
+        require_available(
+            mxm_compute_[mxm],
+            cycle,
+            "MXM accumulator read");
+        icu_.enqueue_mxm_compute_nop(
+            mxm,
+            cycle - mxm_compute_[mxm]);
+        icu_.enqueue_mxm(
+            mxm,
+            ftlpu::MxmControlInstruction::AccumulatorRead(
+                address,
+                0,
+                true,
                 ftlpu::MxmComputeMode::Block8));
         advance(mxm_compute_[mxm], cycle + 1);
     }
@@ -600,6 +632,282 @@ void run_system(
     }
 }
 
+struct OutputBlock {
+    std::size_t global_mxm{0};
+    std::size_t wave{0};
+    std::size_t row_block{0};
+    std::size_t accumulator_address{0};
+    std::size_t staging_address{0};
+};
+
+std::vector<OutputBlock> output_blocks(ftlpu::Hemisphere hemisphere)
+{
+    constexpr auto kDownWaves =
+        (kHidden + kDownColumnsPerWave - 1)
+        / kDownColumnsPerWave;
+    auto blocks = std::vector<OutputBlock> {};
+    for (std::size_t wave = 0; wave < kDownWaves; ++wave) {
+        for (std::size_t local_mxm = 0;
+             local_mxm < ftlpu::TspSliceSystem::kMxmCountPerHemisphere;
+             ++local_mxm) {
+            const auto global_mxm =
+                static_cast<std::size_t>(hemisphere)
+                    * ftlpu::TspSliceSystem::kMxmCountPerHemisphere
+                + local_mxm;
+            const auto output_base =
+                wave * kDownColumnsPerWave + global_mxm * kTile;
+            if (output_base >= kHidden) {
+                continue;
+            }
+            for (std::size_t row_block = 0;
+                 row_block < kRowBlocks;
+                 ++row_block) {
+                blocks.push_back(OutputBlock {
+                    global_mxm,
+                    wave,
+                    row_block,
+                    wave * kRowBlocks + row_block,
+                    blocks.size(),
+                });
+            }
+        }
+    }
+    return blocks;
+}
+
+void schedule_down_output_stage(
+    OfflineSchedule& schedule,
+    std::vector<TraceEvent>& trace,
+    std::size_t trace_offset,
+    std::size_t read_start)
+{
+    for (std::size_t hemisphere_index = 0;
+         hemisphere_index < ftlpu::hw::kHemispheres;
+         ++hemisphere_index) {
+        const auto hemisphere =
+            static_cast<ftlpu::Hemisphere>(hemisphere_index);
+        const auto blocks = output_blocks(hemisphere);
+        for (const auto& block : blocks) {
+            const auto read_cycle =
+                read_start + block.staging_address;
+            schedule.accumulator_read_at(
+                block.global_mxm,
+                read_cycle,
+                block.accumulator_address);
+            for (std::size_t stream = 0;
+                 stream < kOutputStreamCount;
+                 ++stream) {
+                schedule.mem_at(
+                    mem_queue(hemisphere, stream),
+                    read_cycle + mxm_west_write_latency(stream),
+                    ftlpu::MemInstruction::Write(
+                        block.staging_address,
+                        ftlpu::StreamId::West(stream)));
+            }
+        }
+
+        const auto hemisphere_name =
+            ftlpu::hemisphere_short_name(hemisphere);
+        trace.push_back(TraceEvent {
+            trace_offset + read_start,
+            trace_offset + read_start + blocks.size()
+                + ftlpu::hw::kTileRows - 1,
+            std::string("MXM.") + hemisphere_name
+                + ".AccumulatorRead",
+            "output stage: Block8 FP32 stream+clear",
+        });
+        trace.push_back(TraceEvent {
+            trace_offset + read_start
+                + mxm_west_write_latency(kOutputStreamCount - 1),
+            trace_offset + read_start + blocks.size()
+                + mxm_west_write_latency(0),
+            std::string("MEM.") + hemisphere_name
+                + ".OutputStore",
+            std::to_string(blocks.size() * kOutputStreamCount)
+                + " x 32B vectors into slices 0..31",
+        });
+    }
+}
+
+float read_staged_output(
+    const ftlpu::TspSliceSystem& system,
+    std::size_t row,
+    std::size_t column)
+{
+    const auto wave = column / kDownColumnsPerWave;
+    const auto global_mxm =
+        (column % kDownColumnsPerWave) / kTile;
+    const auto hemisphere = static_cast<ftlpu::Hemisphere>(
+        global_mxm / ftlpu::TspSliceSystem::kMxmCountPerHemisphere);
+    const auto local_mxm =
+        global_mxm % ftlpu::TspSliceSystem::kMxmCountPerHemisphere;
+    const auto staging_address =
+        (wave * ftlpu::TspSliceSystem::kMxmCountPerHemisphere
+            + local_mxm) * kRowBlocks
+        + row / kBlockRows;
+    const auto local_column = column % kTile;
+    const auto tile = local_column / ftlpu::hw::kLanesPerTile;
+    const auto lane = local_column % ftlpu::hw::kLanesPerTile;
+    const auto stream_base = (row % kBlockRows) * sizeof(float);
+    auto raw = std::uint32_t {0};
+    for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+        raw |= static_cast<std::uint32_t>(
+            system.read_mem_sram_lane_byte(
+                hemisphere,
+                stream_base + byte,
+                tile,
+                staging_address,
+                lane))
+            << (byte * 8);
+    }
+    return std::bit_cast<float>(raw);
+}
+
+void validate_output_vector(
+    const ftlpu::C2cVector& vector,
+    const OutputBlock& block,
+    std::size_t stream,
+    const std::vector<float>& output)
+{
+    const auto output_row = stream / sizeof(float);
+    const auto byte = stream % sizeof(float);
+    for (std::size_t tile = 0;
+         tile < ftlpu::hw::kTileRows;
+         ++tile) {
+        for (std::size_t lane = 0;
+             lane < ftlpu::hw::kLanesPerTile;
+             ++lane) {
+            const auto local_column =
+                tile * ftlpu::hw::kLanesPerTile + lane;
+            const auto row =
+                block.row_block * kBlockRows + output_row;
+            const auto column =
+                block.wave * kDownColumnsPerWave
+                + block.global_mxm * kTile + local_column;
+            const auto raw = std::bit_cast<std::uint32_t>(
+                output[activation_index(row, column, kHidden)]);
+            const auto expected = static_cast<std::uint8_t>(
+                (raw >> (byte * 8)) & 0xffu);
+            const auto actual = vector.payload[tile][lane];
+            if (actual != expected) {
+                throw std::runtime_error(
+                    "prefill FFN C2C outbound mismatch at row="
+                    + std::to_string(row)
+                    + " column=" + std::to_string(column)
+                    + " byte=" + std::to_string(byte)
+                    + " expected=" + std::to_string(expected)
+                    + " actual=" + std::to_string(actual));
+            }
+        }
+    }
+}
+
+std::size_t transfer_down_output(
+    ftlpu::TspSliceSystem& system,
+    ftlpu::Hemisphere hemisphere,
+    const std::vector<float>& output,
+    std::vector<TraceEvent>& trace,
+    std::size_t trace_offset)
+{
+    if (system.has_c2c()) {
+        throw std::logic_error(
+            "prefill FFN outbound transfer needs an unattached C2C port");
+    }
+
+    const auto blocks = output_blocks(hemisphere);
+    const auto vector_count = blocks.size() * kOutputStreamCount;
+    auto outbound_link = ftlpu::C2cLink(ftlpu::C2cLinkConfig {
+        ftlpu::hw::kPhysicalVectorBytes, 0, 4});
+    auto inbound_link = ftlpu::C2cLink(ftlpu::C2cLinkConfig {
+        ftlpu::hw::kPhysicalVectorBytes, 0, 4});
+    system.attach_c2c(
+        hemisphere,
+        ftlpu::C2cStreamPortMap::WestEdge(
+            ftlpu::hw::kMemWestBoundaryStreamRegisterColumn),
+        outbound_link,
+        inbound_link);
+
+    auto mem_cursor = std::array<
+        std::size_t,
+        ftlpu::InstructionControlUnit::kMemQueues> {};
+    system.icu().enqueue_c2c_tx_nop(kOutboundLeadCycles);
+    auto vector_index = std::size_t {0};
+    for (const auto& block : blocks) {
+        for (std::size_t slice = 0;
+             slice < kOutputStreamCount;
+             ++slice, ++vector_index) {
+            const auto send_cycle =
+                kOutboundLeadCycles
+                + vector_index * kC2cInstructionSpacing;
+            const auto route_cycles =
+                slice / ftlpu::hw::kMemSlicesPerGroup;
+            const auto read_cycle = send_cycle - route_cycles;
+            const auto queue = mem_queue(hemisphere, slice);
+            system.icu().enqueue_mem_nop(
+                queue, read_cycle - mem_cursor[queue]);
+            system.icu().enqueue_mem(
+                queue,
+                ftlpu::MemInstruction::Read(
+                    block.staging_address,
+                    ftlpu::StreamId::West(kOutboundStream)));
+            mem_cursor[queue] = read_cycle + 1;
+            system.icu().enqueue_c2c_send(kOutboundStream);
+            system.icu().enqueue_c2c_tx_nop(
+                kC2cInstructionSpacing - 1);
+        }
+    }
+
+    const auto cycles = kOutboundLeadCycles
+        + vector_count * kC2cInstructionSpacing
+        + kOutboundTailCycles;
+    auto received = std::size_t {0};
+    try {
+        for (std::size_t cycle = 0; cycle < cycles; ++cycle) {
+            system.tick({});
+            outbound_link.tick();
+            inbound_link.tick();
+            while (outbound_link.receive_ready()) {
+                const auto vector = outbound_link.pop_received();
+                const auto block_index = received / kOutputStreamCount;
+                const auto stream = received % kOutputStreamCount;
+                validate_output_vector(
+                    vector, blocks.at(block_index), stream, output);
+                ++received;
+            }
+        }
+    } catch (const std::exception& ex) {
+        system.detach_c2c();
+        throw std::runtime_error(
+            "prefill FFN C2C outbound transfer: "
+            + std::string(ex.what()));
+    }
+
+    if (received != vector_count
+        || !system.c2c_endpoint().tx().idle()
+        || outbound_link.outstanding_vector_count() != 0) {
+        system.detach_c2c();
+        throw std::runtime_error(
+            "prefill FFN C2C outbound transfer did not drain");
+    }
+    system.detach_c2c();
+
+    const auto hemisphere_name =
+        ftlpu::hemisphere_short_name(hemisphere);
+    trace.push_back(TraceEvent {
+        trace_offset,
+        trace_offset + cycles,
+        std::string("MEM.") + hemisphere_name + ".OutputRead",
+        "FP32 output vectors from slices 0..31",
+    });
+    trace.push_back(TraceEvent {
+        trace_offset,
+        trace_offset + cycles,
+        std::string("C2C.Outbound.") + hemisphere_name,
+        std::to_string(vector_count) + " x 32B down-output vectors",
+    });
+    return cycles;
+}
+
 std::size_t inbound_route_nop_cycles(
     ftlpu::Hemisphere hemisphere,
     std::size_t target_slice)
@@ -712,10 +1020,10 @@ std::size_t transfer_block_activations(
                         vector_index, stream));
                 source.icu().enqueue_mem_nop(
                     source_queue,
-                    kInboundInstructionSpacing - 1);
+                    kC2cInstructionSpacing - 1);
                 source.icu().enqueue_c2c_send(kInboundStream);
                 source.icu().enqueue_c2c_tx_nop(
-                    kInboundInstructionSpacing - 1);
+                    kC2cInstructionSpacing - 1);
 
                 const auto target_slice =
                     kActivationSlices[activation_stream];
@@ -726,7 +1034,7 @@ std::size_t transfer_block_activations(
                     destination_hemisphere,
                     target_slice);
                 destination.icu().enqueue_c2c_rx_nop(
-                    kInboundInstructionSpacing - 1);
+                    kC2cInstructionSpacing - 1);
                 destination.icu().enqueue_control(
                     ftlpu::IcuLocation::Mem(
                         destination_hemisphere, target_slice),
@@ -749,7 +1057,7 @@ std::size_t transfer_block_activations(
 
     const auto cycles =
         kInboundVectorsPerHemisphere
-            * kInboundInstructionSpacing
+            * kC2cInstructionSpacing
         + kInboundTailCycles;
     try {
         for (std::size_t cycle = 0; cycle < cycles; ++cycle) {
@@ -1428,25 +1736,18 @@ ftlpu::test::smollm2_layer::run_prefill_ffn(
         }
     }
 
+    const auto output_stage_start =
+        down_schedule.end_cycle() + 4;
+    schedule_down_output_stage(
+        down_schedule, trace, down_trace_offset, output_stage_start);
+
     const auto down_cycles = down_schedule.end_cycle() + 16;
     run_system(system, down_cycles, "down");
 
     auto output = std::vector<float>(kRows * kHidden);
     for (std::size_t row = 0; row < kRows; ++row) {
         for (std::size_t n = 0; n < kHidden; ++n) {
-            const auto wave = n / kDownColumnsPerWave;
-            const auto global_mxm =
-                (n % kDownColumnsPerWave) / kTile;
-            const auto local_column = n % kTile;
-            const auto address =
-                wave * kRowBlocks + row / kBlockRows;
-            const auto actual =
-                system.mxm_unit(global_mxm)
-                    .block_accumulator()
-                    .value(
-                        address,
-                        row % kBlockRows,
-                        local_column);
+            const auto actual = read_staged_output(system, row, n);
             output[activation_index(row, n, kHidden)] = actual;
             float expected = 0.0f;
             for (std::size_t k = 0; k < kIntermediate; ++k) {
@@ -1472,6 +1773,20 @@ ftlpu::test::smollm2_layer::run_prefill_ffn(
         }
     }
 
+    auto outbound_cycles = std::size_t {0};
+    for (std::size_t hemisphere_index = 0;
+         hemisphere_index < ftlpu::hw::kHemispheres;
+         ++hemisphere_index) {
+        system.reset_execution_state();
+        outbound_cycles += transfer_down_output(
+            system,
+            static_cast<ftlpu::Hemisphere>(hemisphere_index),
+            output,
+            trace,
+            down_trace_offset
+                + down_cycles + outbound_cycles);
+    }
+
     if (!trace_path.empty()) {
         write_trace_csv(trace_path.string(), trace);
     }
@@ -1481,7 +1796,8 @@ ftlpu::test::smollm2_layer::run_prefill_ffn(
         {},
         {},
         inbound_cycles
-            + gate_up_cycles + swiglu_cycles + down_cycles};
+            + gate_up_cycles + swiglu_cycles + down_cycles
+            + outbound_cycles};
 }
 
 #ifndef FTLPU_SMOLLM2_LAYER_PHASE_ONLY
@@ -1502,7 +1818,7 @@ try {
     std::cout
         << "SmolLM2 Block8 Dequant FFN passed: "
         << "X[128,576], gate/up[576,1536], "
-        << "BF16 SwiGLU[128,1536], down[1536,576]; cycles="
+        << "BF16 SwiGLU[128,1536], down[1536,576], C2C TX; cycles="
         << result.cycles << '\n';
     return 0;
 } catch (const std::exception& ex) {
