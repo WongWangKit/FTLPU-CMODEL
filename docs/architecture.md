@@ -324,10 +324,11 @@ Each MXM owns two mode-specific FP32 accumulator SRAMs:
 
 | Mode | SRAM geometry | Row width | Capacity |
 |---|---:|---:|---:|
-| `Vector` | `8192 x 32 FP32` | 128 bytes | 1 MiB |
-| `Block8` | `1024 x (8 x 32 FP32)` | 1024 bytes | 1 MiB |
+| `Vector` | `(block_count * 32) x 32 FP32` | 128 bytes | 128 KiB at 32 blocks |
+| `Block8` | `(block_count * 4) x (8 x 32 FP32)` | 1024 bytes | 128 KiB at 32 blocks |
 
-The two SRAMs total 2 MiB per MXM. Vector Compute writes one eight-column
+`FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT` is a CMake cache parameter and defaults to
+32 complete 32x32 partial-sum blocks. Vector Compute writes one eight-column
 segment of a narrow row. Block8 Compute writes the same eight-column segment
 for all eight output rows, and the four column segments share one logical wide
 address. The Compute/AccumulatorRead mode bit selects the SRAM. A Block8 read
@@ -391,7 +392,7 @@ X[128,576] BF16
 Weights enter every MXM as eight INT8 streams. The independent Dequant queue
 supplies one BF16 scale per eight-column group, and the converted BF16 values
 are written directly into the weight buffers. Gate, up, and down all use
-Block8 Compute and the `1024 x (8 x 32 FP32)` wide accumulator.
+Block8 Compute and the configurable `(block_count * 4) x (8 x 32 FP32)` wide accumulator.
 
 Four consecutive Block8 pulses cover one physical 32-row tile. The 128 input
 rows are scheduled as four such groups, with enough separation for the last

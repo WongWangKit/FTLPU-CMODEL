@@ -25,8 +25,10 @@ constexpr std::size_t kWeightAddress = 64;
 constexpr std::size_t kQuantizedWeightAddress = 96;
 constexpr std::size_t kActivationAddress = 80;
 constexpr std::size_t kBlockCount = 4;
-constexpr std::size_t kAccumulatorAddress = 1024;
-constexpr std::size_t kBlockAccumulatorAddress = 128;
+constexpr std::size_t kAccumulatorAddress =
+    ftlpu::hw::kMxmAccumulatorRows / 2;
+constexpr std::size_t kBlockAccumulatorAddress =
+    ftlpu::hw::kMxmBlockAccumulatorRows / 2;
 constexpr std::size_t kDirectOutputAddress = 192;
 constexpr std::size_t kLoadStart = 20;
 constexpr std::size_t kComputeCycle = 30;

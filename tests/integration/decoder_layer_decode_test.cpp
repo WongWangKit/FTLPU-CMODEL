@@ -40,7 +40,8 @@ constexpr std::array<std::size_t, 2> kActivationSlices {50, 51};
 constexpr std::size_t kWeightAddressBase = 64;
 constexpr std::size_t kColumnAddress = 96;
 constexpr std::size_t kActivationAddress = 128;
-constexpr std::size_t kAccumulatorAddress = 4096;
+constexpr std::size_t kAccumulatorAddress =
+    ftlpu::hw::kMxmAccumulatorRows / 2;
 
 using Vector = std::array<float, kHidden>;
 using Matrix = std::array<Vector, kHidden>;

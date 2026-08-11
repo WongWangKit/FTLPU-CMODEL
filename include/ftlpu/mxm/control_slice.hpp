@@ -369,7 +369,10 @@ struct MxmControlInstruction {
             ? hw::kMxmBlockAccumulatorRows
             : hw::kMxmAccumulatorRows;
         if (address >= rows) {
-            throw std::out_of_range("MXM accumulator address is outside the 1 MiB SRAM");
+            throw std::out_of_range(
+                "MXM accumulator address " + std::to_string(address)
+                + " is outside the configured " + std::to_string(rows)
+                + "-row SRAM");
         }
     }
 

@@ -50,7 +50,8 @@ constexpr std::size_t kGateWeightAddressBase = 8000;
 constexpr std::size_t kUpWeightAddressBase = 10000;
 constexpr std::size_t kDownWeightAddressBase = 12000;
 constexpr std::size_t kFinalOutputAddressBase = 16000;
-constexpr std::size_t kDownAccumulatorAddressBase = 1024;
+constexpr std::size_t kDownAccumulatorAddressBase =
+    ftlpu::hw::kMxmAccumulatorRows / 2;
 constexpr std::array<std::size_t, 2> kActivationSlices {50, 51};
 constexpr std::array<std::size_t, 8> kSwigluSlices {
     36, 37, 38, 39, 40, 41, 42, 43};

@@ -67,7 +67,15 @@ constexpr std::size_t kMxmBlockRows = kLanesPerTile;
 constexpr std::size_t kMxmActivationStreamsPerBlock =
     kMxmBlockRows * kMxmWeightBytesPerValue;
 constexpr std::size_t kMxmLoadBytesPerCycle = kLanesPerTile * kMxmLoadStreamsPerCycle * kStreamRegisterBytes;
-constexpr std::size_t kMxmAccumulatorRows = 8192;
+// Logical capacity shared by the Vector and Block8 accumulator layouts.
+// One partial-sum block contains a complete 32x32 FP32 output tile.
+#ifndef FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT
+#define FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT 32
+#endif
+constexpr std::size_t kMxmAccumulatorBlockCount =
+    FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT;
+constexpr std::size_t kMxmAccumulatorRows =
+    kMxmAccumulatorBlockCount * kMxmRows;
 constexpr std::size_t kMxmAccumulatorBytes =
     kMxmAccumulatorRows * kMxmColumns * sizeof(float);
 constexpr std::size_t kMxmBlockAccumulatorRows =
@@ -143,10 +151,15 @@ static_assert(kMxmLoadStreamStride == 16);
 static_assert(kMxmInt8LoadStreamStride == 8);
 static_assert(kMxmActivationStreamsPerBlock == 16);
 static_assert(kMxmLoadBytesPerCycle == 128);
-static_assert(kMxmAccumulatorBytes == 1024 * 1024);
-static_assert(kMxmBlockAccumulatorRows == 1024);
+static_assert(kMxmAccumulatorBlockCount > 0);
+static_assert(kMxmAccumulatorBlockCount <= 256,
+    "the 13-bit MXM accumulator address supports at most 256 blocks");
+static_assert(kMxmAccumulatorRows
+    == kMxmAccumulatorBlockCount * kMxmRows);
+static_assert(kMxmBlockAccumulatorRows
+    == kMxmAccumulatorBlockCount * (kMxmRows / kMxmBlockRows));
 static_assert(kMxmBlockAccumulatorColumns == 256);
-static_assert(kMxmBlockAccumulatorBytes == 1024 * 1024);
+static_assert(kMxmAccumulatorBytes == kMxmBlockAccumulatorBytes);
 static_assert(kSxmConcurrentStreamOps == 16);
 static_assert(kIcuVxmImemDepth >= kIcuVxmIqDepth);
 static_assert(kIcuDistributedVxmImemDepth >= kIcuVxmIqDepth);

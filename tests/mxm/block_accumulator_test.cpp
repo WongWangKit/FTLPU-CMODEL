@@ -11,10 +11,12 @@
 
 int main()
 {
-    static_assert(ftlpu::hw::kMxmBlockAccumulatorRows == 1024);
+    static_assert(ftlpu::hw::kMxmBlockAccumulatorRows
+        == ftlpu::hw::kMxmAccumulatorBlockCount * 4);
     static_assert(ftlpu::hw::kMxmBlockAccumulatorColumns == 256);
-    static_assert(
-        ftlpu::hw::kMxmBlockAccumulatorBytes == 1024 * 1024);
+    static_assert(ftlpu::hw::kMxmBlockAccumulatorBytes
+        == ftlpu::hw::kMxmAccumulatorBlockCount * 32 * 32 * sizeof(float));
+    constexpr auto kTestAddress = ftlpu::hw::kMxmBlockAccumulatorRows / 2;
 
     ftlpu::MxmBlockAccumulator accumulator;
     ftlpu::MxmBlockAccumulator::Segment first {};
@@ -26,22 +28,22 @@ int main()
         }
     }
 
-    accumulator.accumulate(17, 2, first);
-    accumulator.accumulate(17, 2, second);
-    const auto values = accumulator.read(17, 2);
+    accumulator.accumulate(kTestAddress, 2, first);
+    accumulator.accumulate(kTestAddress, 2, second);
+    const auto values = accumulator.read(kTestAddress, 2);
     for (std::size_t row = 0; row < values.size(); ++row) {
         for (std::size_t lane = 0; lane < values[row].size(); ++lane) {
             assert(values[row][lane] == first[row][lane] + 0.5f);
             assert(
-                accumulator.value(17, row, 16 + lane)
+                accumulator.value(kTestAddress, row, 16 + lane)
                 == values[row][lane]);
         }
     }
 
-    accumulator.clear_segment(17, 2);
+    accumulator.clear_segment(kTestAddress, 2);
     for (std::size_t row = 0; row < values.size(); ++row) {
         for (std::size_t lane = 0; lane < values[row].size(); ++lane) {
-            assert(accumulator.value(17, row, 16 + lane) == 0.0f);
+            assert(accumulator.value(kTestAddress, row, 16 + lane) == 0.0f);
         }
     }
 
@@ -64,10 +66,10 @@ int main()
                 static_cast<float>(100 * row + lane) + 0.25f;
         }
     }
-    mxm.block_accumulator().accumulate(23, 0, stream_values);
+    mxm.block_accumulator().accumulate(kTestAddress, 0, stream_values);
     mxm.control().issue_south(
         ftlpu::MxmControlInstruction::AccumulatorRead(
-            23,
+            kTestAddress,
             0,
             true,
             ftlpu::MxmComputeMode::Block8));
@@ -92,7 +94,8 @@ int main()
                     == static_cast<std::uint8_t>(
                         (raw >> (byte * 8)) & 0xffu));
             }
-            assert(mxm.block_accumulator().value(23, row, lane) == 0.0f);
+            assert(mxm.block_accumulator().value(
+                kTestAddress, row, lane) == 0.0f);
         }
     }
 

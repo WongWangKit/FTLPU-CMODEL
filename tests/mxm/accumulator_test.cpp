@@ -22,7 +22,10 @@ bool throws(Fn&& fn)
 
 int main()
 {
-    static_assert(ftlpu::hw::kMxmAccumulatorBytes == 1024 * 1024);
+    static_assert(ftlpu::hw::kMxmAccumulatorRows
+        == ftlpu::hw::kMxmAccumulatorBlockCount * ftlpu::hw::kMxmRows);
+    static_assert(ftlpu::hw::kMxmAccumulatorBytes
+        == ftlpu::hw::kMxmAccumulatorBlockCount * 32 * 32 * sizeof(float));
 
     ftlpu::MxmAccumulator accumulator;
     ftlpu::MxmAccumulator::Segment first{};

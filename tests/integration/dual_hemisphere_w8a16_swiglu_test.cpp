@@ -35,7 +35,7 @@ constexpr std::size_t kMxmOutputToVxmLatency =
 constexpr std::size_t kDownOutputCastLatency = kMxmOutputToVxmLatency;
 constexpr std::size_t kDownActivationStreamBase = 16;
 constexpr std::size_t kDownActivationOutputBase = 8;
-constexpr std::size_t kDownAccumulatorAddressBase = 7000;
+constexpr std::size_t kDownAccumulatorAddressBase = 0;
 constexpr std::size_t kPrefetchWeightStreamBase = 8;
 constexpr std::size_t kComputeBlockCycles = kTile;
 constexpr std::size_t kOutputLowSlice = 29;
@@ -48,6 +48,10 @@ constexpr std::array<std::size_t, 4> kDownOutputSlices {32, 33, 34, 35};
 static_assert(kRows % kTile == 0);
 static_assert(kHidden % kTile == 0);
 static_assert(kIntermediate % (2 * kTile) == 0);
+static_assert(kDownAccumulatorAddressBase
+        + ((kHidden + 4 * kTile - 1) / (4 * kTile) - 1) * kRows
+        + kRows
+    <= ftlpu::hw::kMxmAccumulatorRows);
 
 enum class Projection : std::size_t { Gate, Up };
 

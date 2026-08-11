@@ -280,10 +280,11 @@ load queue 都是显式调度资源。
 
 | 模式 | SRAM 组织 | 行宽 | 容量 |
 |---|---:|---:|---:|
-| `Vector` | `8192 x 32 FP32` | 128 bytes | 1 MiB |
-| `Block8` | `1024 x (8 x 32 FP32)` | 1024 bytes | 1 MiB |
+| `Vector` | `(block_count * 32) x 32 FP32` | 128 bytes | 32 blocks 时 128 KiB |
+| `Block8` | `(block_count * 4) x (8 x 32 FP32)` | 1024 bytes | 32 blocks 时 128 KiB |
 
-两个 SRAM 合计每个 MXM 2 MiB。Vector Compute 每次写窄行中的一个 8 列 segment；
+`FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT` 是 CMake cache 参数，默认容量为 32 个完整
+32x32 部分和 block。Vector Compute 每次写窄行中的一个 8 列 segment；
 Block8 Compute 同时写相同 8 列上的 8 个输出行，四个列 segment 共用一个逻辑宽行
 地址。Compute/AccumulatorRead 的 mode bit 选择目标 SRAM。Block8 read 会占满 32
 条 west stream，因此输出窗口需要与本地另一个 MXM 协同调度。只有最终结果输出并
@@ -341,7 +342,7 @@ X[128,576] BF16
 
 权重以 8 条 INT8 stream 进入每个 MXM；独立 Dequant queue 为每个 8 列 group 提供
 一个 BF16 scale，转换后的 BF16 权重直接写入 weight buffer。gate、up 和 down 全部
-使用 Block8 Compute 与 `1024 x (8 x 32 FP32)` 宽 accumulator。
+使用 Block8 Compute 与可配置的 `(block_count * 4) x (8 x 32 FP32)` 宽 accumulator。
 
 连续 4 个 Block8 pulse 覆盖一个物理 32-row tile。128 行输入分成 4 组调度，组间只
 保留最后一个 column wave 离开内部 partial-sum row 所需的间隔。gate/up accumulator

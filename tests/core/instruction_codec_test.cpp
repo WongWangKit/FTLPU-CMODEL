@@ -114,14 +114,14 @@ bool verify_mxm_codec()
             1,
             30,
             20,
-            4095,
+            ftlpu::hw::kMxmAccumulatorRows - 1,
             48,
             ftlpu::MxmAccumulatorDestination::Sram),
         ftlpu::MxmControlInstruction::Compute(
             0,
             4,
             8,
-            1024,
+            ftlpu::hw::kMxmAccumulatorRows / 2,
             1,
             ftlpu::MxmAccumulatorDestination::Stream,
             ftlpu::MxmDataFormat::BFloat16),
@@ -129,7 +129,7 @@ bool verify_mxm_codec()
             0,
             16,
             0,
-            512,
+            ftlpu::hw::kMxmBlockAccumulatorRows / 2,
             1,
             ftlpu::MxmAccumulatorDestination::Sram,
             ftlpu::MxmDataFormat::Float16,
@@ -138,15 +138,16 @@ bool verify_mxm_codec()
             0,
             16,
             0,
-            512,
+            ftlpu::hw::kMxmBlockAccumulatorRows / 2,
             1,
             ftlpu::MxmAccumulatorDestination::Stream,
             ftlpu::MxmDataFormat::BFloat16,
             ftlpu::MxmComputeMode::Block8,
             false),
-        ftlpu::MxmControlInstruction::AccumulatorRead(7000, 16, false),
         ftlpu::MxmControlInstruction::AccumulatorRead(
-            700,
+            ftlpu::hw::kMxmAccumulatorRows - 1, 16, false),
+        ftlpu::MxmControlInstruction::AccumulatorRead(
+            ftlpu::hw::kMxmBlockAccumulatorRows - 1,
             0,
             true,
             ftlpu::MxmComputeMode::Block8),
@@ -158,7 +159,7 @@ bool verify_mxm_codec()
             1,
             8,
             ftlpu::MxmDataFormat::BFloat16,
-            123,
+            ftlpu::hw::kMxmAccumulatorRows / 3,
             2,
             ftlpu::MxmAccumulatorDestination::Sram,
             false),
@@ -171,7 +172,7 @@ bool verify_mxm_codec()
             0,
             4,
             ftlpu::MxmDataFormat::BFloat16,
-            321,
+            ftlpu::hw::kMxmAccumulatorRows / 4,
             0,
             ftlpu::MxmAccumulatorDestination::Stream,
             true,
@@ -284,7 +285,8 @@ bool verify_mxm_codec()
         return false;
     }
     const auto vector_read = ftlpu::isa::encode_mxm_instruction(
-        ftlpu::MxmControlInstruction::AccumulatorRead(7000, 16, false));
+        ftlpu::MxmControlInstruction::AccumulatorRead(
+            ftlpu::hw::kMxmAccumulatorRows - 1, 16, false));
     if (!require(
             (vector_read & (std::uint64_t {1} << 46)) == 0,
             "legacy Vector AccumulatorRead encoding changed")) {
@@ -292,7 +294,7 @@ bool verify_mxm_codec()
     }
     const auto block_read = ftlpu::isa::encode_mxm_instruction(
         ftlpu::MxmControlInstruction::AccumulatorRead(
-            700,
+            ftlpu::hw::kMxmBlockAccumulatorRows - 1,
             0,
             false,
             ftlpu::MxmComputeMode::Block8));
@@ -316,7 +318,7 @@ bool verify_mxm_codec()
                         true,
                         ftlpu::MxmComputeMode::Block8));
             },
-            "MXM Block8 accumulator read should reject addresses past 1023")
+            "MXM Block8 accumulator read should reject addresses past its configured depth")
         && require_throws(
             [] {
                 static_cast<void>(
