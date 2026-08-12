@@ -22,9 +22,9 @@ bit-accurate。当前目标是提供一个可验证的数据流调度目标，�
 | MXM | 四个 32 x 32 FP16 GEMM 阵列，每侧两个 |
 | MXM 权重 | 每个 supercell 两个对等 buffer，由 `IW`/`Compute` 选择 |
 | MXM decode | 可选择 `Linear1x16` 或 activation-stationary `Native4x4` |
-| VXM | 中心一个 slice，每个 lane 有 16 个独立控制的 ALU |
+| VXM | 中心一个 slice；每 lane 两条镜像的 8 级链，共 16 个物理 ALU |
 | SXM | 每个 hemisphere 一个四-tile Transpose/Permute slice |
-| ICU | 104 MEM、4 MXM load、4 MXM compute、16 VXM、4 SXM queue |
+| ICU | 104 MEM、12 MXM、8 VXM 紧凑控制、4 SXM、6 C2C/DMA queue |
 
 固定的完整芯片拓扑为：
 
@@ -32,8 +32,9 @@ bit-accurate。当前目标是提供一个可验证的数据流调度目标，�
 MXM2/MXM3 <-> SXM.W <-> MEM.W <-> VXM <-> MEM.E <-> SXM.E <-> MXM0/MXM1
 ```
 
-每个 hemisphere 使用局部 `sreg0..sreg14`。`sreg0` 靠近 VXM，MEM 的 13 个
-group 位于 `sreg0..sreg13`，SXM 将 `sreg13` 连接到 MXM 边界 `sreg14`。
+每个 hemisphere 使用局部 `sreg0..sreg15`。`sreg0` 靠近 VXM，MEM 的 13 个
+group 位于 `sreg0..sreg13`，C2C 接在 `sreg13`，SXM 跨接 `sreg14` 到 MXM
+边界 `sreg15`。
 
 Stream 支持广播读取：同一拍内多个功能单元可以消费同一个寄存器值。只要有一个
 消费者，该值就不再被动传播；多个生产者仍不能向同一个 stream register 写入
@@ -60,15 +61,15 @@ MEM、MXM、VXM 和 SXM 指令必须在正确周期与 stream operand 相遇。�
 | `w8a16_swiglu_test` | gate/up projection + SwiGLU | 196,608 个 FP16 输出 |
 | `dual_hemisphere_w8a16_swiglu_test` | 完整 gate/up、SwiGLU、down FFN | `[128,576]` 最终 FP16 输出 |
 | `rmsnorm_test` | `[32,32]` FP16 RMSNorm | 全部存回的 FP16 输出 |
-| `smollm2_attention_test` | Q/K/V、RoPE、QK、softmax、P x V、`o_proj` | `[128,576]` attention 输出 |
+| `smollm2_attention_test` | ICU 驱动的 Q/K RoPE、QK、softmax 和 P x V hardware tile | RoPE 逐 bit 检查及 `8 x 32` attention 输出 |
 | `mxm_decode_layout_comparison_test` | 用两种 decode layout 执行相同 `K=128, N=32` GEMV | BF16 逐 bit 一致并比较周期数 |
 | `smollm2_decode_ffn_test` | 原生 4 x 4 weight-streaming decode FFN | `[1,576]` 最终 BF16 输出 |
 | `sxm_mem_transpose_test` | 连续 MEM -> SXM -> MEM FP16 transpose | 四个 32 x 32 矩阵 |
 
 完整 FFN 使用四个 MXM，当前调度为 90,817 拍。gate/up 的最终 reduction 会把
-accumulator 结果直接送入共享 VXM SwiGLU 流水线。SmolLM2 attention 使用
-sequence length 128、hidden size 576、9 个 query head、3 个 KV head 和
-64 维 head，完整验证调度为 94,761 拍。
+accumulator 结果直接送入共享 VXM SwiGLU 流水线。standalone attention 可执行文件
+严格验证一个 `8-token x 4-head x 8-dimension` 物理 tile；layer-phase harness
+再把这一 tile 映射重复到 `[128,576]` API 外形。
 
 MXM Decode 指令带有显式 layout bit。`Linear1x16` 从 8 条 stream 为每个 tile
 装入 4 个独立的 8 元素 activation vector，让一个 partial sum 依次走过全部

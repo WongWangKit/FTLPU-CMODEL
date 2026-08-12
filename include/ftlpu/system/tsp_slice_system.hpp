@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <streambuf>
 #include <string>
+#include <vector>
 
 namespace ftlpu {
 
@@ -214,6 +215,31 @@ public:
     const VxmSlice& vxm_unit() const noexcept
     {
         return vxm_;
+    }
+
+    VxmSlice& vxm_unit() noexcept
+    {
+        return vxm_;
+    }
+
+    void initialize_vxm_lut(
+        VxmSpecialAluOpcode opcode,
+        VxmLutConfig config,
+        const std::vector<VxmLutEntry>& entries)
+    {
+        vxm_.configure_special_lut(opcode, config, entries);
+    }
+
+    void configure_vxm_input_group_source(
+        std::size_t group, Hemisphere source)
+    {
+        vxm_.configure_input_group_source(group, source);
+    }
+
+    void configure_vxm_output_block_destination(
+        std::size_t block, Hemisphere destination)
+    {
+        vxm_.configure_output_block_destination(block, destination);
     }
 
     const StreamRegisterFabric& stream_fabric(
@@ -623,50 +649,111 @@ private:
         return input;
     }
 
-    bool has_complete_vxm_input(Hemisphere hemisphere, std::size_t tile) const
+    bool has_complete_vxm_input(std::size_t tile) const
     {
-        const auto& required_streams = vxm_.required_streams_at(hemisphere, tile);
+        const auto& required_streams = vxm_.required_streams_at(tile);
         if (!required_streams.has_value()) {
             return false;
         }
 
-        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            for (std::size_t stream = 0; stream < hw::kStreams; ++stream) {
-                if (!(*required_streams)[stream]) {
-                    continue;
-                }
-                if (!mem_edge_stream(mems_[hemisphere_index(hemisphere)], tile, lane, stream).has_value()) {
-                    return false;
+        for (std::size_t group = 0;
+             group < VxmLane::kStreamGroupCount;
+             ++group) {
+            const auto base = group * VxmLane::kStreamGroupBytes;
+            if (!(*required_streams)[base]
+                && !(*required_streams)[base + 1]) {
+                continue;
+            }
+
+            const auto source = vxm_.input_group_source(group);
+            const auto& mem = mems_[hemisphere_index(source)];
+            for (std::size_t lane = 0;
+                 lane < hw::kLanesPerTile;
+                 ++lane) {
+                for (std::size_t byte = 0;
+                     byte < VxmLane::kStreamGroupBytes;
+                     ++byte) {
+                    if (!mem.west_register(
+                            tile, lane,
+                            hw::kMemWestBoundaryStreamRegisterColumn,
+                            base + byte)
+                             .has_value()) {
+                        return false;
+                    }
                 }
             }
         }
         return true;
     }
 
+    bool vxm_requires_stream_from(
+        Hemisphere source,
+        std::size_t tile,
+        std::size_t stream) const
+    {
+        const auto& required = vxm_.required_streams_at(tile);
+        if (!required.has_value() || !(*required)[stream]) {
+            return false;
+        }
+        const auto group = stream / VxmLane::kStreamGroupBytes;
+        return vxm_.input_group_source(group) == source;
+    }
+
     void transfer_mem_edges_to_vxm(LogSinks sinks)
     {
-        for (std::size_t hemisphere_index_value = 0; hemisphere_index_value < hw::kHemispheres;
-             ++hemisphere_index_value) {
-            const auto hemisphere = static_cast<Hemisphere>(hemisphere_index_value);
-            const auto& mem = mems_[hemisphere_index_value];
-            for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-                if (!has_complete_vxm_input(hemisphere, tile)) {
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+            if (!has_complete_vxm_input(tile)) {
+                continue;
+            }
+
+            const auto& required = *vxm_.required_streams_at(tile);
+            auto required_groups = std::size_t {0};
+            for (std::size_t group = 0;
+                 group < VxmLane::kStreamGroupCount;
+                 ++group) {
+                const auto base = group * VxmLane::kStreamGroupBytes;
+                if (required[base] || required[base + 1]) {
+                    ++required_groups;
+                }
+            }
+            vxm_.configure_input_buffer(tile, required_groups);
+
+            for (std::size_t group = 0;
+                 group < VxmLane::kStreamGroupCount;
+                 ++group) {
+                const auto base = group * VxmLane::kStreamGroupBytes;
+                if (!required[base] && !required[base + 1]) {
                     continue;
                 }
 
-                auto streams = VxmSlice::StreamMatrix {};
-                for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                    for (std::size_t stream = 0; stream < hw::kStreams; ++stream) {
-                        const auto& slot = mem_edge_stream(mem, tile, lane, stream);
-                        streams[lane][stream] = slot.has_value() ? slot->data : 0;
+                const auto source = vxm_.input_group_source(group);
+                auto& mem = mems_[hemisphere_index(source)];
+                auto values = VxmSlice::InputBuffer::GroupVector {};
+                for (std::size_t lane = 0;
+                     lane < hw::kLanesPerTile;
+                     ++lane) {
+                    for (std::size_t byte = 0;
+                         byte < VxmLane::kStreamGroupBytes;
+                         ++byte) {
+                        const auto cell = mem.consume_west_register(
+                            tile, lane,
+                            hw::kMemWestBoundaryStreamRegisterColumn,
+                            base + byte);
+                        if (!cell.has_value()) {
+                            throw std::logic_error(
+                                "VXM input group became incomplete during MEM-edge capture");
+                        }
+                        values[lane][byte] = cell->data;
                     }
                 }
-                vxm_.set_stream_inputs(hemisphere, tile, streams);
-                if (sinks.vxm != nullptr
-                    && (!sinks.vxm_log_tile.has_value() || tile == *sinks.vxm_log_tile)) {
-                    *sinks.vxm << "  MEM." << hemisphere_short_name(hemisphere)
-                               << ".edge -> VXM tile " << tile << '\n';
-                }
+                vxm_.capture_stream_group(tile, group, values);
+            }
+
+            if (sinks.vxm != nullptr
+                && (!sinks.vxm_log_tile.has_value()
+                    || tile == *sinks.vxm_log_tile)) {
+                *sinks.vxm << "  MEM.edge -> VXM tile " << tile
+                           << " groups=" << required_groups << '\n';
             }
         }
     }
@@ -679,20 +766,27 @@ private:
             auto& destination = mems_[destination_index];
             const auto& source_mem = mems_[source_index];
             for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-                const auto& required = vxm_.required_streams_at(source, tile);
                 for (std::size_t stream = 0; stream < hw::kWestStreams; ++stream) {
-                    const auto packed = hw::kEastStreams + stream;
-                    if (required.has_value() && (*required)[packed]) continue;
+                    if (vxm_requires_stream_from(source, tile, stream)) {
+                        continue;
+                    }
 
                     auto complete = true;
                     for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                         complete = complete
-                            && mem_edge_stream(source_mem, tile, lane, packed).has_value();
+                            && source_mem.west_register(
+                                tile, lane,
+                                hw::kMemWestBoundaryStreamRegisterColumn,
+                                stream)
+                                   .has_value();
                     }
                     if (!complete) continue;
 
                     for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                        const auto& cell = mem_edge_stream(source_mem, tile, lane, packed);
+                        const auto& cell = source_mem.west_register(
+                            tile, lane,
+                            hw::kMemWestBoundaryStreamRegisterColumn,
+                            stream);
                         destination.set_east_stream_input(
                             tile,
                             lane,
@@ -716,10 +810,14 @@ private:
     {
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
             for (const auto& output : vxm_.outputs_at(tile)) {
-                if (output.stream + output.byte_count > hw::kStreams) {
-                    throw std::out_of_range("VXM output stream is outside the 64-stream lane");
+                if (output.stream + output.byte_count
+                    > hw::kStreamsPerDirection) {
+                    throw std::out_of_range(
+                        "VXM output is outside the fixed 32-byte stream set");
                 }
-                auto& mem = mems_[hemisphere_index(output.hemisphere)];
+                const auto destination =
+                    vxm_.output_stream_destination(output.stream);
+                auto& mem = mems_[hemisphere_index(destination)];
                 for (std::size_t byte = 0; byte < output.byte_count; ++byte) {
                     const auto stream = output.stream + byte;
                     for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
@@ -727,15 +825,11 @@ private:
                             output.byte_values[lane][byte],
                             lane + 1 == hw::kLanesPerTile,
                         };
-                        if (stream < hw::kEastStreams) {
-                            mem.set_east_stream_input(tile, lane, stream, word);
-                        } else {
-                            mem.set_west_stream_input(tile, lane, stream - hw::kEastStreams, word);
-                        }
+                        mem.set_east_stream_input(tile, lane, stream, word);
                     }
                 }
                 if (sinks.mem != nullptr && (!sinks.mem_log_tile.has_value() || tile == *sinks.mem_log_tile)) {
-                    *sinks.mem << "  VXM -> MEM." << hemisphere_short_name(output.hemisphere)
+                    *sinks.mem << "  VXM -> MEM." << hemisphere_short_name(destination)
                                << " tile " << tile << " stream " << output.stream
                                << " bytes=" << output.byte_count << '\n';
                 }

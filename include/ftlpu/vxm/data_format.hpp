@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ftlpu/core/bf16.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -7,12 +9,13 @@
 #include <limits>
 #include <stdexcept>
 
-namespace ftlpu::distributed_vxm {
+namespace ftlpu {
 
 enum class VxmCastTarget {
     Float32,
     Float16,
     Int8,
+    BFloat16,
 };
 
 // Input/output format conversion is boundary hardware, not an ALU operation.
@@ -105,6 +108,16 @@ public:
         if ((bits & 0x7c00u) == 0) return std::copysign(0.0f, input);
         return fp16_bits_to_float(bits);
     }
+
+    static std::uint16_t float_to_bf16_bits(float input)
+    {
+        return Bf16::from_float(input).bits();
+    }
+
+    static float bf16_bits_to_float(std::uint16_t bits)
+    {
+        return Bf16::from_bits(bits).to_float();
+    }
 };
 
-} // namespace ftlpu::distributed_vxm
+} // namespace ftlpu

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ftlpu/vxm_distributed/data_format.hpp"
+#include "ftlpu/vxm/data_format.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace ftlpu::distributed_vxm {
+namespace ftlpu {
 
 // Optional boundary hardware after a VXM output lane. Int8 requests enter
 // this fixed one-cycle pipeline; there is no ready signal or replay path.
@@ -66,4 +66,4 @@ private:
     std::vector<Result> pending_{};
 };
 
-} // namespace ftlpu::distributed_vxm
+} // namespace ftlpu

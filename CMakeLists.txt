@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT 96 CACHE STRING
+set(FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT 256 CACHE STRING
     "Number of complete 32x32 FP32 partial-sum blocks per MXM accumulator")
 if(NOT FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT MATCHES "^[1-9][0-9]*$" OR
    FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT GREATER 256)
@@ -80,8 +80,16 @@ ftlpu_add_test(vxm_superlane_test tests/unit/vxm/superlane_test.cpp
     unit.vxm.superlane unit vxm fast)
 ftlpu_add_test(vxm_slice_test tests/unit/vxm/slice_test.cpp
     unit.vxm.slice unit vxm fast)
-ftlpu_add_test(vxm_dual_backend_test tests/unit/vxm/dual_backend_test.cpp
-    unit.vxm.dual_backend unit vxm fast)
+ftlpu_add_test(vxm_fp16_16alu_test tests/unit/vxm/fp16_16alu_test.cpp
+    unit.vxm.fp16_16alu unit vxm fast)
+ftlpu_add_test(vxm_input_buffer_test tests/unit/vxm/input_buffer_test.cpp
+    unit.vxm.input_buffer unit vxm fast)
+ftlpu_add_test(vxm_operator_throughput_test tests/unit/vxm/operator_throughput_test.cpp
+    unit.vxm.operator_throughput unit vxm fast)
+ftlpu_add_test(vxm_special_alu_test tests/unit/vxm/special_alu_test.cpp
+    unit.vxm.special_alu unit vxm fast)
+ftlpu_add_test(vxm_static_quantizer_test tests/unit/vxm/static_quantizer_test.cpp
+    unit.vxm.static_quantizer unit vxm fast)
 
 ftlpu_add_test(sxm_test tests/unit/sxm/slice_test.cpp
     unit.sxm.slice unit sxm fast)

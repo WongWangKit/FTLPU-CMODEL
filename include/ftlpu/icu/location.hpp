@@ -10,7 +10,6 @@ namespace ftlpu {
 enum class IcuLocationKind : std::uint8_t {
     Mem,
     Vxm,
-    DistributedVxm,
     MxmLoad,
     MxmCompute,
     MxmDequant,
@@ -41,11 +40,6 @@ struct IcuLocation {
         return {IcuLocationKind::Vxm, 0, alu};
     }
 
-    static constexpr IcuLocation DistributedVxm(
-        std::size_t queue) noexcept
-    {
-        return {IcuLocationKind::DistributedVxm, 0, queue};
-    }
     static constexpr IcuLocation MxmLoad(std::size_t mxm) noexcept
     {
         return {IcuLocationKind::MxmLoad, mxm, 0};

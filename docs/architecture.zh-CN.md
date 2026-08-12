@@ -184,23 +184,25 @@ helper。
 
 ## 6. VXM
 
-中心 VXM 有四个 superlane、每个 superlane 8 lane、每个 lane 16 个 ALU。每个 ALU
-有独立 ICU queue，同一条 ALU 指令会作用到所有物理 lane。
+中心 VXM 有四个 superlane、每个 superlane 8 lane、每个 lane 16 个物理 ALU，组成
+两条镜像的 8 级数据通路。8 条紧凑 ICU queue 控制逻辑级 `C0..C7`，superlane
+decoder 将每份配置镜像到物理级 `C(i+8)`。两条链的数据和流水状态彼此独立，解码后
+的配置广播到所有物理 lane。
 
 支持的 opcode：
 
 ```text
-Pass Add Subtract Multiply Divide Negate Abs Min Max Clamp
-Square Sqrt Exp Log Relu Cast
+Bypass Add Subtract Multiply Negate Max Exp Reciprocal Rsqrt
 ```
 
-operand 可以来自 INT8、FP16、BF16、INT32、FP32 stream，FP32 immediate，或前一拍
-ALU output。结果可以保留在 ALU register，也可以写入指定 stream 和目标 hemisphere。
-Cast 可以把 FP16 或 BF16 按 little-endian 拆成两条 byte stream 输出。
+operand 使用固定 stream group、previous/original/auxiliary 值、accumulator 或 feedback
+状态、local scalar 和 FP32 immediate。链深可选 2、4、8。16 个 2-byte 输入 group
+分别选择 east 或 west hemisphere；每个两级 output block 使用固定 stream pair，并可
+配置目标 hemisphere。结果可保留在本地，也可输出 FP16、BF16、INT8 或 FP32 stream。
 
-量化/反量化不是独立 opcode，而是 ALU 指令图。例如 W8 dequant 由 Multiply 和 Cast
-组成；SwiGLU 由算术、Exp、用于流水延迟的 Pass 和 Cast 组成。RMSNorm 使用 ALU
-feedback 计算 `sum(x^2)`，并在 `x`、`gamma` 流过时保留 inverse RMS。
+量化、反量化、SwiGLU、softmax 和 RMSNorm 都是指令图，而不是整体 opcode。VXM
+还建模了基于 LUT 的 Exp、Reciprocal、Rsqrt 单元、local scalar 捕获、反馈累加和这些
+指令图使用的静态输出量化器。
 
 ## 7. SXM
 
@@ -218,11 +220,11 @@ Transpose 输出先打一拍，再由 Permute 消费。Permute 在 4 个 superla
 可按 `II=4` 流水。
 
 每个 hemisphere 有两条 SXM ICU queue：Transpose 和 Permute 各一条。没有 SXM
-指令时，east stream 以普通一拍 link 从 `sreg13` pass 到 `sreg14`。
+指令时，east stream 以普通一拍 link 从 `sreg14` pass 到 `sreg15`。
 
 ## 8. ICU 与 ISA
 
-ICU 共拥有 136 条独立 queue：
+ICU 共拥有 134 条独立 queue：
 
 | Queue 类别 | 数量 |
 | --- | ---: |
@@ -230,8 +232,9 @@ ICU 共拥有 136 条独立 queue：
 | MXM load | 4 |
 | MXM Dequant | 4 |
 | MXM compute | 4 |
-| VXM ALU | 16 |
+| VXM 紧凑控制 | 8 |
 | SXM Transpose/Permute | 4 |
+| C2C TX/RX/DMA | 6 |
 
 已实现的 queue command：
 
@@ -246,7 +249,7 @@ ICU 共拥有 136 条独立 queue：
 - 32-bit MEM 指令；
 - 32-bit MXM control 指令；
 - 16-bit MXM Dequant BF16 scale immediate；
-- 四个 32-bit word 的 VXM ALU 指令；
+- 96-bit VXM 紧凑指令（64-bit control + 32-bit immediate）；
 - 32-bit ICU NOP/Repeat command。
 
 SXM 指令使用固定的 13 x 32-bit packet 编码，包含 header、16 个输入/输出
@@ -354,17 +357,20 @@ Pass stage。该测试不使用 MXM 或 MEM accumulator。
 
 ### SmolLM2 Attention
 
-`smollm2_attention_test` 验证：
+`smollm2_attention_test` 验证一个物理 attention tile：
 
 ```text
-Q/K/V projection -> Q/K RoPE -> QK score -> scaled 三-pass softmax
--> P x V -> o_proj[128,576]
+MEM Q/K -> VXM 两 pass Q/K RoPE -> MEM/MXM QK score
+-> scaled 三-pass softmax -> SXM probability transpose -> MXM P x V
 ```
 
-配置为 sequence length 128、hidden size 576、9 个 query head、3 个 KV head、
-head dimension 64。QK、P x V 和 o_proj 在 stream/accumulator 资源允许时把独立
-work 分配到四个 MXM。SXM 为 attention replay 准备 packed/transpose layout。
-完整 numerical golden 在 94,761 个调度周期通过。
+该 tile 包含 8 个 token、4 个 head，head dimension 为 8。ICU MEM 指令把
+half-split RoPE 的配对元素和 BF16 cosine/sine 表送入 VXM；四路乘法先生成两个
+带符号乘积，再经 MEM/VXM 第二个 pass 相加并写回旋转后的 Q/K。测试会先逐 bit
+检查 Q/K RoPE 中间结果，再检查 QK、softmax 和 P x V，并使用 SmolLM2 的
+`rope_theta=100000`。layer harness 还会把绝对 token position base 传给每个物理
+tile：prefill 分块使用位置 `0..127`，decode 的最后 8-token 窗口使用位置
+`121..128`，因此 RoPE 不会在 tile 边界重新从零开始。
 
 各 phase 时序、MXM 利用率和后续 overlap 机会见
 [attention_pipeline_optimization.md](attention_pipeline_optimization.md)。

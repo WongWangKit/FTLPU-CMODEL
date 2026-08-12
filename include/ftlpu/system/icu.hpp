@@ -9,7 +9,8 @@
 #include "ftlpu/mem/tile_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
 #include "ftlpu/sxm/slice.hpp"
-#include "ftlpu/vxm/backend.hpp"
+#include "ftlpu/vxm/compact_instruction.hpp"
+#include "ftlpu/vxm/slice.hpp"
 
 #include <array>
 #include <cstddef>
@@ -26,8 +27,6 @@ namespace ftlpu {
 class InstructionControlUnit {
 public:
     static constexpr std::size_t kVxmQueues = VxmSlice::kAluQueues;
-    static constexpr std::size_t kDistributedVxmQueues =
-        DistributedVxmSlice::kAluQueues;
     static constexpr std::size_t kMemQueuesPerHemisphere = hw::kSliceColumns;
     static constexpr std::size_t kMxmQueuesPerHemisphere =
         hw::kMxmsPerHemisphere;
@@ -48,15 +47,9 @@ public:
 
     using Repeat = IcuRepeat;
     using VxmIcu = DistributedIcuQueue<
-        VxmLaneAluInstruction,
+        VxmCompactInstruction,
         hw::kIcuVxmInstructionBits,
         hw::kIcuVxmImemDepth,
-        hw::kIcuVxmIqDepth,
-        hw::kIcuFetchLatencyCycles>;
-    using DistributedVxmIcu = DistributedIcuQueue<
-        distributed_vxm::VxmCompactInstruction,
-        hw::kIcuVxmInstructionBits,
-        hw::kIcuDistributedVxmImemDepth,
         hw::kIcuVxmIqDepth,
         hw::kIcuFetchLatencyCycles>;
     using MemIcu = DistributedIcuQueue<
@@ -104,7 +97,6 @@ public:
     void reset()
     {
         for (auto& queue : vxm_queues_) queue.reset();
-        for (auto& queue : distributed_vxm_queues_) queue.reset();
         for (auto& queue : mem_queues_) {
             queue.reset();
         }
@@ -162,11 +154,6 @@ public:
             check_vxm_queue(location.index);
             vxm_queues_[location.index].append_control(instruction);
             return;
-        case IcuLocationKind::DistributedVxm:
-            check_distributed_vxm_queue(location.index);
-            distributed_vxm_queues_[location.index].append_control(
-                instruction);
-            return;
         case IcuLocationKind::MxmLoad:
             check_mxm_queue(location.unit);
             mxm_load_queues_[location.unit].append_control(instruction);
@@ -220,10 +207,23 @@ public:
         }
         throw std::logic_error("unknown ICU location kind");
     }
-    void enqueue_vxm(std::size_t alu, VxmLaneAluInstruction instruction)
+    void enqueue_vxm(
+        std::size_t alu,
+        VxmCompactInstruction instruction)
     {
         check_vxm_queue(alu);
-        vxm_queues_[alu].push_instruction(instruction);
+        vxm_queues_[alu].push_instruction(std::move(instruction));
+    }
+
+    void enqueue_vxm(
+        std::size_t alu,
+        VxmChainDepth depth,
+        const VxmLaneAluInstruction& instruction)
+    {
+        enqueue_vxm(
+            alu,
+            VxmCompactInstructionCodec::encode(
+                alu, depth, instruction));
     }
 
     void enqueue_vxm_nop(std::size_t alu, std::size_t cycles)
@@ -238,31 +238,6 @@ public:
         vxm_queues_[alu].push_repeat(Repeat {count, interval, 0});
     }
 
-    void enqueue_distributed_vxm(
-        std::size_t alu,
-        distributed_vxm::VxmCompactInstruction instruction)
-    {
-        check_distributed_vxm_queue(alu);
-        distributed_vxm_queues_[alu].push_instruction(
-            std::move(instruction));
-    }
-
-    void enqueue_distributed_vxm_nop(
-        std::size_t alu, std::size_t cycles)
-    {
-        check_distributed_vxm_queue(alu);
-        distributed_vxm_queues_[alu].push_nop(cycles);
-    }
-
-    void enqueue_distributed_vxm_repeat(
-        std::size_t alu,
-        std::size_t count,
-        std::size_t interval = 1)
-    {
-        check_distributed_vxm_queue(alu);
-        distributed_vxm_queues_[alu].push_repeat(
-            Repeat {count, interval, 0});
-    }
     void enqueue_mem(std::size_t column, MemInstruction instruction)
     {
         check_mem_queue(column);
@@ -498,9 +473,6 @@ public:
         case IcuLocationKind::Vxm:
             vxm_iq(location.index).notify();
             return;
-        case IcuLocationKind::DistributedVxm:
-            distributed_vxm_iq(location.index).notify();
-            return;
         case IcuLocationKind::MxmLoad:
             mxm_load_iq(location.unit).notify();
             return;
@@ -574,7 +546,6 @@ public:
     void broadcast_notification()
     {
         for (auto& queue : vxm_queues_) queue.notify();
-        for (auto& queue : distributed_vxm_queues_) queue.notify();
         for (auto& queue : mem_queues_) queue.notify();
         for (auto& queue : mxm_load_queues_) queue.notify();
         for (auto& queue : mxm_dequant_queues_) queue.notify();
@@ -604,27 +575,9 @@ public:
             if (!instruction.has_value()) continue;
             vxm.issue_south(alu, *instruction);
             any = true;
-            if (os != nullptr) *os << "  ICU -> VXM.alu" << alu << ' ' << describe_vxm(*instruction) << '\n';
-        }
-        log_dispatch_idle(os, any);
-        ++cycle_;
-    }
-
-    void dispatch_vxm(
-        DistributedVxmSlice& vxm,
-        std::ostream* os = nullptr)
-    {
-        log_cycle_header(os);
-        bool any = false;
-        for (std::size_t alu = 0; alu < kDistributedVxmQueues; ++alu) {
-            const auto instruction =
-                distributed_vxm_queues_[alu].dispatch_next();
-            if (!instruction.has_value()) continue;
-            vxm.issue_south(alu, *instruction);
-            any = true;
             if (os != nullptr) {
-                *os << "  ICU -> VXM.distributed.q" << alu
-                    << " compact\n";
+                *os << "  ICU -> VXM.q" << alu << ' '
+                    << describe_vxm(alu, *instruction) << '\n';
             }
         }
         log_dispatch_idle(os, any);
@@ -709,7 +662,10 @@ public:
             if (!instruction.has_value()) continue;
             vxm.issue_south(alu, *instruction);
             any = true;
-            if (os != nullptr) *os << "  ICU -> VXM.alu" << alu << ' ' << describe_vxm(*instruction) << '\n';
+            if (os != nullptr) {
+                *os << "  ICU -> VXM.q" << alu << ' '
+                    << describe_vxm(alu, *instruction) << '\n';
+            }
         }
 
         for (std::size_t column = 0; column < kMemQueues; ++column) {
@@ -797,12 +753,6 @@ public:
         return vxm_queues_[alu];
     }
 
-    DistributedVxmIcu& distributed_vxm_iq(std::size_t queue)
-    {
-        check_distributed_vxm_queue(queue);
-        return distributed_vxm_queues_[queue];
-    }
-
     MemIcu& mem_iq(std::size_t queue)
     {
         check_mem_queue(queue);
@@ -866,7 +816,6 @@ private:
             }
         };
         collect(vxm_queues_);
-        collect(distributed_vxm_queues_);
         collect(mem_queues_);
         collect(mxm_load_queues_);
         collect(mxm_dequant_queues_);
@@ -895,14 +844,9 @@ private:
 
     static void check_vxm_queue(std::size_t alu)
     {
-        if (alu >= kVxmQueues) throw std::out_of_range("ICU VXM queue is outside the 16 ALU queues");
-    }
-
-    static void check_distributed_vxm_queue(std::size_t alu)
-    {
-        if (alu >= kDistributedVxmQueues) {
+        if (alu >= kVxmQueues) {
             throw std::out_of_range(
-                "ICU distributed VXM queue is outside the 8 compact queues");
+                "ICU VXM queue is outside the 8 compact control queues");
         }
     }
     template <typename QueueArray>
@@ -1051,19 +995,23 @@ private:
         return os.str();
     }
 
-    static std::string describe_vxm(const VxmLaneAluInstruction& instruction)
+    static std::string describe_vxm(
+        std::size_t stage,
+        const VxmCompactInstruction& packet)
     {
+        const auto decoded =
+            VxmCompactInstructionCodec::decode(stage, packet);
+        const auto& instruction = decoded.instruction;
         std::ostringstream os;
-        os << VxmLane::opcode_name(instruction.opcode)
-           << " in_hemi=" << hemisphere_short_name(instruction.input_hemisphere)
-           << " out_hemi=" << hemisphere_short_name(instruction.output_hemisphere);
-        if (instruction.output_stream.has_value()) os << " output=" << *instruction.output_stream;
+        os << VxmLane::operation_name(instruction.operation)
+           << " depth=" << static_cast<std::size_t>(decoded.chain_depth);
+        if (instruction.output_stream.has_value()) {
+            os << " output=" << *instruction.output_stream;
+        }
         return os.str();
     }
 
     std::array<VxmIcu, kVxmQueues> vxm_queues_{};
-    std::array<DistributedVxmIcu, kDistributedVxmQueues>
-        distributed_vxm_queues_{};
     std::array<MemIcu, kMemQueues> mem_queues_{};
     std::array<MxmIcu, kMxmQueues> mxm_load_queues_{};
     std::array<MxmDequantIcu, kMxmQueues>

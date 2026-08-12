@@ -1,14 +1,14 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
-#include "ftlpu/vxm_distributed/lane.hpp"
+#include "ftlpu/vxm/lane.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 
-namespace ftlpu::distributed_vxm {
+namespace ftlpu {
 
 // One controller serves a VXM tile. The data plane is physically banked by
 // Lane: every Lane owns one Stream-byte Buffer, while stream-group capture and
@@ -173,4 +173,4 @@ private:
     State state_{State::Empty};
 };
 
-} // namespace ftlpu::distributed_vxm
+} // namespace ftlpu

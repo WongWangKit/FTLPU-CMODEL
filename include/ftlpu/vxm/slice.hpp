@@ -1,11 +1,12 @@
 #pragma once
 
+#include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/core/hardware_params.hpp"
+#include "ftlpu/vxm/input_buffer.hpp"
 #include "ftlpu/vxm/superlane.hpp"
 
 #include <array>
 #include <cstddef>
-#include <cstdint>
 #include <deque>
 #include <optional>
 #include <ostream>
@@ -18,24 +19,18 @@ class VxmSlice {
 public:
     static constexpr std::size_t kTileCount = hw::kTileRows;
     static constexpr std::size_t kRows = hw::kTileRows * hw::kLanesPerTile;
-    static constexpr std::size_t kAluQueues = VxmLane::kAluCount;
+    // Eight Slice instruction channels feed eight shared control queues.
+    // Superlane-local decode mirrors logical Ci onto physical C(i+8).
+    static constexpr std::size_t kAluQueues =
+        VxmSuperlaneInstructionControl::kStageCount;
 
     using Superlane = VxmSuperlane;
-    using AluInstruction = VxmLaneAluInstruction;
-    using Int8Vector = Superlane::Int8Vector;
+    using CompactInstruction = VxmCompactInstruction;
     using StreamMatrix = Superlane::StreamMatrix;
-    using InstructionSlot = std::optional<AluInstruction>;
+    using InstructionSlot = std::optional<CompactInstruction>;
     using OutputSlot = std::optional<Superlane::Output>;
     using RequiredStreams = std::array<bool, hw::kStreams>;
-
-    struct InputSlot {
-        StreamMatrix streams{};
-    };
-
-    struct CycleActivity {
-        std::size_t executed_instruction_rows{0};
-        std::size_t useful_instruction_rows{0};
-    };
+    using InputBuffer = VxmInputBuffer;
 
     void reset()
     {
@@ -50,39 +45,143 @@ public:
         for (auto& superlane : superlanes_) {
             superlane.reset();
         }
-        for (auto& hemisphere_inputs : input_slots_) for (auto& input : hemisphere_inputs) input.reset();
+        for (auto& buffer : input_buffers_) {
+            buffer.reset();
+        }
         for (auto& output : output_slots_) {
             output.reset();
         }
         for (auto& outputs : output_slots_multi_) {
             outputs.clear();
         }
-        for (auto& hemisphere_required : required_streams_) for (auto& required : hemisphere_required) required.reset();
+        for (auto& required : required_streams_) {
+            required.reset();
+        }
+        input_group_sources_.fill(Hemisphere::East);
+        output_block_destinations_.fill(Hemisphere::East);
         cycle_ = 0;
-        prepared_ = false;
-        current_cycle_activity_ = {};
-        last_cycle_activity_ = {};
     }
 
-    void issue_south(std::size_t alu, AluInstruction instruction)
+    void issue_south(
+        std::size_t alu, CompactInstruction instruction)
     {
         check_alu(alu);
         instruction_queues_[alu].push_back(instruction);
     }
 
-    void set_stream_inputs(Hemisphere hemisphere, std::size_t tile, const StreamMatrix& streams)
+    void set_chain_depth(VxmChainDepth depth)
+    {
+        for (auto& superlane : superlanes_) {
+            superlane.set_chain_depth(depth);
+        }
+    }
+
+    void set_chain_depth(std::size_t tile, VxmChainDepth depth)
     {
         check_tile(tile);
-        auto& input = input_slots_[hemisphere_index(hemisphere)][tile];
-        if (input.has_value()) {
-            throw std::logic_error("VXM tile input is already occupied");
+        superlanes_[tile].set_chain_depth(depth);
+    }
+
+    void request_chain_depth_transition(
+        std::size_t tile, VxmChainDepth depth,
+        bool feedback_required = true)
+    {
+        check_tile(tile);
+        superlanes_[tile].request_chain_depth_transition(
+            depth, feedback_required);
+    }
+
+    void configure_special_lut(VxmSpecialAluOpcode opcode, VxmLutConfig config,
+                               const std::vector<VxmLutEntry>& entries)
+    {
+        for (auto& superlane : superlanes_) {
+            superlane.configure_special_lut(opcode, config, entries);
         }
-        input = InputSlot {streams};
     }
 
     void set_stream_inputs(std::size_t tile, const StreamMatrix& streams)
     {
-        set_stream_inputs(Hemisphere::East, tile, streams);
+        check_tile(tile);
+        input_buffers_[tile].load_complete(streams);
+    }
+
+    void configure_input_buffer(
+        std::size_t tile,
+        std::size_t expected_group_count)
+    {
+        check_tile(tile);
+        input_buffers_[tile].configure(
+            expected_group_count);
+    }
+
+    void capture_stream_group(
+        std::size_t tile,
+        std::size_t group,
+        const InputBuffer::GroupVector& values)
+    {
+        check_tile(tile);
+        input_buffers_[tile].capture_group(group, values);
+    }
+
+    // Compiler-visible fixed mux configuration. The logical group position
+    // inside every lane remains fixed; this bit selects which hemisphere's
+    // same-numbered SR group drives that position.
+    void configure_input_group_source(
+        std::size_t group,
+        Hemisphere source)
+    {
+        if (group >= VxmLane::kStreamGroupCount) {
+            throw std::out_of_range(
+                "VXM input group source is outside the fixed group set");
+        }
+        input_group_sources_[group] = source;
+    }
+
+    Hemisphere input_group_source(std::size_t group) const
+    {
+        if (group >= VxmLane::kStreamGroupCount) {
+            throw std::out_of_range(
+                "VXM input group source is outside the fixed group set");
+        }
+        return input_group_sources_[group];
+    }
+
+    void configure_output_block_destination(
+        std::size_t block,
+        Hemisphere destination)
+    {
+        if (block >= VxmLane::kBlockCount) {
+            throw std::out_of_range(
+                "VXM output block destination is outside the fixed block set");
+        }
+        output_block_destinations_[block] = destination;
+    }
+
+    Hemisphere output_block_destination(std::size_t block) const
+    {
+        if (block >= VxmLane::kBlockCount) {
+            throw std::out_of_range(
+                "VXM output block destination is outside the fixed block set");
+        }
+        return output_block_destinations_[block];
+    }
+
+    Hemisphere output_stream_destination(std::size_t stream) const
+    {
+        return output_block_destination(
+            stream / VxmLane::kStreamGroupBytes);
+    }
+
+    InputBuffer& input_buffer(std::size_t tile)
+    {
+        check_tile(tile);
+        return input_buffers_[tile];
+    }
+
+    const InputBuffer& input_buffer(std::size_t tile) const
+    {
+        check_tile(tile);
+        return input_buffers_[tile];
     }
 
     void tick(std::ostream* os = nullptr, std::optional<std::size_t> log_tile = std::nullopt)
@@ -96,12 +195,9 @@ public:
             log_status(*os, log_tile);
         }
 
-        current_cycle_activity_ = {};
         execute_instructions(os, log_tile);
         tick_superlanes(os, log_tile);
-        last_cycle_activity_ = current_cycle_activity_;
         advance_instructions();
-        for (auto& hemisphere_inputs : input_slots_) for (auto& input : hemisphere_inputs) input.reset();
         prepared_ = false;
         ++cycle_;
     }
@@ -119,11 +215,6 @@ public:
     std::size_t cycle() const
     {
         return cycle_;
-    }
-
-    const CycleActivity& last_cycle_activity() const noexcept
-    {
-        return last_cycle_activity_;
     }
 
     const InstructionSlot& instruction_at(std::size_t alu, std::size_t tile) const
@@ -145,18 +236,19 @@ public:
         return output_slots_multi_[tile];
     }
 
-    const std::optional<RequiredStreams>& required_streams_at(Hemisphere hemisphere, std::size_t tile) const
-    {
-        check_tile(tile);
-        return required_streams_[hemisphere_index(hemisphere)][tile];
-    }
-
     const std::optional<RequiredStreams>& required_streams_at(std::size_t tile) const
     {
-        return required_streams_at(Hemisphere::East, tile);
+        check_tile(tile);
+        return required_streams_[tile];
     }
 
     const Superlane& superlane(std::size_t tile) const
+    {
+        check_tile(tile);
+        return superlanes_[tile];
+    }
+
+    Superlane& superlane(std::size_t tile)
     {
         check_tile(tile);
         return superlanes_[tile];
@@ -166,14 +258,15 @@ private:
     static void check_tile(std::size_t tile)
     {
         if (tile >= kTileCount) {
-            throw std::out_of_range("VXM slice tile is outside the configured slice");
+            throw std::out_of_range("VXM slice tile is outside the 20-row slice");
         }
     }
 
     static void check_alu(std::size_t alu)
     {
         if (alu >= kAluQueues) {
-            throw std::out_of_range("VXM ALU queue is outside the 16-ALU lane");
+            throw std::out_of_range(
+                "VXM shared ALU control queue is outside 0..7");
         }
     }
 
@@ -205,7 +298,11 @@ private:
         }
 
         std::size_t inputs = 0;
-        for (const auto& hemisphere_inputs : input_slots_) for (const auto& slot : hemisphere_inputs) if (slot.has_value()) ++inputs;
+        for (const auto& buffer : input_buffers_) {
+            if (!buffer.empty()) {
+                ++inputs;
+            }
+        }
 
         os << "  status:";
         if (log_tile.has_value()) {
@@ -229,15 +326,17 @@ private:
                 }
 
                 any = true;
-                ++current_cycle_activity_.executed_instruction_rows;
-                if (instruction->opcode != VxmAluOpcode::Pass)
-                    ++current_cycle_activity_.useful_instruction_rows;
-                superlanes_[tile].enqueue_instruction(alu, *instruction);
+                superlanes_[tile].enqueue_compact_instruction(
+                    alu, *instruction);
                 if (os != nullptr && (!log_tile.has_value() || tile == *log_tile)) {
                     any_logged = true;
+                    const auto decoded =
+                        VxmCompactInstructionCodec::decode(
+                            alu, *instruction);
                     *os << "  tile " << tile
                         << " alu" << alu
-                        << " " << VxmLane::opcode_name(instruction->opcode)
+                        << " " << VxmLane::operation_name(
+                            decoded.instruction.operation)
                         << '\n';
                 }
             }
@@ -253,22 +352,66 @@ private:
         for (std::size_t tile = 0; tile < kTileCount; ++tile) {
             output_slots_[tile].reset();
             output_slots_multi_[tile].clear();
-            for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
-                if (input_slots_[hemisphere][tile].has_value()) {
-                    superlanes_[tile].set_stream_inputs(
-                        static_cast<Hemisphere>(hemisphere), input_slots_[hemisphere][tile]->streams);
-                    if (os != nullptr && (!log_tile.has_value() || tile == *log_tile)) {
-                        *os << "  tile " << tile << " input "
-                            << hemisphere_short_name(static_cast<Hemisphere>(hemisphere)) << '\n';
-                    }
+
+            auto stream_consumers =
+                std::array<bool, kAluQueues>{};
+            bool will_consume_bundle = false;
+            for (std::size_t alu = 0; alu < kAluQueues; ++alu) {
+                if (!superlanes_[tile]
+                         .configuration_will_issue(alu)) {
+                    continue;
+                }
+                const auto instruction =
+                    superlanes_[tile].next_instruction(alu);
+                if (!instruction
+                    || !instruction_uses_stream(*instruction)) {
+                    continue;
+                }
+                stream_consumers[alu] = true;
+                will_consume_bundle = true;
+            }
+
+            auto supplied_bundle = false;
+            if (will_consume_bundle
+                && !input_buffers_[tile].ready()) {
+                throw std::logic_error(
+                    "VXM compiler/static-schedule error: input Bundle is not ready on its scheduled issue cycle at tile "
+                    + std::to_string(tile));
+            }
+            if (will_consume_bundle) {
+                superlanes_[tile].set_stream_inputs(
+                    input_buffers_[tile].bundle());
+                supplied_bundle = true;
+                if (os != nullptr && (!log_tile.has_value() || tile == *log_tile)) {
+                    *os << "  tile " << tile
+                        << " input Bundle groups="
+                        << input_buffers_[tile].fill_count()
+                        << '\n';
                 }
             }
 
-            const auto capture_trace = os != nullptr
-                && (!log_tile.has_value() || tile == *log_tile);
-            superlanes_[tile].tick(capture_trace);
-            if (capture_trace) {
-                superlanes_[tile].print_lane_trace(*os, 0);
+            const auto executed = superlanes_[tile].tick();
+            if (supplied_bundle) {
+                for (std::size_t alu = 0;
+                     alu < kAluQueues;
+                     ++alu) {
+                    if (!stream_consumers[alu]) {
+                        continue;
+                    }
+                    const auto consumed =
+                        executed[alu]
+                        || executed[
+                            alu
+                            + VxmSuperlaneInstructionControl::
+                                kMirroredStageOffset];
+                    if (!consumed) {
+                        throw std::logic_error(
+                            "VXM compiler/static-schedule error: a scheduled stream consumer did not execute");
+                    }
+                }
+                // The execution mask is an assertion of the compiler's
+                // schedule, not a ready/valid handshake or backpressure path.
+                input_buffers_[tile].release_after_issue();
             }
             output_slots_multi_[tile] = superlanes_[tile].outputs();
             if (!output_slots_multi_[tile].empty()) {
@@ -296,70 +439,89 @@ private:
         }
     }
 
-    static void mark_operand_streams(RequiredStreams& required, const VxmLaneOperand& operand)
+    void mark_operand_streams(RequiredStreams& required,
+                              const VxmLaneOperand& operand,
+                              std::size_t alu, bool rhs_port) const
     {
-        std::size_t width = 0;
-        switch (operand.kind) {
-        case VxmLaneOperandKind::StreamInt8: width = 1; break;
-        case VxmLaneOperandKind::StreamFloat16:
-        case VxmLaneOperandKind::StreamBFloat16:
-            width = 2;
-            break;
-        case VxmLaneOperandKind::StreamInt32:
-        case VxmLaneOperandKind::StreamFloat32: width = 4; break;
-        default: return;
+        if (operand.kind != VxmLaneOperandKind::StreamFloat16
+            && operand.kind != VxmLaneOperandKind::StreamBFloat16) {
+            return;
         }
-        if (operand.index + width > hw::kStreams) throw std::out_of_range("VXM stream operand is outside the stream set");
-        for (std::size_t byte = 0; byte < width; ++byte) {
-            required[operand.index + byte] = true;
+        const auto group = VxmLane::fixed_input_group_for_stage(alu, rhs_port);
+        // RequiredStreams describes the fixed logical 32-byte VXM input
+        // bundle.  The separately configured group source selects which MEM
+        // hemisphere supplies that same-numbered westbound SR group.
+        const auto base = group * VxmLane::kStreamGroupBytes;
+        for (std::size_t byte = 0; byte < VxmLane::kStreamGroupBytes; ++byte) {
+            required[base + byte] = true;
         }
     }
 
     static bool operand_uses_stream(const VxmLaneOperand& operand)
     {
-        return operand.kind == VxmLaneOperandKind::StreamInt32
-            || operand.kind == VxmLaneOperandKind::StreamFloat32
-            || operand.kind == VxmLaneOperandKind::StreamInt8
-            || operand.kind == VxmLaneOperandKind::StreamFloat16
+        return operand.kind == VxmLaneOperandKind::StreamFloat16
             || operand.kind == VxmLaneOperandKind::StreamBFloat16;
     }
 
-    static bool instruction_uses_stream(const AluInstruction& instruction)
+    static bool instruction_uses_stream(
+        const VxmLaneAluInstruction& instruction)
     {
         return operand_uses_stream(instruction.lhs) || operand_uses_stream(instruction.rhs);
     }
 
     void refresh_required_streams()
     {
-        for (auto& hemisphere_required : required_streams_) for (auto& required : hemisphere_required) required.reset();
+        for (auto& required : required_streams_) {
+            required.reset();
+        }
 
         for (std::size_t tile = 0; tile < kTileCount; ++tile) {
-            auto required = std::array<RequiredStreams, hw::kHemispheres> {};
-            auto any = std::array<bool, hw::kHemispheres> {};
+            auto required = RequiredStreams {};
+            bool any = false;
             for (std::size_t alu = 0; alu < kAluQueues; ++alu) {
-                const auto& instruction = instruction_rows_[alu][tile];
+                // A held Current Config takes precedence over a new packet
+                // merely passing this tile toward the shared Superlane queue.
+                auto instruction = superlanes_[tile].next_instruction(alu);
+                if (!instruction && instruction_rows_[alu][tile]) {
+                    instruction =
+                        VxmCompactInstructionCodec::decode(
+                            alu, *instruction_rows_[alu][tile])
+                            .instruction;
+                }
                 if (!instruction.has_value() || !instruction_uses_stream(*instruction)) {
                     continue;
                 }
-                const auto hemisphere = hemisphere_index(instruction->input_hemisphere);
-                mark_operand_streams(required[hemisphere], instruction->lhs);
-                mark_operand_streams(required[hemisphere], instruction->rhs);
-                any[hemisphere] = true;
+                mark_operand_streams(required, instruction->lhs, alu, false);
+                mark_operand_streams(required, instruction->rhs, alu, true);
+                const auto mirrored =
+                    alu + VxmSuperlaneInstructionControl::kMirroredStageOffset;
+                mark_operand_streams(
+                    required, instruction->lhs, mirrored, false);
+                mark_operand_streams(
+                    required, instruction->rhs, mirrored, true);
+                any = true;
             }
-            for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere)
-                if (any[hemisphere]) required_streams_[hemisphere][tile] = required[hemisphere];
+            if (any) {
+                required_streams_[tile] = required;
+            }
         }
     }
 
-    std::array<std::deque<AluInstruction>, kAluQueues> instruction_queues_{};
+    std::array<std::deque<CompactInstruction>, kAluQueues>
+        instruction_queues_{};
     std::array<std::array<InstructionSlot, kTileCount>, kAluQueues> instruction_rows_{};
-    std::array<Superlane, kTileCount> superlanes_{};
-    std::array<std::array<std::optional<InputSlot>, kTileCount>, hw::kHemispheres> input_slots_{};
+    // A complete Slice contains kTileCount configured Superlanes and every Lane owns real
+    // internal ALU pipeline state. Keep the fixed architectural count while
+    // placing the large C-model objects on the host heap instead of its stack.
+    std::vector<Superlane> superlanes_{kTileCount};
+    std::array<InputBuffer, kTileCount> input_buffers_{};
     std::array<OutputSlot, kTileCount> output_slots_{};
     std::array<std::vector<Superlane::Output>, kTileCount> output_slots_multi_{};
-    std::array<std::array<std::optional<RequiredStreams>, kTileCount>, hw::kHemispheres> required_streams_{};
-    CycleActivity current_cycle_activity_{};
-    CycleActivity last_cycle_activity_{};
+    std::array<std::optional<RequiredStreams>, kTileCount> required_streams_{};
+    std::array<Hemisphere, VxmLane::kStreamGroupCount>
+        input_group_sources_{};
+    std::array<Hemisphere, VxmLane::kBlockCount>
+        output_block_destinations_{};
     std::size_t cycle_{0};
     bool prepared_{false};
 };

@@ -41,13 +41,19 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
 
 bool same_vxm(const ftlpu::VxmLaneAluInstruction& lhs, const ftlpu::VxmLaneAluInstruction& rhs)
 {
-    return lhs.opcode == rhs.opcode
-        && lhs.lhs.kind == rhs.lhs.kind && lhs.lhs.index == rhs.lhs.index
-        && lhs.rhs.kind == rhs.rhs.kind && lhs.rhs.immediate == rhs.rhs.immediate
-        && lhs.cast_target == rhs.cast_target
+    return lhs.operation == rhs.operation
+        && lhs.lhs.kind == rhs.lhs.kind
+        && lhs.lhs.immediate == rhs.lhs.immediate
+        && lhs.rhs.kind == rhs.rhs.kind
+        && lhs.rhs.immediate == rhs.rhs.immediate
+        && lhs.precision == rhs.precision
+        && lhs.output_type == rhs.output_type
         && lhs.output_stream == rhs.output_stream
-        && lhs.input_hemisphere == rhs.input_hemisphere
-        && lhs.output_hemisphere == rhs.output_hemisphere;
+        && lhs.accumulator_reset == rhs.accumulator_reset
+        && lhs.accumulator_write == rhs.accumulator_write
+        && lhs.accumulator_emit == rhs.accumulator_emit
+        && lhs.repeat_count == rhs.repeat_count
+        && lhs.local_scalar_write == rhs.local_scalar_write;
 }
 
 bool require(bool condition, const std::string& message)
@@ -340,26 +346,38 @@ bool verify_mxm_codec()
 
 bool verify_vxm_codec()
 {
-    auto instruction = ftlpu::VxmLaneAluInstruction {
-        ftlpu::VxmAluOpcode::Multiply,
-        ftlpu::VxmLaneOperand::StreamBFloat16(32),
-        ftlpu::VxmLaneOperand::Imm(0.125f),
-        1.0f, 0, ftlpu::VxmCastTarget::BFloat16, 16,
-        ftlpu::Hemisphere::West, ftlpu::Hemisphere::East};
+    constexpr auto queue = std::size_t {1};
+    constexpr auto depth = ftlpu::VxmChainDepth::Two;
+    auto instruction = ftlpu::VxmLaneAluInstruction {};
+    instruction.operation = ftlpu::VxmAluOpcode::Multiply;
+    instruction.lhs = ftlpu::VxmLaneOperand::Previous();
+    instruction.rhs = ftlpu::VxmLaneOperand::Imm(0.125f);
+    instruction.precision = ftlpu::VxmAluPrecision::Float32;
+    instruction.output_type = ftlpu::VxmCastTarget::BFloat16;
+    instruction.output_stream =
+        ftlpu::VxmLane::fixed_output_stream_for_block(
+            ftlpu::VxmLane::block_for_stage(queue));
+    instruction.repeat_count = 7;
 
-    const auto encoded = ftlpu::isa::encode_vxm_instruction(instruction);
-    const auto decoded = ftlpu::isa::decode_vxm_instruction(encoded);
-    if (!require(same_vxm(instruction, decoded), "VXM ALU instruction codec round-trip failed")) {
+    const auto encoded = ftlpu::isa::encode_vxm_instruction(
+        queue, depth, instruction);
+    const auto decoded = ftlpu::isa::decode_vxm_instruction(queue, encoded);
+    if (!require(
+            decoded.chain_depth == depth
+                && same_vxm(instruction, decoded.instruction),
+            "VXM compact instruction codec round-trip failed")) {
         return false;
     }
 
     return require_throws(
         [] {
             auto invalid = ftlpu::VxmLaneAluInstruction {};
-            invalid.lhs = ftlpu::VxmLaneOperand::StreamInt8(64);
-            ftlpu::isa::encode_vxm_instruction(invalid);
+            invalid.lhs = ftlpu::VxmLaneOperand::Imm(1.0f);
+            invalid.rhs = ftlpu::VxmLaneOperand::Imm(2.0f);
+            ftlpu::isa::encode_vxm_instruction(
+                0, ftlpu::VxmChainDepth::Two, invalid);
         },
-        "VXM codec should reject stream indexes outside the stream set");
+        "VXM codec should reject two distinct immediate values");
 }
 
 bool verify_icu_command_codec()

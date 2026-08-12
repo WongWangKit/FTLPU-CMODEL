@@ -206,6 +206,32 @@ public:
         return cell;
     }
 
+    StreamSlot consume_west_register(
+        std::size_t tile,
+        std::size_t lane,
+        std::size_t register_file,
+        std::size_t stream)
+    {
+        const auto id = StreamId::West(stream);
+        const auto cell = streams_.cell(register_file, tile, lane, id);
+        if (cell.valid) {
+            const auto already_requested = std::any_of(
+                pending_consumptions_.begin(),
+                pending_consumptions_.end(),
+                [&](const PendingConsumption& pending) {
+                    return pending.column == register_file
+                        && pending.tile == tile
+                        && pending.lane == lane
+                        && pending.stream == id;
+                });
+            if (!already_requested) {
+                pending_consumptions_.push_back(
+                    PendingConsumption {register_file, tile, lane, id});
+            }
+        }
+        return cell;
+    }
+
     Data sram_byte(std::size_t column, std::size_t row, std::size_t byte_offset) const
     {
         return mem_.sram_byte(column, row, byte_offset);

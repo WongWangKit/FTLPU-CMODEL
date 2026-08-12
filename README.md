@@ -18,13 +18,13 @@ provide a concrete target for dataflow scheduling and future compiler work.
 | Streams | 32 eastward + 32 westward streams, one byte per register |
 | MEM | 52 slices per hemisphere, 104 ICU queues total |
 | SRAM | 2 MiB per slice, 104 MiB per hemisphere, 208 MiB total |
-| Accumulators | Configurable complete 32x32 FP32 block count per MXM (96 blocks / 384 KiB per layout by default) |
+| Accumulators | Configurable complete 32x32 FP32 block count per MXM (256 blocks / 1 MiB by default) |
 | MXM | Four 32 x 32 FP16 GEMM arrays, two per hemisphere |
 | MXM weights | Two peer buffers per supercell, selected by `IW`/`Compute` |
 | MXM decode | Selectable `Linear1x16` or activation-stationary `Native4x4` |
-| VXM | One central slice, 16 independently controlled ALUs per lane |
+| VXM | One central slice; two mirrored 8-stage chains (16 physical ALUs) per lane |
 | SXM | One four-tile slice per hemisphere for Transpose/Permute |
-| ICU | 104 MEM, 4 MXM load, 4 MXM compute, 16 VXM, and 4 SXM queues |
+| ICU | 104 MEM, 12 MXM, 8 VXM compact-control, 4 SXM, and 6 C2C/DMA queues |
 
 The fixed full-chip topology is:
 
@@ -32,9 +32,10 @@ The fixed full-chip topology is:
 MXM2/MXM3 <-> SXM.W <-> MEM.W <-> VXM <-> MEM.E <-> SXM.E <-> MXM0/MXM1
 ```
 
-Each hemisphere uses local stream-register columns `sreg0..sreg14`.
+Each hemisphere uses local stream-register columns `sreg0..sreg15`.
 `sreg0` is next to VXM, MEM occupies the thirteen groups between
-`sreg0..sreg13`, and SXM connects `sreg13` to the MXM boundary at `sreg14`.
+`sreg0..sreg13`, C2C attaches at `sreg13`, and SXM spans `sreg14` to the MXM
+boundary at `sreg15`.
 
 Stream reads are broadcast-capable: multiple functional units may consume the
 same register value in one cycle. A consumed value no longer propagates
@@ -62,16 +63,16 @@ instruction trains. MEM repeats may also apply a signed address stride.
 | `w8a16_swiglu_test` | gate/up projection plus SwiGLU | 196,608 FP16 outputs |
 | `dual_hemisphere_w8a16_swiglu_test` | full gate/up, SwiGLU, and down FFN | `[128,576]` final FP16 output |
 | `rmsnorm_test` | `[32,32]` FP16 RMSNorm | all stored FP16 outputs |
-| `smollm2_attention_test` | Q/K/V, RoPE, QK, softmax, P x V, and `o_proj` | `[128,576]` attention output |
+| `smollm2_attention_test` | ICU-driven Q/K RoPE, QK, softmax, and P x V hardware tile | bit-checked RoPE plus `8 x 32` attention output |
 | `mxm_decode_layout_comparison_test` | Same `K=128, N=32` GEMV in both decode layouts | bit-identical BF16 outputs and cycle comparison |
 | `smollm2_decode_ffn_test` | Native 4 x 4 weight-streaming decode FFN | `[1,576]` final BF16 output |
 | `sxm_mem_transpose_test` | continuous MEM -> SXM -> MEM FP16 transpose | four 32 x 32 matrices |
 
 The full FFN uses all four MXMs and currently schedules 90,817 cycles. Its final
 gate/up reduction streams accumulator results directly into the shared VXM
-SwiGLU pipeline. The complete SmolLM2 attention workload uses sequence length
-128, hidden size 576, 9 query heads, 3 KV heads, and head dimension 64; its
-validated schedule is 94,761 cycles.
+SwiGLU pipeline. The standalone attention executable validates one physical
+`8-token x 4-head x 8-dimension` tile. The layer-phase harness repeats that
+tile mapping over a `[128,576]` API shape.
 
 MXM Decode instructions carry an explicit layout bit. `Linear1x16` loads four
 independent 8-element activation vectors per tile from eight streams and walks

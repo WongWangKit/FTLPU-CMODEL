@@ -103,8 +103,7 @@ constexpr std::size_t kIcuMxmInstructionBits = 128;
 constexpr std::size_t kIcuSxmInstructionBits = 96;
 constexpr std::size_t kIcuC2cInstructionBits = 96;
 constexpr std::size_t kIcuC2cDmaInstructionBits = 192;
-constexpr std::size_t kIcuVxmImemDepth = 32768;
-constexpr std::size_t kIcuDistributedVxmImemDepth = 2048;
+constexpr std::size_t kIcuVxmImemDepth = 2048;
 // Existing whole-layer schedules are emitted as one flat program image. The
 // runtime frontend still exposes only a 16-entry IQ and one fetch per cycle.
 constexpr std::size_t kIcuMemImemDepth = 131072;
@@ -169,7 +168,6 @@ static_assert(kMxmBlockAccumulatorColumns == 256);
 static_assert(kMxmAccumulatorBytes == kMxmBlockAccumulatorBytes);
 static_assert(kSxmConcurrentStreamOps == 16);
 static_assert(kIcuVxmImemDepth >= kIcuVxmIqDepth);
-static_assert(kIcuDistributedVxmImemDepth >= kIcuVxmIqDepth);
 static_assert(kIcuMemImemDepth >= kIcuMemIqDepth);
 static_assert(kIcuMxmImemDepth >= kIcuMxmIqDepth);
 static_assert(kIcuSxmImemDepth >= kIcuSxmIqDepth);

@@ -1,7 +1,7 @@
 #include "ftlpu/core/bf16.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
-#include "vxm_alu_program.hpp"
-#include "layer_phases.hpp"
+#include "smollm2_layer_phases.hpp"
+#include "w8a16_swiglu_dataflow_harness.hpp"
 
 #include <algorithm>
 #include <array>
@@ -28,7 +28,8 @@ constexpr std::size_t kOutputGroup = ftlpu::hw::kMxmSupercellColumns;
 constexpr std::size_t kDecodeOutputWidth = ftlpu::hw::kMxmColumns;
 constexpr std::size_t kDecodeWaveStages =
     ftlpu::hw::kTileRows
-    + ftlpu::hw::kMxmSupercellsPerPlane - 1;
+    + ftlpu::hw::kMxmSupercellsPerPlane
+    + ftlpu::Mxm::kLocalMacStages - 2;
 constexpr std::size_t kGroupsPerAccumulatorRow =
     ftlpu::hw::kMxmSupercellsPerPlane;
 constexpr std::size_t kGateUpGroups = kIntermediate / kOutputGroup;
@@ -50,14 +51,15 @@ constexpr std::size_t kGateWeightAddressBase = 8000;
 constexpr std::size_t kUpWeightAddressBase = 10000;
 constexpr std::size_t kDownWeightAddressBase = 12000;
 constexpr std::size_t kFinalOutputAddressBase = 16000;
-constexpr std::size_t kDownAccumulatorAddressBase =
-    ftlpu::hw::kMxmAccumulatorRows / 2;
+constexpr std::size_t kGateUpStageAddressBase = 20000;
+constexpr std::size_t kDownAccumulatorAddressBase = 1024;
 constexpr std::array<std::size_t, 2> kActivationSlices {50, 51};
 constexpr std::array<std::size_t, 8> kSwigluSlices {
     36, 37, 38, 39, 40, 41, 42, 43};
 constexpr std::array<std::size_t, 4> kFinalSlices {48, 49, 50, 51};
-constexpr std::size_t kMxmToVxmLatency =
-    ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 1;
+constexpr std::array<std::size_t, 4> kGateStageSlices {0, 1, 16, 17};
+constexpr std::array<std::size_t, 4> kUpStageSlices {2, 3, 18, 19};
+constexpr std::size_t kVxmSwiGluLatency = 17;
 constexpr std::size_t kEastMxm =
     ftlpu::InstructionControlUnit::mxm_queue(
         ftlpu::Hemisphere::East, 0);
@@ -105,8 +107,7 @@ float down_weight_value(std::size_t k, std::size_t n)
 
 std::size_t east_latency(std::size_t slice)
 {
-    return ftlpu::hw::kMemGroups
-        + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 2
+    return ftlpu::hw::kMxmBoundaryStreamRegisterColumn + 1
         - slice / ftlpu::hw::kMemSlicesPerGroup;
 }
 
@@ -116,11 +117,14 @@ std::size_t mxm_west_latency(std::size_t slice)
         - slice / ftlpu::hw::kMemSlicesPerGroup;
 }
 
-std::size_t vxm_east_write_latency(std::size_t slice)
+std::size_t mem_to_vxm_latency(std::size_t slice)
 {
-    constexpr std::size_t kSwishPipeline = 6;
-    return kSwishPipeline
-        + slice / ftlpu::hw::kMemSlicesPerGroup;
+    return slice / ftlpu::hw::kMemSlicesPerGroup + 2;
+}
+
+std::size_t vxm_to_mem_latency(std::size_t slice)
+{
+    return slice / ftlpu::hw::kMemSlicesPerGroup + 1;
 }
 
 std::size_t mem_queue(ftlpu::Hemisphere hemisphere, std::size_t slice)
@@ -201,7 +205,9 @@ public:
         std::size_t cycle,
         std::size_t address,
         std::size_t stream_base,
-        bool clear)
+        bool clear,
+        ftlpu::MxmAccumulatorOutputFormat output_format =
+            ftlpu::MxmAccumulatorOutputFormat::Float32)
     {
         pad(mxm_compute_[mxm], cycle, [&](std::size_t count) {
             icu_.enqueue_mxm_compute_nop(mxm, count);
@@ -209,35 +215,58 @@ public:
         icu_.enqueue_mxm(
             mxm,
             ftlpu::MxmControlInstruction::AccumulatorRead(
-                address, stream_base, clear));
+                address, stream_base, clear,
+                ftlpu::MxmComputeMode::Vector, output_format));
         advance(mxm_compute_[mxm], cycle + 1);
     }
 
-    void swiglu_at(std::size_t cycle)
+    void configure_swiglu_at(
+        std::size_t cycle, std::size_t repeat)
     {
-        ftlpu::test::enqueue_swish(
-            icu_, vxm_, cycle,
-            ftlpu::test::SwishSpec {
-                ftlpu::hw::kEastStreams,
-                4,
-                0,
-                ftlpu::Hemisphere::East,
-                ftlpu::Hemisphere::East,
-                ftlpu::VxmCastTarget::BFloat16});
-        ftlpu::test::enqueue_alu_at(
-            icu_, vxm_, 10, cycle + 5,
-            {
-                ftlpu::VxmAluOpcode::Cast,
-                ftlpu::VxmLaneOperand::Alu(8),
-                ftlpu::VxmLaneOperand::Imm(0.0f),
-                1.0f,
-                0,
-                ftlpu::VxmCastTarget::BFloat16,
-                0,
-                ftlpu::Hemisphere::East,
-                ftlpu::Hemisphere::West,
+        using namespace ftlpu::test::w8a16_swiglu;
+        const auto at = [&](std::size_t stage,
+                            ftlpu::VxmLaneAluInstruction instruction) {
+            pad(vxm_[stage], cycle, [&](std::size_t count) {
+                icu_.enqueue_vxm_nop(stage, count);
             });
-        end_ = std::max(end_, cycle + 6);
+            icu_.enqueue_vxm(
+                stage, ftlpu::VxmChainDepth::Eight, instruction);
+            advance(vxm_[stage], cycle + 1);
+        };
+        at(0, basic(
+            ftlpu::VxmAluOpcode::Negate,
+            ftlpu::VxmLaneOperand::StreamBFloat16(),
+            ftlpu::VxmLaneOperand::StreamBFloat16(), repeat));
+        at(1, special(
+            ftlpu::VxmSpecialAluOpcode::Exp,
+            ftlpu::VxmLaneOperand::Previous(), repeat));
+        at(2, basic(
+            ftlpu::VxmAluOpcode::Add,
+            ftlpu::VxmLaneOperand::Previous(),
+            ftlpu::VxmLaneOperand::Imm(1.0f), repeat));
+        at(3, special(
+            ftlpu::VxmSpecialAluOpcode::Reciprocal,
+            ftlpu::VxmLaneOperand::Previous(), repeat));
+        at(4, basic(
+            ftlpu::VxmAluOpcode::Multiply,
+            ftlpu::VxmLaneOperand::Previous(),
+            ftlpu::VxmLaneOperand::Original(), repeat));
+        at(5, basic(
+            ftlpu::VxmAluOpcode::Multiply,
+            ftlpu::VxmLaneOperand::Previous(),
+            ftlpu::VxmLaneOperand::Aux(), repeat));
+        at(6, basic(
+            ftlpu::VxmAluOpcode::Bypass,
+            ftlpu::VxmLaneOperand::Previous(),
+            ftlpu::VxmLaneOperand::Imm(0.0f), repeat));
+        auto tail = basic(
+            ftlpu::VxmAluOpcode::Bypass,
+            ftlpu::VxmLaneOperand::Previous(),
+            ftlpu::VxmLaneOperand::Imm(0.0f), repeat);
+        tail.output_type = ftlpu::VxmCastTarget::BFloat16;
+        tail.output_stream =
+            ftlpu::VxmLane::fixed_output_stream_for_block(3);
+        at(7, tail);
     }
 
     void trace(
@@ -563,6 +592,27 @@ float read_swiglu(
         | (static_cast<std::uint16_t>(high) << 8)).to_float();
 }
 
+ftlpu::Bf16 read_staged_projection(
+    const ftlpu::TspSliceSystem& system,
+    ftlpu::Hemisphere hemisphere,
+    const std::array<std::size_t, 4>& slices,
+    std::size_t index)
+{
+    const auto address = index / ftlpu::hw::kMxmColumns;
+    const auto in_vector = index % ftlpu::hw::kMxmColumns;
+    const auto tile = in_vector / ftlpu::hw::kLanesPerTile;
+    const auto lane = in_vector % ftlpu::hw::kLanesPerTile;
+    const auto low = system.read_mem_sram_lane_byte(
+        hemisphere, slices[0], tile,
+        kGateUpStageAddressBase + address, lane);
+    const auto high = system.read_mem_sram_lane_byte(
+        hemisphere, slices[1], tile,
+        kGateUpStageAddressBase + address, lane);
+    return ftlpu::Bf16::from_bits(
+        static_cast<std::uint16_t>(low)
+        | (static_cast<std::uint16_t>(high) << 8));
+}
+
 } // namespace
 
 ftlpu::test::smollm2_layer::PhaseResult
@@ -595,6 +645,8 @@ ftlpu::test::smollm2_layer::run_decode_ffn(
         });
 
     system.reset_execution_state();
+    const auto reference_lut =
+        ftlpu::test::w8a16_swiglu::configure_luts(system);
     initialize_activation_source(
         system, ftlpu::Hemisphere::East, activation, kGateUpReductions);
     initialize_activation_source(
@@ -708,66 +760,136 @@ ftlpu::test::smollm2_layer::run_decode_ffn(
         phase_cycle = compute_start + kGateUpWaves + kDecodeWaveStages + 4;
     }
 
-    const auto swiglu_read_start = phase_cycle + 4;
+    const auto stage_read_start = phase_cycle + 4;
     for (std::size_t address = 0;
          address < kGateUpAccumulatorRows;
          ++address) {
-        const auto read_cycle = swiglu_read_start + address;
-        const auto vxm_cycle = read_cycle + kMxmToVxmLatency;
-        schedule.accumulator_read_at(kEastMxm, read_cycle, address, 0, false);
-        schedule.accumulator_read_at(kWestMxm, read_cycle - 1, address, 4, false);
-        schedule.swiglu_at(vxm_cycle);
-        const auto column = address % ftlpu::hw::kMxmSupercellsPerPlane;
-        const auto sram_address = address / ftlpu::hw::kMxmSupercellsPerPlane;
-        for (std::size_t byte = 0; byte < 2; ++byte) {
-            const auto slice = kSwigluSlices[column * 2 + byte];
-            const auto write_cycle = vxm_cycle + vxm_east_write_latency(slice);
-            schedule.mem_at(
-                ftlpu::Hemisphere::East,
-                slice,
-                write_cycle,
-                ftlpu::MemInstruction::Write(
-                    sram_address, ftlpu::StreamId::East(byte)));
-            schedule.mem_at(
-                ftlpu::Hemisphere::West,
-                slice,
-                write_cycle,
-                ftlpu::MemInstruction::Write(
-                    sram_address, ftlpu::StreamId::East(byte)));
+        const auto read_cycle = stage_read_start + address;
+        schedule.accumulator_read_at(
+            kEastMxm, read_cycle, address, 0, false,
+            ftlpu::MxmAccumulatorOutputFormat::BFloat16);
+        schedule.accumulator_read_at(
+            kWestMxm, read_cycle, address, 0, false,
+            ftlpu::MxmAccumulatorOutputFormat::BFloat16);
+        for (std::size_t projection = 0; projection < 2; ++projection) {
+            const auto side = projection == 0
+                ? ftlpu::Hemisphere::East : ftlpu::Hemisphere::West;
+            const auto& slices = projection == 0
+                ? kGateStageSlices : kUpStageSlices;
+            for (std::size_t byte = 0; byte < 2; ++byte) {
+                // The first (near-MXM) write taps the westbound stream;
+                // the second consumes it two MEM groups later.  This stores
+                // two copies for the two mirrored VXM input chains.
+                schedule.mem_at(
+                    side, slices[byte + 2],
+                    read_cycle + mxm_west_latency(slices[byte + 2]),
+                    ftlpu::MemInstruction::WriteTap(
+                        kGateUpStageAddressBase + address,
+                        ftlpu::StreamId::West(byte)));
+                schedule.mem_at(
+                    side, slices[byte],
+                    read_cycle + mxm_west_latency(slices[byte]),
+                    ftlpu::MemInstruction::Write(
+                        kGateUpStageAddressBase + address,
+                        ftlpu::StreamId::West(byte)));
+            }
         }
     }
-    const auto first_swiglu_cycle =
-        swiglu_read_start + kMxmToVxmLatency;
+
+    system.configure_vxm_input_group_source(0, ftlpu::Hemisphere::East);
+    system.configure_vxm_input_group_source(1, ftlpu::Hemisphere::West);
+    system.configure_vxm_input_group_source(8, ftlpu::Hemisphere::East);
+    system.configure_vxm_input_group_source(9, ftlpu::Hemisphere::West);
+    system.configure_vxm_output_block_destination(
+        3, ftlpu::Hemisphere::East);
+    system.configure_vxm_output_block_destination(
+        7, ftlpu::Hemisphere::West);
+    const auto swiglu_config_cycle = stage_read_start
+        + kGateUpAccumulatorRows + 16;
+    const auto swiglu_input_cycle = swiglu_config_cycle + 1;
+    schedule.configure_swiglu_at(
+        swiglu_config_cycle, kGateUpAccumulatorRows);
+    for (std::size_t address = 0;
+         address < kGateUpAccumulatorRows;
+         ++address) {
+        const auto input_cycle = swiglu_input_cycle + address;
+        for (std::size_t byte = 0; byte < 2; ++byte) {
+            schedule.mem_at(
+                ftlpu::Hemisphere::East, kGateStageSlices[byte],
+                input_cycle - mem_to_vxm_latency(kGateStageSlices[byte]),
+                ftlpu::MemInstruction::Read(
+                    kGateUpStageAddressBase + address,
+                    ftlpu::StreamId::West(byte)));
+            schedule.mem_at(
+                ftlpu::Hemisphere::East, kGateStageSlices[byte + 2],
+                input_cycle
+                    - mem_to_vxm_latency(kGateStageSlices[byte + 2]),
+                ftlpu::MemInstruction::Read(
+                    kGateUpStageAddressBase + address,
+                    ftlpu::StreamId::West(16 + byte)));
+            schedule.mem_at(
+                ftlpu::Hemisphere::West, kUpStageSlices[byte],
+                input_cycle - mem_to_vxm_latency(kUpStageSlices[byte]),
+                ftlpu::MemInstruction::Read(
+                    kGateUpStageAddressBase + address,
+                    ftlpu::StreamId::West(2 + byte)));
+            schedule.mem_at(
+                ftlpu::Hemisphere::West, kUpStageSlices[byte + 2],
+                input_cycle
+                    - mem_to_vxm_latency(kUpStageSlices[byte + 2]),
+                ftlpu::MemInstruction::Read(
+                    kGateUpStageAddressBase + address,
+                    ftlpu::StreamId::West(18 + byte)));
+        }
+        const auto column = address % ftlpu::hw::kMxmSupercellsPerPlane;
+        const auto sram_address = address / ftlpu::hw::kMxmSupercellsPerPlane;
+        for (std::size_t side_index = 0;
+             side_index < ftlpu::hw::kHemispheres; ++side_index) {
+            const auto side = static_cast<ftlpu::Hemisphere>(side_index);
+            const auto output_stream = side_index == 0 ? 6u : 14u;
+            for (std::size_t byte = 0; byte < 2; ++byte) {
+                const auto slice = kSwigluSlices[column * 2 + byte];
+                schedule.mem_at(
+                    side, slice,
+                    input_cycle + kVxmSwiGluLatency
+                        + vxm_to_mem_latency(slice),
+                    ftlpu::MemInstruction::Write(
+                        sram_address,
+                        ftlpu::StreamId::East(output_stream + byte)));
+            }
+        }
+    }
     schedule.trace(
-        swiglu_read_start,
-        swiglu_read_start + kGateUpAccumulatorRows,
+        stage_read_start,
+        stage_read_start + kGateUpAccumulatorRows,
         "MXM.E0.AccumulatorRead",
-        "gate FP32 dst=stream retain");
+        "gate BF16 dst=MEM retain");
     schedule.trace(
-        swiglu_read_start - 1,
-        swiglu_read_start - 1 + kGateUpAccumulatorRows,
+        stage_read_start,
+        stage_read_start + kGateUpAccumulatorRows,
         "MXM.W0.AccumulatorRead",
-        "up FP32 dst=stream retain; one-cycle bridge skew");
+        "up BF16 dst=MEM retain");
     schedule.trace(
-        first_swiglu_cycle,
-        first_swiglu_cycle + kGateUpAccumulatorRows + 5,
+        swiglu_input_cycle,
+        swiglu_input_cycle + kGateUpAccumulatorRows
+            + kVxmSwiGluLatency,
         "VXM.SwiGLU",
-        "48 vector waves; gate W0..W3 + bridged up E4..E7");
+        "48 BF16 vectors through mirrored fixed 8-stage chains");
     schedule.trace(
-        first_swiglu_cycle + vxm_east_write_latency(kSwigluSlices.front()),
-        first_swiglu_cycle + kGateUpAccumulatorRows
-            + vxm_east_write_latency(kSwigluSlices.back()),
+        swiglu_input_cycle + kVxmSwiGluLatency,
+        swiglu_input_cycle + kGateUpAccumulatorRows
+            + kVxmSwiGluLatency + vxm_to_mem_latency(kSwigluSlices.back()),
         "MEM.E.Write",
         "BF16 SwiGLU packed for down activation");
     schedule.trace(
-        first_swiglu_cycle + vxm_east_write_latency(kSwigluSlices.front()),
-        first_swiglu_cycle + kGateUpAccumulatorRows
-            + vxm_east_write_latency(kSwigluSlices.back()),
+        swiglu_input_cycle + kVxmSwiGluLatency,
+        swiglu_input_cycle + kGateUpAccumulatorRows
+            + kVxmSwiGluLatency + vxm_to_mem_latency(kSwigluSlices.back()),
         "MEM.W.Write",
         "BF16 SwiGLU duplicate for down activation");
 
-    const auto down_start = swiglu_read_start
-        + kGateUpAccumulatorRows + kMxmToVxmLatency + 32;
+    const auto down_start = swiglu_input_cycle
+        + kGateUpAccumulatorRows + kVxmSwiGluLatency + 32;
     phase_cycle = down_start;
     for (std::size_t reduction = 0; reduction < kDownReductions; ++reduction) {
         const auto buffer = reduction % 2;
@@ -920,32 +1042,42 @@ ftlpu::test::smollm2_layer::run_decode_ffn(
             projected_up[n] += activation[k]
                 * up.dequantized[k * kIntermediate + n];
         }
-        const auto accumulator_address =
-            n / ftlpu::hw::kMxmColumns;
-        const auto accumulator_column =
-            n % ftlpu::hw::kMxmColumns;
-        const auto actual_gate = system.mxm_unit(kEastMxm).accumulator().value(
-            accumulator_address, accumulator_column);
-        const auto actual_up = system.mxm_unit(kWestMxm).accumulator().value(
-            accumulator_address, accumulator_column);
-        if (!close_enough(actual_gate, projected_gate[n])
-            || !close_enough(actual_up, projected_up[n])) {
+        const auto expected_gate = ftlpu::Bf16::from_float(
+            projected_gate[n]);
+        const auto expected_up = ftlpu::Bf16::from_float(
+            projected_up[n]);
+        const auto actual_gate = read_staged_projection(
+            system, ftlpu::Hemisphere::East,
+            kGateStageSlices, n);
+        const auto actual_up = read_staged_projection(
+            system, ftlpu::Hemisphere::West,
+            kUpStageSlices, n);
+        if (actual_gate.bits() != expected_gate.bits()
+            || actual_up.bits() != expected_up.bits()) {
             std::cerr << "decode FFN gate/up mismatch at " << n
-                      << " gate=" << actual_gate << '/' << projected_gate[n]
-                      << " up=" << actual_up << '/' << projected_up[n] << '\n';
+                      << " gate=" << actual_gate.to_float() << '/'
+                      << expected_gate.to_float()
+                      << " up=" << actual_up.to_float() << '/'
+                      << expected_up.to_float() << '\n';
             throw std::runtime_error("decode FFN hardware mismatch");
         }
+        const auto exponent = reference_lut.execute(
+            ftlpu::VxmSpecialAluOpcode::Exp,
+            -actual_gate.to_float());
+        const auto reciprocal = reference_lut.execute(
+            ftlpu::VxmSpecialAluOpcode::Reciprocal,
+            1.0f + exponent);
         swiglu[n] = ftlpu::Bf16::from_float(
-            (actual_gate * actual_up)
-            / (1.0f + std::exp(-actual_gate))).to_float();
+            (reciprocal * actual_gate.to_float())
+            * actual_up.to_float()).to_float();
         const auto actual_swiglu = read_swiglu(
             system, ftlpu::Hemisphere::East, n);
         if (actual_swiglu != swiglu[n]) {
             std::cerr << "decode FFN SwiGLU mismatch at " << n
                       << " actual=" << actual_swiglu
                       << " expected=" << swiglu[n]
-                      << " gate=" << actual_gate
-                      << " up=" << actual_up << '\n';
+                      << " gate=" << actual_gate.to_float()
+                      << " up=" << actual_up.to_float() << '\n';
             throw std::runtime_error("decode FFN hardware mismatch");
         }
     }

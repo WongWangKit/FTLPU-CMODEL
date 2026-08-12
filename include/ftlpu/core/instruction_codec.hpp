@@ -5,7 +5,7 @@
 #include "ftlpu/mxm/control_slice.hpp"
 #include "ftlpu/sxm/instruction.hpp"
 #include "ftlpu/system/icu.hpp"
-#include "ftlpu/vxm/lane.hpp"
+#include "ftlpu/vxm/compact_instruction.hpp"
 
 #include <array>
 #include <cstddef>
@@ -40,12 +40,12 @@ namespace isa {
 //   Decode  [1:0] opcode, [2] activation buffer, [3] operation,
 //           [9:4] activation/output stream base, [25] data format,
 //           [28] layout (0=Linear1x16, 1=Native4x4).
-// VXM ALU 4x32b:
-//   word0 [4:0] opcode, [7:5] lhs kind, [13:8] lhs index,
-//         [16:14] rhs kind, [22:17] rhs index, [24:23] cast target,
-//         [25] output valid, [31:26] output stream.
-//   word1/2 are lhs/rhs immediate FP32 values.
-//   word3 [0] input hemisphere, [1] output hemisphere.
+// VXM compact instruction 96b:
+//   control [3:0] opcode, [6:4] lhs, [9:7] rhs, [10] precision,
+//           [12:11] output type, [13] output enable,
+//           [16:14] accumulator controls, [18:17] chain depth,
+//           [50:19] repeat count, [51] local scalar write.
+//   immediate_bits carries the one shared FP32 immediate.
 // ICU queue command 32b:
 //   NOP    [1:0] opcode, [31:2] cycle count.
 //   Repeat [1:0] opcode, [11:2] count, [19:12] interval,
@@ -65,9 +65,7 @@ struct EncodedIcuRepeat2D {
     std::array<std::uint32_t, 3> words{};
 };
 
-struct EncodedVxmInstruction {
-    std::array<std::uint32_t, 4> words{};
-};
+using EncodedVxmInstruction = VxmCompactInstruction;
 
 struct EncodedSxmInstruction {
     std::array<std::uint32_t, 13> words{};
@@ -552,77 +550,21 @@ inline void require_zero_float(float value, const char* field)
     if (value != 0.0f) throw std::logic_error(field);
 }
 
-inline void require_operand_hardware_encodable(const VxmLaneOperand& operand, const char* field)
-{
-    if (operand.kind == VxmLaneOperandKind::AluOutput) {
-        require_unsigned_fit(operand.index, VxmLane::kAluCount - 1, field);
-    } else if (operand.kind == VxmLaneOperandKind::Immediate) {
-        require_unsigned_fit(operand.index, 0, field);
-    } else {
-        std::size_t width = 1;
-        if (operand.kind == VxmLaneOperandKind::StreamFloat16
-            || operand.kind == VxmLaneOperandKind::StreamBFloat16) {
-            width = 2;
-        }
-        if (operand.kind == VxmLaneOperandKind::StreamInt32
-            || operand.kind == VxmLaneOperandKind::StreamFloat32) width = 4;
-        require_unsigned_fit(operand.index, hw::kStreams - width, field);
-    }
-    require_default_float(operand.scale, "VXM operand scale is model metadata, not a hardware ISA field");
-    if (operand.kind != VxmLaneOperandKind::Immediate) {
-        require_zero_float(operand.immediate, "VXM non-immediate operand carries a literal value");
-    }
-}
-
 } // namespace detail
 
-inline EncodedVxmInstruction encode_vxm_instruction(const VxmLaneAluInstruction& instruction)
+inline EncodedVxmInstruction encode_vxm_instruction(
+    std::size_t queue,
+    VxmChainDepth depth,
+    const VxmLaneAluInstruction& instruction)
 {
-    detail::require_default_float(instruction.scale, "VXM instruction scale is not an ISA field");
-    if (instruction.output_zero_point != 0) throw std::logic_error("VXM zero point must be synthesized with ALU ops");
-    detail::require_operand_hardware_encodable(instruction.lhs, "VXM lhs index does not fit");
-    detail::require_operand_hardware_encodable(instruction.rhs, "VXM rhs index does not fit");
-    detail::require_unsigned_fit(static_cast<std::uint64_t>(instruction.opcode), 0x1f, "VXM opcode does not fit");
-    detail::require_unsigned_fit(static_cast<std::uint64_t>(instruction.lhs.kind), 0x7, "VXM lhs kind does not fit");
-    detail::require_unsigned_fit(static_cast<std::uint64_t>(instruction.rhs.kind), 0x7, "VXM rhs kind does not fit");
-    detail::require_unsigned_fit(static_cast<std::uint64_t>(instruction.cast_target), 0x3, "VXM cast target does not fit");
-    if (instruction.output_stream.has_value()) detail::require_unsigned_fit(*instruction.output_stream, 0x3f, "VXM output stream does not fit");
-
-    auto control = static_cast<std::uint32_t>(instruction.opcode)
-        | (static_cast<std::uint32_t>(instruction.lhs.kind) << 5)
-        | (static_cast<std::uint32_t>(instruction.lhs.index) << 8)
-        | (static_cast<std::uint32_t>(instruction.rhs.kind) << 14)
-        | (static_cast<std::uint32_t>(instruction.rhs.index) << 17)
-        | (static_cast<std::uint32_t>(instruction.cast_target) << 23);
-    if (instruction.output_stream.has_value()) {
-        control |= 1u << 25;
-        control |= static_cast<std::uint32_t>(*instruction.output_stream) << 26;
-    }
-    const auto routing = static_cast<std::uint32_t>(hemisphere_index(instruction.input_hemisphere))
-        | (static_cast<std::uint32_t>(hemisphere_index(instruction.output_hemisphere)) << 1);
-    return EncodedVxmInstruction {{control, detail::float_to_bits(instruction.lhs.immediate),
-        detail::float_to_bits(instruction.rhs.immediate), routing}};
+    return VxmCompactInstructionCodec::encode(queue, depth, instruction);
 }
 
-inline VxmLaneAluInstruction decode_vxm_instruction(const EncodedVxmInstruction& encoded)
+inline VxmDecodedInstruction decode_vxm_instruction(
+    std::size_t queue,
+    const EncodedVxmInstruction& encoded)
 {
-    detail::require_reserved_zero(encoded.words[3], 0x3u, "encoded VXM routing word has non-zero reserved bits");
-    const auto control = encoded.words[0];
-    auto instruction = VxmLaneAluInstruction {};
-    instruction.opcode = static_cast<VxmAluOpcode>(control & 0x1fu);
-    instruction.lhs.kind = static_cast<VxmLaneOperandKind>((control >> 5) & 0x7u);
-    instruction.lhs.index = (control >> 8) & 0x3fu;
-    instruction.rhs.kind = static_cast<VxmLaneOperandKind>((control >> 14) & 0x7u);
-    instruction.rhs.index = (control >> 17) & 0x3fu;
-    instruction.cast_target = static_cast<VxmCastTarget>((control >> 23) & 0x3u);
-    if (((control >> 25) & 1u) != 0) instruction.output_stream = (control >> 26) & 0x3fu;
-    instruction.lhs.immediate = detail::bits_to_float(encoded.words[1]);
-    instruction.rhs.immediate = detail::bits_to_float(encoded.words[2]);
-    if (instruction.lhs.kind != VxmLaneOperandKind::Immediate) instruction.lhs.immediate = 0.0f;
-    if (instruction.rhs.kind != VxmLaneOperandKind::Immediate) instruction.rhs.immediate = 0.0f;
-    instruction.input_hemisphere = static_cast<Hemisphere>(encoded.words[3] & 1u);
-    instruction.output_hemisphere = static_cast<Hemisphere>((encoded.words[3] >> 1) & 1u);
-    return instruction;
+    return VxmCompactInstructionCodec::decode(queue, encoded);
 }
 
 inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instruction)

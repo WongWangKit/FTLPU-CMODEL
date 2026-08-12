@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ftlpu/vxm_distributed/lane.hpp"
+#include "ftlpu/vxm/lane.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <variant>
 
-namespace ftlpu::distributed_vxm {
+namespace ftlpu {
 
 // The Slice transports this 96-bit packet. The physical instruction channel
 // identifies the ALU stage, so no stage or Stream Register index is encoded.
@@ -77,6 +77,8 @@ public:
         insert(control, encode_depth(depth), kDepthShift, kDepthMask);
         insert(control, instruction.repeat_count,
                kRepeatShift, kRepeatMask);
+        insert(control, instruction.local_scalar_write ? 1 : 0,
+               kLocalScalarWriteShift, 0x1);
 
         auto immediate = 0.0f;
         if (instruction.lhs.kind == VxmLaneOperandKind::Immediate) {
@@ -118,6 +120,8 @@ public:
             packet.control, kAccumulatorEmitShift, 0x1) != 0;
         instruction.repeat_count = static_cast<std::size_t>(extract(
             packet.control, kRepeatShift, kRepeatMask));
+        instruction.local_scalar_write = extract(
+            packet.control, kLocalScalarWriteShift, 0x1) != 0;
         if (instruction.repeat_count == 0) {
             throw std::invalid_argument(
                 "VXM compact instruction decoded a zero repeat_count");
@@ -146,6 +150,7 @@ private:
     static constexpr unsigned kAccumulatorEmitShift = 16;
     static constexpr unsigned kDepthShift = 17;
     static constexpr unsigned kRepeatShift = 19;
+    static constexpr unsigned kLocalScalarWriteShift = 51;
 
     static void insert(std::uint64_t& word, std::uint64_t value,
                        unsigned shift, std::uint64_t mask)
@@ -222,8 +227,8 @@ private:
         case VxmLaneOperandKind::Accumulator: return VxmLaneOperand::Acc();
         case VxmLaneOperandKind::StreamFloat16:
             return VxmLaneOperand::StreamFloat16();
-        case VxmLaneOperandKind::Reserved:
-            break;
+        case VxmLaneOperandKind::StreamBFloat16:
+            return VxmLaneOperand::StreamBFloat16();
         case VxmLaneOperandKind::Immediate:
             return VxmLaneOperand::Imm(immediate);
         case VxmLaneOperandKind::Feedback:
@@ -239,7 +244,7 @@ private:
 
     static VxmCastTarget decode_output_type(std::uint64_t encoded)
     {
-        if (encoded > static_cast<std::uint64_t>(VxmCastTarget::Int8)) {
+        if (encoded > static_cast<std::uint64_t>(VxmCastTarget::BFloat16)) {
             throw std::invalid_argument(
                 "VXM compact instruction has an invalid output type");
         }
@@ -270,7 +275,8 @@ private:
 
     static void validate_compact_operand(const VxmLaneOperand& operand)
     {
-        if (operand.kind == VxmLaneOperandKind::StreamFloat16
+        if ((operand.kind == VxmLaneOperandKind::StreamFloat16
+             || operand.kind == VxmLaneOperandKind::StreamBFloat16)
             && (operand.scale != 1.0f || operand.zero_point != 0)) {
             throw std::invalid_argument(
                 "VXM compact packet requires separately configured "
@@ -300,4 +306,4 @@ private:
     }
 };
 
-} // namespace ftlpu::distributed_vxm
+} // namespace ftlpu

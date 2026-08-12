@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ftlpu/vxm_distributed/data_format.hpp"
+#include "ftlpu/vxm/data_format.hpp"
 
 #include <algorithm>
 #include <array>
@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace ftlpu::distributed_vxm {
+namespace ftlpu {
 
 enum class VxmSpecialAluOpcode {
     Exp,
@@ -321,4 +321,4 @@ private:
     std::array<Bank, kBankCount> banks_{};
 };
 
-} // namespace ftlpu::distributed_vxm
+} // namespace ftlpu

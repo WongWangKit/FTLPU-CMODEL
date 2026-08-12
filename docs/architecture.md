@@ -226,27 +226,30 @@ GEMM engine or runtime helper.
 
 ## 6. VXM
 
-The central VXM contains four superlanes, eight lanes per superlane, and 16 ALUs
-per lane. Each ALU has an independent ICU queue. The same ALU instruction is
-applied across the physical lanes.
+The central VXM contains four superlanes, eight lanes per superlane, and 16
+physical ALUs per lane. They form two mirrored 8-stage datapaths. Eight compact
+ICU queues control logical stages `C0..C7`; the superlane decoder mirrors each
+configuration onto physical stage `C(i+8)`. Data and pipeline state remain
+independent between the two chains, and the same decoded configuration is
+broadcast across all physical lanes.
 
 Supported opcodes are:
 
 ```text
-Pass Add Subtract Multiply Divide Negate Abs Min Max Clamp
-Square Sqrt Exp Log Relu Cast
+Bypass Add Subtract Multiply Negate Max Exp Reciprocal Rsqrt
 ```
 
-Operands may come from INT8, FP16, BF16, INT32, or FP32 streams; FP32
-immediates; or prior-cycle ALU outputs. Results may remain in an ALU register
-or be emitted to a selected stream and destination hemisphere. Cast can emit
-FP16 or BF16 as two little-endian byte streams.
+Operands use fixed stream groups, previous/original/auxiliary values,
+accumulator or feedback state, local scalars, and FP32 immediates. The active
+chain depth is 2, 4, or 8. Each of the sixteen 2-byte input groups can select
+the east or west hemisphere; each two-stage output block has a fixed stream
+pair and a configurable destination hemisphere. Results can remain local or
+be emitted as FP16, BF16, INT8, or FP32 stream data.
 
-Quantization and dequantization are instruction graphs, not dedicated opcodes.
-For example, W8 dequant is synthesized with Multiply and Cast. SwiGLU is
-synthesized from arithmetic, Exp, pipeline-delay Pass operations, and Cast.
-RMSNorm uses ALU feedback for `sum(x^2)` and keeps inverse RMS resident while
-`x` and `gamma` stream through.
+Quantization, dequantization, SwiGLU, softmax, and RMSNorm are instruction
+graphs rather than monolithic opcodes. The VXM also models LUT-backed Exp,
+Reciprocal, and Rsqrt units, local scalar capture, recurrent accumulation, and
+the static output quantizer used by those graphs.
 
 ## 7. SXM
 
@@ -266,12 +269,12 @@ implementation uses one transpose buffer; same-destination blocks can pipeline
 at `II=4`.
 
 Each hemisphere has two ICU queues for SXM: one Transpose queue and one Permute
-queue. With no issued SXM operation, east streams pass from `sreg13` to
-`sreg14` as an ordinary one-cycle link.
+queue. With no issued SXM operation, east streams pass from `sreg14` to
+`sreg15` as an ordinary one-cycle link.
 
 ## 8. ICU and ISA
 
-The ICU owns 136 independent queues:
+The ICU owns 134 independent queues:
 
 | Queue class | Count |
 | --- | ---: |
@@ -279,8 +282,9 @@ The ICU owns 136 independent queues:
 | MXM load | 4 |
 | MXM Dequant | 4 |
 | MXM compute | 4 |
-| VXM ALU | 16 |
+| VXM compact control | 8 |
 | SXM Transpose/Permute | 4 |
+| C2C TX/RX/DMA | 6 |
 
 Implemented queue commands are:
 
@@ -295,7 +299,7 @@ The compact model codec currently covers:
 - 32-bit MEM instructions;
 - 32-bit MXM control instructions;
 - 16-bit MXM Dequant BF16 scale immediates;
-- VXM ALU instructions encoded as four 32-bit words;
+- 96-bit VXM compact instructions (64-bit control plus 32-bit immediate);
 - 32-bit ICU NOP/Repeat commands.
 
 SXM instructions use a fixed 13 x 32-bit packet encoding. The packet carries
@@ -415,18 +419,22 @@ Pass stages. No MXM or MEM accumulator is used.
 
 ### SmolLM2 Attention
 
-`smollm2_attention_test` validates:
+`smollm2_attention_test` validates one physical attention tile:
 
 ```text
-Q/K/V projection -> Q/K RoPE -> QK score -> scaled three-pass softmax
--> P x V -> o_proj[128,576]
+MEM Q/K -> VXM two-pass Q/K RoPE -> MEM/MXM QK score
+-> scaled three-pass softmax -> SXM probability transpose -> MXM P x V
 ```
 
-The configuration is sequence length 128, hidden size 576, 9 query heads,
-3 KV heads, and head dimension 64. QK, P x V, and o_proj use independent work
-across all four MXMs where stream and accumulator resources allow. SXM prepares
-packed/transpose layouts for attention replay. The complete numerical golden
-check passes at 94,761 scheduled cycles.
+The tile has 8 tokens, 4 heads, and head dimension 8. ICU MEM instructions
+stage each half-split RoPE pair and its BF16 cosine/sine table. Four VXM
+multiplications produce the two signed products; a second MEM/VXM pass adds
+them and writes rotated Q and K. The test bit-checks both rotated tensors before
+checking QK, softmax, and P x V. SmolLM2's `rope_theta=100000` is used. The
+layer harness also passes the absolute token-position base into every physical
+tile: prefill blocks use positions `0..127`, while decode's final eight-token
+window uses positions `121..128`. RoPE therefore never restarts at zero at a
+tile boundary.
 
 See [attention_pipeline_optimization.md](attention_pipeline_optimization.md) for
 phase timing, measured MXM utilization, and remaining overlap opportunities.

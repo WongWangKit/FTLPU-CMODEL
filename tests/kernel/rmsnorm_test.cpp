@@ -1,282 +1,541 @@
 #include "ftlpu/core/fp16.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
-#include "vxm_alu_program.hpp"
+#include "system_gantt_trace.hpp"
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace {
 
-constexpr std::size_t kRows = ftlpu::hw::kMxmRows;
-constexpr std::size_t kHidden = ftlpu::hw::kMxmColumns;
+constexpr std::size_t kTokens = 8;
+constexpr std::size_t kElements = 32;
 constexpr float kEpsilon = 1.0e-5f;
 
-constexpr std::array<std::size_t, 2> kInputSlices {0, 1};
-constexpr std::array<std::size_t, 2> kGammaSlices {2, 3};
-constexpr std::array<std::size_t, 2> kOutputSlices {24, 25};
-constexpr std::size_t kInputAddressBase = 0;
-constexpr std::size_t kGammaAddress = 96;
-constexpr std::size_t kOutputAddressBase = 320;
+// X occupies two independent byte-plane sets because the depth-2 square
+// stage consumes x on both fixed head operands in the same cycle.  The second
+// set is reused for gamma during the final phase. Scalar scratch and output
+// reuse the same physical slices at disjoint SRAM addresses; one hemisphere
+// owns 32 slices, and the phases are intentionally non-overlapping.
+constexpr std::array<std::size_t, 16> kXLhsSlices {
+    0, 1, 2, 3, 4, 5, 6, 7,
+    8, 9, 10, 11, 12, 13, 14, 15,
+};
+constexpr std::array<std::size_t, 16> kXRhsGammaSlices {
+    16, 17, 18, 19, 20, 21, 22, 23,
+    24, 25, 26, 27, 28, 29, 30, 31,
+};
+constexpr auto kScalarSlices = kXLhsSlices;
+constexpr auto kOutputSlices = kXLhsSlices;
 
-static_assert(kRows == 32);
-static_assert(kHidden == 32);
+constexpr std::size_t kXAddress = 64;
+constexpr std::size_t kGammaAddress = 128;
+constexpr std::size_t kSquareSumAddress = 256;
+constexpr std::size_t kInverseRmsAddress = 320;
+constexpr std::size_t kOutputAddress = 512;
 
 std::size_t mem_queue(std::size_t slice)
 {
-    return ftlpu::InstructionControlUnit::mem_queue(ftlpu::Hemisphere::East, slice);
+    return ftlpu::InstructionControlUnit::mem_queue(
+        ftlpu::Hemisphere::East, slice);
 }
 
-std::size_t west_read_latency(std::size_t slice)
+std::size_t mem_to_vxm_latency(std::size_t slice)
 {
     return slice / ftlpu::hw::kMemSlicesPerGroup + 2;
 }
 
-std::size_t east_read_to_mxm_latency(std::size_t slice)
+std::size_t vxm_to_mem_latency(std::size_t slice)
 {
-    return 13 - slice / ftlpu::hw::kMemSlicesPerGroup;
+    return slice / ftlpu::hw::kMemSlicesPerGroup + 1;
 }
 
-float input_value(std::size_t row, std::size_t column)
-{
-    static_cast<void>(column);
-    return 0.25f + static_cast<float>(row % 7) * 0.0625f;
-}
-
-float gamma_value(std::size_t column)
-{
-    static_cast<void>(column);
-    return 0.875f;
-}
-
-class OfflineSchedule {
+class Schedule {
 public:
-    explicit OfflineSchedule(ftlpu::InstructionControlUnit& icu) : icu_(icu) {}
+    explicit Schedule(ftlpu::InstructionControlUnit& icu) : icu_(icu) {}
 
-    void mem_at(std::size_t queue, std::size_t cycle, ftlpu::MemInstruction instruction)
+    void mem_at(
+        std::size_t slice, std::size_t cycle,
+        ftlpu::MemInstruction instruction)
     {
-        pad(mem_[queue], cycle, [&](std::size_t count) { icu_.enqueue_mem_nop(queue, count); });
-        icu_.enqueue_mem(queue, instruction);
-        advance(mem_[queue], cycle + 1);
+        auto& cursor = mem_[mem_queue(slice)];
+        if (cycle < cursor) {
+            throw std::logic_error(
+                "RMSNorm schedule overlaps MEM slice="
+                + std::to_string(slice) + " cursor="
+                + std::to_string(cursor) + " cycle="
+                + std::to_string(cycle));
+        }
+        icu_.enqueue_mem_nop(mem_queue(slice), cycle - cursor);
+        icu_.enqueue_mem(mem_queue(slice), std::move(instruction));
+        cursor = cycle + 1;
+        end_cycle_ = std::max(end_cycle_, cursor);
     }
 
     void mem_repeat_at(
-        std::size_t queue,
-        std::size_t cycle,
-        ftlpu::MemInstruction instruction,
-        std::size_t count,
-        std::int64_t stride)
+        std::size_t slice, std::size_t cycle,
+        ftlpu::MemInstruction instruction, std::size_t count,
+        std::int64_t address_stride)
     {
-        mem_at(queue, cycle, instruction);
-        if (count > 1) icu_.enqueue_mem_repeat(queue, count - 1, 1, stride);
-        advance(mem_[queue], cycle + count);
+        if (count == 0) return;
+        mem_at(slice, cycle, std::move(instruction));
+        if (count > 1) {
+            icu_.enqueue_mem_repeat(
+                mem_queue(slice), count - 1, 1, address_stride);
+        }
+        mem_[mem_queue(slice)] = cycle + count;
+        end_cycle_ = std::max(end_cycle_, cycle + count);
     }
 
-    void vxm_at(std::size_t alu, std::size_t cycle, ftlpu::VxmLaneAluInstruction instruction)
+    void vxm_at(
+        std::size_t stage, std::size_t cycle, ftlpu::VxmChainDepth depth,
+        const ftlpu::VxmLaneAluInstruction& instruction)
     {
-        ftlpu::test::enqueue_alu_at(icu_, vxm_, alu, cycle, std::move(instruction));
-        end_cycle_ = std::max(end_cycle_, cycle + 1);
+        auto& cursor = vxm_[stage];
+        require_available(cursor, cycle, "VXM");
+        icu_.enqueue_vxm_nop(stage, cycle - cursor);
+        icu_.enqueue_vxm(stage, depth, instruction);
+        cursor = cycle + 1;
+        end_cycle_ = std::max(end_cycle_, cursor);
     }
 
-    std::size_t end_cycle() const { return end_cycle_; }
+    std::size_t end_cycle() const noexcept { return end_cycle_; }
 
 private:
-    template <typename Emit>
-    static void pad(std::size_t cursor, std::size_t cycle, Emit emit)
+    static void require_available(
+        std::size_t cursor, std::size_t cycle, const char* queue)
     {
         if (cycle < cursor) {
-            throw std::logic_error("offline RMSNorm schedule overlaps an ICU queue");
+            throw std::logic_error(
+                std::string("RMSNorm schedule overlaps ") + queue
+                + " queue");
         }
-        emit(cycle - cursor);
-    }
-
-    void advance(std::size_t& cursor, std::size_t next)
-    {
-        cursor = next;
-        end_cycle_ = std::max(end_cycle_, next);
     }
 
     ftlpu::InstructionControlUnit& icu_;
     std::array<std::size_t, ftlpu::InstructionControlUnit::kMemQueues> mem_ {};
-    std::array<std::size_t, ftlpu::VxmLane::kAluCount> vxm_ {};
+    std::array<std::size_t, ftlpu::InstructionControlUnit::kVxmQueues> vxm_ {};
     std::size_t end_cycle_{0};
 };
 
-ftlpu::VxmLaneAluInstruction alu_instruction(
-    ftlpu::VxmAluOpcode opcode,
-    ftlpu::VxmLaneOperand lhs,
-    ftlpu::VxmLaneOperand rhs,
-    ftlpu::VxmCastTarget cast = ftlpu::VxmCastTarget::Float32,
-    std::optional<std::size_t> output = std::nullopt)
+ftlpu::VxmLaneAluInstruction basic(
+    ftlpu::VxmAluOpcode opcode, ftlpu::VxmLaneOperand lhs,
+    ftlpu::VxmLaneOperand rhs = ftlpu::VxmLaneOperand::Imm(0.0f),
+    std::size_t repeat = 1)
 {
-    return {opcode, lhs, rhs, 1.0f, 0, cast, output,
-        ftlpu::Hemisphere::East, ftlpu::Hemisphere::East};
+    auto instruction = ftlpu::VxmLaneAluInstruction {opcode, lhs, rhs};
+    instruction.precision = ftlpu::VxmAluPrecision::Float32;
+    instruction.repeat_count = repeat;
+    return instruction;
 }
 
-void initialize_data(ftlpu::TspSliceSystem& system, const std::vector<float>& input)
+ftlpu::VxmLaneAluInstruction accumulator(
+    bool reset, bool emit, std::size_t repeat)
 {
-    // At address c, every physical lane holds x[row, c].  A VXM vector is
-    // therefore one hidden-column across all rows: VXM feedback lane r can
-    // reduce sum_c x[r,c]^2 in place without routing through MEM or MXM.
-    for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
-        for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-            const auto row = tile * ftlpu::hw::kLanesPerTile + lane;
-            for (std::size_t column = 0; column < kHidden; ++column) {
-                const auto input_bits = ftlpu::Fp16::from_float(input[row * kHidden + column]).bits();
-                const auto gamma_bits = ftlpu::Fp16::from_float(gamma_value(column)).bits();
-                system.initialize_mem_sram_lane_byte(
-                    ftlpu::Hemisphere::East, kInputSlices[0], tile,
-                    kInputAddressBase + column, lane, input_bits & 0xffu);
-                system.initialize_mem_sram_lane_byte(
-                    ftlpu::Hemisphere::East, kInputSlices[1], tile,
-                    kInputAddressBase + column, lane, input_bits >> 8);
-                system.initialize_mem_sram_lane_byte(
-                    ftlpu::Hemisphere::East, kGammaSlices[0], tile,
-                    kGammaAddress + column, lane, gamma_bits & 0xffu);
-                system.initialize_mem_sram_lane_byte(
-                    ftlpu::Hemisphere::East, kGammaSlices[1], tile,
-                    kGammaAddress + column, lane, gamma_bits >> 8);
+    auto instruction = basic(
+        ftlpu::VxmAluOpcode::Add,
+        ftlpu::VxmLaneOperand::Previous(),
+        ftlpu::VxmLaneOperand::Acc(), repeat);
+    instruction.accumulator_reset = reset;
+    instruction.accumulator_write = true;
+    instruction.accumulator_emit = emit;
+    return instruction;
+}
+
+template <typename Fn>
+std::vector<ftlpu::VxmLutEntry> make_table(
+    float input_min, float segment_width, std::size_t count, Fn fn)
+{
+    auto entries = std::vector<ftlpu::VxmLutEntry> {};
+    entries.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto x0 = input_min + static_cast<float>(index) * segment_width;
+        const auto y0 = fn(x0);
+        entries.push_back(ftlpu::VxmLutEntry::from_float(
+            (fn(x0 + segment_width) - y0) / segment_width, y0));
+    }
+    return entries;
+}
+
+void configure_rsqrt_lut(ftlpu::TspSliceSystem& system)
+{
+    constexpr std::size_t kEntries = 256;
+    constexpr float kWidth = 3.0f / static_cast<float>(kEntries);
+    system.initialize_vxm_lut(
+        ftlpu::VxmSpecialAluOpcode::Rsqrt,
+        {1.0f, kWidth},
+        make_table(
+            1.0f, kWidth, kEntries,
+            [](float x) { return 1.0f / std::sqrt(x); }));
+}
+
+float input_value(
+    std::size_t token, std::size_t element,
+    std::size_t tile, std::size_t lane)
+{
+    const auto wave = std::sin(
+        static_cast<float>(element) * 0.173f
+        + static_cast<float>(token) * 0.311f
+        + static_cast<float>(tile) * 0.127f
+        + static_cast<float>(lane) * 0.071f);
+    return 0.75f + static_cast<float>(token) * 0.035f + wave * 0.25f;
+}
+
+float gamma_value(std::size_t token, std::size_t element)
+{
+    return 0.875f
+        + static_cast<float>((token * 7 + element * 3) % 13) * 0.0078125f;
+}
+
+void initialize_data(ftlpu::TspSliceSystem& system)
+{
+    for (std::size_t token = 0; token < kTokens; ++token) {
+        for (std::size_t element = 0; element < kElements; ++element) {
+            for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+                for (std::size_t lane = 0;
+                     lane < ftlpu::hw::kLanesPerTile; ++lane) {
+                    const auto x = ftlpu::Fp16::from_float(
+                        input_value(token, element, tile, lane)).bits();
+                    const auto gamma = ftlpu::Fp16::from_float(
+                        gamma_value(token, element)).bits();
+                    for (std::size_t byte = 0; byte < 2; ++byte) {
+                        const auto x_byte = static_cast<std::uint8_t>(
+                            byte == 0 ? x & 0xffu : x >> 8);
+                        const auto gamma_byte = static_cast<std::uint8_t>(
+                            byte == 0 ? gamma & 0xffu : gamma >> 8);
+                        system.initialize_mem_sram_lane_byte(
+                            kXLhsSlices[token * 2 + byte], tile,
+                            kXAddress + element, lane, x_byte);
+                        system.initialize_mem_sram_lane_byte(
+                            kXRhsGammaSlices[token * 2 + byte], tile,
+                            kXAddress + element, lane, x_byte);
+                        system.initialize_mem_sram_lane_byte(
+                            kXRhsGammaSlices[token * 2 + byte], tile,
+                            kGammaAddress + element, lane, gamma_byte);
+                    }
+                }
             }
         }
     }
 }
 
-float read_output(const ftlpu::TspSliceSystem& system, std::size_t row, std::size_t column)
+void schedule_read_pair(
+    Schedule& schedule, const std::array<std::size_t, 16>& slices,
+    std::size_t token, std::size_t address, std::size_t stream,
+    std::size_t input_cycle, std::size_t count,
+    std::int64_t address_stride)
 {
-    const auto tile = row / ftlpu::hw::kLanesPerTile;
-    const auto lane = row % ftlpu::hw::kLanesPerTile;
+    for (std::size_t byte = 0; byte < 2; ++byte) {
+        const auto slice = slices[token * 2 + byte];
+        schedule.mem_repeat_at(
+            slice, input_cycle - mem_to_vxm_latency(slice),
+            ftlpu::MemInstruction::Read(
+                address, ftlpu::StreamId::West(stream + byte)),
+            count, address_stride);
+    }
+}
+
+void schedule_write_pair(
+    Schedule& schedule, const std::array<std::size_t, 16>& slices,
+    std::size_t token, std::size_t address, std::size_t stream,
+    std::size_t output_cycle, std::size_t count,
+    std::int64_t address_stride)
+{
+    for (std::size_t byte = 0; byte < 2; ++byte) {
+        const auto slice = slices[token * 2 + byte];
+        schedule.mem_repeat_at(
+            slice, output_cycle + vxm_to_mem_latency(slice),
+            ftlpu::MemInstruction::Write(
+                address, ftlpu::StreamId::East(stream + byte)),
+            count, address_stride);
+    }
+}
+
+std::size_t build_schedule(Schedule& schedule)
+{
+    // Phase 1: eight depth-2 chains compute eight independent square sums.
+    constexpr std::size_t kSquareConfigCycle = 40;
+    constexpr std::size_t kSquareInputCycle = kSquareConfigCycle + 1;
+    for (std::size_t head = 0; head < 8; head += 2) {
+        schedule.vxm_at(
+            head, kSquareConfigCycle, ftlpu::VxmChainDepth::Two,
+            basic(
+                ftlpu::VxmAluOpcode::Multiply,
+                ftlpu::VxmLaneOperand::StreamFloat16(),
+                ftlpu::VxmLaneOperand::StreamFloat16(), kElements));
+
+        const auto tail = head + 1;
+        schedule.vxm_at(
+            tail, kSquareConfigCycle, ftlpu::VxmChainDepth::Two,
+            accumulator(true, false, 1));
+        if (kElements > 2) {
+            schedule.vxm_at(
+                tail, kSquareConfigCycle + 1, ftlpu::VxmChainDepth::Two,
+                accumulator(false, false, kElements - 2));
+        }
+        auto final = accumulator(false, true, 1);
+        final.output_type = ftlpu::VxmCastTarget::Float16;
+        final.output_stream =
+            ftlpu::VxmLane::fixed_output_stream_for_block(head / 2);
+        schedule.vxm_at(
+            tail, kSquareConfigCycle + 2,
+            ftlpu::VxmChainDepth::Two, final);
+    }
+
+    for (std::size_t token = 0; token < kTokens; ++token) {
+        schedule_read_pair(
+            schedule, kXLhsSlices, token, kXAddress,
+            token * 4, kSquareInputCycle, kElements, 1);
+        schedule_read_pair(
+            schedule, kXRhsGammaSlices, token, kXAddress,
+            token * 4 + 2, kSquareInputCycle, kElements, 1);
+    }
+    constexpr std::size_t kSquareOutputCycle =
+        kSquareInputCycle + kElements + 1;
+    for (std::size_t token = 0; token < kTokens; ++token) {
+        schedule_write_pair(
+            schedule, kScalarSlices, token, kSquareSumAddress,
+            token * 2, kSquareOutputCycle, 1, 0);
+    }
+    // Phase 2: four depth-4 chains process two scalar waves.  C3/C7 host
+    // the fixed Rsqrt LUT; their mirrored copies are C11/C15.
+    constexpr std::size_t kRsqrtConfigCycle = kSquareOutputCycle + 40;
+    constexpr std::size_t kRsqrtInputCycle = kRsqrtConfigCycle + 1;
+    for (const auto head : {std::size_t {0}, std::size_t {4}}) {
+        schedule.vxm_at(
+            head, kRsqrtConfigCycle, ftlpu::VxmChainDepth::Four,
+            basic(
+                ftlpu::VxmAluOpcode::Multiply,
+                ftlpu::VxmLaneOperand::StreamFloat16(),
+                ftlpu::VxmLaneOperand::Imm(
+                    1.0f / static_cast<float>(kElements)),
+                2));
+        schedule.vxm_at(
+            head + 1, kRsqrtConfigCycle, ftlpu::VxmChainDepth::Four,
+            basic(
+                ftlpu::VxmAluOpcode::Add,
+                ftlpu::VxmLaneOperand::Previous(),
+                ftlpu::VxmLaneOperand::Imm(kEpsilon), 2));
+        schedule.vxm_at(
+            head + 2, kRsqrtConfigCycle, ftlpu::VxmChainDepth::Four,
+            basic(
+                ftlpu::VxmAluOpcode::Bypass,
+                ftlpu::VxmLaneOperand::Previous(),
+                ftlpu::VxmLaneOperand::Imm(0.0f), 2));
+        auto rsqrt = ftlpu::VxmLaneAluInstruction {
+            ftlpu::VxmSpecialAluOpcode::Rsqrt,
+            ftlpu::VxmLaneOperand::Previous()};
+        rsqrt.repeat_count = 2;
+        rsqrt.output_type = ftlpu::VxmCastTarget::Float16;
+        rsqrt.output_stream =
+            ftlpu::VxmLane::fixed_output_stream_for_block((head + 3) / 2);
+        schedule.vxm_at(
+            head + 3, kRsqrtConfigCycle,
+            ftlpu::VxmChainDepth::Four, rsqrt);
+    }
+
+    constexpr std::array<std::size_t, 4> kDepth4InputStreams {0, 8, 16, 24};
+    constexpr std::array<std::size_t, 4> kDepth4OutputStreams {2, 6, 10, 14};
+    for (std::size_t wave = 0; wave < 2; ++wave) {
+        for (std::size_t chain = 0; chain < 4; ++chain) {
+            const auto token = wave * 4 + chain;
+            schedule_read_pair(
+                schedule, kScalarSlices, token, kSquareSumAddress,
+                kDepth4InputStreams[chain], kRsqrtInputCycle + wave, 1, 0);
+        }
+    }
+    constexpr std::size_t kRsqrtOutputCycle = kRsqrtInputCycle + 8;
+    for (std::size_t wave = 0; wave < 2; ++wave) {
+        for (std::size_t chain = 0; chain < 4; ++chain) {
+            const auto token = wave * 4 + chain;
+            schedule_write_pair(
+                schedule, kScalarSlices, token, kInverseRmsAddress,
+                kDepth4OutputStreams[chain], kRsqrtOutputCycle + wave, 1, 0);
+        }
+    }
+    // Phase 3: redistribute the eight scalar results into the eight C1/C3
+    // local registers using only stream data and instructions.
+    constexpr std::size_t kScalarLoadConfigCycle = kRsqrtOutputCycle + 40;
+    constexpr std::size_t kScalarLoadInputCycle = kScalarLoadConfigCycle + 1;
+    for (std::size_t head = 0; head < 8; head += 2) {
+        schedule.vxm_at(
+            head, kScalarLoadConfigCycle, ftlpu::VxmChainDepth::Two,
+            basic(
+                ftlpu::VxmAluOpcode::Bypass,
+                ftlpu::VxmLaneOperand::StreamFloat16()));
+        auto capture = basic(
+            ftlpu::VxmAluOpcode::Bypass,
+            ftlpu::VxmLaneOperand::Previous());
+        capture.local_scalar_write = true;
+        schedule.vxm_at(
+            head + 1, kScalarLoadConfigCycle,
+            ftlpu::VxmChainDepth::Two, capture);
+    }
+    for (std::size_t token = 0; token < kTokens; ++token) {
+        schedule_read_pair(
+            schedule, kScalarSlices, token, kInverseRmsAddress,
+            token * 4, kScalarLoadInputCycle, 1, 0);
+    }
+    // Phase 4: all eight depth-2 chains normalize vector elements in parallel.
+    constexpr std::size_t kNormalizeConfigCycle = kScalarLoadInputCycle + 20;
+    constexpr std::size_t kNormalizeInputCycle = kNormalizeConfigCycle + 1;
+    for (std::size_t head = 0; head < 8; head += 2) {
+        schedule.vxm_at(
+            head, kNormalizeConfigCycle, ftlpu::VxmChainDepth::Two,
+            basic(
+                ftlpu::VxmAluOpcode::Multiply,
+                ftlpu::VxmLaneOperand::StreamFloat16(),
+                ftlpu::VxmLaneOperand::StreamFloat16(), kElements));
+        auto normalize = basic(
+            ftlpu::VxmAluOpcode::Multiply,
+            ftlpu::VxmLaneOperand::Previous(),
+            ftlpu::VxmLaneOperand::Acc(), kElements);
+        normalize.output_type = ftlpu::VxmCastTarget::Float16;
+        normalize.output_stream =
+            ftlpu::VxmLane::fixed_output_stream_for_block(head / 2);
+        schedule.vxm_at(
+            head + 1, kNormalizeConfigCycle,
+            ftlpu::VxmChainDepth::Two, normalize);
+    }
+    constexpr std::size_t kNormalizeOutputCycle = kNormalizeInputCycle + 3;
+    for (std::size_t token = 0; token < kTokens; ++token) {
+        // Gamma owns independent slices and is a normal read stream.
+        schedule_read_pair(
+            schedule, kXRhsGammaSlices, token, kGammaAddress,
+            token * 4 + 2, kNormalizeInputCycle, kElements, 1);
+
+        // Every East-hemisphere slice is already occupied by x or gamma.
+        // The dual-port MEM instruction overlaps the middle of the x read
+        // stream with the delayed VXM result write.  Prefix/suffix transfers
+        // cover the non-overlapping pipeline fill and drain cycles.
+        for (std::size_t byte = 0; byte < 2; ++byte) {
+            const auto slice = kXLhsSlices[token * 2 + byte];
+            const auto read_cycle =
+                kNormalizeInputCycle - mem_to_vxm_latency(slice);
+            const auto write_cycle =
+                kNormalizeOutputCycle + vxm_to_mem_latency(slice);
+            const auto overlap_offset = write_cycle - read_cycle;
+            if (overlap_offset >= kElements) {
+                throw std::logic_error(
+                    "RMSNorm vector is too short to overlap MEM ReadWrite");
+            }
+
+            schedule.mem_repeat_at(
+                slice, read_cycle,
+                ftlpu::MemInstruction::Read(
+                    kXAddress,
+                    ftlpu::StreamId::West(token * 4 + byte)),
+                overlap_offset, 1);
+            schedule.mem_repeat_at(
+                slice, write_cycle,
+                ftlpu::MemInstruction::ReadWrite(
+                    kXAddress + overlap_offset,
+                    ftlpu::StreamId::West(token * 4 + byte),
+                    kOutputAddress,
+                    ftlpu::StreamId::East(token * 2 + byte)),
+                kElements - overlap_offset, 1);
+            schedule.mem_repeat_at(
+                slice, read_cycle + kElements,
+                ftlpu::MemInstruction::Write(
+                    kOutputAddress + kElements - overlap_offset,
+                    ftlpu::StreamId::East(token * 2 + byte)),
+                overlap_offset, 1);
+        }
+    }
+    return schedule.end_cycle() + 24;
+}
+
+float read_output(
+    const ftlpu::TspSliceSystem& system, std::size_t token,
+    std::size_t element, std::size_t tile, std::size_t lane)
+{
     const auto low = system.read_mem_sram_lane_byte(
-        ftlpu::Hemisphere::East, kOutputSlices[0], tile, kOutputAddressBase + column, lane);
+        kOutputSlices[token * 2], tile, kOutputAddress + element, lane);
     const auto high = system.read_mem_sram_lane_byte(
-        ftlpu::Hemisphere::East, kOutputSlices[1], tile, kOutputAddressBase + column, lane);
+        kOutputSlices[token * 2 + 1], tile, kOutputAddress + element, lane);
     return ftlpu::Fp16::from_bits(
-        static_cast<std::uint16_t>(low) | (static_cast<std::uint16_t>(high) << 8)).to_float();
+        static_cast<std::uint16_t>(low)
+        | (static_cast<std::uint16_t>(high) << 8)).to_float();
 }
 
 } // namespace
 
 int main() try
 {
-    auto input = std::vector<float>(kRows * kHidden);
-    for (std::size_t row = 0; row < kRows; ++row) {
-        for (std::size_t column = 0; column < kHidden; ++column) {
-            input[row * kHidden + column] = ftlpu::Fp16::from_float(
-                input_value(row, column)).to_float();
-        }
-    }
-
     auto system = ftlpu::TspSliceSystem {};
-    initialize_data(system, input);
-    auto schedule = OfflineSchedule(system.icu());
+    initialize_data(system);
+    configure_rsqrt_lut(system);
 
-    // Pass 1: square one hidden column per cycle, then use ALU1 as the
-    // feedback accumulator.  Each physical lane owns one logical row, so all
-    // 32 row reductions proceed in parallel without MEM accumulation or MXM.
-    constexpr std::size_t kSquareStart = 4;
-    for (std::size_t column = 0; column < kHidden; ++column) {
-        const auto cycle = kSquareStart + column;
-        for (std::size_t byte = 0; byte < kInputSlices.size(); ++byte) {
-            const auto slice = kInputSlices[byte];
-            schedule.mem_at(
-                mem_queue(slice), cycle - west_read_latency(slice),
-                ftlpu::MemInstruction::Read(kInputAddressBase + column, ftlpu::StreamId::West(byte)));
-        }
-        schedule.vxm_at(0, cycle, alu_instruction(
-            ftlpu::VxmAluOpcode::Square, ftlpu::VxmLaneOperand::StreamFloat16(32),
-            ftlpu::VxmLaneOperand::Imm(0.0f)));
-    }
-    schedule.vxm_at(1, kSquareStart, alu_instruction(
-        ftlpu::VxmAluOpcode::Pass, ftlpu::VxmLaneOperand::Imm(0.0f),
-        ftlpu::VxmLaneOperand::Imm(0.0f)));
-    for (std::size_t column = 0; column < kHidden; ++column) {
-        schedule.vxm_at(1, kSquareStart + column + 1, alu_instruction(
-            ftlpu::VxmAluOpcode::Add, ftlpu::VxmLaneOperand::Alu(0),
-            ftlpu::VxmLaneOperand::Alu(1)));
-    }
-
-    // Pass 2: ALU1 now holds sum(x^2).  Build inverse RMS once and leave it
-    // resident in ALU5 while x and gamma stream by hidden column.
-    constexpr std::size_t kNormalizeStart = kSquareStart + kHidden + 1;
-    schedule.vxm_at(2, kNormalizeStart, alu_instruction(
-        ftlpu::VxmAluOpcode::Divide, ftlpu::VxmLaneOperand::Alu(1),
-        ftlpu::VxmLaneOperand::Imm(static_cast<float>(kHidden))));
-    schedule.vxm_at(3, kNormalizeStart + 1, alu_instruction(
-        ftlpu::VxmAluOpcode::Add, ftlpu::VxmLaneOperand::Alu(2),
-        ftlpu::VxmLaneOperand::Imm(kEpsilon)));
-    schedule.vxm_at(4, kNormalizeStart + 2, alu_instruction(
-        ftlpu::VxmAluOpcode::Sqrt, ftlpu::VxmLaneOperand::Alu(3),
-        ftlpu::VxmLaneOperand::Imm(0.0f)));
-    schedule.vxm_at(5, kNormalizeStart + 3, alu_instruction(
-        ftlpu::VxmAluOpcode::Divide, ftlpu::VxmLaneOperand::Imm(1.0f),
-        ftlpu::VxmLaneOperand::Alu(4)));
-    constexpr std::size_t kScaleStart = kNormalizeStart + 4;
-    for (std::size_t column = 0; column < kHidden; ++column) {
-        const auto x_cycle = kScaleStart + column;
-        const auto gamma_cycle = x_cycle + 1;
-        for (std::size_t byte = 0; byte < kInputSlices.size(); ++byte) {
-            const auto slice = kInputSlices[byte];
-            schedule.mem_at(
-                mem_queue(slice), x_cycle - west_read_latency(slice),
-                ftlpu::MemInstruction::Read(kInputAddressBase + column, ftlpu::StreamId::West(byte)));
-        }
-        for (std::size_t byte = 0; byte < kGammaSlices.size(); ++byte) {
-            const auto slice = kGammaSlices[byte];
-            schedule.mem_at(
-                mem_queue(slice), gamma_cycle - west_read_latency(slice),
-                ftlpu::MemInstruction::Read(kGammaAddress + column, ftlpu::StreamId::West(2 + byte)));
-        }
-        schedule.vxm_at(6, x_cycle, alu_instruction(
-            ftlpu::VxmAluOpcode::Multiply,
-            ftlpu::VxmLaneOperand::StreamFloat16(32),
-            ftlpu::VxmLaneOperand::Alu(5)));
-        schedule.vxm_at(7, gamma_cycle, alu_instruction(
-            ftlpu::VxmAluOpcode::Multiply, ftlpu::VxmLaneOperand::Alu(6),
-            ftlpu::VxmLaneOperand::StreamFloat16(34),
-            ftlpu::VxmCastTarget::Float16, 0));
-        for (std::size_t byte = 0; byte < kOutputSlices.size(); ++byte) {
-            const auto slice = kOutputSlices[byte];
-            schedule.mem_at(
-                mem_queue(slice), gamma_cycle + 1 + slice / ftlpu::hw::kMemSlicesPerGroup,
-                ftlpu::MemInstruction::Write(kOutputAddressBase + column, ftlpu::StreamId::East(byte)));
-        }
-    }
-
-    for (std::size_t cycle = 0; cycle < schedule.end_cycle() + 20; ++cycle) {
+    auto schedule = Schedule {system.icu()};
+    const auto cycles = build_schedule(schedule);
+    auto timing = integration_timing::SystemGanttTrace {};
+    const auto collect_timing =
+        integration_timing::SystemGanttTrace::enabled();
+    for (std::size_t cycle = 0; cycle < cycles; ++cycle) {
         system.tick({});
+        if (collect_timing) timing.capture(system);
     }
 
-    for (std::size_t row = 0; row < kRows; ++row) {
-        auto sum_squares = 0.0f;
-        for (std::size_t column = 0; column < kHidden; ++column) {
-            const auto squared = ftlpu::Fp16::from_float(
-                input[row * kHidden + column] * input[row * kHidden + column]).to_float();
-            sum_squares += squared;
-        }
-        const auto inverse_rms = 1.0f / std::sqrt(sum_squares / static_cast<float>(kHidden) + kEpsilon);
-        for (std::size_t column = 0; column < kHidden; ++column) {
-            const auto expected = ftlpu::Fp16::from_float(
-                input[row * kHidden + column] * inverse_rms * gamma_value(column)).to_float();
-            const auto actual = read_output(system, row, column);
-            if (std::fabs(actual - expected) > 2.0e-3f) {
-                std::cerr << "RMSNorm mismatch at row=" << row << " column=" << column
-                          << " actual=" << actual << " expected=" << expected
-                          << " expected_sum=" << sum_squares << '\n';
-                return 1;
+    auto maximum_error = 0.0f;
+    for (std::size_t token = 0; token < kTokens; ++token) {
+        for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+            for (std::size_t lane = 0;
+                 lane < ftlpu::hw::kLanesPerTile; ++lane) {
+                auto square_sum = 0.0f;
+                for (std::size_t element = 0; element < kElements; ++element) {
+                    const auto x = ftlpu::Fp16::from_float(
+                        input_value(token, element, tile, lane)).to_float();
+                    square_sum += x * x;
+                }
+                const auto inverse_rms = 1.0f / std::sqrt(
+                    square_sum / static_cast<float>(kElements) + kEpsilon);
+                for (std::size_t element = 0; element < kElements; ++element) {
+                    const auto x = ftlpu::Fp16::from_float(
+                        input_value(token, element, tile, lane)).to_float();
+                    const auto gamma = ftlpu::Fp16::from_float(
+                        gamma_value(token, element)).to_float();
+                    const auto expected = ftlpu::Fp16::from_float(
+                        x * gamma * inverse_rms).to_float();
+                    const auto actual = read_output(
+                        system, token, element, tile, lane);
+                    maximum_error = std::max(
+                        maximum_error, std::fabs(actual - expected));
+                    if (std::fabs(actual - expected) > 1.5e-2f) {
+                        std::cerr
+                            << "RMSNorm mismatch token=" << token
+                            << " element=" << element
+                            << " tile=" << tile
+                            << " lane=" << lane
+                            << " actual=" << actual
+                            << " expected=" << expected
+                            << " square_sum=" << square_sum << '\n';
+                        return 1;
+                    }
+                }
             }
         }
     }
 
-    std::cout << "RMSNorm passed: X[32,32] fp16, gamma[32] fp16, VXM feedback sum(x^2), VXM rsqrt\n";
+    std::cout
+        << "RMSNorm black-box passed: MEM -> VXM(depth2 square reduction)"
+        << " -> MEM -> VXM(depth4 rsqrt) -> MEM"
+        << " -> VXM(depth2 scalar load/normalize) -> MEM"
+        << ", tokens=8 elements=32 max_error=" << maximum_error << '\n';
+    if (collect_timing) {
+        timing.write(
+            "rmsnorm_system", "RMSNorm black-box system timing");
+    }
     return 0;
 }
 catch (const std::exception& ex)
 {
-    std::cerr << "RMSNorm test failed: " << ex.what() << '\n';
+    std::cerr << "RMSNorm black-box test failed: " << ex.what() << '\n';
     return 1;
 }

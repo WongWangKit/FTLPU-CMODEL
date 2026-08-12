@@ -1,115 +1,69 @@
 #include "ftlpu/vxm/alu.hpp"
+#include "hardware_test_output.hpp"
 
 #include <cassert>
 #include <cmath>
-#include <cstdint>
 
 namespace {
-
-bool nearly_equal(float a, float b, float eps = 1.0e-5f)
+bool near(float a, float b, float eps = 1.0e-3f)
 {
     return std::fabs(a - b) <= eps;
 }
-
-ftlpu::VxmAlu::Vector ramp(float start)
-{
-    ftlpu::VxmAlu::Vector out{};
-    for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-        out[lane] = start + static_cast<float>(lane);
-    }
-    return out;
 }
-
-} // namespace
 
 int main()
 {
-    const auto a = ramp(-8.0f);
-    const auto b = ramp(1.0f);
+    using namespace ftlpu;
+    const auto fp32 = VxmAluPrecision::Float32;
 
-    auto add = ftlpu::VxmAlu::execute({ftlpu::VxmAluOpcode::Add}, a, b);
-    assert(add[0] == -7.0f);
-    assert(add[15] == 23.0f);
+    // One call represents one scalar Basic ALU operation.
+    assert(VxmAlu::execute({VxmAluOpcode::Bypass, fp32}, 2.0f) == 2.0f);
+    assert(VxmAlu::execute({VxmAluOpcode::Add, fp32}, 2.0f, 3.0f) == 5.0f);
+    assert(VxmAlu::execute({VxmAluOpcode::Subtract, fp32}, 2.0f, 3.0f) == -1.0f);
+    assert(VxmAlu::execute({VxmAluOpcode::Multiply, fp32}, 2.0f, 3.0f) == 6.0f);
+    assert(VxmAlu::execute({VxmAluOpcode::Negate, fp32}, 2.0f) == -2.0f);
+    assert(VxmAlu::execute({VxmAluOpcode::Max, fp32}, -2.0f, 0.0f) == 0.0f);
 
-    auto mul = ftlpu::VxmAlu::execute({ftlpu::VxmAluOpcode::Multiply}, a, b);
-    assert(mul[0] == -8.0f);
-    assert(mul[15] == 112.0f);
+    // Compiler lowering examples.
+    assert(VxmAlu::execute({VxmAluOpcode::Multiply, fp32}, 1.5f, 1.5f) == 2.25f);
+    assert(VxmAlu::execute({VxmAluOpcode::Max, fp32}, -3.0f, 0.0f) == 0.0f);
 
-    auto square = ftlpu::VxmAlu::execute({ftlpu::VxmAluOpcode::Square}, b);
-    assert(square[3] == 16.0f);
+    const auto value = 1.0004f;
+    const auto rounded = VxmAlu::execute(
+        {VxmAluOpcode::Bypass, VxmAluPrecision::Float16}, value);
+    assert(rounded != value);
+    assert(near(rounded, value));
 
-    auto sqrt = ftlpu::VxmAlu::execute({ftlpu::VxmAluOpcode::Sqrt}, square);
-    assert(nearly_equal(sqrt[3], 4.0f));
+    // Cast and quantization belong to boundary-format hardware.
+    assert(VxmDataFormat::round_fp16_ftz(0x1p-20f) == 0.0f);
+    assert(VxmDataFormat::quantize_int8(12.7f, 0.1f) == 127);
+    assert(VxmDataFormat::quantize_int8(-20.0f, 0.1f) == -128);
+    assert(VxmDataFormat::quantize_int8(1.0f, 0.5f, 3) == 5);
+    const auto half = VxmDataFormat::float_to_fp16_bits(1.5f);
+    assert(near(VxmDataFormat::fp16_bits_to_float(half), 1.5f));
 
-    auto min = ftlpu::VxmAlu::execute({ftlpu::VxmAluOpcode::Min}, a, b);
-    assert(min[0] == -8.0f);
-    assert(min[15] == 7.0f);
-
-    auto max = ftlpu::VxmAlu::execute({ftlpu::VxmAluOpcode::Max}, a, b);
-    assert(max[0] == 1.0f);
-    assert(max[15] == 16.0f);
-
-    auto clamp = ftlpu::VxmAlu::execute({ftlpu::VxmAluOpcode::Clamp, -2.0f, 3.0f}, a);
-    assert(clamp[0] == -2.0f);
-    assert(clamp[15] == 3.0f);
-
-    ftlpu::VxmAlu::Vector ones{};
-    ones.fill(1.0f);
-    const auto neg = ftlpu::VxmAlu::execute({ftlpu::VxmAluOpcode::Negate}, a);
-    const auto exp_neg = ftlpu::VxmAlu::execute({ftlpu::VxmAluOpcode::Exp}, neg);
-    const auto denom = ftlpu::VxmAlu::execute({ftlpu::VxmAluOpcode::Add}, ones, exp_neg);
-    const auto sigmoid = ftlpu::VxmAlu::execute({ftlpu::VxmAluOpcode::Divide}, ones, denom);
-    assert(sigmoid[0] < 0.001f);
-    assert(nearly_equal(sigmoid[8], 0.5f));
-
-    auto relu = ftlpu::VxmAlu::execute({ftlpu::VxmAluOpcode::Relu}, a);
-    assert(relu[0] == 0.0f);
-    assert(relu[15] == 7.0f);
-
-    auto log = ftlpu::VxmAlu::execute({ftlpu::VxmAluOpcode::Log}, b);
-    assert(nearly_equal(log[0], 0.0f));
-
-    auto quantized = ftlpu::VxmAlu::quantize(b, 0.5f, -3);
-    assert(quantized[0] == -1);
-    assert(quantized[15] == 29);
-
-    auto dequantized = ftlpu::VxmAlu::dequantize(quantized, 0.5f, -3);
-    assert(nearly_equal(dequantized[0], 1.0f));
-    assert(nearly_equal(dequantized[15], 16.0f));
-
-    auto cast_fp32 = ftlpu::VxmAlu::execute(
-        {ftlpu::VxmAluOpcode::Cast, 0.0f, 0.0f, 0, 1.0f, ftlpu::VxmCastTarget::Float32},
-        b);
-    assert(nearly_equal(cast_fp32[0], 1.0f));
-    assert(nearly_equal(cast_fp32[15], 16.0f));
-
-    ftlpu::VxmAlu::Vector bf16_cast_input {};
-    bf16_cast_input[0] = 1.00390625f;
-    bf16_cast_input[1] = -3.1415927f;
-    const auto cast_bf16 = ftlpu::VxmAlu::execute(
-        {ftlpu::VxmAluOpcode::Cast, 0.0f, 0.0f, 0, 1.0f,
-         ftlpu::VxmCastTarget::BFloat16},
-        bf16_cast_input);
-    assert(cast_bf16[0]
-        == ftlpu::Bf16::from_float(bf16_cast_input[0]).to_float());
-    assert(cast_bf16[1]
-        == ftlpu::Bf16::from_float(bf16_cast_input[1]).to_float());
-
-    ftlpu::VxmAlu::Vector int8_cast_input {};
-    int8_cast_input[0] = -129.0f;
-    int8_cast_input[1] = -2.4f;
-    int8_cast_input[2] = 127.6f;
-    const auto cast_int8 = ftlpu::VxmAlu::execute(
-        {ftlpu::VxmAluOpcode::Cast, 0.0f, 0.0f, 0, 1.0f, ftlpu::VxmCastTarget::Int8},
-        int8_cast_input);
-    assert(cast_int8[0] == -128.0f);
-    assert(cast_int8[1] == -2.0f);
-    assert(cast_int8[2] == 127.0f);
-
-    ftlpu::VxmAlu::Vector large{};
-    large.fill(1000.0f);
-    auto saturated = ftlpu::VxmAlu::quantize(large, 1.0f, 0);
-    assert(saturated[0] == 127);
-
+    // Timing model: ordinary operations complete in one tick. Multiply has
+    // latency 2 but accepts a new request every tick (II=1).
+    static_assert(VxmAlu::kDefaultLatency == 1);
+    static_assert(VxmAlu::kMultiplyLatency == 2);
+    static_assert(VxmAlu::kInitiationInterval == 1);
+    using Pipeline = VxmAlu::Pipeline<int>;
+    auto pipeline = Pipeline{};
+    auto add = pipeline.tick(Pipeline::Request{
+        {VxmAluOpcode::Add, fp32}, 2.0f, 3.0f, 10});
+    assert(add && add->value == 5.0f && add->metadata == 10);
+    auto first_mul = pipeline.tick(Pipeline::Request{
+        {VxmAluOpcode::Multiply, fp32}, 2.0f, 4.0f, 20});
+    assert(!first_mul);
+    auto second_mul = pipeline.tick(Pipeline::Request{
+        {VxmAluOpcode::Multiply, fp32}, 3.0f, 5.0f, 30});
+    assert(second_mul && second_mul->value == 8.0f
+           && second_mul->metadata == 20);
+    auto drained_mul = pipeline.tick();
+    assert(drained_mul && drained_mul->value == 15.0f
+           && drained_mul->metadata == 30);
+    assert(pipeline.empty());
+    vxm_hardware_test::write_pass_result(
+        "alu_test_results.txt", "alu_test");
     return 0;
 }

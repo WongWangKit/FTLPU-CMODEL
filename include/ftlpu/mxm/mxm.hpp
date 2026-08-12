@@ -24,6 +24,10 @@ namespace ftlpu {
 class Mxm {
 public:
     static constexpr std::size_t kWeightBuffers = MxmSupercell::kWeightBuffers;
+    // Main's current MXM completes the local supercell dot product in one
+    // modeled stage. Workload schedulers use this architectural latency
+    // instead of assuming develop's deeper internal wavefront pipeline.
+    static constexpr std::size_t kLocalMacStages = 1;
     using ActivationData = std::array<float, hw::kLanesPerTile>;
     using ActivationBlock =
         std::array<ActivationData, hw::kMxmBlockRows>;
@@ -260,12 +264,16 @@ public:
             if (read->compute_mode == MxmComputeMode::Block8) {
                 const auto values =
                     block_accumulator_.read(read->address, tile);
-                emit_block_stream_values(
-                    mem,
-                    tile,
-                    read->stream_base,
-                    read->address,
-                    values);
+                if (read->output_format
+                    == MxmAccumulatorOutputFormat::BFloat16) {
+                    emit_block_bf16_stream_values(
+                        mem, tile, read->stream_base,
+                        read->address, values);
+                } else {
+                    emit_block_stream_values(
+                        mem, tile, read->stream_base,
+                        read->address, values);
+                }
                 if (read->clear) {
                     block_accumulator_.clear_segment(
                         read->address,
@@ -274,8 +282,16 @@ public:
                 continue;
             }
             const auto values = accumulator_.read(read->address, tile);
-            emit_stream_values(
-                mem, tile, read->stream_base, read->address, values);
+            if (read->output_format
+                == MxmAccumulatorOutputFormat::BFloat16) {
+                emit_bf16_stream_values(
+                    mem, tile, read->stream_base,
+                    read->address, values);
+            } else {
+                emit_stream_values(
+                    mem, tile, read->stream_base,
+                    read->address, values);
+            }
             if (read->clear) {
                 accumulator_.clear_segment(read->address, tile);
             }
