@@ -2,5 +2,5 @@
 
 int main()
 {
-    return ftlpu::test::w8a16_swiglu::run(false);
+    return ftlpu::test::w8a16_swiglu::run(true);
 }

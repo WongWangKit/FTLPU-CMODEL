@@ -526,13 +526,15 @@ try {
     auto schedule = Schedule(system.icu());
     build_schedule(schedule);
     auto timing = integration_timing::SystemGanttTrace {};
+    const auto collect_timing =
+        integration_timing::SystemGanttTrace::enabled();
 
     const auto run_cycles = schedule.end_cycle()
         + ftlpu::hw::kTileRows + 4;
     for (std::size_t cycle = 0; cycle < run_cycles; ++cycle) {
         try {
             system.tick({});
-            timing.capture(system);
+            if (collect_timing) timing.capture(system);
         }
         catch (const std::exception& error) {
             std::cerr
@@ -548,9 +550,11 @@ try {
         << "MEM -> MXM -> SXM -> MEM -> VXM -> MEM passed: "
         << "one 8x32 output block, two K reductions, serial 8-cycle "
         << "SXM transpose, MEM staging, four dual-chain BF16 VXM waves\n";
-    timing.write(
-        "attention_dataflow_system",
-        "MEM-MXM-SXM-MEM-VXM-MEM system timing");
+    if (collect_timing) {
+        timing.write(
+            "attention_dataflow_system",
+            "MEM-MXM-SXM-MEM-VXM-MEM system timing");
+    }
     return 0;
 }
 catch (const std::exception& error) {

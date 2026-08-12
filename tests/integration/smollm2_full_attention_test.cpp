@@ -1,14 +1,19 @@
 #include "softmax_dataflow_harness.hpp"
+#include "smollm2_layer_phases.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
+#include <fstream>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -16,7 +21,6 @@ constexpr std::size_t kSequence = 8;
 constexpr std::size_t kHeads = 4;
 constexpr std::size_t kHeadDim = 8;
 constexpr std::size_t kHidden = kHeads * kHeadDim;
-constexpr std::size_t kBytePlanes = 2;
 constexpr float kAttentionScale = 0.3535533905932738f; // 1 / sqrt(8)
 
 constexpr std::array<std::size_t, 16> kWeightSlices {
@@ -48,6 +52,11 @@ constexpr std::size_t kPvAccumulatorAddress = 1024;
 static_assert(kHidden == ftlpu::hw::kMxmRows);
 static_assert(kSequence == ftlpu::hw::kLanesPerTile);
 static_assert(kHeads == ftlpu::hw::kTileRows);
+
+thread_local const std::vector<float>* active_queries = nullptr;
+thread_local const std::vector<float>* active_keys = nullptr;
+thread_local const std::vector<float>* active_values = nullptr;
+thread_local bool quiet_verification = false;
 
 std::size_t mem_queue(std::size_t slice)
 {
@@ -206,6 +215,9 @@ private:
 
 float query_value(std::size_t query, std::size_t head, std::size_t dim)
 {
+    if (active_queries != nullptr) {
+        return (*active_queries)[query * kHidden + head * kHeadDim + dim];
+    }
     const auto pattern = static_cast<int>(
         (query * 11 + head * 7 + dim * 5) % 19) - 9;
     return static_cast<float>(pattern) / 8.0f;
@@ -213,6 +225,9 @@ float query_value(std::size_t query, std::size_t head, std::size_t dim)
 
 float key_value(std::size_t head, std::size_t key, std::size_t dim)
 {
+    if (active_keys != nullptr) {
+        return (*active_keys)[key * kHidden + head * kHeadDim + dim];
+    }
     const auto pattern = static_cast<int>(
         (head * 13 + key * 5 + dim * 3) % 17) - 8;
     return static_cast<float>(pattern) / 8.0f;
@@ -220,6 +235,9 @@ float key_value(std::size_t head, std::size_t key, std::size_t dim)
 
 float value_value(std::size_t head, std::size_t key, std::size_t dim)
 {
+    if (active_values != nullptr) {
+        return (*active_values)[key * kHidden + head * kHeadDim + dim];
+    }
     const auto pattern = static_cast<int>(
         (head * 17 + key * 7 + dim * 3) % 23) - 11;
     return static_cast<float>(pattern) / 16.0f;
@@ -814,18 +832,96 @@ bool verify(
             }
         }
     }
-    std::cout
-        << "SmolLM2 full attention passed: MEM Q/K/V -> MXM QK^T -> "
-           "SXM score layout -> MEM -> VXM scaled Softmax -> MEM -> "
-           "SXM probability layout -> MXM P*V -> SXM -> MEM, "
-        << "heads=4 sequence=8 head_dim=8"
-        << " max_probability_error=" << max_probability_error
-        << " max_context_error=" << max_context_error << '\n';
+    if (!quiet_verification) {
+        std::cout
+            << "SmolLM2 full attention passed: MEM Q/K/V -> MXM QK^T -> "
+               "SXM score layout -> MEM -> VXM scaled Softmax -> MEM -> "
+               "SXM probability layout -> MXM P*V -> SXM -> MEM, "
+            << "heads=4 sequence=8 head_dim=8"
+            << " max_probability_error=" << max_probability_error
+            << " max_context_error=" << max_context_error << '\n';
+    }
     return true;
+}
+
+struct TileResult {
+    std::array<float, kSequence * kHidden> output{};
+    std::size_t cycles{0};
+};
+
+TileResult run_attention_tile(
+    ftlpu::TspSliceSystem& system,
+    const std::vector<float>& queries,
+    const std::vector<float>& keys,
+    const std::vector<float>& values)
+{
+    if (queries.size() != kSequence * kHidden
+        || keys.size() != kSequence * kHidden
+        || values.size() != kSequence * kHidden) {
+        throw std::invalid_argument("attention tile must be [8,32]");
+    }
+
+    system.reset_execution_state();
+    active_queries = &queries;
+    active_keys = &keys;
+    active_values = &values;
+    quiet_verification = true;
+    const auto reference_lut =
+        ftlpu::test::softmax_dataflow::configure_luts(system);
+    initialize_inputs(system);
+    auto schedule = Schedule(system.icu());
+    schedule_qk(schedule);
+    schedule_softmax(schedule);
+    schedule_pv(schedule);
+    const auto run_cycles = schedule.end_cycle()
+        + ftlpu::hw::kTileRows + 24;
+    for (std::size_t cycle = 0; cycle < run_cycles; ++cycle) {
+        system.tick({});
+    }
+    if (!verify(system, reference_lut)) {
+        throw std::runtime_error("attention tile black-box verification failed");
+    }
+
+    auto result = TileResult{};
+    result.cycles = run_cycles;
+    for (std::size_t token = 0; token < kSequence; ++token) {
+        for (std::size_t hidden = 0; hidden < kHidden; ++hidden) {
+            const auto head = hidden / kHeadDim;
+            const auto dim = hidden % kHeadDim;
+            result.output[token * kHidden + hidden] = read_bf16(
+                system, kOutputSlices, head,
+                kOutputAddress + dim, token).to_float();
+        }
+    }
+    active_queries = nullptr;
+    active_keys = nullptr;
+    active_values = nullptr;
+    quiet_verification = false;
+    return result;
+}
+
+void write_phase_trace(
+    const std::filesystem::path& path,
+    std::size_t cycles, const char* detail)
+{
+    if (path.empty()) return;
+    auto output = std::ofstream(path, std::ios::trunc);
+    if (!output) {
+        throw std::runtime_error("cannot write attention phase trace");
+    }
+    output << "start,end,resource,detail\n"
+           << "0," << cycles << ",Attention," << detail << '\n';
+}
+
+bool full_layer_attention_tiles()
+{
+    const auto* value = std::getenv("FTLPU_FULL_INTEGRATION");
+    return value != nullptr && std::string {value} == "1";
 }
 
 } // namespace
 
+#ifndef FTLPU_SMOLLM2_LAYER_PHASE_ONLY
 int main()
 try {
     auto system = ftlpu::TspSliceSystem{};
@@ -837,13 +933,15 @@ try {
     schedule_softmax(schedule);
     schedule_pv(schedule);
     auto timing = integration_timing::SystemGanttTrace {};
+    const auto collect_timing =
+        integration_timing::SystemGanttTrace::enabled();
 
     const auto run_cycles = schedule.end_cycle()
         + ftlpu::hw::kTileRows + 24;
     for (std::size_t cycle = 0; cycle < run_cycles; ++cycle) {
         try {
             system.tick({});
-            timing.capture(system);
+            if (collect_timing) timing.capture(system);
         } catch (const std::exception& error) {
             std::cerr << "full attention hardware schedule failed at cycle "
                       << cycle << ": " << error.what() << '\n';
@@ -851,11 +949,133 @@ try {
         }
     }
     const auto passed = verify(system, reference_lut);
-    timing.write(
-        "smollm2_full_attention_system",
-        "SmolLM2 full Attention system timing");
+    if (collect_timing) {
+        timing.write(
+            "smollm2_full_attention_system",
+            "SmolLM2 full Attention system timing");
+    }
     return passed ? 0 : 1;
 } catch (const std::exception& error) {
     std::cerr << "full attention setup failed: " << error.what() << '\n';
     return 1;
 }
+#endif
+
+namespace ftlpu::test::smollm2_layer {
+
+PhaseResult run_prefill_attention(
+    TspSliceSystem& system,
+    const std::vector<float>& input,
+    const std::filesystem::path& trace_path)
+{
+    if (input.size() != kPrefillLength * kHidden) {
+        throw std::invalid_argument("prefill attention input must be [128,576]");
+    }
+    auto result = PhaseResult{};
+    result.output = input;
+    result.key_cache = input;
+    result.value_cache = input;
+    auto query_tile = std::vector<float>(::kSequence * ::kHidden);
+    auto key_tile = query_tile;
+    auto value_tile = query_tile;
+
+    for (std::size_t token_base = 0;
+         token_base < kPrefillLength; token_base += ::kSequence) {
+        const auto hidden_limit = ::full_layer_attention_tiles()
+            ? kHidden : ::kHidden;
+        for (std::size_t hidden_base = 0;
+             hidden_base < hidden_limit; hidden_base += ::kHidden) {
+            for (std::size_t token = 0; token < ::kSequence; ++token) {
+                for (std::size_t hidden = 0; hidden < ::kHidden; ++hidden) {
+                    const auto value = input[
+                        (token_base + token) * kHidden
+                        + hidden_base + hidden];
+                    const auto index = token * ::kHidden + hidden;
+                    query_tile[index] = value;
+                    key_tile[index] = value;
+                    value_tile[index] = value;
+                }
+            }
+            const auto tile = ::run_attention_tile(
+                system, query_tile, key_tile, value_tile);
+            result.cycles += tile.cycles;
+            for (std::size_t token = 0; token < ::kSequence; ++token) {
+                for (std::size_t hidden = 0; hidden < ::kHidden; ++hidden) {
+                    result.output[
+                        (token_base + token) * kHidden
+                        + hidden_base + hidden]
+                        = tile.output[token * ::kHidden + hidden];
+                }
+            }
+        }
+    }
+    ::write_phase_trace(
+        trace_path, result.cycles,
+        ::full_layer_attention_tiles()
+            ? "prefill [128,576] full 8-token x 32-hidden black-box tiles"
+            : "prefill [128,576] representative hardware tile per token block");
+    return result;
+}
+
+PhaseResult run_decode_attention(
+    TspSliceSystem& system,
+    const std::vector<float>& input,
+    const std::filesystem::path& trace_path,
+    const std::filesystem::path&,
+    const std::vector<float>& prefill_keys,
+    const std::vector<float>& prefill_values)
+{
+    if (input.size() != kHidden
+        || prefill_keys.size() != kPrefillLength * kHidden
+        || prefill_values.size() != kPrefillLength * kHidden) {
+        throw std::invalid_argument("decode attention/cache shape mismatch");
+    }
+    auto result = PhaseResult{};
+    result.output = input;
+    result.key_cache = prefill_keys;
+    result.value_cache = prefill_values;
+    result.key_cache.insert(result.key_cache.end(), input.begin(), input.end());
+    result.value_cache.insert(result.value_cache.end(), input.begin(), input.end());
+    auto query_tile = std::vector<float>(::kSequence * ::kHidden);
+    auto key_tile = query_tile;
+    auto value_tile = query_tile;
+    constexpr auto history_base = kPrefillLength - (::kSequence - 1);
+
+    const auto hidden_limit = ::full_layer_attention_tiles()
+        ? kHidden : ::kHidden;
+    for (std::size_t hidden_base = 0;
+         hidden_base < hidden_limit; hidden_base += ::kHidden) {
+        for (std::size_t token = 0; token < ::kSequence; ++token) {
+            for (std::size_t hidden = 0; hidden < ::kHidden; ++hidden) {
+                const auto index = token * ::kHidden + hidden;
+                const auto value = token + 1 == ::kSequence
+                    ? input[hidden_base + hidden]
+                    : prefill_keys[
+                        (history_base + token) * kHidden
+                        + hidden_base + hidden];
+                query_tile[index] = value;
+                key_tile[index] = value;
+                value_tile[index] = token + 1 == ::kSequence
+                    ? input[hidden_base + hidden]
+                    : prefill_values[
+                        (history_base + token) * kHidden
+                        + hidden_base + hidden];
+            }
+        }
+        const auto tile = ::run_attention_tile(
+            system, query_tile, key_tile, value_tile);
+        result.cycles += tile.cycles;
+        for (std::size_t hidden = 0; hidden < ::kHidden; ++hidden) {
+            result.output[hidden_base + hidden] = tile.output[
+                (::kSequence - 1) * ::kHidden + hidden];
+        }
+    }
+    ::write_phase_trace(
+        trace_path, result.cycles,
+        ::full_layer_attention_tiles()
+            ? "decode full hidden last-7 cache + new token black-box tiles"
+            : "decode representative last-7 cache + new token hardware tile");
+    return result;
+}
+
+} // namespace ftlpu::test::smollm2_layer

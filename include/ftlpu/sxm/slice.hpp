@@ -73,8 +73,8 @@ private:
     std::size_t west_output_{0};
 };
 
-// Physical SR-facing SXM slice: an 8x8 streaming transpose window followed by
-// explicit Transpose and Permute vector pipeline stages.
+// Physical SR-facing SXM slice: an 8x8 capture bank feeds a fixed-wiring 8x8
+// transpose output bank, followed by the explicit Permute vector stage.
 class SxmSlice {
 public:
     static constexpr std::size_t kTransposeBytePlanes = 2;
@@ -82,6 +82,7 @@ public:
     struct TimingSnapshot {
         std::size_t cycle{0};
         std::size_t captured_rows{0};
+        std::size_t transpose_bank_loads{0};
         std::size_t transpose_rows{0};
         std::size_t permute_rows{0};
     };
@@ -105,6 +106,7 @@ public:
         next_transpose_issue_cycle_ = 0;
         permute_issue_cycle_.reset();
         captured_rows_ = 0;
+        transpose_bank_loads_ = 0;
         transpose_rows_ = 0;
         permute_rows_ = 0;
     }
@@ -118,7 +120,8 @@ public:
     {
         return TimingSnapshot {
             cycle_ == 0 ? 0 : cycle_ - 1,
-            captured_rows_, transpose_rows_, permute_rows_};
+            captured_rows_, transpose_bank_loads_,
+            transpose_rows_, permute_rows_};
     }
 
     bool can_issue(const SxmInstruction& instruction) const
@@ -224,6 +227,7 @@ public:
 
         cycle_events_.clear();
         captured_rows_ = 0;
+        transpose_bank_loads_ = 0;
         transpose_rows_ = 0;
         permute_rows_ = 0;
 
@@ -267,17 +271,18 @@ private:
         bool completed{false};
     };
 
-    // One 8x8 FP16 register window per tile.  The resident block is read in
-    // one orientation while the next block overwrites the cells just freed in
-    // the opposite orientation.  No second transpose bank is required.
+    // Two fixed-role 8x8 BF16 register banks per tile.  capture_bank always
+    // receives one flat MXM row per cycle.  Once all eight rows are present,
+    // fixed transpose wiring loads the complete transposed matrix into
+    // output_bank in one register stage.  While output_bank drains one row
+    // per cycle, capture_bank collects the following block.
     struct TransposeWindow {
-        TransposeBlock block{};
-        bool resident_rows_stored{true};
+        TransposeBlock capture_bank{};
+        TransposeBlock output_bank{};
         std::optional<std::size_t> resident_block{};
         std::size_t output_row{0};
         bool resident_drained{false};
 
-        bool capture_rows_stored{true};
         std::optional<std::size_t> capture_block{};
         std::size_t capture_row{0};
     };
@@ -373,9 +378,6 @@ private:
             }
             window.capture_block = *block_id;
             window.capture_row = 0;
-            window.capture_rows_stored = window.resident_block
-                ? !window.resident_rows_stored
-                : window.resident_rows_stored;
 
             if (trace_enabled_) {
                 std::ostringstream event;
@@ -392,14 +394,6 @@ private:
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
             auto& window = transpose_windows_[tile];
             if (!window.capture_block) continue;
-
-            // Read-before-write: row r of the new block may overwrite the
-            // matrix only after row r of the resident block has been emitted.
-            if (window.resident_block
-                && !window.resident_drained
-                && window.capture_row >= window.output_row) {
-                continue;
-            }
 
             const auto block_id = *window.capture_block;
             const auto& instruction = block_control(block_id).transpose;
@@ -436,12 +430,8 @@ private:
                 for (std::size_t lane = 0;
                      lane < hw::kLanesPerTile;
                      ++lane) {
-                    if (window.capture_rows_stored) {
-                        window.block[plane][row][lane] = input[lane].data;
-                    }
-                    else {
-                        window.block[plane][lane][row] = input[lane].data;
-                    }
+                    window.capture_bank[plane][row][lane] =
+                        input[lane].data;
                 }
             }
 
@@ -457,19 +447,35 @@ private:
             if (window.capture_row == hw::kLanesPerTile) {
                 if (window.resident_block && !window.resident_drained) {
                     throw std::logic_error(
-                        "SXM transpose overwrote a resident block before it drained");
+                        "SXM capture bank filled before the transpose output bank drained");
+                }
+                // The transpose is fixed wiring, not an ALU operation.  All
+                // 64 BF16 elements cross into the output bank on this edge.
+                for (std::size_t plane = 0;
+                     plane < kTransposeBytePlanes;
+                     ++plane) {
+                    for (std::size_t output_row = 0;
+                         output_row < hw::kLanesPerTile;
+                         ++output_row) {
+                        for (std::size_t lane = 0;
+                             lane < hw::kLanesPerTile;
+                             ++lane) {
+                            window.output_bank[plane][output_row][lane] =
+                                window.capture_bank[plane][lane][output_row];
+                        }
+                    }
                 }
                 window.resident_block = block_id;
-                window.resident_rows_stored = window.capture_rows_stored;
                 window.output_row = 0;
                 window.resident_drained = false;
                 window.capture_block.reset();
+                ++transpose_bank_loads_;
 
                 if (trace_enabled_) {
                     std::ostringstream event;
                     event << "transpose tile=" << tile
                           << " block=" << block_id
-                          << " resident=ready";
+                          << " capture->output-bank";
                     cycle_events_.push_back(event.str());
                 }
             }
@@ -545,9 +551,8 @@ private:
                 for (std::size_t lane = 0;
                      lane < hw::kLanesPerTile;
                      ++lane) {
-                    entry.data[plane][lane] = window.resident_rows_stored
-                        ? window.block[plane][lane][row]
-                        : window.block[plane][row][lane];
+                    entry.data[plane][lane] =
+                        window.output_bank[plane][row][lane];
                 }
             }
             transpose_pipeline_[tile] = std::move(entry);
@@ -702,6 +707,7 @@ private:
     std::optional<std::size_t> permute_issue_cycle_{};
     std::vector<std::string> cycle_events_{};
     std::size_t captured_rows_{0};
+    std::size_t transpose_bank_loads_{0};
     std::size_t transpose_rows_{0};
     std::size_t permute_rows_{0};
     bool trace_enabled_{true};

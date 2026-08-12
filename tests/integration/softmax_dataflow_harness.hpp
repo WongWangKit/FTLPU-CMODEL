@@ -605,12 +605,14 @@ try {
     auto schedule = Schedule(system.icu());
     const auto scheduled_end = build_schedule(schedule, scenario);
     auto timing = integration_timing::SystemGanttTrace {};
+    const auto collect_timing =
+        integration_timing::SystemGanttTrace::enabled();
     const auto run_cycles = std::max(schedule.end_cycle(), scheduled_end)
         + hw::kTileRows + 24;
     for (std::size_t cycle = 0; cycle < run_cycles; ++cycle) {
         try {
             system.tick({});
-            timing.capture(system);
+            if (collect_timing) timing.capture(system);
         } catch (const std::exception& error) {
             std::cerr << scenario.name
                       << " Softmax hardware schedule failed at cycle "
@@ -619,10 +621,12 @@ try {
         }
     }
     const auto passed = verify(system, scenario, reference_lut);
-    timing.write(
-        integration_timing::SystemGanttTrace::prefix_from_name(
-            scenario.name) + "_system",
-        scenario.name + " Softmax system timing");
+    if (collect_timing) {
+        timing.write(
+            integration_timing::SystemGanttTrace::prefix_from_name(
+                scenario.name) + "_system",
+            scenario.name + " Softmax system timing");
+    }
     return passed ? 0 : 1;
 } catch (const std::exception& error) {
     std::cerr << scenario.name << " Softmax setup failed: "

@@ -1,0 +1,43 @@
+# CMake and compiler output
+build*/
+out/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+Makefile
+compile_commands.json
+
+*.exe
+*.obj
+*.o
+*.a
+*.lib
+*.dll
+*.pdb
+*.ilk
+*.dtmp
+
+# Runtime logs and generated test reports
+logs/
+*.log
+tests/integration/results/
+tests/vxm/results/
+
+# Generated schedule traces/plots in documentation
+docs/*_schedule.csv
+docs/*_schedule_detail.svg
+docs/*_schedule_detail.png
+
+# IDE and user-local files
+.vs/
+.vscode/
+.idea/
+*.user
+.$*
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini

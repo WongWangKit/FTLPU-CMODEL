@@ -79,6 +79,10 @@ int main()
     // one cycle after its southern neighbour, matching the physical SR wave.
     constexpr auto kLastOutputCycle =
         kBlocks * kRows + (ftlpu::hw::kTileRows - 1) + 2 + (kRows - 1);
+    auto captured_rows = std::size_t {0};
+    auto transpose_bank_loads = std::size_t {0};
+    auto transpose_rows = std::size_t {0};
+    auto permute_rows = std::size_t {0};
     for (std::size_t cycle = 0; cycle <= kLastOutputCycle; ++cycle) {
         if (cycle < kBlocks * kRows && cycle % kRows == 0) {
             assert(sxm.can_issue(transpose));
@@ -116,6 +120,11 @@ int main()
         fabric.begin_cycle();
         sxm.evaluate(fabric);
         fabric.commit_cycle();
+        const auto timing = sxm.timing_snapshot();
+        captured_rows += timing.captured_rows;
+        transpose_bank_loads += timing.transpose_bank_loads;
+        transpose_rows += timing.transpose_rows;
+        permute_rows += timing.permute_rows;
 
         for (std::size_t destination_tile = 0;
              destination_tile < ftlpu::hw::kTileRows;
@@ -163,6 +172,15 @@ int main()
             }
         }
     }
+
+    assert(captured_rows
+        == kBlocks * kRows * ftlpu::hw::kTileRows);
+    assert(transpose_bank_loads
+        == kBlocks * ftlpu::hw::kTileRows);
+    assert(transpose_rows
+        == kBlocks * kRows * ftlpu::hw::kTileRows);
+    assert(permute_rows
+        == kBlocks * kRows * ftlpu::hw::kTileRows);
 
     return 0;
 }

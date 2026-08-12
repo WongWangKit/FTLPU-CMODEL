@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -36,11 +37,16 @@ constexpr std::array<std::size_t, 2> kColumnSlices {16, 17};
 constexpr std::array<std::size_t, 2> kKeyCacheSlices {40, 41};
 constexpr std::array<std::size_t, 2> kValueCacheSlices {42, 43};
 constexpr std::array<std::size_t, 2> kActivationSlices {50, 51};
+constexpr std::array<std::size_t, 4> kResultSlices {32, 33, 34, 35};
 
 constexpr std::size_t kWeightAddressBase = 64;
 constexpr std::size_t kColumnAddress = 96;
 constexpr std::size_t kActivationAddress = 128;
 constexpr std::size_t kAccumulatorAddress = 4096;
+constexpr std::size_t kResultAddressBase = 20000;
+constexpr std::size_t kMxmOutputLatency =
+    ftlpu::hw::kMxmSupercellsPerPlane
+    + ftlpu::Mxm::kLocalMacStages - 2;
 
 using Vector = std::array<float, kHidden>;
 using Matrix = std::array<Vector, kHidden>;
@@ -59,6 +65,12 @@ std::uint16_t fp16_bits(float value)
 std::size_t east_read_to_mxm_latency(std::size_t slice)
 {
     return ftlpu::hw::kMemGroups + 2
+        - slice / ftlpu::hw::kMemSlicesPerGroup;
+}
+
+std::size_t mxm_to_mem_write_latency(std::size_t slice)
+{
+    return ftlpu::hw::kSystemStreamRegisterColumns - 1
         - slice / ftlpu::hw::kMemSlicesPerGroup;
 }
 
@@ -226,6 +238,22 @@ public:
                 1,
                 ftlpu::MxmAccumulatorDestination::Sram));
 
+        constexpr std::size_t kReadCycle =
+            kComputeCycle + kMxmOutputLatency + 8;
+        schedule.mxm_compute_at(
+            kReadCycle,
+            ftlpu::MxmControlInstruction::AccumulatorRead(
+                kAccumulatorAddress, 0, true));
+        for (std::size_t byte = 0; byte < kResultSlices.size(); ++byte) {
+            const auto slice = kResultSlices[byte];
+            schedule.mem_at(
+                mem_queue(slice),
+                kReadCycle + mxm_to_mem_write_latency(slice),
+                ftlpu::MemInstruction::Write(
+                    kResultAddressBase,
+                    ftlpu::StreamId::West(byte)));
+        }
+
         const auto phase_start = total_cycles_;
         trace(
             phase_start + kLoadStart,
@@ -237,6 +265,11 @@ public:
             phase_start + kComputeCycle + 1,
             "MXM.E0.Compute",
             label + ": one decode activation");
+        trace(
+            phase_start + kReadCycle,
+            phase_start + kReadCycle + 1,
+            "MXM.E0.AccumulatorRead",
+            label + ": FP32 result to MEM");
         run(
             schedule.end_cycle()
                 + ftlpu::Mxm::kLocalMacStages + 8,
@@ -244,9 +277,8 @@ public:
 
         Vector output{};
         for (std::size_t column = 0; column < kHidden; ++column) {
-            output[column] =
-                system_.mxm_unit(0).accumulator().value(
-                    kAccumulatorAddress, column);
+            output[column] = read_fp32_result(
+                kResultAddressBase, column);
         }
         require_close(output, reference_gemv(input, weights), label);
         return output;
@@ -328,6 +360,26 @@ public:
                 count);
         }
 
+        constexpr std::size_t kReadStart = kComputeStart
+            + kSequenceLength + kMxmOutputLatency + 8;
+        for (std::size_t token = 0; token < kSequenceLength; ++token) {
+            const auto read_cycle = kReadStart + token;
+            schedule.mxm_compute_at(
+                read_cycle,
+                ftlpu::MxmControlInstruction::AccumulatorRead(
+                    kAccumulatorAddress + token, 0, true));
+            for (std::size_t byte = 0;
+                 byte < kResultSlices.size(); ++byte) {
+                const auto slice = kResultSlices[byte];
+                schedule.mem_at(
+                    mem_queue(slice),
+                    read_cycle + mxm_to_mem_write_latency(slice),
+                    ftlpu::MemInstruction::Write(
+                        kResultAddressBase + token,
+                        ftlpu::StreamId::West(byte)));
+            }
+        }
+
         const auto phase_start = total_cycles_;
         trace(
             phase_start + kLoadStart,
@@ -349,6 +401,11 @@ public:
             phase_start + kComputeStart + kSequenceLength,
             "MXM.E0.Compute",
             "QK decode: 129 cached K rows");
+        trace(
+            phase_start + kReadStart,
+            phase_start + kReadStart + kSequenceLength,
+            "MXM.E0.AccumulatorRead",
+            "QK scores FP32 to MEM");
         run(
             schedule.end_cycle()
                 + ftlpu::Mxm::kLocalMacStages + 8,
@@ -356,9 +413,8 @@ public:
 
         std::array<float, kSequenceLength> scores{};
         for (std::size_t token = 0; token < kSequenceLength; ++token) {
-            scores[token] =
-                system_.mxm_unit(0).accumulator().value(
-                    kAccumulatorAddress + token, 0);
+            scores[token] = read_fp32_result(
+                kResultAddressBase + token, 0);
             auto expected = 0.0f;
             for (std::size_t dimension = 0;
                  dimension < kHidden;
@@ -538,6 +594,21 @@ private:
             static_cast<std::uint16_t>(low)
             | (static_cast<std::uint16_t>(high) << 8))
             .to_float();
+    }
+
+    float read_fp32_result(
+        std::size_t address, std::size_t column) const
+    {
+        const auto tile = column / ftlpu::hw::kLanesPerTile;
+        const auto lane = column % ftlpu::hw::kLanesPerTile;
+        auto raw = std::uint32_t {0};
+        for (std::size_t byte = 0; byte < sizeof(float); ++byte) {
+            raw |= static_cast<std::uint32_t>(
+                system_.read_mem_sram_lane_byte(
+                    kResultSlices[byte], tile, address, lane))
+                << (byte * 8);
+        }
+        return std::bit_cast<float>(raw);
     }
 
     void run(std::size_t cycles, const std::string& label)

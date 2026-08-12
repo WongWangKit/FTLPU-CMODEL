@@ -356,10 +356,26 @@ int main()
                 ftlpu::StreamId::West(byte)));
     }
 
+    auto vector_deskew_writes = std::size_t {0};
+    auto vector_deskew_vectors = std::size_t {0};
     for (std::size_t cycle = 0;
          cycle < schedule.end_cycle() + 8;
          ++cycle) {
         system.tick({});
+        const auto timing = system.system_timing_snapshot().mxms[0];
+        vector_deskew_writes += timing.deskew_writes;
+        vector_deskew_vectors += timing.deskew_vectors;
+    }
+
+    constexpr auto kOrdinaryCells =
+        ftlpu::hw::kTileRows * ftlpu::hw::kMxmSupercellsPerPlane;
+    if (vector_deskew_writes
+            != kOrdinaryCells * ftlpu::hw::kLanesPerTile
+        || vector_deskew_vectors != kOrdinaryCells) {
+        std::cerr << "MXM explicit lane deskew timing mismatch: writes="
+                  << vector_deskew_writes
+                  << " vectors=" << vector_deskew_vectors << '\n';
+        return 1;
     }
 
     for (std::size_t column = 0;

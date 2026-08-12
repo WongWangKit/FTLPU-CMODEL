@@ -149,6 +149,8 @@ public:
         decode_layout_ = MxmDecodeLayout::Linear1x16;
         compute_active_by_buffer_.fill(false);
         last_outputs_.clear();
+        last_deskew_writes_ = 0;
+        last_deskew_vectors_ = 0;
         active_ = false;
     }
 
@@ -159,6 +161,8 @@ public:
         std::optional<std::size_t> log_tile = std::nullopt)
     {
         last_outputs_.clear();
+        last_deskew_writes_ = 0;
+        last_deskew_vectors_ = 0;
         for (auto& row : last_computing_) row.fill(false);
 
         for (std::size_t tile = 0;
@@ -317,12 +321,16 @@ public:
             if (read->compute_mode == MxmComputeMode::Block8) {
                 const auto values =
                     block_accumulator_.read(read->address, tile);
-                emit_block_stream_values(
-                    mem,
-                    tile,
-                    read->stream_base,
-                    read->address,
-                    values);
+                if (read->output_format
+                    == MxmAccumulatorOutputFormat::BFloat16) {
+                    emit_block_bf16_stream_values(
+                        mem, tile, read->stream_base,
+                        read->address, values);
+                } else {
+                    emit_block_stream_values(
+                        mem, tile, read->stream_base,
+                        read->address, values);
+                }
                 if (read->clear) {
                     block_accumulator_.clear_segment(
                         read->address,
@@ -331,8 +339,16 @@ public:
                 continue;
             }
             const auto values = accumulator_.read(read->address, tile);
-            emit_stream_values(
-                mem, tile, read->stream_base, read->address, values);
+            if (read->output_format
+                == MxmAccumulatorOutputFormat::BFloat16) {
+                emit_bf16_stream_values(
+                    mem, tile, read->stream_base,
+                    read->address, values);
+            } else {
+                emit_stream_values(
+                    mem, tile, read->stream_base,
+                    read->address, values);
+            }
             if (read->clear) {
                 accumulator_.clear_segment(read->address, tile);
             }
@@ -362,6 +378,16 @@ public:
     const std::vector<ColumnOutput>& last_outputs() const
     {
         return last_outputs_;
+    }
+
+    std::size_t last_deskew_writes() const noexcept
+    {
+        return last_deskew_writes_;
+    }
+
+    std::size_t last_deskew_vectors() const noexcept
+    {
+        return last_deskew_vectors_;
     }
 
     void validate_weight_buffer_load(
@@ -437,6 +463,99 @@ private:
         ActivationBlock data{};
     };
 
+    // Each 8x8 MAC wave completes lane c at local stage 7+c.  These 28
+    // triangular delay registers explicitly hold the early lanes for
+    // 7/6/.../0 cycles so that the SXM-facing boundary receives one flat
+    // eight-lane vector at stage 14.
+    class LaneDeskewRegisters {
+    public:
+        static constexpr std::size_t kMaximumDelay =
+            hw::kMxmSupercellColumns - 1;
+        static constexpr std::size_t kRegisterCount =
+            kMaximumDelay * (kMaximumDelay + 1) / 2;
+
+        void advance()
+        {
+            for (const auto& value : outputs_) {
+                if (value.has_value()) {
+                    throw std::logic_error(
+                        "MXM lane deskew output was not consumed");
+                }
+            }
+            for (std::size_t lane = 0;
+                 lane < hw::kMxmSupercellColumns;
+                 ++lane) {
+                const auto depth = delay(lane);
+                if (depth == 0) continue;
+                const auto base = offset(lane);
+                outputs_[lane] = std::move(registers_[base]);
+                for (std::size_t stage = 0; stage + 1 < depth; ++stage) {
+                    registers_[base + stage] =
+                        std::move(registers_[base + stage + 1]);
+                }
+                registers_[base + depth - 1].reset();
+            }
+        }
+
+        void latch(std::size_t lane, float value)
+        {
+            if (lane >= hw::kMxmSupercellColumns) {
+                throw std::out_of_range(
+                    "MXM lane deskew input is outside the tile");
+            }
+            const auto depth = delay(lane);
+            if (depth == 0) {
+                if (outputs_[lane].has_value()) {
+                    throw std::logic_error(
+                        "MXM lane deskew direct output is occupied");
+                }
+                outputs_[lane] = value;
+                return;
+            }
+            auto& destination = registers_[offset(lane) + depth - 1];
+            if (destination.has_value()) {
+                throw std::logic_error(
+                    "MXM lane deskew register collision");
+            }
+            destination = value;
+        }
+
+        ResultValues take_aligned()
+        {
+            auto result = ResultValues {};
+            for (std::size_t lane = 0;
+                 lane < hw::kMxmSupercellColumns;
+                 ++lane) {
+                if (!outputs_[lane].has_value()) {
+                    throw std::logic_error(
+                        "MXM lane deskew vector is not flat at stage 14");
+                }
+                result[lane] = *outputs_[lane];
+                outputs_[lane].reset();
+            }
+            return result;
+        }
+
+    private:
+        static constexpr std::size_t delay(std::size_t lane)
+        {
+            return kMaximumDelay - lane;
+        }
+
+        static constexpr std::size_t offset(std::size_t lane)
+        {
+            auto result = std::size_t {0};
+            for (std::size_t previous = 0; previous < lane; ++previous) {
+                result += delay(previous);
+            }
+            return result;
+        }
+
+        std::array<std::optional<float>, kRegisterCount> registers_{};
+        std::array<
+            std::optional<float>, hw::kMxmSupercellColumns> outputs_{};
+    };
+
     // One entry advances through the 15 diagonals of a physical 8x8
     // supercell.  Stage s executes every MAC at row+column=s (with the row
     // direction reversed for upward partial sums).  The pipeline still
@@ -444,6 +563,7 @@ private:
     struct PartialEvent {
         ActivationEvent event{};
         ActivationBlock values{};
+        std::array<LaneDeskewRegisters, hw::kMxmBlockRows> deskew{};
     };
 
     using LocalMacPipeline =
@@ -967,7 +1087,7 @@ private:
         PartialEvent& partial,
         std::size_t tile,
         std::size_t column,
-        std::size_t stage) const
+        std::size_t stage)
     {
         const auto& event = partial.event;
         if (event.tile != tile) {
@@ -975,6 +1095,11 @@ private:
                 "MXM activation wave entered the wrong supercell row");
         }
         const auto row_count = compute_row_count(event.compute_mode);
+        for (std::size_t output_row = 0;
+             output_row < row_count;
+             ++output_row) {
+            partial.deskew[output_row].advance();
+        }
         // The activation vector is skewed across the 8x8 cell.  At local
         // stage s, column c consumes row 7-(s-c), which is exactly one
         // row+column diagonal.  Each output column therefore completes at
@@ -999,6 +1124,31 @@ private:
                         input_row,
                         local_column,
                         event.data_format);
+            }
+        }
+        for (std::size_t local_column = 0;
+             local_column < hw::kMxmSupercellColumns;
+             ++local_column) {
+            if (stage
+                != hw::kMxmSupercellRows - 1 + local_column) {
+                continue;
+            }
+            for (std::size_t output_row = 0;
+                 output_row < row_count;
+                 ++output_row) {
+                partial.deskew[output_row].latch(
+                    local_column,
+                    partial.values[output_row][local_column]);
+                ++last_deskew_writes_;
+            }
+        }
+        if (stage + 1 == kLocalMacStages) {
+            for (std::size_t output_row = 0;
+                 output_row < row_count;
+                 ++output_row) {
+                partial.values[output_row] =
+                    partial.deskew[output_row].take_aligned();
+                ++last_deskew_vectors_;
             }
         }
     }
@@ -1407,6 +1557,8 @@ private:
     std::array<std::array<std::size_t, hw::kMxmSupercellsPerPlane>, kWeightBuffers> next_row_for_tile_{};
     std::array<bool, kWeightBuffers> compute_active_by_buffer_{};
     std::vector<ColumnOutput> last_outputs_{};
+    std::size_t last_deskew_writes_{0};
+    std::size_t last_deskew_vectors_{0};
 };
 
 } // namespace ftlpu

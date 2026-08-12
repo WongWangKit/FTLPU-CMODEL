@@ -476,9 +476,11 @@ int main() try
     auto schedule = Schedule {system.icu()};
     const auto cycles = build_schedule(schedule);
     auto timing = integration_timing::SystemGanttTrace {};
+    const auto collect_timing =
+        integration_timing::SystemGanttTrace::enabled();
     for (std::size_t cycle = 0; cycle < cycles; ++cycle) {
         system.tick({});
-        timing.capture(system);
+        if (collect_timing) timing.capture(system);
     }
 
     auto maximum_error = 0.0f;
@@ -526,8 +528,10 @@ int main() try
         << " -> MEM -> VXM(depth4 rsqrt) -> MEM"
         << " -> VXM(depth2 scalar load/normalize) -> MEM"
         << ", tokens=8 elements=32 max_error=" << maximum_error << '\n';
-    timing.write(
-        "rmsnorm_system", "RMSNorm black-box system timing");
+    if (collect_timing) {
+        timing.write(
+            "rmsnorm_system", "RMSNorm black-box system timing");
+    }
     return 0;
 }
 catch (const std::exception& ex)

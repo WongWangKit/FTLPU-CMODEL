@@ -11,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
@@ -57,6 +58,8 @@ public:
     struct MxmTiming {
         std::size_t compute_issues{0};
         std::size_t computing_cells{0};
+        std::size_t deskew_writes{0};
+        std::size_t deskew_vectors{0};
         std::size_t outputs{0};
     };
 
@@ -68,6 +71,19 @@ public:
         std::array<SxmSlice::TimingSnapshot, hw::kHemispheres> sxms{};
         VxmTimingSnapshot vxm{};
     };
+
+    using TimingObserver =
+        std::function<void(const SystemTimingSnapshot&)>;
+
+    void set_timing_observer(TimingObserver observer)
+    {
+        timing_observer_ = std::move(observer);
+    }
+
+    void clear_timing_observer() noexcept
+    {
+        timing_observer_ = {};
+    }
 
     TspSliceSystem()
         : sxms_ {
@@ -157,6 +173,21 @@ public:
         vxm_.configure_special_lut(opcode, config, entries);
     }
 
+    // Boot-time VXM edge routing.  This is architectural configuration at
+    // the system boundary; workloads still supply operands through MEM/SR
+    // and ICU instructions rather than through VXM implementation objects.
+    void configure_vxm_input_group_source(
+        std::size_t group, Hemisphere source)
+    {
+        vxm_.configure_input_group_source(group, source);
+    }
+
+    void configure_vxm_output_block_destination(
+        std::size_t block, Hemisphere destination)
+    {
+        vxm_.configure_output_block_destination(block, destination);
+    }
+
     void tick(std::ostream& os)
     {
         LogSinks sinks {&os, &os, &os, &os, &os};
@@ -171,6 +202,9 @@ public:
         vxm_phase(sinks);
         mem_sxm_commit_phase(sinks);
         end_cycle_phase();
+        if (timing_observer_) {
+            timing_observer_(system_timing_snapshot());
+        }
     }
 
     std::size_t cycle() const
@@ -230,6 +264,8 @@ public:
                         ? 1U : 0U;
                 }
             }
+            timing.deskew_writes = unit.last_deskew_writes();
+            timing.deskew_vectors = unit.last_deskew_vectors();
             timing.outputs = unit.last_outputs().size();
         }
         return result;
@@ -740,6 +776,7 @@ private:
     std::array<Mxm, kMxmCount> mxms_{};
     InstructionControlUnit icu_{};
     std::size_t cycle_{0};
+    TimingObserver timing_observer_{};
     CyclePhase phase_{CyclePhase::Idle};
 };
 

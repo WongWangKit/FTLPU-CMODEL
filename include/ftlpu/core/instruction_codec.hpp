@@ -402,7 +402,8 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
         MxmControlInstruction::check_compute_mode(instruction.compute_mode);
         MxmControlInstruction::check_accumulator_read_stream_base(
             instruction.stream_base,
-            instruction.compute_mode);
+            instruction.compute_mode,
+            instruction.accumulator_output_format);
         MxmControlInstruction::check_accumulator_address(
             instruction.accumulator_address,
             instruction.compute_mode);
@@ -418,7 +419,9 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
             | (static_cast<std::uint64_t>(instruction.stream_base) << 9)
             | (static_cast<std::uint64_t>(instruction.accumulator_address) << 15)
             | (static_cast<std::uint64_t>(instruction.accumulator_clear) << 28)
-            | (static_cast<std::uint64_t>(instruction.compute_mode) << 46);
+            | (static_cast<std::uint64_t>(instruction.compute_mode) << 46)
+            | (static_cast<std::uint64_t>(
+                   instruction.accumulator_output_format) << 48);
     }
     throw std::logic_error("unknown MXM opcode");
 }
@@ -473,13 +476,15 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
     case MxmControlOpcode::AccumulatorRead:
         detail::require_reserved_zero(
             word,
-            0x40001ffffe03ull,
+            0x140001ffffe03ull,
             "encoded MXM AccumulatorRead instruction has non-zero reserved bits");
         return MxmControlInstruction::AccumulatorRead(
             static_cast<std::size_t>((word >> 15) & 0x1fffu),
             stream_base,
             ((word >> 28) & 0x1u) != 0,
-            compute_mode);
+            compute_mode,
+            static_cast<MxmAccumulatorOutputFormat>(
+                (word >> 48) & 0x1u));
     case MxmControlOpcode::Decode: {
         const auto activation_buffer =
             static_cast<std::size_t>((word >> 2) & 0x1u);

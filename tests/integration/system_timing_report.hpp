@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -23,6 +24,8 @@ struct Event {
 
 class Report {
 public:
+    enum class OutputFormat { Csv, Html, Both };
+
     void ensure_resource(std::string resource)
     {
         if (std::find(resources_.begin(), resources_.end(), resource)
@@ -52,32 +55,41 @@ public:
         std::size_t end_cycle, std::string label,
         std::string kind, double utilization = 1.0)
     {
-        const auto existing = std::find_if(
-            events_.rbegin(), events_.rend(),
-            [&](const Event& event) {
-                return event.resource == resource
-                    && event.label == label
-                    && event.kind == kind
-                    && event.utilization == utilization
-                    && event.end_cycle == first_cycle;
-            });
-        if (existing != events_.rend()) {
-            existing->end_cycle = end_cycle;
-            return;
+        // A trace can contain millions of cycles but only a small, fixed set
+        // of hardware resources.  Keep the last event index per resource so
+        // extending a run is O(1), rather than reverse-scanning the complete
+        // event vector on every captured cycle.
+        if (const auto found = last_event_.find(resource);
+            found != last_event_.end()) {
+            auto& existing = events_[found->second];
+            if (existing.label == label
+                && existing.kind == kind
+                && existing.utilization == utilization
+                && existing.end_cycle == first_cycle) {
+                existing.end_cycle = end_cycle;
+                return;
+            }
         }
         add(
             std::move(resource), first_cycle, end_cycle,
             std::move(label), std::move(kind), utilization);
+        last_event_[events_.back().resource] = events_.size() - 1;
     }
 
-    void write(std::string_view prefix, std::string_view title) const
+    void write(
+        std::string_view prefix, std::string_view title,
+        OutputFormat format = OutputFormat::Both) const
     {
         if (events_.empty()) return;
         const auto directory = results_directory();
-        write_csv(directory / (std::string {prefix} + "_schedule.csv"));
-        write_html(
-            directory / (std::string {prefix} + "_timing_gantt.html"),
-            title);
+        if (format != OutputFormat::Html) {
+            write_csv(directory / (std::string {prefix} + "_schedule.csv"));
+        }
+        if (format != OutputFormat::Csv) {
+            write_html(
+                directory / (std::string {prefix} + "_timing_gantt.html"),
+                title);
+        }
     }
 
 private:
@@ -310,6 +322,7 @@ rect.event{shape-rendering:crispEdges}rect.event:hover{stroke:#172033;stroke-wid
 
     std::vector<Event> events_{};
     std::vector<std::string> resources_{};
+    std::unordered_map<std::string, std::size_t> last_event_{};
 };
 
 } // namespace integration_timing

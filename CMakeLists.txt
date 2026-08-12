@@ -6,12 +6,37 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(
+    FTLPU_FAST_CMODEL
+    "Optimize the cycle-accurate CModel even in Debug builds"
+    ON)
+option(
+    FTLPU_ENABLE_GANTT
+    "Collect and write system Gantt traces during normal test runs"
+    OFF)
+
 add_library(ftlpu_cmodel STATIC
     src/mem/sram.cpp
     src/mxm/accumulator.cpp
     src/mxm/block_accumulator.cpp
 )
 target_include_directories(ftlpu_cmodel PUBLIC include)
+
+if(FTLPU_FAST_CMODEL)
+    if(MSVC)
+        target_compile_options(
+            ftlpu_cmodel PUBLIC $<$<CONFIG:Debug>:/O2>)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(
+            ftlpu_cmodel PUBLIC $<$<CONFIG:Debug>:-O2>)
+    endif()
+endif()
+
+if(FTLPU_ENABLE_GANTT)
+    target_compile_definitions(ftlpu_cmodel PUBLIC FTLPU_ENABLE_GANTT=1)
+else()
+    target_compile_definitions(ftlpu_cmodel PUBLIC FTLPU_ENABLE_GANTT=0)
+endif()
 
 enable_testing()
 
@@ -58,13 +83,39 @@ ftlpu_add_test(rmsnorm_test tests/integration/rmsnorm_test.cpp)
 ftlpu_add_test(mxm_decode_streamed_weight_test tests/integration/mxm_decode_streamed_weight_test.cpp)
 ftlpu_add_test(mxm_decode_layout_comparison_test tests/integration/mxm_decode_layout_comparison_test.cpp)
 ftlpu_add_test(w8a16_projection_test tests/integration/w8a16_projection_test.cpp)
+ftlpu_add_test(w8a16_swiglu_test tests/integration/w8a16_swiglu_test.cpp)
+ftlpu_add_test(w8a16_swiglu_down_test tests/integration/w8a16_swiglu_down_test.cpp)
+ftlpu_add_test(smollm2_block8_dequant_ffn_test tests/integration/smollm2_block8_dequant_ffn_test.cpp)
+ftlpu_add_test(smollm2_decode_ffn_test tests/integration/smollm2_decode_ffn_test.cpp)
 ftlpu_add_test(decoder_layer_decode_test tests/integration/decoder_layer_decode_test.cpp)
+ftlpu_add_test(
+    smollm2_norm_residual_test
+    tests/integration/smollm2_norm_residual_test.cpp)
+add_executable(
+    smollm2_prefill_decode_layer_test
+    tests/integration/smollm2_prefill_decode_layer_test.cpp
+    tests/integration/smollm2_full_attention_test.cpp
+    tests/integration/smollm2_block8_dequant_ffn_test.cpp
+    tests/integration/smollm2_decode_ffn_test.cpp)
+target_compile_definitions(
+    smollm2_prefill_decode_layer_test
+    PRIVATE FTLPU_SMOLLM2_LAYER_PHASE_ONLY=1)
+target_link_libraries(smollm2_prefill_decode_layer_test PRIVATE ftlpu_cmodel)
+add_test(
+    NAME smollm2_prefill_decode_layer_test
+    COMMAND smollm2_prefill_decode_layer_test)
 
 # These workloads saturate the simulator's CPU and memory paths. Running them
 # concurrently is substantially slower than scheduling them one at a time.
 set_tests_properties(
     w8a16_projection_test
+    w8a16_swiglu_test
+    w8a16_swiglu_down_test
+    smollm2_block8_dequant_ffn_test
+    smollm2_decode_ffn_test
     decoder_layer_decode_test
+    smollm2_norm_residual_test
+    smollm2_prefill_decode_layer_test
     PROPERTIES RUN_SERIAL TRUE
 )
 

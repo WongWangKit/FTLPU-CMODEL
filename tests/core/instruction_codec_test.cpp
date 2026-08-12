@@ -301,6 +301,19 @@ bool verify_mxm_codec()
             "MXM Block8 AccumulatorRead mode bit was not encoded")) {
         return false;
     }
+    const auto bf16_read = ftlpu::isa::encode_mxm_instruction(
+        ftlpu::MxmControlInstruction::AccumulatorRead(
+            7000, 30, false, ftlpu::MxmComputeMode::Vector,
+            ftlpu::MxmAccumulatorOutputFormat::BFloat16));
+    const auto decoded_bf16_read =
+        ftlpu::isa::decode_mxm_instruction(bf16_read);
+    if (!require(
+            (bf16_read & (std::uint64_t {1} << 48)) != 0
+                && decoded_bf16_read.accumulator_output_format
+                    == ftlpu::MxmAccumulatorOutputFormat::BFloat16,
+            "MXM accumulator BF16 read codec round-trip failed")) {
+        return false;
+    }
 
     return require_throws(
         [] {
