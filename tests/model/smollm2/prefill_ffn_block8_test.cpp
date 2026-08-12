@@ -816,16 +816,17 @@ std::size_t transfer_down_output(
             "prefill FFN outbound transfer needs an unattached C2C port");
     }
 
+    constexpr auto kDdr4Base = std::uint64_t {0x200000};
     const auto blocks = output_blocks(hemisphere);
     const auto vector_count = blocks.size() * kOutputStreamCount;
-    auto outbound_link = ftlpu::C2cLink(ftlpu::C2cLinkConfig {
-        ftlpu::hw::kPhysicalVectorBytes, 0, 4});
-    auto inbound_link = ftlpu::C2cLink(ftlpu::C2cLinkConfig {
-        ftlpu::hw::kPhysicalVectorBytes, 0, 4});
-    system.attach_c2c(
+    auto ddr4 = ftlpu::Ddr4Model(ftlpu::Ddr4Config {
+        ftlpu::hw::kPhysicalVectorBytes, 0, 0, 8});
+    auto dma = ftlpu::C2cDmaEngine(ddr4, 4);
+    system.attach_c2c_dma(hemisphere, dma);
+    system.icu().enqueue_c2c_dma(
         hemisphere,
-        outbound_link,
-        inbound_link);
+        ftlpu::C2cDmaInstruction::Store(
+            kDdr4Base, vector_count));
 
     auto mem_cursor = std::array<
         std::size_t,
@@ -861,34 +862,37 @@ std::size_t transfer_down_output(
     const auto cycles = kOutboundLeadCycles
         + vector_count * kC2cInstructionSpacing
         + kOutboundTailCycles;
-    auto received = std::size_t {0};
     try {
         for (std::size_t cycle = 0; cycle < cycles; ++cycle) {
             system.tick({});
-            outbound_link.tick();
-            inbound_link.tick();
-            while (outbound_link.receive_ready()) {
-                const auto vector = outbound_link.pop_received();
-                const auto block_index = received / kOutputStreamCount;
-                const auto stream = received % kOutputStreamCount;
-                validate_output_vector(
-                    vector, blocks.at(block_index), stream, output);
-                ++received;
-            }
+            ddr4.tick();
         }
     } catch (const std::exception& ex) {
         system.detach_c2c(hemisphere);
         throw std::runtime_error(
-            "prefill FFN C2C outbound transfer: "
+            "prefill FFN C2C DMA outbound transfer: "
             + std::string(ex.what()));
     }
 
-    if (received != vector_count
-        || !system.c2c_endpoint(hemisphere).tx().idle()
-        || outbound_link.outstanding_vector_count() != 0) {
+    if (!system.c2c_endpoint(hemisphere).tx().idle()
+        || !dma.idle() || !ddr4.idle()) {
         system.detach_c2c(hemisphere);
         throw std::runtime_error(
-            "prefill FFN C2C outbound transfer did not drain");
+            "prefill FFN C2C DMA outbound transfer did not drain");
+    }
+
+    for (std::size_t received = 0;
+         received < vector_count;
+         ++received) {
+        const auto block_index = received / kOutputStreamCount;
+        const auto stream = received % kOutputStreamCount;
+        validate_output_vector(
+            ddr4.read_vector(
+                kDdr4Base
+                + received * ftlpu::hw::kPhysicalVectorBytes),
+            blocks.at(block_index),
+            stream,
+            output);
     }
     system.detach_c2c(hemisphere);
 
@@ -903,8 +907,8 @@ std::size_t transfer_down_output(
     trace.push_back(TraceEvent {
         trace_offset,
         trace_offset + cycles,
-        std::string("C2C.Outbound.") + hemisphere_name,
-        std::to_string(vector_count) + " x 32B down-output vectors",
+        std::string("C2C.DMA.Outbound.") + hemisphere_name,
+        std::to_string(vector_count) + " x 32B down-output vectors to DDR4",
     });
     return cycles;
 }
@@ -932,27 +936,19 @@ std::size_t transfer_block_activations(
             "prefill FFN inbound transfer needs an unattached C2C port");
     }
 
-    const auto source_hemisphere = destination_hemisphere;
-    constexpr std::size_t kSourceSlice = 48;
-    const auto source_stream = ftlpu::StreamId::East(kInboundStream);
+    constexpr auto kDdr4Base = std::uint64_t {0x100000};
     const auto target_stream = ftlpu::StreamId::West(kInboundStream);
-
-    auto source = ftlpu::TspSliceSystem {};
-    auto forward_link = ftlpu::C2cLink(ftlpu::C2cLinkConfig {
-        ftlpu::hw::kPhysicalVectorBytes, 0, 4});
-    auto reverse_link = ftlpu::C2cLink(ftlpu::C2cLinkConfig {
-        ftlpu::hw::kPhysicalVectorBytes, 0, 4});
-    source.attach_c2c(
-        source_hemisphere,
-        forward_link,
-        reverse_link);
-    destination.attach_c2c(
+    auto ddr4 = ftlpu::Ddr4Model(ftlpu::Ddr4Config {
+        ftlpu::hw::kPhysicalVectorBytes, 0, 0, 8});
+    auto dma = ftlpu::C2cDmaEngine(ddr4, 4);
+    destination.attach_c2c_dma(destination_hemisphere, dma);
+    destination.icu().enqueue_c2c_dma(
         destination_hemisphere,
-        reverse_link,
-        forward_link);
+        ftlpu::C2cDmaInstruction::Load(
+            kDdr4Base,
+            kInboundVectorsPerHemisphere,
+            ftlpu::hw::kPhysicalVectorBytes));
 
-    const auto source_queue = mem_queue(
-        source_hemisphere, kSourceSlice);
     auto vector_index = std::size_t {0};
     for (std::size_t reduction = 0;
          reduction < kHidden / kTile;
@@ -967,6 +963,8 @@ std::size_t transfer_block_activations(
                  ++activation_stream, ++vector_index) {
                 const auto output_row = activation_stream / 2;
                 const auto byte = activation_stream % 2;
+                auto vector = ftlpu::C2cVector {};
+                vector.vector_tag = vector_index;
                 for (std::size_t tile = 0;
                      tile < ftlpu::hw::kTileRows;
                      ++tile) {
@@ -981,28 +979,16 @@ std::size_t transfer_block_activations(
                         const auto bits = ftlpu::Bf16::from_float(
                             values[activation_index(
                                 row, k, kHidden)]).bits();
-                        source.initialize_mem_sram_lane_byte(
-                            source_hemisphere,
-                            kSourceSlice,
-                            tile,
-                            vector_index,
-                            lane,
+                        vector.payload[tile][lane] =
                             static_cast<std::uint8_t>(
-                                (bits >> (byte * 8)) & 0xffu));
+                                (bits >> (byte * 8)) & 0xffu);
                     }
                 }
-
-                source.icu().enqueue_mem(
-                    source_queue,
-                    ftlpu::MemInstruction::Read(
-                        vector_index, source_stream));
-                source.icu().enqueue_mem_nop(
-                    source_queue,
-                    kC2cInstructionSpacing - 1);
-                source.icu().enqueue_c2c_send(
-                    source_hemisphere, kInboundStream);
-                source.icu().enqueue_c2c_tx_nop(
-                    source_hemisphere, kC2cInstructionSpacing - 1);
+                ddr4.initialize_vector(
+                    kDdr4Base
+                        + vector_index
+                            * ftlpu::hw::kPhysicalVectorBytes,
+                    vector);
 
                 const auto target_slice =
                     kActivationSlices[activation_stream];
@@ -1041,28 +1027,22 @@ std::size_t transfer_block_activations(
         + kInboundTailCycles;
     try {
         for (std::size_t cycle = 0; cycle < cycles; ++cycle) {
-            source.tick({});
             destination.tick({});
-            forward_link.tick();
-            reverse_link.tick();
+            ddr4.tick();
         }
     } catch (const std::exception& ex) {
-        source.detach_c2c(source_hemisphere);
         destination.detach_c2c(destination_hemisphere);
         throw std::runtime_error(
-            "prefill FFN C2C inbound transfer: "
+            "prefill FFN C2C DMA inbound transfer: "
             + std::string(ex.what()));
     }
 
-    if (!source.c2c_endpoint(source_hemisphere).tx().idle()
-        || !destination.c2c_endpoint(destination_hemisphere).rx().idle()
-        || forward_link.outstanding_vector_count() != 0) {
-        source.detach_c2c(source_hemisphere);
+    if (!destination.c2c_endpoint(destination_hemisphere).rx().idle()
+        || !dma.idle() || !ddr4.idle()) {
         destination.detach_c2c(destination_hemisphere);
         throw std::runtime_error(
-            "prefill FFN C2C inbound transfer did not drain");
+            "prefill FFN C2C DMA inbound transfer did not drain");
     }
-    source.detach_c2c(source_hemisphere);
     destination.detach_c2c(destination_hemisphere);
 
     const auto hemisphere_name =
@@ -1070,9 +1050,9 @@ std::size_t transfer_block_activations(
     trace.push_back(TraceEvent {
         trace_offset,
         trace_offset + cycles,
-        std::string("C2C.Inbound.") + hemisphere_name,
+        std::string("C2C.DMA.Inbound.") + hemisphere_name,
         std::to_string(kInboundVectorsPerHemisphere)
-            + " x 32B activation vectors"});
+            + " x 32B activation vectors from DDR4"});
     trace.push_back(TraceEvent {
         trace_offset,
         trace_offset + cycles,
@@ -1798,7 +1778,7 @@ try {
     std::cout
         << "SmolLM2 Block8 Dequant FFN passed: "
         << "X[128,576], gate/up[576,1536], "
-        << "BF16 SwiGLU[128,1536], down[1536,576], C2C TX; cycles="
+        << "BF16 SwiGLU[128,1536], down[1536,576], C2C DMA+DDR4; cycles="
         << result.cycles << '\n';
     return 0;
 } catch (const std::exception& ex) {

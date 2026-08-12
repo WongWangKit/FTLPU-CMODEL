@@ -16,6 +16,7 @@ enum class IcuLocationKind : std::uint8_t {
     MxmDequant,
     Sxm,
     C2cTx,
+    C2cDma,
     C2cRx,
 };
 
@@ -76,6 +77,12 @@ struct IcuLocation {
         Hemisphere hemisphere) noexcept
     {
         return {IcuLocationKind::C2cRx, hemisphere_index(hemisphere), 0};
+    }
+
+    static constexpr IcuLocation C2cDma(
+        Hemisphere hemisphere) noexcept
+    {
+        return {IcuLocationKind::C2cDma, hemisphere_index(hemisphere), 0};
     }
 
     friend bool operator==(const IcuLocation&, const IcuLocation&) = default;

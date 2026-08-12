@@ -15,6 +15,7 @@
 #include <ostream>
 #include <stdexcept>
 #include <streambuf>
+#include <string>
 
 namespace ftlpu {
 

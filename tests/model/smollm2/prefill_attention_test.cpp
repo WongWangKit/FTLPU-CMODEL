@@ -57,7 +57,7 @@ constexpr std::array<std::size_t, 4> kAttentionOutputSlices {28, 29, 30, 31};
 constexpr std::size_t kRopeTableAddressBase = 7000;
 constexpr std::size_t kScoreAddressBase = 3000;
 constexpr std::size_t kContextAccumulatorAddressBase = 2000;
-constexpr std::size_t kOutputAccumulatorAddressBase = 2200;
+constexpr std::size_t kOutputAccumulatorAddressBase = 0;
 constexpr std::size_t kOProjWeightAddressBase = 4600;
 constexpr std::size_t kProbabilityPackAddressBase = 6000;
 constexpr std::size_t kQueryIwAddressBase = 7600;
@@ -104,9 +104,12 @@ static_assert(kQueryWidth == 18 * kTile);
 static_assert(kRopeTableAddressBase + kSeqLen <= ftlpu::hw::kSramDepthRows);
 static_assert(kScoreAddressBase + kQueryHeads * (kSeqLen / kTile) * kSeqLen
     <= ftlpu::hw::kSramDepthRows);
+static_assert(kContextAccumulatorAddressBase
+        + kSeqLen
+    <= ftlpu::hw::kMxmAccumulatorRows);
 static_assert(kOutputAccumulatorAddressBase
         + (kHidden / (2 * kTile)) * kSeqLen
-    <= ftlpu::hw::kSramDepthRows);
+    <= ftlpu::hw::kMxmAccumulatorRows);
 static_assert(kOProjWeightAddressBase
         + (kHidden / (2 * kTile)) * (kHidden / kTile) * 8
     <= kProbabilityPackAddressBase);
@@ -875,14 +878,11 @@ std::size_t rope_table_address(std::size_t token)
     return kRopeTableAddressBase + token;
 }
 
-std::size_t score_address(
-    std::size_t query_head,
-    std::size_t query_block,
+std::size_t score_accumulator_address(
+    std::size_t slot,
     std::size_t key_token)
 {
-    return kScoreAddressBase
-        + (query_head * (kSeqLen / kTile) + query_block) * kSeqLen
-        + key_token;
+    return slot * kSeqLen + key_token;
 }
 
 std::size_t probability_pack_address(
@@ -916,7 +916,8 @@ std::size_t context_address(std::size_t query_head, std::size_t token)
 
 std::size_t context_accumulator_address(std::size_t query_head, std::size_t token)
 {
-    return kContextAccumulatorAddressBase + query_head * kSeqLen + token;
+    (void)query_head;
+    return kContextAccumulatorAddressBase + token;
 }
 
 ftlpu::Hemisphere context_hemisphere(std::size_t query_head)
@@ -1598,6 +1599,7 @@ ftlpu::test::smollm2_layer::run_prefill_attention(
         std::size_t query_block;
         ftlpu::Hemisphere hemisphere;
         std::size_t local_mxm;
+        std::size_t accumulator_slot{0};
     };
     using QkWave = std::array<
         std::array<std::optional<QkWork>, ftlpu::TspSliceSystem::kMxmCountPerHemisphere>,
@@ -1644,6 +1646,27 @@ ftlpu::test::smollm2_layer::run_prefill_attention(
         wave[hemisphere_index(ftlpu::Hemisphere::East)][1] = QkWork {
             8, query_block + 1, ftlpu::Hemisphere::East, 1};
         qk_waves.push_back(std::move(wave));
+    }
+
+    auto accumulator_slots =
+        std::array<std::size_t, ftlpu::TspSliceSystem::kMxmCount> {};
+    for (auto& wave : qk_waves) {
+        for (auto& hemisphere_works : wave) {
+            for (auto& work : hemisphere_works) {
+                if (!work.has_value()) continue;
+                const auto global_mxm =
+                    ftlpu::InstructionControlUnit::mxm_queue(
+                        work->hemisphere, work->local_mxm);
+                work->accumulator_slot =
+                    accumulator_slots[global_mxm]++;
+            }
+        }
+    }
+    for (const auto slots : accumulator_slots) {
+        if (slots * kSeqLen > ftlpu::hw::kMxmAccumulatorRows) {
+            throw std::logic_error(
+                "QK work set exceeds one MXM accumulator");
+        }
     }
 
     auto completed_qk_works = std::vector<QkWork> {};
@@ -1707,9 +1730,8 @@ ftlpu::test::smollm2_layer::run_prefill_attention(
                             activation_stream,
                             output_stream,
                             reduction_block,
-                            score_address(
-                                work->query_head,
-                                work->query_block,
+                            score_accumulator_address(
+                                work->accumulator_slot,
                                 key_block * kTile),
                             1,
                             ftlpu::MxmAccumulatorDestination::Sram);
@@ -1738,7 +1760,8 @@ ftlpu::test::smollm2_layer::run_prefill_attention(
             schedule.mxm_accumulator_read_at(
                 global_mxm,
                 vxm_cycle - kMxmToVxmLatency,
-                score_address(work.query_head, work.query_block, key),
+                score_accumulator_address(
+                    work.accumulator_slot, key),
                 0,
                 true);
             auto immediate_mask = std::optional<float> {0.0f};

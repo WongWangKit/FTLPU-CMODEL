@@ -50,6 +50,8 @@ namespace isa {
 //   NOP    [1:0] opcode, [31:2] cycle count.
 //   Repeat [1:0] opcode, [11:2] count, [19:12] interval,
 //          [31:20] signed MEM address stride.
+//   Loop   [1:0] opcode, [7:2] window size, [15:8] count,
+//          [23:16] interval, [31:24] signed MEM address stride.
 // SXM control 13x32b:
 //   header, 16 source selectors, 16 destination selectors, 8 lane-map
 //   selectors, and 32 cross-tile permute selectors. The fixed packet avoids
@@ -58,6 +60,10 @@ using EncodedMemInstruction = std::uint64_t;
 using EncodedMxmInstruction = std::uint64_t;
 using EncodedMxmDequantInstruction = std::uint16_t;
 using EncodedIcuCommand = std::uint32_t;
+
+struct EncodedIcuRepeat2D {
+    std::array<std::uint32_t, 3> words{};
+};
 
 struct EncodedVxmInstruction {
     std::array<std::uint32_t, 4> words{};
@@ -71,6 +77,7 @@ enum class IcuCommandOpcode : std::uint8_t {
     Instruction = 0,
     Nop = 1,
     Repeat = 2,
+    Loop = 3,
 };
 
 namespace detail {
@@ -764,6 +771,75 @@ inline EncodedIcuCommand encode_icu_repeat(const InstructionControlUnit::Repeat&
         | (static_cast<std::uint64_t>(static_cast<std::uint16_t>(repeat.address_stride) & 0x0fffu) << 20));
 }
 
+inline EncodedIcuCommand encode_icu_loop(const IcuLoop& loop)
+{
+    detail::require_unsigned_fit(loop.window_size, 0x3full,
+        "ICU Loop window size does not fit encoded command");
+    detail::require_unsigned_fit(loop.count, 0xffull,
+        "ICU Loop count does not fit encoded command");
+    detail::require_unsigned_fit(loop.interval, 0xffull,
+        "ICU Loop interval does not fit encoded command");
+    detail::require_signed_fit(loop.address_stride, -128, 127,
+        "ICU Loop address stride does not fit encoded command");
+    if (loop.window_size == 0 || loop.count == 0
+        || loop.interval < loop.window_size) {
+        throw std::invalid_argument(
+            "ICU Loop requires count > 0 and interval >= window size > 0");
+    }
+    return static_cast<std::uint32_t>(
+        static_cast<std::uint64_t>(IcuCommandOpcode::Loop)
+        | (static_cast<std::uint64_t>(loop.window_size) << 2)
+        | (static_cast<std::uint64_t>(loop.count) << 8)
+        | (static_cast<std::uint64_t>(loop.interval) << 16)
+        | (static_cast<std::uint64_t>(
+               static_cast<std::uint8_t>(loop.address_stride))
+            << 24));
+}
+
+inline EncodedIcuRepeat2D encode_icu_repeat_2d(const IcuRepeat2D& repeat)
+{
+    detail::require_unsigned_fit(repeat.inner_count, 0x3ff,
+        "ICU Repeat2D inner count does not fit encoded command");
+    detail::require_unsigned_fit(repeat.outer_count, 0x3ff,
+        "ICU Repeat2D outer count does not fit encoded command");
+    detail::require_unsigned_fit(repeat.inner_interval, 0xffff,
+        "ICU Repeat2D inner interval does not fit encoded command");
+    detail::require_unsigned_fit(repeat.outer_interval, 0xffff,
+        "ICU Repeat2D outer interval does not fit encoded command");
+    detail::require_signed_fit(repeat.inner_stride, -32768, 32767,
+        "ICU Repeat2D inner stride does not fit encoded command");
+    detail::require_signed_fit(repeat.outer_stride, -32768, 32767,
+        "ICU Repeat2D outer stride does not fit encoded command");
+    if (repeat.inner_count == 0 || repeat.outer_count == 0
+        || repeat.inner_interval == 0 || repeat.outer_interval == 0
+        || repeat.inner_count * repeat.outer_count <= 1
+        || (repeat.outer_count > 1
+            && repeat.outer_interval
+                <= (repeat.inner_count - 1) * repeat.inner_interval)) {
+        throw std::invalid_argument("ICU Repeat2D has an invalid iteration space");
+    }
+
+    EncodedIcuRepeat2D encoded;
+    auto write = [&](std::size_t offset, std::size_t width,
+                     std::uint64_t value) {
+        for (std::size_t bit = 0; bit < width; ++bit) {
+            if ((value & (std::uint64_t {1} << bit)) != 0)
+                encoded.words[(offset + bit) / 32]
+                    |= std::uint32_t {1} << ((offset + bit) % 32);
+        }
+    };
+    write(0, 2, static_cast<std::uint64_t>(IcuCommandOpcode::Loop));
+    write(2, 10, repeat.inner_count);
+    write(12, 10, repeat.outer_count);
+    write(22, 16, repeat.inner_interval);
+    write(38, 16, repeat.outer_interval);
+    write(54, 16, static_cast<std::uint16_t>(repeat.inner_stride));
+    write(70, 16, static_cast<std::uint16_t>(repeat.outer_stride));
+    write(86, 2, static_cast<std::uint8_t>(repeat.induction_target));
+    write(88, 4, 1); // Extended-control subtype: Repeat2D.
+    return encoded;
+}
+
 inline IcuCommandOpcode decode_icu_command_opcode(EncodedIcuCommand command)
 {
     return static_cast<IcuCommandOpcode>(command & 0x3u);
@@ -791,6 +867,58 @@ inline InstructionControlUnit::Repeat decode_icu_repeat(EncodedIcuCommand comman
         static_cast<std::size_t>((command >> 12) & 0xffull),
         stride,
     };
+}
+
+inline IcuLoop decode_icu_loop(EncodedIcuCommand command)
+{
+    if (decode_icu_command_opcode(command) != IcuCommandOpcode::Loop) {
+        throw std::logic_error("encoded ICU command is not Loop");
+    }
+    const auto loop = IcuLoop {
+        static_cast<std::size_t>((command >> 2) & 0x3fu),
+        static_cast<std::size_t>((command >> 8) & 0xffu),
+        static_cast<std::size_t>((command >> 16) & 0xffu),
+        static_cast<std::int8_t>(command >> 24),
+    };
+    if (loop.window_size == 0 || loop.count == 0
+        || loop.interval < loop.window_size) {
+        throw std::logic_error("encoded ICU Loop has invalid fields");
+    }
+    return loop;
+}
+
+inline IcuRepeat2D decode_icu_repeat_2d(const EncodedIcuRepeat2D& encoded)
+{
+    auto read = [&](std::size_t offset, std::size_t width) {
+        std::uint64_t value = 0;
+        for (std::size_t bit = 0; bit < width; ++bit) {
+            if ((encoded.words[(offset + bit) / 32]
+                    & (std::uint32_t {1} << ((offset + bit) % 32))) != 0)
+                value |= std::uint64_t {1} << bit;
+        }
+        return value;
+    };
+    if (read(0, 2) != static_cast<std::uint8_t>(IcuCommandOpcode::Loop)
+        || read(88, 4) != 1)
+        throw std::logic_error("encoded ICU control is not Repeat2D");
+    auto signed16 = [&](std::size_t offset) {
+        return static_cast<std::int16_t>(read(offset, 16));
+    };
+    const auto repeat = IcuRepeat2D {
+        static_cast<std::size_t>(read(2, 10)),
+        static_cast<std::size_t>(read(22, 16)),
+        signed16(54),
+        static_cast<std::size_t>(read(12, 10)),
+        static_cast<std::size_t>(read(38, 16)),
+        signed16(70),
+        static_cast<IcuInductionTarget>(read(86, 2)),
+    };
+    if (repeat.inner_count == 0 || repeat.outer_count == 0
+        || repeat.inner_interval == 0 || repeat.outer_interval == 0
+        || repeat.inner_count * repeat.outer_count <= 1
+        || repeat.induction_target > IcuInductionTarget::MxmWeightColumn)
+        throw std::logic_error("encoded ICU Repeat2D has invalid fields");
+    return repeat;
 }
 
 } // namespace isa

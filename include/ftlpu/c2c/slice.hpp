@@ -1,7 +1,6 @@
 #pragma once
 
 #include "ftlpu/c2c/instruction.hpp"
-#include "ftlpu/c2c/link.hpp"
 #include "ftlpu/core/stream_port.hpp"
 
 #include <cstddef>
@@ -80,14 +79,17 @@ public:
     std::size_t queued_instruction_count() const noexcept { return queue_.size(); }
     std::size_t gathered_tile_count() const noexcept { return next_tile_; }
 
-    void evaluate(StreamRegisterFabric& fabric, C2cLink& link)
+    template <typename Transport>
+    void evaluate(
+        StreamRegisterFabric& fabric,
+        Transport& external)
     {
         if (queue_.empty()) {
             return;
         }
 
         if (next_tile_ == hw::kTileRows) {
-            try_send(link);
+            try_send(external);
             return;
         }
 
@@ -108,17 +110,18 @@ public:
         }
         ++next_tile_;
         if (next_tile_ == hw::kTileRows) {
-            try_send(link);
+            try_send(external);
         }
     }
 
 private:
-    void try_send(C2cLink& link)
+    template <typename Transport>
+    void try_send(Transport& external)
     {
-        if (!link.can_send()) {
+        if (!external.can_send()) {
             return;
         }
-        link.send(std::move(buffer_));
+        external.send(std::move(buffer_));
         queue_.pop_front();
         buffer_ = {};
         next_tile_ = 0;
@@ -160,9 +163,10 @@ public:
     std::size_t queued_instruction_count() const noexcept { return queue_.size(); }
     std::size_t replayed_tile_count() const noexcept { return next_tile_; }
 
+    template <typename Transport>
     std::optional<C2cReceiveNotification> evaluate(
         StreamRegisterFabric& fabric,
-        C2cLink& link)
+        Transport& external)
     {
         if (queue_.empty()) {
             return std::nullopt;
@@ -170,10 +174,10 @@ public:
 
         std::optional<C2cReceiveNotification> notification;
         if (!vector_.has_value()) {
-            if (!link.receive_ready()) {
+            if (!external.receive_ready()) {
                 return std::nullopt;
             }
-            vector_ = link.pop_received();
+            vector_ = external.pop_received();
             next_tile_ = 0;
             notification = C2cReceiveNotification {
                 queue_.front().consumer,
@@ -238,13 +242,14 @@ public:
     C2cRxSlice& rx() noexcept { return rx_; }
     const C2cRxSlice& rx() const noexcept { return rx_; }
 
+    template <typename TxTransport, typename RxTransport>
     std::optional<C2cReceiveNotification> evaluate(
         StreamRegisterFabric& fabric,
-        C2cLink& tx_link,
-        C2cLink& rx_link)
+        TxTransport& tx_external,
+        RxTransport& rx_external)
     {
-        tx_.evaluate(fabric, tx_link);
-        return rx_.evaluate(fabric, rx_link);
+        tx_.evaluate(fabric, tx_external);
+        return rx_.evaluate(fabric, rx_external);
     }
 
 private:

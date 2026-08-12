@@ -89,10 +89,16 @@ ftlpu_add_test(sxm_attention_transpose_test tests/unit/sxm/attention_transpose_t
     unit.sxm.attention_transpose unit sxm fast)
 ftlpu_add_test(icu_barrier_test tests/unit/icu/barrier_test.cpp
     unit.icu.barrier unit icu fast)
+ftlpu_add_test(icu_loop_test tests/unit/icu/loop_test.cpp
+    unit.icu.loop unit icu fast)
+ftlpu_add_test(icu_repeat_2d_test tests/unit/icu/repeat_2d_test.cpp
+    unit.icu.repeat_2d unit icu fast)
 
 # Subsystem tests: multiple hardware blocks connected by physical SR routes.
 ftlpu_add_test(c2c_test tests/subsystem/c2c/dual_chip_test.cpp
     subsystem.c2c.dual_chip subsystem c2c fast)
+ftlpu_add_test(c2c_dma_ddr4_test tests/subsystem/c2c/dma_ddr4_test.cpp
+    subsystem.c2c.dma_ddr4 subsystem c2c dma ddr4 fast)
 ftlpu_add_test(stream_topology_test tests/subsystem/system/stream_topology_test.cpp
     subsystem.topology.stream subsystem topology fast)
 ftlpu_add_test(full_chip_topology_test tests/subsystem/system/full_chip_topology_test.cpp

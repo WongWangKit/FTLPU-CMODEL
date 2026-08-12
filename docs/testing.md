@@ -19,6 +19,7 @@ work. Examples:
 ```text
 unit.mxm.array
 subsystem.c2c.dual_chip
+subsystem.c2c.dma_ddr4
 kernel.swiglu.w8a16
 model.smollm2.prefill_attention
 ```

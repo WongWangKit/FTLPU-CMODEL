@@ -22,6 +22,14 @@ enum class IcuControlOpcode : std::uint8_t {
     Repeat = 2,
     Sync = 3,
     Notify = 4,
+    Loop = 5,
+    Repeat2D = 6,
+};
+
+enum class IcuInductionTarget : std::uint8_t {
+    None = 0,
+    MemAddress = 1,
+    MxmWeightColumn = 2,
 };
 
 struct IcuRepeat {
@@ -30,11 +38,33 @@ struct IcuRepeat {
     std::int64_t address_stride{0};
 };
 
+struct IcuLoop {
+    std::size_t window_size{0};
+    std::size_t count{0};
+    std::size_t interval{1};
+    std::int64_t address_stride{0};
+};
+
+// Total iteration counts include the functional instruction that was already
+// issued at coordinate (0, 0). The control entry emits all remaining points in
+// outer-major, inner-minor order.
+struct IcuRepeat2D {
+    std::size_t inner_count{1};
+    std::size_t inner_interval{1};
+    std::int64_t inner_stride{0};
+    std::size_t outer_count{1};
+    std::size_t outer_interval{1};
+    std::int64_t outer_stride{0};
+    IcuInductionTarget induction_target{IcuInductionTarget::None};
+};
+
 struct IcuControlInstruction {
     IcuControlOpcode opcode{IcuControlOpcode::Nop};
     std::size_t count{0};
     std::size_t interval{1};
     std::int64_t address_stride{0};
+    std::size_t window_size{0};
+    IcuRepeat2D repeat_2d{};
 
     static constexpr IcuControlInstruction Nop(std::size_t cycles) noexcept
     {
@@ -51,6 +81,29 @@ struct IcuControlInstruction {
             count,
             interval,
             address_stride};
+    }
+
+    static constexpr IcuControlInstruction Loop(
+        std::size_t window_size,
+        std::size_t count,
+        std::size_t interval,
+        std::int64_t address_stride = 0) noexcept
+    {
+        return IcuControlInstruction {
+            IcuControlOpcode::Loop,
+            count,
+            interval,
+            address_stride,
+            window_size};
+    }
+
+    static constexpr IcuControlInstruction Repeat2D(
+        IcuRepeat2D repeat) noexcept
+    {
+        IcuControlInstruction instruction;
+        instruction.opcode = IcuControlOpcode::Repeat2D;
+        instruction.repeat_2d = repeat;
+        return instruction;
     }
 
     static constexpr IcuControlInstruction Sync() noexcept

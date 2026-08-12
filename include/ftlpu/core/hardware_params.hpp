@@ -102,6 +102,7 @@ constexpr std::size_t kIcuMemInstructionBits = 96;
 constexpr std::size_t kIcuMxmInstructionBits = 128;
 constexpr std::size_t kIcuSxmInstructionBits = 96;
 constexpr std::size_t kIcuC2cInstructionBits = 96;
+constexpr std::size_t kIcuC2cDmaInstructionBits = 192;
 constexpr std::size_t kIcuVxmImemDepth = 32768;
 constexpr std::size_t kIcuDistributedVxmImemDepth = 2048;
 // Existing whole-layer schedules are emitted as one flat program image. The

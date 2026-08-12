@@ -38,7 +38,10 @@ public:
     }
 
     bool receive_ready() const noexcept { return !rx_ready_.empty(); }
-    std::size_t receive_queue_size() const noexcept { return rx_ready_.size(); }
+    std::size_t receive_queue_size() const noexcept
+    {
+        return rx_ready_.size();
+    }
     std::size_t outstanding_vector_count() const noexcept
     {
         return outstanding_vectors_;

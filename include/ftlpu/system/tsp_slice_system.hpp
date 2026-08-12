@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ftlpu/c2c/dma.hpp"
+#include "ftlpu/c2c/link.hpp"
 #include "ftlpu/c2c/slice.hpp"
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/hemisphere.hpp"
@@ -76,6 +78,34 @@ public:
             hw::kMemEastBoundaryStreamRegisterColumn));
         c2c_outbound_links_[index] = &outbound_link;
         c2c_inbound_links_[index] = &inbound_link;
+        c2c_dmas_[index] = nullptr;
+    }
+
+    void attach_c2c_dma(
+        Hemisphere hemisphere,
+        C2cDmaEngine& dma)
+    {
+        require_phase(CyclePhase::Idle, "attaching C2C DMA");
+        const auto index = hemisphere_index(hemisphere);
+        c2cs_[index].emplace(C2cStreamPortMap::EastEdge(
+            hw::kMemEastBoundaryStreamRegisterColumn));
+        c2c_outbound_links_[index] = nullptr;
+        c2c_inbound_links_[index] = nullptr;
+        c2c_dmas_[index] = &dma;
+    }
+
+    C2cDmaEngine& c2c_dma(Hemisphere hemisphere)
+    {
+        auto* dma = c2c_dmas_[hemisphere_index(hemisphere)];
+        if (dma == nullptr) {
+            throw std::logic_error("TSP hemisphere has no C2C DMA");
+        }
+        return *dma;
+    }
+
+    const C2cDmaEngine& c2c_dma(Hemisphere hemisphere) const
+    {
+        return const_cast<TspSliceSystem*>(this)->c2c_dma(hemisphere);
     }
 
     bool has_c2c(Hemisphere hemisphere) const noexcept
@@ -97,6 +127,7 @@ public:
         c2cs_[index].reset();
         c2c_outbound_links_[index] = nullptr;
         c2c_inbound_links_[index] = nullptr;
+        c2c_dmas_[index] = nullptr;
     }
 
     void detach_c2c()
@@ -106,6 +137,7 @@ public:
             c2cs_[index].reset();
             c2c_outbound_links_[index] = nullptr;
             c2c_inbound_links_[index] = nullptr;
+            c2c_dmas_[index] = nullptr;
         }
     }
 
@@ -235,6 +267,9 @@ public:
             if (endpoint.has_value()) endpoint->reset();
         }
         cycle_ = 0;
+        for (auto* dma : c2c_dmas_) {
+            if (dma != nullptr) dma->reset();
+        }
     }
 
 private:
@@ -278,14 +313,17 @@ private:
         require_phase(CyclePhase::Begun, "dispatching ICU instructions");
         auto c2c_endpoints =
             std::array<C2cEndpoint*, hw::kHemispheres> {};
+        auto c2c_dmas =
+            std::array<C2cDmaEngine*, hw::kHemispheres> {};
         for (std::size_t hemisphere = 0;
              hemisphere < hw::kHemispheres;
              ++hemisphere) {
             c2c_endpoints[hemisphere] = c2cs_[hemisphere].has_value()
                 ? &*c2cs_[hemisphere] : nullptr;
+            c2c_dmas[hemisphere] = c2c_dmas_[hemisphere];
         }
         icu_.dispatch(
-            mems_, vxm_, sxms_, mxms_, sinks.icu, c2c_endpoints);
+            mems_, vxm_, sxms_, mxms_, sinks.icu, c2c_endpoints, c2c_dmas);
         phase_ = CyclePhase::Dispatched;
     }
 
@@ -351,6 +389,17 @@ private:
     void end_cycle_phase()
     {
         require_phase(CyclePhase::MemSxmCommitted, "ending cycle");
+        for (std::size_t hemisphere = 0;
+             hemisphere < hw::kHemispheres;
+             ++hemisphere) {
+            auto* dma = c2c_dmas_[hemisphere];
+            if (dma == nullptr) continue;
+            dma->tick();
+            if (dma->take_completion_notification()) {
+                icu_.notify(IcuLocation::C2cDma(
+                    static_cast<Hemisphere>(hemisphere)));
+            }
+        }
         icu_.advance_barrier_events();
         ++cycle_;
         phase_ = CyclePhase::Idle;
@@ -361,15 +410,24 @@ private:
         StreamRegisterFabric& fabric)
     {
         auto& endpoint = c2cs_[hemisphere];
-        if (!endpoint.has_value()
-            || c2c_outbound_links_[hemisphere] == nullptr
-            || c2c_inbound_links_[hemisphere] == nullptr) {
+        if (!endpoint.has_value()) {
             throw std::logic_error("incomplete TSP C2C attachment");
         }
-        const auto notification = endpoint->evaluate(
-            fabric,
-            *c2c_outbound_links_[hemisphere],
-            *c2c_inbound_links_[hemisphere]);
+
+        std::optional<C2cReceiveNotification> notification;
+        if (c2c_dmas_[hemisphere] != nullptr) {
+            notification = endpoint->evaluate(
+                fabric, *c2c_dmas_[hemisphere], *c2c_dmas_[hemisphere]);
+        } else {
+            if (c2c_outbound_links_[hemisphere] == nullptr
+                || c2c_inbound_links_[hemisphere] == nullptr) {
+                throw std::logic_error("incomplete TSP C2C link attachment");
+            }
+            notification = endpoint->evaluate(
+                fabric,
+                *c2c_outbound_links_[hemisphere],
+                *c2c_inbound_links_[hemisphere]);
+        }
         if (notification.has_value()) {
             icu_.notify(IcuLocation::Mem(
                 notification->consumer.hemisphere,
@@ -714,6 +772,7 @@ private:
     std::array<std::optional<C2cEndpoint>, hw::kHemispheres> c2cs_{};
     std::array<C2cLink*, hw::kHemispheres> c2c_outbound_links_{};
     std::array<C2cLink*, hw::kHemispheres> c2c_inbound_links_{};
+    std::array<C2cDmaEngine*, hw::kHemispheres> c2c_dmas_{};
     std::size_t cycle_{0};
     CyclePhase phase_{CyclePhase::Idle};
 };

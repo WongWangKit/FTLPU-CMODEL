@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ftlpu/c2c/dma.hpp"
 #include "ftlpu/c2c/slice.hpp"
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/hemisphere.hpp"
@@ -88,6 +89,12 @@ public:
         hw::kIcuC2cImemDepth,
         hw::kIcuC2cIqDepth,
         hw::kIcuFetchLatencyCycles>;
+    using C2cDmaIcu = DistributedIcuQueue<
+        C2cDmaInstruction,
+        hw::kIcuC2cDmaInstructionBits,
+        hw::kIcuC2cImemDepth,
+        hw::kIcuC2cIqDepth,
+        hw::kIcuFetchLatencyCycles>;
 
     explicit InstructionControlUnit(
         std::size_t barrier_latency_cycles = hw::kIcuBarrierLatencyCycles)
@@ -113,6 +120,7 @@ public:
         for (auto& queue : sxm_transpose_queues_) queue.reset();
         for (auto& queue : sxm_permute_queues_) queue.reset();
         for (auto& queue : c2c_tx_queues_) queue.reset();
+        for (auto& queue : c2c_dma_queues_) queue.reset();
         for (auto& queue : c2c_rx_queues_) queue.reset();
         barrier_events_.clear();
         cycle_ = 0;
@@ -136,6 +144,7 @@ public:
         for (auto& queue : sxm_transpose_queues_) queue.push_nop(cycles);
         for (auto& queue : sxm_permute_queues_) queue.push_nop(cycles);
         for (auto& queue : c2c_tx_queues_) queue.push_nop(cycles);
+        for (auto& queue : c2c_dma_queues_) queue.push_nop(cycles);
         for (auto& queue : c2c_rx_queues_) queue.push_nop(cycles);
     }
 
@@ -200,6 +209,13 @@ public:
                     "ICU C2C RX hemisphere is outside the chip");
             }
             c2c_rx_queues_[location.unit].append_control(instruction);
+            return;
+        case IcuLocationKind::C2cDma:
+            if (location.unit >= hw::kHemispheres) {
+                throw std::out_of_range(
+                    "ICU C2C DMA hemisphere is outside the chip");
+            }
+            c2c_dma_queues_[location.unit].append_control(instruction);
             return;
         }
         throw std::logic_error("unknown ICU location kind");
@@ -455,6 +471,22 @@ public:
         c2c_rx_queues_[hemisphere_index(endpoint_hemisphere)].push_nop(cycles);
     }
 
+    void enqueue_c2c_dma(
+        Hemisphere endpoint_hemisphere,
+        C2cDmaInstruction instruction)
+    {
+        c2c_dma_queues_[hemisphere_index(endpoint_hemisphere)]
+            .push_instruction(std::move(instruction));
+    }
+
+    void enqueue_c2c_dma_nop(
+        Hemisphere endpoint_hemisphere,
+        std::size_t cycles)
+    {
+        c2c_dma_queues_[hemisphere_index(endpoint_hemisphere)]
+            .push_nop(cycles);
+    }
+
     void notify(IcuLocation location)
     {
         switch (location.kind) {
@@ -507,6 +539,13 @@ public:
             }
             c2c_rx_queues_[location.unit].notify();
             return;
+        case IcuLocationKind::C2cDma:
+            if (location.unit >= hw::kHemispheres) {
+                throw std::out_of_range(
+                    "ICU C2C DMA hemisphere is outside the chip");
+            }
+            c2c_dma_queues_[location.unit].notify();
+            return;
         }
         throw std::logic_error("unknown ICU location kind");
     }
@@ -544,6 +583,7 @@ public:
         for (auto& queue : sxm_permute_queues_) queue.notify();
         for (auto& queue : c2c_tx_queues_) queue.notify();
         for (auto& queue : c2c_rx_queues_) queue.notify();
+        for (auto& queue : c2c_dma_queues_) queue.notify();
     }
 
     std::size_t barrier_latency_cycles() const noexcept
@@ -596,7 +636,8 @@ public:
         std::array<SxmSlice, hw::kHemispheres>& sxms,
         std::array<Mxm, kMxmQueues>& mxms,
         std::ostream* os = nullptr,
-        std::array<C2cEndpoint*, hw::kHemispheres> c2cs = {})
+        std::array<C2cEndpoint*, hw::kHemispheres> c2cs = {},
+        std::array<C2cDmaEngine*, hw::kHemispheres> c2c_dmas = {})
     {
         log_cycle_header(os);
 
@@ -637,6 +678,29 @@ public:
                         << c2c_rx->stream_index << " consumer=MEM."
                         << hemisphere_short_name(c2c_rx->consumer.hemisphere)
                         << '.' << c2c_rx->consumer.mem_slice << '\n';
+                }
+            }
+
+            const auto c2c_dma =
+                c2c_dma_queues_[hemisphere].dispatch_next();
+            if (c2c_dma.has_value()) {
+                if (c2c_dmas[hemisphere] == nullptr) {
+                    throw std::logic_error(
+                        "ICU issued C2C DMA without an attached DMA engine");
+                }
+                c2c_dmas[hemisphere]->issue(*c2c_dma);
+                any = true;
+                if (os != nullptr) {
+                    *os << "  ICU -> C2C."
+                        << hemisphere_short_name(
+                               static_cast<Hemisphere>(hemisphere))
+                        << ".dma "
+                        << (c2c_dma->direction
+                                    == C2cDmaDirection::Ddr4ToC2c
+                                ? "Load"
+                                : "Store")
+                        << " ddr4=" << c2c_dma->ddr4_address
+                        << " vectors=" << c2c_dma->vector_count << std::endl;
                 }
             }
         }
@@ -781,6 +845,12 @@ public:
     {
         return c2c_rx_queues_[hemisphere_index(hemisphere)];
     }
+
+    C2cDmaIcu& c2c_dma_iq(Hemisphere hemisphere) noexcept
+    {
+        return c2c_dma_queues_[hemisphere_index(hemisphere)];
+    }
+
     std::size_t cycle() const
     {
         return cycle_;
@@ -805,6 +875,7 @@ private:
         collect(sxm_permute_queues_);
         collect(c2c_tx_queues_);
         collect(c2c_rx_queues_);
+        collect(c2c_dma_queues_);
         return count;
     }
     static void check_mem_queue(std::size_t column)
@@ -862,6 +933,8 @@ private:
             << " sxm_permute=" << queued_instruction_count(sxm_permute_queues_)
             << " c2c_tx=" << queued_instruction_count(c2c_tx_queues_)
             << " c2c_rx=" << queued_instruction_count(c2c_rx_queues_)
+            << " c2c_dma="
+            << queued_instruction_count(c2c_dma_queues_)
             << '\n';
     }
 
@@ -999,6 +1072,7 @@ private:
     std::array<SxmIcu, hw::kHemispheres> sxm_transpose_queues_{};
     std::array<SxmIcu, hw::kHemispheres> sxm_permute_queues_{};
     std::array<C2cIcu, hw::kHemispheres> c2c_tx_queues_{};
+    std::array<C2cDmaIcu, hw::kHemispheres> c2c_dma_queues_{};
     std::array<C2cIcu, hw::kHemispheres> c2c_rx_queues_{};
     std::size_t barrier_latency_cycles_{hw::kIcuBarrierLatencyCycles};
     std::deque<std::size_t> barrier_events_{};

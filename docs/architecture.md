@@ -42,6 +42,14 @@ Both hemispheres use the same local orientation:
 - `sreg0` is adjacent to VXM.
 - Thirteen MEM groups occupy the boundaries `sreg0..sreg13`.
 - Each hemisphere has independent C2C TX/RX endpoints attached at the MEM boundary `sreg13`.
+- Each C2C TX/RX pair connects directly either to another chip's `C2cLink`
+  or to an ICU-controlled DMA.
+- A DMA `Load` moves `DDR4 -> DMA RX FIFO -> C2C RX -> west SR -> MEM`.
+  A DMA `Store` moves `MEM -> east SR -> C2C TX -> DMA TX FIFO -> DDR4`.
+- The two hemisphere DMA engines have independent ICU queues and C2C-facing
+  FIFOs; `C2cDmaSystem` models them sharing one sparse DDR4 address space.
+- DDR4 latency and data beats advance cycle by cycle; DMA completion notifies
+  its ICU queue so a following `Sync` releases only after the last beat.
 - One SR hop separates C2C from SXM: `sreg14` is the C2C/SXM boundary.
 - SXM connects `sreg14` to the MXM boundary `sreg15`.
 - East streams move from VXM toward MXM.

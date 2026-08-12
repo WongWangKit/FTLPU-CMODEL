@@ -2,6 +2,7 @@
 
 #include "ftlpu/icu/instruction.hpp"
 #include "ftlpu/mem/slice.hpp"
+#include "ftlpu/mxm/control_slice.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -35,6 +36,10 @@ enum class IcuQueueAction : std::uint8_t {
     NopWait,
     RepeatIssue,
     RepeatWait,
+    LoopIssue,
+    LoopWait,
+    Repeat2DIssue,
+    Repeat2DWait,
     SyncWait,
     SyncRelease,
     Notify,
@@ -86,6 +91,59 @@ inline MemInstruction apply_icu_repeat_stride(
     return instruction;
 }
 
+template <typename FuncInstruction>
+FuncInstruction apply_icu_repeat_2d_stride(
+    FuncInstruction instruction,
+    IcuInductionTarget target,
+    std::int64_t delta)
+{
+    if (target != IcuInductionTarget::None || delta != 0)
+        throw std::invalid_argument(
+            "ICU Repeat2D induction target is invalid for this queue");
+    return instruction;
+}
+
+inline MemInstruction apply_icu_repeat_2d_stride(
+    MemInstruction instruction,
+    IcuInductionTarget target,
+    std::int64_t delta)
+{
+    if (target == IcuInductionTarget::None) {
+        if (delta != 0)
+            throw std::invalid_argument(
+                "ICU Repeat2D has a stride without a MEM induction target");
+        return instruction;
+    }
+    if (target != IcuInductionTarget::MemAddress)
+        throw std::invalid_argument(
+            "ICU Repeat2D induction target is invalid for a MEM queue");
+    return apply_icu_repeat_stride(instruction, delta, 1);
+}
+
+inline MxmControlInstruction apply_icu_repeat_2d_stride(
+    MxmControlInstruction instruction,
+    IcuInductionTarget target,
+    std::int64_t delta)
+{
+    if (target == IcuInductionTarget::None) {
+        if (delta != 0)
+            throw std::invalid_argument(
+                "ICU Repeat2D has a stride without an MXM induction target");
+        return instruction;
+    }
+    if (target != IcuInductionTarget::MxmWeightColumn
+        || instruction.opcode != MxmControlOpcode::IW)
+        throw std::invalid_argument(
+            "ICU Repeat2D weight-column induction requires an MXM IW instruction");
+    const auto column = static_cast<std::int64_t>(instruction.weight_column)
+        + delta;
+    if (column < 0 || column >= static_cast<std::int64_t>(hw::kMxmColumns))
+        throw std::out_of_range(
+            "ICU Repeat2D MXM weight-column induction is outside the MXM");
+    instruction.weight_column = static_cast<std::size_t>(column);
+    return instruction;
+}
+
 } // namespace detail
 
 // One independently scheduled ICU endpoint. The instruction memory is local
@@ -129,12 +187,25 @@ public:
         pending_fetches_.clear();
         last_dispatched_.reset();
         repeat_instruction_.reset();
+        repeat_2d_instruction_.reset();
         nop_remaining_ = 0;
         repeat_remaining_ = 0;
         repeat_interval_ = 1;
         repeat_cooldown_ = 0;
         repeat_address_stride_ = 0;
         repeat_index_ = 0;
+        repeat_2d_active_ = false;
+        repeat_2d_inner_ = 0;
+        repeat_2d_outer_ = 0;
+        repeat_2d_cooldown_ = 0;
+        static_history_pcs_.clear();
+        loop_window_pcs_.clear();
+        loop_rounds_remaining_ = 0;
+        loop_window_index_ = 0;
+        loop_interval_ = 1;
+        loop_cooldown_ = 0;
+        loop_address_stride_ = 0;
+        loop_round_index_ = 0;
         last_dispatched_pc_.reset();
         notification_tokens_ = 0;
         notify_emitted_ = false;
@@ -233,6 +304,18 @@ public:
         }
     }
 
+    void push_loop(IcuLoop loop)
+    {
+        append_control(IcuControlInstruction::Loop(
+            loop.window_size, loop.count, loop.interval,
+            loop.address_stride));
+    }
+
+    void push_repeat_2d(IcuRepeat2D repeat)
+    {
+        append_control(IcuControlInstruction::Repeat2D(repeat));
+    }
+
     std::optional<FuncInstruction> dispatch_next()
     {
         return tick();
@@ -311,7 +394,9 @@ public:
 
     bool blocked_on_sync() const
     {
-        if (nop_remaining_ != 0 || repeat_remaining_ != 0 || iq_.empty()) {
+        if (nop_remaining_ != 0 || repeat_remaining_ != 0
+            || loop_rounds_remaining_ != 0 || repeat_2d_active_
+            || iq_.empty()) {
             return false;
         }
         const auto* control = std::get_if<IcuControlInstruction>(&iq_.front());
@@ -329,7 +414,9 @@ public:
             && pending_fetches_.empty()
             && iq_.empty()
             && nop_remaining_ == 0
-            && repeat_remaining_ == 0;
+            && repeat_remaining_ == 0
+            && loop_rounds_remaining_ == 0
+            && !repeat_2d_active_;
     }
 
     bool running() const { return !done(); }
@@ -356,7 +443,14 @@ public:
     std::size_t pending_issue_cycles() const noexcept
     {
         if (repeat_remaining_ == 0) {
-            return nop_remaining_;
+            if (repeat_2d_active_)
+                return nop_remaining_ + repeat_2d_cooldown_
+                    + repeat_2d_remaining_points();
+            if (loop_rounds_remaining_ == 0) return nop_remaining_;
+            const auto current_round = loop_window_pcs_.size()
+                - loop_window_index_;
+            return nop_remaining_ + loop_cooldown_ + current_round
+                + (loop_rounds_remaining_ - 1) * loop_interval_;
         }
         return nop_remaining_ + repeat_cooldown_ + 1
             + (repeat_remaining_ - 1) * repeat_interval_;
@@ -368,7 +462,9 @@ public:
         }
         return iq_.size() + pending_fetches_.size()
             + (program_end_pc_ - fetch_pc_)
-            + repeat_remaining_ + nop_remaining_;
+            + repeat_remaining_ + nop_remaining_
+            + repeat_2d_remaining_points()
+            + loop_rounds_remaining_ * loop_window_pcs_.size();
     }
 
 private:
@@ -460,6 +556,12 @@ private:
         if (repeat_remaining_ > 0) {
             return tick_repeat();
         }
+        if (repeat_2d_active_) {
+            return tick_repeat_2d();
+        }
+        if (loop_rounds_remaining_ > 0) {
+            return tick_loop();
+        }
         if (iq_.empty()) {
             if (fetch_pc_ != program_end_pc_ || !pending_fetches_.empty()) {
                 underflowed_ = true;
@@ -480,6 +582,10 @@ private:
             iq_.pop_front();
             iq_pcs_.pop_front();
             last_dispatched_ = result;
+            static_history_pcs_.push_back(*last_dispatched_pc_);
+            if (static_history_pcs_.size() > 63) {
+                static_history_pcs_.pop_front();
+            }
             ++issued_count_;
             return result;
         }
@@ -504,6 +610,10 @@ private:
             return std::nullopt;
         case IcuControlOpcode::Repeat:
             return begin_repeat(control);
+        case IcuControlOpcode::Loop:
+            return begin_loop(control);
+        case IcuControlOpcode::Repeat2D:
+            return begin_repeat_2d(control);
         case IcuControlOpcode::Sync:
             if (notification_tokens_ == 0) {
                 last_trace_.issue_pc = iq_pcs_.front();
@@ -572,12 +682,147 @@ private:
         return result;
     }
 
+    std::optional<FuncInstruction> begin_repeat_2d(
+        const IcuControlInstruction& control)
+    {
+        const auto& repeat = control.repeat_2d;
+        if (!last_dispatched_.has_value())
+            throw std::logic_error(
+                "ICU Repeat2D needs a prior functional instruction");
+        if (repeat.inner_count == 0 || repeat.outer_count == 0
+            || repeat.inner_interval == 0 || repeat.outer_interval == 0
+            || repeat.inner_count * repeat.outer_count <= 1
+            || (repeat.outer_count > 1
+                && repeat.outer_interval
+                    <= (repeat.inner_count - 1) * repeat.inner_interval))
+            throw std::invalid_argument(
+                "ICU Repeat2D has an invalid iteration space");
+        last_trace_.issue_pc = iq_pcs_.front();
+        iq_.pop_front();
+        iq_pcs_.pop_front();
+        repeat_2d_ = repeat;
+        repeat_2d_instruction_ = *last_dispatched_;
+        repeat_2d_outer_ = 0;
+        repeat_2d_inner_ = repeat.inner_count > 1 ? 1 : 0;
+        if (repeat.inner_count == 1) repeat_2d_outer_ = 1;
+        repeat_2d_active_ = true;
+        const auto firstOffset = repeat_2d_issue_offset();
+        repeat_2d_cooldown_ = firstOffset - 1;
+        return tick_repeat_2d();
+    }
+
+    std::optional<FuncInstruction> tick_repeat_2d()
+    {
+        if (repeat_2d_cooldown_ > 0) {
+            --repeat_2d_cooldown_;
+            last_trace_.action = IcuQueueAction::Repeat2DWait;
+            return std::nullopt;
+        }
+        const auto delta = static_cast<std::int64_t>(repeat_2d_inner_)
+                * repeat_2d_.inner_stride
+            + static_cast<std::int64_t>(repeat_2d_outer_)
+                * repeat_2d_.outer_stride;
+        auto result = detail::apply_icu_repeat_2d_stride(
+            *repeat_2d_instruction_, repeat_2d_.induction_target, delta);
+        last_trace_.issue_pc = last_dispatched_pc_;
+        last_trace_.action = IcuQueueAction::Repeat2DIssue;
+        last_dispatched_ = result;
+        ++issued_count_;
+
+        const auto previousOffset = repeat_2d_issue_offset();
+        ++repeat_2d_inner_;
+        if (repeat_2d_inner_ == repeat_2d_.inner_count) {
+            repeat_2d_inner_ = 0;
+            ++repeat_2d_outer_;
+        }
+        if (repeat_2d_outer_ == repeat_2d_.outer_count) {
+            repeat_2d_active_ = false;
+        } else {
+            const auto nextOffset = repeat_2d_issue_offset();
+            repeat_2d_cooldown_ = nextOffset - previousOffset - 1;
+        }
+        return result;
+    }
+
+    std::size_t repeat_2d_issue_offset() const noexcept
+    {
+        return repeat_2d_outer_ * repeat_2d_.outer_interval
+            + repeat_2d_inner_ * repeat_2d_.inner_interval;
+    }
+
+    std::size_t repeat_2d_remaining_points() const noexcept
+    {
+        if (!repeat_2d_active_) return 0;
+        return (repeat_2d_.outer_count - repeat_2d_outer_ - 1)
+                * repeat_2d_.inner_count
+            + repeat_2d_.inner_count - repeat_2d_inner_;
+    }
+
+    std::optional<FuncInstruction> begin_loop(
+        const IcuControlInstruction& control)
+    {
+        if (control.window_size == 0 || control.count == 0
+            || control.interval < control.window_size) {
+            throw std::invalid_argument(
+                "ICU Loop requires count > 0 and interval >= window size > 0");
+        }
+        if (control.window_size > static_history_pcs_.size()) {
+            throw std::logic_error(
+                "ICU Loop window exceeds prior functional instructions");
+        }
+        last_trace_.issue_pc = iq_pcs_.front();
+        iq_.pop_front();
+        iq_pcs_.pop_front();
+        loop_window_pcs_.assign(
+            static_history_pcs_.end() - control.window_size,
+            static_history_pcs_.end());
+        loop_rounds_remaining_ = control.count;
+        loop_window_index_ = 0;
+        loop_interval_ = control.interval;
+        loop_cooldown_ = 0;
+        loop_address_stride_ = control.address_stride;
+        loop_round_index_ = 1;
+        return tick_loop();
+    }
+
+    std::optional<FuncInstruction> tick_loop()
+    {
+        if (loop_cooldown_ > 0) {
+            --loop_cooldown_;
+            last_trace_.action = IcuQueueAction::LoopWait;
+            return std::nullopt;
+        }
+        auto result = detail::apply_icu_repeat_stride(
+            std::get<FuncInstruction>(
+                read_imem(loop_window_pcs_[loop_window_index_])),
+            loop_address_stride_,
+            loop_round_index_);
+        last_trace_.issue_pc = loop_window_pcs_[loop_window_index_];
+        last_trace_.action = IcuQueueAction::LoopIssue;
+        last_dispatched_ = result;
+        last_dispatched_pc_ = loop_window_pcs_[loop_window_index_];
+        ++issued_count_;
+        ++loop_window_index_;
+        if (loop_window_index_ == loop_window_pcs_.size()) {
+            --loop_rounds_remaining_;
+            loop_window_index_ = 0;
+            ++loop_round_index_;
+            if (loop_rounds_remaining_ > 0) {
+                loop_cooldown_ = loop_interval_ - loop_window_pcs_.size();
+            }
+        }
+        return result;
+    }
+
     std::vector<std::optional<Entry>> imem_{};
     std::deque<Entry> iq_{};
     std::deque<std::size_t> iq_pcs_{};
     std::deque<PendingFetch> pending_fetches_{};
     std::optional<FuncInstruction> last_dispatched_{};
     std::optional<FuncInstruction> repeat_instruction_{};
+    std::optional<FuncInstruction> repeat_2d_instruction_{};
+    std::deque<std::size_t> static_history_pcs_{};
+    std::vector<std::size_t> loop_window_pcs_{};
     std::optional<std::size_t> last_dispatched_pc_{};
     std::size_t nop_remaining_{0};
     std::size_t repeat_remaining_{0};
@@ -585,6 +830,17 @@ private:
     std::size_t repeat_cooldown_{0};
     std::int64_t repeat_address_stride_{0};
     std::size_t repeat_index_{0};
+    IcuRepeat2D repeat_2d_{};
+    bool repeat_2d_active_{false};
+    std::size_t repeat_2d_inner_{0};
+    std::size_t repeat_2d_outer_{0};
+    std::size_t repeat_2d_cooldown_{0};
+    std::size_t loop_rounds_remaining_{0};
+    std::size_t loop_window_index_{0};
+    std::size_t loop_interval_{1};
+    std::size_t loop_cooldown_{0};
+    std::int64_t loop_address_stride_{0};
+    std::size_t loop_round_index_{0};
     std::size_t notification_tokens_{0};
     bool notify_emitted_{false};
     std::size_t fetch_pc_{0};
