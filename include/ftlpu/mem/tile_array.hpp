@@ -96,6 +96,14 @@ public:
         mem_.enqueue_instruction(column, std::move(instruction));
     }
 
+    void enqueue_instruction(
+        std::size_t column,
+        std::size_t bank,
+        MemInstruction instruction)
+    {
+        mem_.enqueue_instruction(column, bank, std::move(instruction));
+    }
+
     void set_east_stream_input(
         std::size_t tile,
         std::size_t lane,
@@ -150,6 +158,16 @@ public:
         mem_.set_sram_byte(column, row, byte_offset, value);
     }
 
+    void set_sram_byte(
+        std::size_t column,
+        std::size_t bank,
+        std::size_t row,
+        std::size_t byte_offset,
+        Data value)
+    {
+        mem_.set_sram_byte(column, bank, row, byte_offset, value);
+    }
+
     void set_sram_lane_byte(
         std::size_t column,
         std::size_t tile,
@@ -158,6 +176,18 @@ public:
         Data value)
     {
         mem_.set_sram_lane_byte(column, tile, row, lane, value);
+    }
+
+    void set_sram_lane_byte(
+        std::size_t column,
+        std::size_t bank,
+        std::size_t tile,
+        std::size_t row,
+        std::size_t lane,
+        Data value)
+    {
+        mem_.set_sram_lane_byte(
+            column, bank, tile, row, lane, value);
     }
 
     const StreamSlot& east_register(
@@ -237,6 +267,15 @@ public:
         return mem_.sram_byte(column, row, byte_offset);
     }
 
+    Data sram_byte(
+        std::size_t column,
+        std::size_t bank,
+        std::size_t row,
+        std::size_t byte_offset) const
+    {
+        return mem_.sram_byte(column, bank, row, byte_offset);
+    }
+
     Data sram_lane_byte(
         std::size_t column,
         std::size_t tile,
@@ -246,9 +285,27 @@ public:
         return mem_.sram_lane_byte(column, tile, row, lane);
     }
 
+    Data sram_lane_byte(
+        std::size_t column,
+        std::size_t bank,
+        std::size_t tile,
+        std::size_t row,
+        std::size_t lane) const
+    {
+        return mem_.sram_lane_byte(column, bank, tile, row, lane);
+    }
+
     const InstructionSlot& instruction_at(std::size_t column, std::size_t tile) const
     {
         return mem_.instruction_at(column, tile);
+    }
+
+    const InstructionSlot& instruction_at(
+        std::size_t column,
+        std::size_t bank,
+        std::size_t tile) const
+    {
+        return mem_.instruction_at(column, bank, tile);
     }
 
     void tick()

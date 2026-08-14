@@ -38,6 +38,9 @@ inline bool operator!=(SxmStreamId lhs, SxmStreamId rhs)
 
 struct SxmInstruction {
     static constexpr std::size_t kZeroFill = static_cast<std::size_t>(-1);
+    static constexpr std::size_t kAllOutputRows = static_cast<std::size_t>(-1);
+    static constexpr std::size_t kAllInputRows = static_cast<std::size_t>(-1);
+    static constexpr std::size_t kAllOutputTiles = static_cast<std::size_t>(-1);
     static constexpr std::size_t kTotalLanes = hw::kTileRows * hw::kLanesPerTile;
 
     using LaneMap = std::array<std::size_t, hw::kLanesPerTile>;
@@ -49,6 +52,9 @@ struct SxmInstruction {
     std::size_t shift_distance{1};
     LaneMap lane_map{};
     PermuteMap permute_map{};
+    std::size_t output_row{kAllOutputRows};
+    std::size_t input_row{kAllInputRows};
+    std::size_t output_tile{kAllOutputTiles};
     StreamList src_streams{};
     StreamList dst_streams{};
 

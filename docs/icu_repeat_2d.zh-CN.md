@@ -28,7 +28,6 @@ delta(o, i) = o * outer_stride + i * inner_stride
 字段范围为 count `1..1023`、interval `1..65535`、stride
 `-32768..32767`。`outer_interval` 必须大于一个 inner wave 的最后发射 offset。
 
-归纳目标：`None`、`MemAddress`、`MxmWeightColumn`。MEM `ReadWrite` 的 read/write 地址
-同步归纳；MXM 只允许归纳 `IW` weight column。实现保存上一条已解码功能指令，不重新读取
+归纳目标：`None`、`MemAddress`、`MxmWeightColumn`。MEM 归纳所选 bank 的 local row
+address；MXM 只允许归纳 `IW` weight column。实现保存上一条已解码功能指令，不重新读取
 i-MEM，并在每个目标 cycle 复制和修改该指令。
-

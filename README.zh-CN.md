@@ -16,15 +16,15 @@ bit-accurate。当前目标是提供一个可验证的数据流调度目标，�
 | --- | --- |
 | 向量形态 | 4 个 tile/superlane x 8 lane = 32 个元素 |
 | Stream | 32 条 eastward + 32 条 westward，每个寄存器 1 byte |
-| MEM | 每个 hemisphere 52 个 slice，全芯片 104 条 ICU queue |
-| SRAM | 每个 slice 2 MiB，每侧 104 MiB，全芯片 208 MiB |
+| MEM | 每个 hemisphere 52 个 slice，每 slice 两条 bank queue，全芯片 208 条 ICU queue |
+| SRAM | 每 slice 两个 1 MiB 单口 bank，每侧 104 MiB，全芯片 208 MiB |
 | Accumulator | 每个 MXM 内置一个 1 MiB FP32 accumulator |
 | MXM | 四个 32 x 32 FP16 GEMM 阵列，每侧两个 |
 | MXM 权重 | 每个 supercell 两个对等 buffer，由 `IW`/`Compute` 选择 |
 | MXM decode | 可选择 `Linear1x16` 或 activation-stationary `Native4x4` |
 | VXM | 中心一个 slice；每 lane 两条镜像的 8 级链，共 16 个物理 ALU |
 | SXM | 每个 hemisphere 一个四-tile Transpose/Permute slice |
-| ICU | 104 MEM、12 MXM、8 VXM 紧凑控制、4 SXM、6 C2C/DMA queue |
+| ICU | 208 MEM、12 MXM、8 VXM 紧凑控制、4 SXM、6 C2C/DMA queue |
 
 固定的完整芯片拓扑为：
 

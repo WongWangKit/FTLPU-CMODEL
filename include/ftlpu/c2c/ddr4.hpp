@@ -73,6 +73,13 @@ public:
     }
 
     const Ddr4Config& config() const noexcept { return config_; }
+    std::size_t read_vector_service_cycles() const noexcept
+    {
+        const std::size_t beats =
+            (hw::kPhysicalVectorBytes + config_.beat_bytes - 1)
+            / config_.beat_bytes;
+        return config_.read_latency_cycles + beats + 1;
+    }
     std::size_t cycle() const noexcept { return cycle_; }
     bool idle() const noexcept
     {

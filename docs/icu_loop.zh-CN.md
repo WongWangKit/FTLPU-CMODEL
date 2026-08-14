@@ -10,8 +10,8 @@
 用于发射第一条回放指令。`interval` 表示相邻两轮起始周期的距离，且不能小于
 `window_size`。
 
-对于 MEM 队列，ICU 将 `address_stride` 乘以回放轮次后，加到读地址以及
-ReadWrite 的写地址上。其他类型队列要求地址步进为 0。Loop 窗口不能包含控制
+对于 MEM bank 队列，ICU 将 `address_stride` 乘以回放轮次后，加到 bank-local
+row address 上。其他类型队列要求地址步进为 0。Loop 窗口不能包含控制
 指令，也暂不允许嵌套。
 
 ## 32 位编码

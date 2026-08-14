@@ -16,15 +16,15 @@ provide a concrete target for dataflow scheduling and future compiler work.
 | --- | --- |
 | Vector shape | 4 tiles/superlanes x 8 lanes = 32 elements |
 | Streams | 32 eastward + 32 westward streams, one byte per register |
-| MEM | 52 slices per hemisphere, 104 ICU queues total |
-| SRAM | 2 MiB per slice, 104 MiB per hemisphere, 208 MiB total |
+| MEM | 52 slices per hemisphere, two bank queues per slice, 208 ICU queues total |
+| SRAM | Two 1 MiB single-port banks per slice, 104 MiB per hemisphere, 208 MiB total |
 | Accumulators | Configurable complete 32x32 FP32 block count per MXM (256 blocks / 1 MiB by default) |
 | MXM | Four 32 x 32 FP16 GEMM arrays, two per hemisphere |
 | MXM weights | Two peer buffers per supercell, selected by `IW`/`Compute` |
 | MXM decode | Selectable `Linear1x16` or activation-stationary `Native4x4` |
 | VXM | One central slice; two mirrored 8-stage chains (16 physical ALUs) per lane |
 | SXM | One four-tile slice per hemisphere for Transpose/Permute |
-| ICU | 104 MEM, 12 MXM, 8 VXM compact-control, 4 SXM, and 6 C2C/DMA queues |
+| ICU | 208 MEM, 12 MXM, 8 VXM compact-control, 4 SXM, and 6 C2C/DMA queues |
 
 The fixed full-chip topology is:
 
@@ -52,8 +52,11 @@ Whole-system workloads follow an offline-only contract:
 4. Read final MEM state and compare it with a software golden model.
 
 MEM, MXM, VXM, and SXM instructions must meet their stream operands in the same
-cycle. Queue-local `NOP N` and `Repeat n,d` commands encode delays and regular
-instruction trains. MEM repeats may also apply a signed address stride.
+cycle. Each MEM slice has independent bank-0 and bank-1 queues. A bank is
+single-port and performs at most one read or write per tile per cycle; the two
+banks may operate concurrently. Queue-local `NOP N` and `Repeat n,d` commands
+encode delays and regular instruction trains. MEM repeats may also apply a
+signed address stride.
 
 ## Validated Workloads
 
@@ -115,9 +118,9 @@ build-vs2026\Release\smollm2_attention_test.exe
 Whole-system logging is disabled by default because per-cycle traces are
 expensive. Small tests and demos can provide `TspSliceSystem::LogSinks` for
 separate ICU, MEM, MXM, VXM, SXM, and system logs.
-The no-log path skips MEM/VXM/SXM trace construction. SRAM preserves its full
-2 MiB-per-slice address space while allocating backing storage lazily in 4 KiB
-pages, so sparse workloads do not eagerly reserve all 208 MiB.
+The no-log path skips MEM/VXM/SXM trace construction. Each SRAM bank preserves
+its full 1 MiB, 32768-row address space while allocating backing storage lazily
+in 4 KiB pages, so sparse workloads do not eagerly reserve all 208 MiB.
 
 ## Schedule Diagrams
 

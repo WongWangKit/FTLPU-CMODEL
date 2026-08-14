@@ -79,10 +79,14 @@ public:
         std::size_t count,
         std::int64_t stride)
     {
-        pad(mem_[slice], cycle, [&](std::size_t n) { icu_.enqueue_mem_nop(slice, n); });
-        icu_.enqueue_mem(slice, instruction);
-        if (count > 1) icu_.enqueue_mem_repeat(slice, count - 1, 1, stride);
-        mem_[slice] = cycle + count;
+        const auto queue = ftlpu::InstructionControlUnit::mem_queue(
+            ftlpu::Hemisphere::East, slice, 0);
+        pad(mem_[queue], cycle,
+            [&](std::size_t n) { icu_.enqueue_mem_nop(queue, n); });
+        icu_.enqueue_mem(queue, instruction);
+        if (count > 1)
+            icu_.enqueue_mem_repeat(queue, count - 1, 1, stride);
+        mem_[queue] = cycle + count;
     }
 
     void transpose_at(std::size_t cycle, ftlpu::SxmInstruction instruction)
@@ -108,7 +112,7 @@ private:
     }
 
     ftlpu::InstructionControlUnit& icu_;
-    std::array<std::size_t, ftlpu::InstructionControlUnit::kMemQueuesPerHemisphere> mem_{};
+    std::array<std::size_t, ftlpu::InstructionControlUnit::kMemQueues> mem_{};
     std::size_t transpose_{0};
     std::size_t permute_{0};
 };

@@ -20,16 +20,18 @@ The central vector shape is:
 | Stream-register columns | 16 per hemisphere (`sreg0..sreg15`) |
 | Streams per lane | 32 eastward + 32 westward |
 | Stream-register width | 1 byte |
-| SRAM capacity | 2 MiB per slice, 208 MiB full chip |
+| SRAM capacity | 2 x 1 MiB single-port banks per slice, 208 MiB full chip |
 | MXM units | 4 total, 2 per hemisphere |
 | MXM array | 32 x 32 FP16/BF16 multiply with FP32 accumulation |
 | VXM | 1 central slice, 16 ALUs per lane |
 | SXM | 1 four-tile slice per hemisphere |
 
-One MEM slice owns a `65536 x 32-byte` SRAM block. Each row spans all four
-tiles; one tile accesses its local 8-byte segment when the instruction wave
-reaches that tile. The model has 104 homogeneous slices across two hemispheres,
-for `104 x 2 MiB = 208 MiB` total SRAM. There is no logical bank subdivision.
+One MEM slice owns two independent `32768 x 32-byte` single-port SRAM banks.
+Each row spans all four tiles; one tile accesses its local 8-byte segment when
+the instruction wave reaches that tile. The model has 104 homogeneous slices
+across two hemispheres, for `104 x 2 x 1 MiB = 208 MiB` total SRAM. Bank
+selection belongs to the ICU queue identity; the MEM instruction carries only
+a 15-bit bank-local row address.
 
 ## 2. Full-Chip Topology
 
@@ -55,7 +57,7 @@ Both hemispheres use the same local orientation:
 - East streams move from VXM toward MXM.
 - West streams move from MXM toward VXM.
 
-Global MEM queues `0..51` and MXMs `0..1` select East. MEM queues `52..103`
+Global MEM queues `0..103` and MXMs `0..1` select East. MEM queues `104..207`
 and MXMs `2..3` select West.
 
 The shared stream fabric is double-buffered by cycle: functional units read
@@ -100,12 +102,14 @@ starts, they call only `tick()` until the offline schedule completes.
 
 ### Organization
 
-Each hemisphere has 52 MEM slice columns and one instruction queue per slice.
+Each hemisphere has 52 MEM slice columns and two instruction queues per slice,
+one for each single-port bank.
 Four adjacent slices form a group between two stream-register boundaries. All
 52 slices are homogeneous SRAM; no MEM group has accumulator behavior.
 
-A MEM instruction is a single-port operation for its slice. A slice cannot read
-and write in the same cycle, even at different addresses.
+A MEM instruction is a single-port operation for its selected bank. The same
+bank cannot read and write in one cycle. Bank 0 and bank 1 may operate
+concurrently, including at the same bank-local row number.
 
 ### Instructions
 
@@ -114,6 +118,10 @@ and write in the same cycle, even at different addresses.
 - `Write(address, stream)` consumes one 8-byte stream segment and stores it.
 - `Gather` and `Scatter` are encoded but intentionally reject execution because
   the address-stream datapath is not modeled yet.
+
+The retired dual-port `ReadWrite` opcode is not part of the banked MEM ISA;
+parallel read/write is expressed by issuing ordinary instructions on the two
+bank queues.
 
 Each instruction wave eventually visits all four tiles, so a complete wave
 moves one 32-byte physical vector row as four skewed 8-byte segments.
@@ -126,13 +134,15 @@ The public-style software address layout used as reference is:
 [39:27] chip
 [26]    hemisphere
 [25:20] slice
-[19:4]  row offset within the slice
+[19]    bank
+[18:4]  row offset within the bank
 [3:0]   software byte offset
 ```
 
-`MemInstruction::address` stores only the 16-bit slice-local row field
-corresponding to software bits `[19:4]`, giving rows `0..65535`. The test
-initialization/result APIs expose tile and lane byte selection separately.
+`MemInstruction::address` stores only the 15-bit bank-local row field
+corresponding to software bits `[18:4]`, giving rows `0..32767`. The queue
+selects software bit `[19]`. Test initialization/result APIs expose bank, tile,
+and lane byte selection separately.
 
 ## 5. MXM
 

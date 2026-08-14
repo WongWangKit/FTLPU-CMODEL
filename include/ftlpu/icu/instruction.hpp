@@ -30,6 +30,7 @@ enum class IcuInductionTarget : std::uint8_t {
     None = 0,
     MemAddress = 1,
     MxmWeightColumn = 2,
+    MxmAccumulatorAddress = 3,
 };
 
 struct IcuRepeat {

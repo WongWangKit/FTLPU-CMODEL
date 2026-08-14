@@ -248,16 +248,21 @@ private:
         Block block{};
         std::array<SxmInstruction::StreamList, hw::kTileRows> dst_streams{};
         std::array<bool, hw::kTileRows> tile_ready{};
+        std::array<std::uint8_t, hw::kTileRows> input_row_mask{};
         std::array<std::size_t, hw::kTileRows> ready_cycle{};
     };
 
     static bool is_streaming_transpose(const SxmInstruction& instruction)
     {
-        return instruction.opcode == SxmOpcode::Transpose
-            && instruction.src_streams.size()
-                == kTransposeBytePlanes * hw::kLanesPerTile
-            && instruction.dst_streams.size()
+        if (instruction.opcode != SxmOpcode::Transpose
+            || instruction.dst_streams.size()
+                != kTransposeBytePlanes * hw::kLanesPerTile)
+            return false;
+        if (instruction.input_row == SxmInstruction::kAllInputRows)
+            return instruction.src_streams.size()
                 == kTransposeBytePlanes * hw::kLanesPerTile;
+        return instruction.input_row < hw::kLanesPerTile
+            && instruction.src_streams.size() == kTransposeBytePlanes;
     }
 
     static bool is_block_permute(const SxmInstruction& instruction)
@@ -322,12 +327,23 @@ private:
             if (bank.tile_ready[tile]) {
                 throw std::logic_error("SXM transpose buffer is full");
             }
-            bank.dst_streams[tile] = instruction.dst_streams;
+            if (bank.input_row_mask[tile] == 0)
+                bank.dst_streams[tile] = instruction.dst_streams;
+            else if (bank.dst_streams[tile] != instruction.dst_streams)
+                throw std::logic_error("SXM serial Transpose destination changed");
 
-            for (std::size_t row = 0; row < hw::kLanesPerTile; ++row) {
+            const std::size_t first_row =
+                instruction.input_row == SxmInstruction::kAllInputRows
+                ? 0 : instruction.input_row;
+            const std::size_t row_end =
+                instruction.input_row == SxmInstruction::kAllInputRows
+                ? hw::kLanesPerTile : first_row + 1;
+            for (std::size_t row = first_row; row < row_end; ++row) {
                 for (std::size_t plane = 0; plane < kTransposeBytePlanes; ++plane) {
                     const auto source = StreamId::from_packed(
-                        instruction.src_streams[row * kTransposeBytePlanes + plane].stream);
+                        instruction.src_streams[
+                            instruction.input_row == SxmInstruction::kAllInputRows
+                                ? row * kTransposeBytePlanes + plane : plane].stream);
                     const auto input = fabric.segment(input_column, tile, source);
                     fabric.consume_segment(
                         input_column, tile, source, "SXM parallel FP16 Transpose");
@@ -335,9 +351,11 @@ private:
                         bank.block[plane][lane][tile][row] = input[lane].data;
                     }
                 }
+                bank.input_row_mask[tile] |= static_cast<std::uint8_t>(1u << row);
             }
-        bank.tile_ready[tile] = true;
-        bank.ready_cycle[tile] = units_.cycle();
+        bank.tile_ready[tile] = bank.input_row_mask[tile]
+            == static_cast<std::uint8_t>((1u << hw::kLanesPerTile) - 1u);
+        if (bank.tile_ready[tile]) bank.ready_cycle[tile] = units_.cycle();
         if (trace_enabled_) {
             std::ostringstream event;
             event << "transpose tile=" << tile
@@ -411,11 +429,22 @@ private:
         std::array<bool, hw::kTileRows>& processed_tiles)
     {
         Permute320::validate_bijection(instruction.permute_map);
+        if (instruction.output_row != SxmInstruction::kAllOutputRows
+            && instruction.output_row >= hw::kLanesPerTile) {
+            throw std::out_of_range("SXM Permute output row is outside the block");
+        }
+        if (instruction.output_tile != SxmInstruction::kAllOutputTiles
+            && instruction.output_tile >= hw::kTileRows) {
+            throw std::out_of_range("SXM Permute output tile is outside the block");
+        }
 
         for (std::size_t destination_tile = 0;
              destination_tile < hw::kTileRows;
             ++destination_tile) {
             if (processed_tiles[destination_tile]) continue;
+            if (instruction.output_tile != SxmInstruction::kAllOutputTiles
+                && instruction.output_tile != destination_tile)
+                continue;
             const auto source_tile = block_permute_source_tile(
                 destination_tile, instruction.permute_map);
             auto& bank = transpose_bank_;
@@ -427,7 +456,13 @@ private:
                 throw std::logic_error("SXM Permute source does not match the ready Transpose block");
             }
 
-            for (std::size_t row = 0; row < hw::kLanesPerTile; ++row) {
+            const std::size_t first_row =
+                instruction.output_row == SxmInstruction::kAllOutputRows
+                ? 0 : instruction.output_row;
+            const std::size_t row_end =
+                instruction.output_row == SxmInstruction::kAllOutputRows
+                ? hw::kLanesPerTile : first_row + 1;
+            for (std::size_t row = first_row; row < row_end; ++row) {
                 for (std::size_t plane = 0; plane < kTransposeBytePlanes; ++plane) {
                     stage_block_segment(
                         fabric,
@@ -443,7 +478,11 @@ private:
                         "SXM parallel block output");
                 }
             }
-            bank.tile_ready[source_tile] = false;
+            if (instruction.output_row == SxmInstruction::kAllOutputRows
+                || instruction.output_row + 1 == hw::kLanesPerTile) {
+                bank.tile_ready[source_tile] = false;
+                bank.input_row_mask[source_tile] = 0;
+            }
             processed_tiles[destination_tile] = true;
             if (trace_enabled_) {
                 std::ostringstream event;

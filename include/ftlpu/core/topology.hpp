@@ -40,6 +40,7 @@ struct MemGroupCoord {
 
 struct SramCoord {
     std::size_t mem_slice{0};
+    std::size_t bank{0};
 };
 
 inline MemGroupCoord mem_group_for(MemTileCoord coord)
@@ -76,7 +77,10 @@ inline std::size_t sram_block_index(SramCoord coord)
     if (coord.mem_slice >= hw::kMemSliceColumns) {
         throw std::out_of_range("SRAM slice is outside the modeled hemisphere");
     }
-    return coord.mem_slice;
+    if (coord.bank >= hw::kMemBanksPerSlice) {
+        throw std::out_of_range("SRAM bank is outside the modeled MEM slice");
+    }
+    return coord.mem_slice * hw::kMemBanksPerSlice + coord.bank;
 }
 
 inline std::size_t sram_byte_address(

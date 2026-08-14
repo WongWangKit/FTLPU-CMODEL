@@ -310,6 +310,60 @@ int main()
         }
     }
 
+    // A selected permute emits only the requested destination tile. This is
+    // used by the compiler to drain one 8x8 block without replaying capture.
+    ftlpu::StreamRegisterFabric selected_fabric(2);
+    ftlpu::SxmSlice selected_sxm(
+        ftlpu::SxmStreamPortMap::SameDirection(0, 1));
+    for (std::size_t cycle = 0;
+         cycle < ftlpu::hw::kTileRows; ++cycle) {
+        for (std::size_t row = 0;
+             row < ftlpu::hw::kLanesPerTile; ++row) {
+            for (std::size_t plane = 0;
+                 plane < ftlpu::SxmSlice::kTransposeBytePlanes; ++plane) {
+                const auto input_stream = ftlpu::StreamId::East(
+                    row * ftlpu::SxmSlice::kTransposeBytePlanes + plane);
+                for (std::size_t lane = 0;
+                     lane < ftlpu::hw::kLanesPerTile; ++lane) {
+                    selected_fabric.initialize_cell(
+                        0, cycle, lane, input_stream,
+                        ftlpu::StreamCell::Valid(
+                            parallel_value(plane, row, cycle, lane),
+                            lane + 1 == ftlpu::hw::kLanesPerTile));
+                }
+            }
+        }
+        if (cycle == 0) {
+            selected_sxm.issue(ftlpu::SxmInstruction::Transpose(
+                stream_range(0, 2 * ftlpu::hw::kLanesPerTile),
+                stream_range(16, 2 * ftlpu::hw::kLanesPerTile)));
+        }
+        selected_fabric.begin_cycle();
+        selected_sxm.evaluate(selected_fabric);
+        selected_fabric.commit_cycle();
+    }
+    auto selected_tile = ftlpu::SxmInstruction::Permute(
+        stream_range(16, 2 * ftlpu::hw::kLanesPerTile),
+        stream_range(0, 2 * ftlpu::hw::kLanesPerTile),
+        ftlpu::Permute320::identity_map());
+    selected_tile.output_tile = 2;
+    selected_sxm.issue(selected_tile);
+    selected_fabric.begin_cycle();
+    selected_sxm.evaluate(selected_fabric);
+    selected_fabric.commit_cycle();
+
+    for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+        for (std::size_t stream = 0;
+             stream < 2 * ftlpu::hw::kLanesPerTile; ++stream) {
+            const auto output_stream = ftlpu::StreamId::East(stream);
+            for (std::size_t lane = 0;
+                 lane < ftlpu::hw::kLanesPerTile; ++lane) {
+                assert(selected_fabric.cell(
+                    1, tile, lane, output_stream).valid == (tile == 2));
+            }
+        }
+    }
+
     // A 32x32 transpose is presented as four cyclic block diagonals.  Beat p
     // carries B[i][(i+p)%4] on source superlane i; Permute moves the locally
     // transposed block to destination superlane (i+p)%4.

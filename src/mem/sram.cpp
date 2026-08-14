@@ -105,24 +105,26 @@ SramArray::SramArray()
 
 void SramArray::set_active_rows(std::size_t rows)
 {
-    for (auto& sram : slices_) sram.set_active_rows(rows);
+    for (auto& slice : slices_) {
+        for (auto& bank : slice) bank.set_active_rows(rows);
+    }
 }
 
 void SramArray::clear()
 {
-    for (auto& sram : slices_) {
-        sram.clear();
+    for (auto& slice : slices_) {
+        for (auto& bank : slice) bank.clear();
     }
 }
 
-Sram& SramArray::slice(std::size_t mem_slice)
+Sram& SramArray::bank(std::size_t mem_slice, std::size_t bank)
 {
-    return slices_.at(mem_slice);
+    return slices_.at(mem_slice).at(bank);
 }
 
-const Sram& SramArray::slice(std::size_t mem_slice) const
+const Sram& SramArray::bank(std::size_t mem_slice, std::size_t bank) const
 {
-    return slices_.at(mem_slice);
+    return slices_.at(mem_slice).at(bank);
 }
 
 } // namespace ftlpu

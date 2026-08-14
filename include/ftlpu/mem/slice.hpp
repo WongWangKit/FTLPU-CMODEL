@@ -12,16 +12,17 @@
 namespace ftlpu {
 
 enum class MemOpcode {
-    Read,
-    Write,
-    ReadWrite,
-    Gather,
-    Scatter,
+    Read = 0,
+    Write = 1,
+    // Opcode 2 was the retired dual-port ReadWrite instruction.
+    Gather = 3,
+    Scatter = 4,
 };
 
 struct MemInstruction {
     MemOpcode opcode{MemOpcode::Read};
-    // SRAM row address (0..65535), not a byte address.
+    // Bank-local SRAM row address (0..32767), not a byte address. The ICU
+    // queue selects the bank, so no bank bit is carried in this instruction.
     std::size_t address{0};
 
     // Packed ISA selector retained for codec compatibility:
@@ -30,9 +31,6 @@ struct MemInstruction {
     // Architectural code should call stream_id()/map_stream_id().
     std::size_t stream{0};
     std::size_t map_stream{0};
-    // Second SRAM port fields, used only by ReadWrite.
-    std::size_t write_address{0};
-    std::size_t write_stream{0};
     // A tap write observes the stream without suppressing passive forwarding.
     bool preserve_stream{false};
 
@@ -77,62 +75,6 @@ struct MemInstruction {
         std::size_t address, std::size_t packed_stream)
     {
         return WriteTap(address, StreamId::from_packed(packed_stream));
-    }
-
-    StreamId write_stream_id() const
-    {
-        return StreamId::from_packed(write_stream);
-    }
-
-    static MemInstruction ReadWrite(
-        std::size_t read_address,
-        StreamId read_stream,
-        std::size_t write_address,
-        StreamId write_stream)
-    {
-        if (read_address == write_address) {
-            throw std::invalid_argument("MEM ReadWrite requires distinct read and write addresses");
-        }
-        auto instruction = MemInstruction {MemOpcode::ReadWrite, read_address, read_stream.packed(), 0};
-        instruction.write_address = write_address;
-        instruction.write_stream = write_stream.packed();
-        return instruction;
-    }
-
-    static MemInstruction ReadWrite(
-        std::size_t read_address,
-        std::size_t read_packed_stream,
-        std::size_t write_address,
-        std::size_t write_packed_stream)
-    {
-        return ReadWrite(
-            read_address,
-            StreamId::from_packed(read_packed_stream),
-            write_address,
-            StreamId::from_packed(write_packed_stream));
-    }
-
-    static MemInstruction ReadWriteTap(
-        std::size_t read_address,
-        StreamId read_stream,
-        std::size_t write_address,
-        StreamId write_stream)
-    {
-        auto instruction = ReadWrite(
-            read_address, read_stream, write_address, write_stream);
-        instruction.preserve_stream = true;
-        return instruction;
-    }
-
-    static MemInstruction ReadWriteTap(
-        std::size_t read_address,
-        std::size_t read_packed_stream,
-        std::size_t write_address,
-        std::size_t write_packed_stream)
-    {
-        return ReadWriteTap(read_address,
-            StreamId::from_packed(read_packed_stream), write_address,
-            StreamId::from_packed(write_packed_stream));
     }
 
     static MemInstruction Gather(StreamId stream, StreamId map_stream)

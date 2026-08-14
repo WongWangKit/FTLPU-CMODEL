@@ -33,7 +33,6 @@ Counts are `1..1023`, intervals are `1..65535`, and strides are
 offset of one inner wave.
 
 Typed targets are `None`, `MemAddress`, and `MxmWeightColumn`. MEM induction
-updates both addresses of `ReadWrite`; MXM induction is valid only for an `IW`
-weight column. Execution retains the previously decoded functional
+updates the selected bank's local row address; MXM induction is valid only for
+an `IW` weight column. Execution retains the previously decoded functional
 instruction and does not reread i-MEM.
-

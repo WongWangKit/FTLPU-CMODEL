@@ -19,16 +19,16 @@
 | Stream-register column | 每侧 16 个（`sreg0..sreg15`） |
 | 每 lane stream | 32 条 eastward + 32 条 westward |
 | Stream-register 位宽 | 1 byte |
-| SRAM 容量 | 每 slice 2 MiB，全芯片 208 MiB |
+| SRAM 容量 | 每 slice 两个 1 MiB 单口 bank，全芯片 208 MiB |
 | MXM | 共 4 个，每侧 2 个 |
 | MXM 阵列 | 32 x 32 FP16/BF16 乘法、FP32 累加 |
 | VXM | 中心 1 个 slice，每 lane 16 个 ALU |
 | SXM | 每侧 1 个四-tile slice |
 
-一个 MEM slice 拥有一个 `65536 x 32-byte` SRAM block。每个 row 横跨 4 个
-tile；指令波到达某个 tile 时，该 tile 只访问自己的 8-byte segment。两个
-hemisphere 共 104 个同构 slice，总容量为 `104 x 2 MiB = 208 MiB`，不再划分
-logical bank。
+一个 MEM slice 拥有两个独立的 `32768 x 32-byte` 单口 SRAM bank。每个 row 横跨
+4 个 tile；指令波到达某个 tile 时，该 tile 只访问自己的 8-byte segment。两个
+hemisphere 共 104 个同构 slice，总容量为 `104 x 2 x 1 MiB = 208 MiB`。bank 由
+ICU queue 身份选择，MEM 指令只携带 15-bit bank-local row address。
 
 ## 2. 完整芯片拓扑
 
@@ -46,7 +46,7 @@ MXM2/MXM3 <-> SXM.W <-> C2C.W <-> MEM.W(52) <-> VXM <-> MEM.E(52) <-> C2C.E <-> 
 - east stream 从 VXM 流向 MXM；
 - west stream 从 MXM 流向 VXM。
 
-全局 MEM queue `0..51`、MXM `0..1` 属于 East；MEM queue `52..103`、MXM
+全局 MEM queue `0..103`、MXM `0..1` 属于 East；MEM queue `104..207`、MXM
 `2..3` 属于 West。
 
 共享 stream fabric 采用逐拍 current/next state：功能单元读取当前状态并暂存输出，
@@ -84,11 +84,13 @@ tile。workload 必须在每个 tile 对齐数据和控制，测试不能直接�
 
 ### 组织方式
 
-每个 hemisphere 有 52 个 MEM slice column，每个 slice 一条指令队列。相邻四个
+每个 hemisphere 有 52 个 MEM slice column，每个 slice 有两条独立指令队列，
+分别控制 bank0 和 bank1。相邻四个
 slice 组成一个 group，位于两个 stream-register boundary 之间。全部 52 个 slice
 都是同构 SRAM，不再有专用 accumulator group。
 
-每个 slice 是单端口：同一拍即使地址不同，也不能同时 Read 和 Write。
+每个 bank 是单端口：同一 bank 同拍只能执行一次 Read 或 Write；bank0 和 bank1
+可以同拍工作，包括访问相同的 bank-local row 编号。原双端口 `ReadWrite` 指令已移除。
 
 ### 指令
 
@@ -107,12 +109,14 @@ slice 组成一个 group，位于两个 stream-register boundary 之间。全部
 [39:27] chip
 [26]    hemisphere
 [25:20] slice
-[19:4]  slice 内 row offset
+[19]    bank
+[18:4]  bank 内 row offset
 [3:0]   软件 byte offset
 ```
 
-`MemInstruction::address` 只保存对应软件位 `[19:4]` 的 16-bit slice-local row，
-范围为 `0..65535`。测试的初始化/结果 API 另外指定 tile 和 lane byte。
+`MemInstruction::address` 只保存对应软件位 `[18:4]` 的 15-bit bank-local row，
+范围为 `0..32767`；queue 选择软件位 `[19]`。测试的初始化/结果 API 另外指定
+bank、tile 和 lane byte。
 
 ## 5. MXM
 

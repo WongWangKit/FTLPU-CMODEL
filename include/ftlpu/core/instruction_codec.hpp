@@ -20,12 +20,11 @@ namespace isa {
 
 // FTLPU hardware ISA encoding for the modeled slice.
 //
-// MEM instruction word (32b normally, 48b for ReadWrite):
+// MEM instruction word (32b):
 //   [2:0] opcode, [8:3] stream, [14:9] map stream,
-//   [30:15] slice-local SRAM row address.
-//   ReadWrite repurposes [14:9] as write stream and [46:31] as write address;
-//   [47] preserves the write stream for passive forwarding. Plain Write uses
-//   [31] for the same preserve behavior.
+//   [29:15] bank-local SRAM row address, [30] reserved,
+//   [31] preserves a Write input for passive forwarding. The distributed ICU
+//   queue identifies one of the slice's two single-port SRAM banks.
 // MXM control 49b:
 //   IW      [1:0] opcode, [2] weight buffer, [4:3] weight column,
 //           [5] column mode, [8:6] inner column, [9] Direct16 input mode.
@@ -170,30 +169,9 @@ inline EncodedMemInstruction encode_mem_instruction(const MemInstruction& instru
         kAddressMask,
         "MEM row address does not fit encoded instruction");
     if (instruction.preserve_stream
-        && instruction.opcode != MemOpcode::Write
-        && instruction.opcode != MemOpcode::ReadWrite)
+        && instruction.opcode != MemOpcode::Write)
         throw std::logic_error(
-            "only MEM Write or ReadWrite can preserve its input stream");
-
-    if (instruction.opcode == MemOpcode::ReadWrite) {
-        if (instruction.address == instruction.write_address) {
-            throw std::logic_error("MEM ReadWrite encodes identical read and write addresses");
-        }
-        detail::require_unsigned_fit(
-            static_cast<std::uint64_t>(instruction.write_stream),
-            kStreamMask,
-            "MEM write stream does not fit encoded instruction");
-        detail::require_unsigned_fit(
-            static_cast<std::uint64_t>(instruction.write_address),
-            kAddressMask,
-            "MEM write row address does not fit encoded instruction");
-        return static_cast<std::uint64_t>(instruction.opcode)
-            | (static_cast<std::uint64_t>(instruction.stream) << 3)
-            | (static_cast<std::uint64_t>(instruction.write_stream) << 9)
-            | (static_cast<std::uint64_t>(instruction.address) << 15)
-            | (static_cast<std::uint64_t>(instruction.write_address) << 31)
-            | (static_cast<std::uint64_t>(instruction.preserve_stream) << 47);
-    }
+            "only MEM Write can preserve its input stream");
     detail::require_unsigned_fit(
         static_cast<std::uint64_t>(instruction.map_stream),
         kStreamMask,
@@ -210,21 +188,9 @@ inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
 {
     const auto opcode = static_cast<MemOpcode>(detail::low_bits(word, 0, 0x7));
     const auto stream = static_cast<std::size_t>(detail::low_bits(word, 3, 0x3f));
-    const auto address = static_cast<std::size_t>(detail::low_bits(word, 15, 0xffff));
-    if (opcode == MemOpcode::ReadWrite) {
-        constexpr std::uint64_t kReadWriteMask = (std::uint64_t {1} << 48) - 1;
-        detail::require_reserved_zero(
-            word, kReadWriteMask, "encoded MEM ReadWrite instruction has non-zero reserved bits");
-        const auto write_stream = static_cast<std::size_t>(detail::low_bits(word, 9, 0x3f));
-        const auto write_address = static_cast<std::size_t>(detail::low_bits(word, 31, 0xffff));
-        const bool preserve_stream = detail::low_bits(word, 47, 0x1) != 0;
-        return preserve_stream
-            ? MemInstruction::ReadWriteTap(
-                  address, stream, write_address, write_stream)
-            : MemInstruction::ReadWrite(
-                  address, stream, write_address, write_stream);
-    }
-    constexpr std::uint64_t kUsedMask = 0xffffffffull;
+    const auto address = static_cast<std::size_t>(
+        detail::low_bits(word, 15, hw::kSramDepthWords - 1));
+    constexpr std::uint64_t kUsedMask = 0xbfffffffull;
     detail::require_reserved_zero(word, kUsedMask, "encoded MEM instruction has non-zero reserved bits");
     const auto map_stream = static_cast<std::size_t>(detail::low_bits(word, 9, 0x3f));
     const bool preserve_stream = detail::low_bits(word, 31, 0x1) != 0;
@@ -238,8 +204,6 @@ inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
         return preserve_stream
             ? MemInstruction::WriteTap(address, stream)
             : MemInstruction::Write(address, stream);
-    case MemOpcode::ReadWrite:
-        break;
     case MemOpcode::Gather:
         return MemInstruction::Gather(stream, map_stream);
     case MemOpcode::Scatter:
@@ -575,6 +539,10 @@ inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instru
     constexpr std::size_t kLaneMapOffset = kDstOffset + kMaxStreams * 6;
     constexpr std::size_t kPermuteMapOffset =
         kLaneMapOffset + hw::kLanesPerTile * 4;
+    constexpr std::size_t kOutputRowOffset =
+        kPermuteMapOffset + SxmInstruction::kTotalLanes * 5;
+    constexpr std::size_t kInputRowOffset = kOutputRowOffset + 4;
+    constexpr std::size_t kOutputTileOffset = kInputRowOffset + 4;
 
     detail::require_unsigned_fit(
         static_cast<std::size_t>(instruction.opcode), 0x3, "SXM opcode does not fit");
@@ -626,6 +594,24 @@ inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instru
             encoded.words, kPermuteMapOffset + lane * 5, 5,
             static_cast<std::uint32_t>(instruction.permute_map[lane]));
     }
+    const auto output_row = instruction.output_row == SxmInstruction::kAllOutputRows
+        ? hw::kLanesPerTile : instruction.output_row;
+    detail::require_unsigned_fit(
+        output_row, hw::kLanesPerTile, "SXM output row does not fit");
+    detail::write_bits(encoded.words, kOutputRowOffset, 4,
+        static_cast<std::uint32_t>(output_row));
+    const auto input_row = instruction.input_row == SxmInstruction::kAllInputRows
+        ? hw::kLanesPerTile : instruction.input_row;
+    detail::require_unsigned_fit(
+        input_row, hw::kLanesPerTile, "SXM input row does not fit");
+    detail::write_bits(encoded.words, kInputRowOffset, 4,
+        static_cast<std::uint32_t>(input_row));
+    const auto output_tile = instruction.output_tile == SxmInstruction::kAllOutputTiles
+        ? hw::kTileRows : instruction.output_tile;
+    detail::require_unsigned_fit(
+        output_tile, hw::kTileRows, "SXM output tile does not fit");
+    detail::write_bits(encoded.words, kOutputTileOffset, 3,
+        static_cast<std::uint32_t>(output_tile));
     return encoded;
 }
 
@@ -637,8 +623,12 @@ inline SxmInstruction decode_sxm_instruction(const EncodedSxmInstruction& encode
     constexpr std::size_t kLaneMapOffset = kDstOffset + kMaxStreams * 6;
     constexpr std::size_t kPermuteMapOffset =
         kLaneMapOffset + hw::kLanesPerTile * 4;
-    constexpr std::size_t kUsedBits =
+    constexpr std::size_t kOutputRowOffset =
         kPermuteMapOffset + SxmInstruction::kTotalLanes * 5;
+    constexpr std::size_t kInputRowOffset = kOutputRowOffset + 4;
+    constexpr std::size_t kOutputTileOffset = kInputRowOffset + 4;
+    constexpr std::size_t kUsedBits =
+        kOutputTileOffset + 3;
 
     for (std::size_t bit = kUsedBits; bit < encoded.words.size() * 32; ++bit) {
         if (detail::read_bits(encoded.words, bit, 1) != 0) {
@@ -680,6 +670,22 @@ inline SxmInstruction decode_sxm_instruction(const EncodedSxmInstruction& encode
         }
         instruction.permute_map[lane] = source;
     }
+    const auto output_row =
+        detail::read_bits(encoded.words, kOutputRowOffset, 4);
+    if (output_row > hw::kLanesPerTile)
+        throw std::logic_error("encoded SXM output row is invalid");
+    instruction.output_row = output_row == hw::kLanesPerTile
+        ? SxmInstruction::kAllOutputRows : output_row;
+    const auto input_row = detail::read_bits(encoded.words, kInputRowOffset, 4);
+    if (input_row > hw::kLanesPerTile)
+        throw std::logic_error("encoded SXM input row is invalid");
+    instruction.input_row = input_row == hw::kLanesPerTile
+        ? SxmInstruction::kAllInputRows : input_row;
+    const auto output_tile = detail::read_bits(encoded.words, kOutputTileOffset, 3);
+    if (output_tile > hw::kTileRows)
+        throw std::logic_error("encoded SXM output tile is invalid");
+    instruction.output_tile = output_tile == hw::kTileRows
+        ? SxmInstruction::kAllOutputTiles : output_tile;
     return instruction;
 }
 
@@ -858,7 +864,8 @@ inline IcuRepeat2D decode_icu_repeat_2d(const EncodedIcuRepeat2D& encoded)
     if (repeat.inner_count == 0 || repeat.outer_count == 0
         || repeat.inner_interval == 0 || repeat.outer_interval == 0
         || repeat.inner_count * repeat.outer_count <= 1
-        || repeat.induction_target > IcuInductionTarget::MxmWeightColumn)
+        || repeat.induction_target
+            > IcuInductionTarget::MxmAccumulatorAddress)
         throw std::logic_error("encoded ICU Repeat2D has invalid fields");
     return repeat;
 }

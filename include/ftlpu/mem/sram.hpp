@@ -12,10 +12,11 @@
 
 namespace ftlpu {
 
-// One SRAM owned by one MEM functional slice. It contains 65536 rows, and
+// One single-port SRAM bank owned by one MEM functional slice. It contains
+// 32768 rows, and
 // every row spans all configured tiles:
 //
-//   65536 rows * (4 tiles * 8 bytes) = 2 MiB.
+//   32768 rows * (4 tiles * 8 bytes) = 1 MiB.
 //
 // MEM instructions address rows.  As an instruction travels through a tile,
 // that tile reads or writes its own contiguous 8-byte portion of the row.
@@ -66,12 +67,12 @@ public:
     void set_active_rows(std::size_t rows);
     void clear();
 
-    Sram& slice(std::size_t mem_slice);
+    Sram& bank(std::size_t mem_slice, std::size_t bank);
 
-    const Sram& slice(std::size_t mem_slice) const;
+    const Sram& bank(std::size_t mem_slice, std::size_t bank) const;
 
 private:
-    std::vector<Sram> slices_{};
+    std::vector<std::array<Sram, hw::kMemBanksPerSlice>> slices_{};
 };
 
 } // namespace ftlpu

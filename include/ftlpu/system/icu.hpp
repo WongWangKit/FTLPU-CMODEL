@@ -27,7 +27,8 @@ namespace ftlpu {
 class InstructionControlUnit {
 public:
     static constexpr std::size_t kVxmQueues = VxmSlice::kAluQueues;
-    static constexpr std::size_t kMemQueuesPerHemisphere = hw::kSliceColumns;
+    static constexpr std::size_t kMemQueuesPerHemisphere =
+        hw::kMemSliceColumns * hw::kMemBanksPerSlice;
     static constexpr std::size_t kMxmQueuesPerHemisphere =
         hw::kMxmsPerHemisphere;
     static constexpr std::size_t kSxmQueuesPerHemisphere = 2;
@@ -35,9 +36,20 @@ public:
     static constexpr std::size_t kMxmQueues = hw::kMxmCount;
     static constexpr std::size_t kSxmQueues = hw::kHemispheres * kSxmQueuesPerHemisphere;
 
-    static constexpr std::size_t mem_queue(Hemisphere hemisphere, std::size_t column)
+    static constexpr std::size_t mem_queue(
+        Hemisphere hemisphere,
+        std::size_t mem_slice,
+        std::size_t bank)
     {
-        return hemisphere_index(hemisphere) * kMemQueuesPerHemisphere + column;
+        return hemisphere_index(hemisphere) * kMemQueuesPerHemisphere
+            + mem_slice * hw::kMemBanksPerSlice + bank;
+    }
+
+    static constexpr std::size_t mem_queue(
+        Hemisphere hemisphere,
+        std::size_t mem_slice)
+    {
+        return mem_queue(hemisphere, mem_slice, 0);
     }
 
     static constexpr std::size_t mxm_queue(Hemisphere hemisphere, std::size_t local_mxm)
@@ -148,7 +160,8 @@ public:
         case IcuLocationKind::Mem:
             mem_queues_[mem_queue(
                 static_cast<Hemisphere>(location.unit),
-                location.index)].append_control(instruction);
+                location.index,
+                location.bank)].append_control(instruction);
             return;
         case IcuLocationKind::Vxm:
             check_vxm_queue(location.index);
@@ -426,10 +439,13 @@ public:
         Hemisphere endpoint_hemisphere,
         std::size_t stream_index,
         Hemisphere consumer_hemisphere,
-        std::size_t consumer_mem_slice)
+        std::size_t consumer_mem_slice,
+        std::size_t consumer_mem_bank = 0,
+        bool notify_mem = true)
     {
         enqueue_c2c(endpoint_hemisphere, C2cInstruction::Receive(
-            stream_index, consumer_hemisphere, consumer_mem_slice));
+            stream_index, consumer_hemisphere, consumer_mem_slice,
+            consumer_mem_bank, notify_mem));
     }
 
     void enqueue_c2c_tx_nop(
@@ -468,7 +484,8 @@ public:
         case IcuLocationKind::Mem:
             mem_iq(mem_queue(
                 static_cast<Hemisphere>(location.unit),
-                location.index)).notify();
+                location.index,
+                location.bank)).notify();
             return;
         case IcuLocationKind::Vxm:
             vxm_iq(location.index).notify();
@@ -668,18 +685,21 @@ public:
             }
         }
 
-        for (std::size_t column = 0; column < kMemQueues; ++column) {
-            const auto instruction = mem_queues_[column].dispatch_next();
+        for (std::size_t queue = 0; queue < kMemQueues; ++queue) {
+            const auto instruction = mem_queues_[queue].dispatch_next();
             if (!instruction.has_value()) {
                 continue;
             }
-            const auto hemisphere = column / kMemQueuesPerHemisphere;
-            const auto local_column = column % kMemQueuesPerHemisphere;
-            mems[hemisphere].enqueue_instruction(local_column, *instruction);
+            const auto hemisphere = queue / kMemQueuesPerHemisphere;
+            const auto local_queue = queue % kMemQueuesPerHemisphere;
+            const auto mem_slice = local_queue / hw::kMemBanksPerSlice;
+            const auto bank = local_queue % hw::kMemBanksPerSlice;
+            mems[hemisphere].enqueue_instruction(mem_slice, bank, *instruction);
             any = true;
             if (os != nullptr) {
                 *os << "  ICU -> MEM." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
-                    << " q" << local_column << ' ' << describe_mem(*instruction) << '\n';
+                    << ".c" << mem_slice << ".b" << bank << ' '
+                    << describe_mem(*instruction) << '\n';
             }
         }
 
@@ -896,8 +916,6 @@ private:
             return "Read";
         case MemOpcode::Write:
             return "Write";
-        case MemOpcode::ReadWrite:
-            return "ReadWrite";
         case MemOpcode::Gather:
             return "Gather";
         case MemOpcode::Scatter:
@@ -912,10 +930,6 @@ private:
         os << mem_opcode_name(instruction.opcode)
            << " address=" << instruction.address
            << " stream=" << instruction.stream;
-        if (instruction.opcode == MemOpcode::ReadWrite) {
-            os << " write_address=" << instruction.write_address
-               << " write_stream=" << instruction.write_stream;
-        }
         if (instruction.opcode == MemOpcode::Gather || instruction.opcode == MemOpcode::Scatter) {
             os << " map_stream=" << instruction.map_stream;
         }

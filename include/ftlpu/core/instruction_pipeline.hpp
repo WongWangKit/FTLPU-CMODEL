@@ -64,8 +64,6 @@ private:
             return "Read";
         case MemOpcode::Write:
             return "Write";
-        case MemOpcode::ReadWrite:
-            return "ReadWrite";
         case MemOpcode::Gather:
             return "Gather";
         case MemOpcode::Scatter:
@@ -81,10 +79,6 @@ private:
         case MemOpcode::Read:
         case MemOpcode::Write:
             os << " a=" << instruction.address << " s=" << instruction.stream;
-            break;
-        case MemOpcode::ReadWrite:
-            os << " ra=" << instruction.address << " rs=" << instruction.stream
-               << " wa=" << instruction.write_address << " ws=" << instruction.write_stream;
             break;
         case MemOpcode::Gather:
         case MemOpcode::Scatter:

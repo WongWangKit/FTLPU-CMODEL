@@ -149,6 +149,7 @@ public:
 
         Kind kind{Kind::StoreStreamToSram};
         std::size_t mem_slice{0};
+        std::size_t bank{0};
         std::size_t tile{0};
         std::size_t sr_column{0};
         StreamId stream{StreamId::East(0)};
@@ -158,6 +159,7 @@ public:
 
     struct InstructionTrace {
         std::size_t mem_slice{0};
+        std::size_t bank{0};
         std::size_t tile{0};
         MemInstruction instruction{};
     };
@@ -179,12 +181,12 @@ public:
     void reset_execution_state()
     {
         cycle_ = 0;
-        for (auto& queue : instruction_queues_) {
-            queue.clear();
+        for (auto& slice : instruction_queues_) {
+            for (auto& queue : slice) queue.clear();
         }
         for (auto& slice : instruction_rows_) {
-            for (auto& slot : slice) {
-                slot.reset();
+            for (auto& bank : slice) {
+                for (auto& slot : bank) slot.reset();
             }
         }
         executed_mem_.clear();
@@ -208,8 +210,18 @@ public:
 
     void enqueue_instruction(std::size_t mem_slice, MemInstruction instruction)
     {
+        enqueue_instruction(mem_slice, 0, std::move(instruction));
+    }
+
+    void enqueue_instruction(
+        std::size_t mem_slice,
+        std::size_t bank,
+        MemInstruction instruction)
+    {
         check_mem_slice(mem_slice);
-        instruction_queues_[mem_slice].push_back(std::move(instruction));
+        check_bank(bank);
+        instruction_queues_[mem_slice][bank].push_back(
+            std::move(instruction));
     }
 
     void set_sram_byte(
@@ -218,8 +230,19 @@ public:
         std::size_t byte_offset,
         std::uint8_t value)
     {
+        set_sram_byte(mem_slice, 0, row, byte_offset, value);
+    }
+
+    void set_sram_byte(
+        std::size_t mem_slice,
+        std::size_t bank,
+        std::size_t row,
+        std::size_t byte_offset,
+        std::uint8_t value)
+    {
         check_mem_slice(mem_slice);
-        sram_.slice(mem_slice).set_byte(row, byte_offset, value);
+        check_bank(bank);
+        sram_.bank(mem_slice, bank).set_byte(row, byte_offset, value);
     }
 
     std::uint8_t sram_byte(
@@ -227,8 +250,18 @@ public:
         std::size_t row,
         std::size_t byte_offset) const
     {
+        return sram_byte(mem_slice, 0, row, byte_offset);
+    }
+
+    std::uint8_t sram_byte(
+        std::size_t mem_slice,
+        std::size_t bank,
+        std::size_t row,
+        std::size_t byte_offset) const
+    {
         check_mem_slice(mem_slice);
-        return sram_.slice(mem_slice).byte(row, byte_offset);
+        check_bank(bank);
+        return sram_.bank(mem_slice, bank).byte(row, byte_offset);
     }
 
     void set_sram_lane_byte(
@@ -238,9 +271,22 @@ public:
         std::size_t lane,
         std::uint8_t value)
     {
+        set_sram_lane_byte(mem_slice, 0, tile, row, lane, value);
+    }
+
+    void set_sram_lane_byte(
+        std::size_t mem_slice,
+        std::size_t bank,
+        std::size_t tile,
+        std::size_t row,
+        std::size_t lane,
+        std::uint8_t value)
+    {
         check_tile(tile);
         check_lane(lane);
-        set_sram_byte(mem_slice, row, tile * hw::kLanesPerTile + lane, value);
+        set_sram_byte(
+            mem_slice, bank, row,
+            tile * hw::kLanesPerTile + lane, value);
     }
 
     std::uint8_t sram_lane_byte(
@@ -249,16 +295,37 @@ public:
         std::size_t row,
         std::size_t lane) const
     {
+        return sram_lane_byte(mem_slice, 0, tile, row, lane);
+    }
+
+    std::uint8_t sram_lane_byte(
+        std::size_t mem_slice,
+        std::size_t bank,
+        std::size_t tile,
+        std::size_t row,
+        std::size_t lane) const
+    {
         check_tile(tile);
         check_lane(lane);
-        return sram_byte(mem_slice, row, tile * hw::kLanesPerTile + lane);
+        return sram_byte(
+            mem_slice, bank, row,
+            tile * hw::kLanesPerTile + lane);
     }
 
     const InstructionSlot& instruction_at(std::size_t mem_slice, std::size_t tile) const
     {
+        return instruction_at(mem_slice, 0, tile);
+    }
+
+    const InstructionSlot& instruction_at(
+        std::size_t mem_slice,
+        std::size_t bank,
+        std::size_t tile) const
+    {
         check_mem_slice(mem_slice);
+        check_bank(bank);
         check_tile(tile);
-        return instruction_rows_[mem_slice][tile];
+        return instruction_rows_[mem_slice][bank][tile];
     }
 
     const std::vector<MemTransfer>& executed_transfers() const noexcept
@@ -315,6 +382,14 @@ private:
         }
     }
 
+    static void check_bank(std::size_t bank)
+    {
+        if (bank >= hw::kMemBanksPerSlice) {
+            throw std::out_of_range(
+                "bank is outside the configured MEM slice");
+        }
+    }
+
     static void check_lane(std::size_t lane)
     {
         if (lane >= hw::kLanesPerTile) {
@@ -334,8 +409,6 @@ private:
             return "Read";
         case MemOpcode::Write:
             return "Write";
-        case MemOpcode::ReadWrite:
-            return "ReadWrite";
         case MemOpcode::Gather:
             return "Gather";
         case MemOpcode::Scatter:
@@ -352,11 +425,6 @@ private:
         case MemOpcode::Write:
             os << "(a=" << instruction.address << ",s=" << instruction.stream << ")";
             break;
-        case MemOpcode::ReadWrite:
-            os << "(ra=" << instruction.address << ",rs=" << instruction.stream
-               << ",wa=" << instruction.write_address << ",ws=" << instruction.write_stream
-               << ")";
-            break;
         case MemOpcode::Gather:
         case MemOpcode::Scatter:
             os << "(s=" << instruction.stream << ",map=" << instruction.map_stream << ")";
@@ -367,41 +435,45 @@ private:
     void dispatch_from_queues()
     {
         for (std::size_t mem_slice = 0; mem_slice < hw::kMemSliceColumns; ++mem_slice) {
-            if (instruction_rows_[mem_slice][0].has_value()
-                || instruction_queues_[mem_slice].empty()) {
-                continue;
+            for (std::size_t bank = 0; bank < hw::kMemBanksPerSlice; ++bank) {
+                if (instruction_rows_[mem_slice][bank][0].has_value()
+                    || instruction_queues_[mem_slice][bank].empty()) {
+                    continue;
+                }
+                instruction_rows_[mem_slice][bank][0] =
+                    instruction_queues_[mem_slice][bank].front();
+                instruction_queues_[mem_slice][bank].pop_front();
             }
-            instruction_rows_[mem_slice][0] = instruction_queues_[mem_slice].front();
-            instruction_queues_[mem_slice].pop_front();
         }
     }
 
     void execute_current_instructions(StreamRegisterFabric& fabric)
     {
         for (std::size_t mem_slice = 0; mem_slice < hw::kMemSliceColumns; ++mem_slice) {
-            for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-                const auto& instruction = instruction_rows_[mem_slice][tile];
-                if (!instruction.has_value()) {
-                    continue;
-                }
+            for (std::size_t bank = 0; bank < hw::kMemBanksPerSlice; ++bank) {
+                for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+                    const auto& instruction =
+                        instruction_rows_[mem_slice][bank][tile];
+                    if (!instruction.has_value()) continue;
 
-                if (capture_trace_) {
-                    executed_instructions_.push_back(
-                        InstructionTrace {mem_slice, tile, *instruction});
-                }
-                switch (instruction->opcode) {
-                case MemOpcode::Read:
-                    execute_read(fabric, mem_slice, tile, *instruction);
-                    break;
-                case MemOpcode::Write:
-                    execute_write(fabric, mem_slice, tile, *instruction);
-                    break;
-                case MemOpcode::ReadWrite:
-                    execute_read_write(fabric, mem_slice, tile, *instruction);
-                    break;
-                case MemOpcode::Gather:
-                case MemOpcode::Scatter:
-                    throw std::logic_error("Gather/Scatter require a separate address-stream datapath model");
+                    if (capture_trace_) {
+                        executed_instructions_.push_back(
+                            InstructionTrace {
+                                mem_slice, bank, tile, *instruction});
+                    }
+                    switch (instruction->opcode) {
+                    case MemOpcode::Read:
+                        execute_read(
+                            fabric, mem_slice, bank, tile, *instruction);
+                        break;
+                    case MemOpcode::Write:
+                        execute_write(
+                            fabric, mem_slice, bank, tile, *instruction);
+                        break;
+                    case MemOpcode::Gather:
+                    case MemOpcode::Scatter:
+                        throw std::logic_error("Gather/Scatter require a separate address-stream datapath model");
+                    }
                 }
             }
         }
@@ -410,13 +482,15 @@ private:
     void execute_read(
         StreamRegisterFabric& fabric,
         std::size_t mem_slice,
+        std::size_t bank,
         std::size_t tile,
         const MemInstruction& instruction)
     {
         const auto stream = instruction.stream_id();
         const auto sr_column = ports_.output_column(mem_slice, stream.direction());
         const auto physical_address = instruction.address;
-        const auto bytes = sram_.slice(mem_slice).read_segment(tile, physical_address);
+        const auto bytes =
+            sram_.bank(mem_slice, bank).read_segment(tile, physical_address);
         const auto vector_tag = static_cast<std::uint64_t>(cycle_) * hw::kTileRows + tile;
 
         StreamOutputPort output(
@@ -434,6 +508,7 @@ private:
             executed_mem_.push_back(MemTransfer {
                 MemTransfer::Kind::LoadSramToStream,
                 mem_slice,
+                bank,
                 tile,
                 sr_column,
                 stream,
@@ -446,6 +521,7 @@ private:
     void execute_write(
         StreamRegisterFabric& fabric,
         std::size_t mem_slice,
+        std::size_t bank,
         std::size_t tile,
         const MemInstruction& instruction)
     {
@@ -465,15 +541,22 @@ private:
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                 bytes[lane] = segment[lane].data;
             }
+        } else if (instruction.preserve_stream) {
+            // A tap is a conditional observation of an existing stream.  The
+            // ICU command traverses every tile, but only the tile carrying the
+            // selected stream may update SRAM.
+            return;
         } else if (missing_stream_policy_ == MissingStreamPolicy::Error) {
             throw std::logic_error("MEM Write reached an invalid stream segment");
         }
 
-        sram_.slice(mem_slice).write_segment(tile, instruction.address, bytes);
+        sram_.bank(mem_slice, bank).write_segment(
+            tile, instruction.address, bytes);
         if (capture_trace_) {
             executed_mem_.push_back(MemTransfer {
                 MemTransfer::Kind::StoreStreamToSram,
                 mem_slice,
+                bank,
                 tile,
                 sr_column,
                 stream,
@@ -483,40 +566,15 @@ private:
         }
     }
 
-    void execute_read_write(
-        StreamRegisterFabric& fabric,
-        std::size_t mem_slice,
-        std::size_t tile,
-        const MemInstruction& instruction)
-    {
-        if (instruction.address == instruction.write_address) {
-            throw std::logic_error("MEM ReadWrite requires distinct read and write addresses");
-        }
-        execute_read(
-            fabric,
-            mem_slice,
-            tile,
-            MemInstruction::Read(instruction.address, instruction.stream_id()));
-        execute_write(
-            fabric,
-            mem_slice,
-            tile,
-            instruction.preserve_stream
-                ? MemInstruction::WriteTap(
-                      instruction.write_address,
-                      instruction.write_stream_id())
-                : MemInstruction::Write(
-                      instruction.write_address,
-                      instruction.write_stream_id()));
-    }
-
     void advance_instructions()
     {
         for (auto& mem_slice : instruction_rows_) {
-            for (std::size_t tile = hw::kTileRows - 1; tile > 0; --tile) {
-                mem_slice[tile] = mem_slice[tile - 1];
+            for (auto& bank : mem_slice) {
+                for (std::size_t tile = hw::kTileRows - 1; tile > 0; --tile) {
+                    bank[tile] = bank[tile - 1];
+                }
+                bank[0].reset();
             }
-            mem_slice[0].reset();
         }
     }
 
@@ -551,7 +609,8 @@ private:
             if (log_tile.has_value() && trace.tile != *log_tile) {
                 continue;
             }
-            os << "    c" << trace.mem_slice << ".t" << trace.tile << '=';
+            os << "    c" << trace.mem_slice << ".b" << trace.bank
+               << ".t" << trace.tile << '=';
             print_instruction(os, trace.instruction);
             os << '\n';
         }
@@ -576,7 +635,8 @@ private:
             if (log_tile.has_value() && transfer.tile != *log_tile) {
                 continue;
             }
-            os << "    c" << transfer.mem_slice << ".t" << transfer.tile << ' '
+            os << "    c" << transfer.mem_slice << ".b" << transfer.bank
+               << ".t" << transfer.tile << ' '
                << (transfer.kind == MemTransfer::Kind::StoreStreamToSram
                        ? "store"
                        : "load")
@@ -590,9 +650,14 @@ private:
     MemStreamPortMap ports_;
     MissingStreamPolicy missing_stream_policy_{MissingStreamPolicy::Error};
     SramArray sram_{};
-    std::array<std::deque<MemInstruction>, hw::kMemSliceColumns> instruction_queues_{};
-    std::array<std::array<InstructionSlot, hw::kTileRows>, hw::kMemSliceColumns>
-        instruction_rows_{};
+    std::array<
+        std::array<std::deque<MemInstruction>, hw::kMemBanksPerSlice>,
+        hw::kMemSliceColumns> instruction_queues_{};
+    std::array<
+        std::array<
+            std::array<InstructionSlot, hw::kTileRows>,
+            hw::kMemBanksPerSlice>,
+        hw::kMemSliceColumns> instruction_rows_{};
     std::vector<MemTransfer> executed_mem_{};
     std::vector<InstructionTrace> executed_instructions_{};
     std::size_t cycle_{0};

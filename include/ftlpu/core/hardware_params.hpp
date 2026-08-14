@@ -18,6 +18,7 @@ constexpr std::size_t kStreamRegisterBytes = 1;
 
 // MEM/SRAM geometry for one modeled hemisphere.
 constexpr std::size_t kMemSliceColumns = 52;
+constexpr std::size_t kMemBanksPerSlice = 2;
 constexpr std::size_t kMemSlicesPerGroup = 4;
 constexpr std::size_t kMemGroups = kMemSliceColumns / kMemSlicesPerGroup;
 constexpr std::size_t kMemBoundaryStreamRegisterColumns = kMemGroups + 1;
@@ -119,14 +120,15 @@ constexpr std::size_t kIcuC2cIqDepth = 16;
 constexpr std::size_t kHemispheres = 2;
 constexpr std::size_t kMxmsPerHemisphere = 2;
 constexpr std::size_t kMxmCount = kHemispheres * kMxmsPerHemisphere;
-constexpr std::size_t kModeledSramBlocks = kMemSliceColumns;
+constexpr std::size_t kModeledSramBlocks =
+    kMemSliceColumns * kMemBanksPerSlice;
 constexpr std::size_t kPublicSramBlocks =
     kHemispheres * kModeledSramBlocks;
-// One vector-wide SRAM is owned by each MEM slice.
-constexpr std::size_t kSramBlocksPerSlice = 1;
+// Every MEM slice owns two independent single-port vector-wide SRAM banks.
+constexpr std::size_t kSramBlocksPerSlice = kMemBanksPerSlice;
 constexpr std::size_t kSramBlocks = kModeledSramBlocks;
 constexpr std::size_t kSramRowBytes = kPhysicalVectorBytes;
-constexpr std::size_t kSramDepthRows = 65536;
+constexpr std::size_t kSramDepthRows = 32768;
 // Compatibility alias for code that historically called a vector row a word.
 constexpr std::size_t kSramDepthWords = kSramDepthRows;
 constexpr std::size_t kSramBlockBytes = kSramRowBytes * kSramDepthRows;
@@ -140,10 +142,11 @@ static_assert(kSystemStreamRegisterColumns == 16);
 static_assert(kMemEastBoundaryStreamRegisterColumn == 13);
 static_assert(kC2cSxmBoundaryStreamRegisterColumn == 14);
 static_assert(kMxmBoundaryStreamRegisterColumn == 15);
-static_assert(kModeledSramBlocks == kMemSliceColumns);
-static_assert(kPublicSramBlocks == 104);
-static_assert(kSramBlocks == 52);
-static_assert(kSramBlocksPerSlice == 1);
+static_assert(kModeledSramBlocks
+    == kMemSliceColumns * kMemBanksPerSlice);
+static_assert(kPublicSramBlocks == 208);
+static_assert(kSramBlocks == 104);
+static_assert(kSramBlocksPerSlice == 2);
 static_assert(kEastStreams + kWestStreams == kStreams);
 static_assert(kLanesPerTile == 8);
 static_assert(kMemReadBytesPerCycle == 8);
@@ -172,7 +175,7 @@ static_assert(kIcuMemImemDepth >= kIcuMemIqDepth);
 static_assert(kIcuMxmImemDepth >= kIcuMxmIqDepth);
 static_assert(kIcuSxmImemDepth >= kIcuSxmIqDepth);
 static_assert(kIcuC2cImemDepth >= kIcuC2cIqDepth);
-static_assert(kSramBlockBytes == 2 * 1024 * 1024);
+static_assert(kSramBlockBytes == 1 * 1024 * 1024);
 static_assert(kTotalSramBytes == 104 * 1024 * 1024);
 static_assert(kPublicTotalSramBytes == 208 * 1024 * 1024);
 

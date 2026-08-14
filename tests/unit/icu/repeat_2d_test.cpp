@@ -68,6 +68,24 @@ try {
     require(columns == std::vector<std::size_t> {0, 1, 2, 3, 4, 5, 6, 7},
         "ICU Repeat2D applied incorrect MXM column induction");
 
+    MxmQueue compute;
+    compute.push_instruction(MxmControlInstruction::Compute(
+        0, 0, 0, 4, 1, MxmAccumulatorDestination::Sram,
+        MxmDataFormat::BFloat16, MxmComputeMode::Block8, false));
+    compute.push_repeat_2d(IcuRepeat2D {
+        4, 1, 0,
+        3, 8, 4,
+        IcuInductionTarget::MxmAccumulatorAddress,
+    });
+    std::vector<std::size_t> accumulator_addresses;
+    for (std::size_t cycle = 0; cycle <= 20; ++cycle)
+        if (const auto instruction = compute.tick())
+            accumulator_addresses.push_back(
+                instruction->accumulator_address);
+    require(accumulator_addresses == std::vector<std::size_t> {
+                4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12},
+        "ICU Repeat2D applied incorrect MXM accumulator induction");
+
     std::cout << "icu_repeat_2d_test passed\n";
     return 0;
 } catch (const std::exception& error) {

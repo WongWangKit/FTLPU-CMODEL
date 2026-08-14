@@ -23,6 +23,7 @@ struct IcuLocation {
     IcuLocationKind kind{IcuLocationKind::Mem};
     std::size_t unit{0};
     std::size_t index{0};
+    std::size_t bank{0};
 
     static constexpr IcuLocation Mem(std::size_t slice) noexcept
     {
@@ -32,7 +33,19 @@ struct IcuLocation {
     static constexpr IcuLocation Mem(
         Hemisphere hemisphere, std::size_t slice) noexcept
     {
-        return {IcuLocationKind::Mem, hemisphere_index(hemisphere), slice};
+        return Mem(hemisphere, slice, 0);
+    }
+
+    static constexpr IcuLocation Mem(
+        Hemisphere hemisphere,
+        std::size_t slice,
+        std::size_t bank) noexcept
+    {
+        return {
+            IcuLocationKind::Mem,
+            hemisphere_index(hemisphere),
+            slice,
+            bank};
     }
 
     static constexpr IcuLocation Vxm(std::size_t alu) noexcept

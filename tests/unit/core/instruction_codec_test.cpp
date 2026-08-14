@@ -14,8 +14,6 @@ bool same_mem(const ftlpu::MemInstruction& lhs, const ftlpu::MemInstruction& rhs
         && lhs.address == rhs.address
         && lhs.stream == rhs.stream
         && lhs.map_stream == rhs.map_stream
-        && lhs.write_address == rhs.write_address
-        && lhs.write_stream == rhs.write_stream
         && lhs.preserve_stream == rhs.preserve_stream;
 }
 
@@ -84,8 +82,6 @@ bool verify_mem_codec()
         ftlpu::MemInstruction::Read(4096, 45),
         ftlpu::MemInstruction::Write(ftlpu::hw::kSramDepthRows - 1, 63),
         ftlpu::MemInstruction::WriteTap(123, 34),
-        ftlpu::MemInstruction::ReadWriteTap(22, 3, 44, 35),
-        ftlpu::MemInstruction::ReadWrite(4095, 7, 4096, 55),
         ftlpu::MemInstruction::Gather(7, 55),
         ftlpu::MemInstruction::Scatter(36, 12),
     };
@@ -103,7 +99,7 @@ bool verify_mem_codec()
             ftlpu::isa::encode_mem_instruction(
                 ftlpu::MemInstruction::Read(ftlpu::hw::kSramDepthRows, 0));
         },
-        "MEM codec should reject row addresses outside the 65536-row SRAM")) {
+        "MEM codec should reject row addresses outside the 32768-row bank")) {
         return false;
     }
     return true;
@@ -419,15 +415,21 @@ bool verify_sxm_codec()
     for (std::size_t lane = 0; lane < map.size(); ++lane) {
         map[lane] = map.size() - lane - 1;
     }
-    const auto instruction =
+    auto instruction =
         ftlpu::SxmInstruction::Permute(std::move(src), std::move(dst), map);
+    instruction.output_row = 5;
+    instruction.input_row = 3;
+    instruction.output_tile = 2;
     const auto decoded =
         ftlpu::isa::decode_sxm_instruction(ftlpu::isa::encode_sxm_instruction(instruction));
     return require(
         decoded.opcode == instruction.opcode
             && decoded.src_streams == instruction.src_streams
             && decoded.dst_streams == instruction.dst_streams
-            && decoded.permute_map == instruction.permute_map,
+            && decoded.permute_map == instruction.permute_map
+            && decoded.output_row == instruction.output_row
+            && decoded.input_row == instruction.input_row
+            && decoded.output_tile == instruction.output_tile,
         "SXM instruction codec round-trip failed");
 }
 

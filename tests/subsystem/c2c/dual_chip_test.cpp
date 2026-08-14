@@ -1,3 +1,4 @@
+#include "ftlpu/c2c/slice.hpp"
 #include "ftlpu/icu/instruction.hpp"
 #include "ftlpu/icu/location.hpp"
 #include "ftlpu/system/dual_chip_c2c_system.hpp"
@@ -5,8 +6,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -16,6 +19,146 @@ void require(bool condition, const char* message)
 {
     if (!condition) {
         throw std::runtime_error(message);
+    }
+}
+
+C2cVector make_vector(std::uint8_t base, std::uint64_t tag)
+{
+    auto vector = C2cVector {};
+    vector.vector_tag = tag;
+    for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+            vector.payload[tile][lane] = static_cast<std::uint8_t>(
+                base + tile * hw::kLanesPerTile + lane);
+        }
+    }
+    return vector;
+}
+
+class VectorTransport {
+public:
+    bool can_send() const noexcept { return true; }
+    void send(C2cVector vector) { sent.push_back(std::move(vector)); }
+    bool receive_ready() const noexcept { return !received.empty(); }
+    C2cVector pop_received()
+    {
+        auto vector = std::move(received.front());
+        received.pop_front();
+        return vector;
+    }
+
+    std::deque<C2cVector> received{};
+    std::vector<C2cVector> sent{};
+};
+
+void test_rx_diagonal_pipeline_accepts_one_vector_per_cycle()
+{
+    constexpr auto kColumn = 0U;
+    constexpr auto kStream = 5U;
+    constexpr auto kVectorCount = std::size_t {4};
+    auto fabric = StreamRegisterFabric(1);
+    auto rx = C2cRxSlice(
+        C2cStreamPortMap::OutputEndpoint {
+            kColumn, StreamDirection::West});
+    auto transport = VectorTransport {};
+
+    for (std::size_t vector = 0; vector < kVectorCount; ++vector) {
+        transport.received.push_back(make_vector(
+            static_cast<std::uint8_t>(vector * 0x20), vector));
+        rx.issue(C2cInstruction::Receive(
+            kStream, Hemisphere::East, 0));
+    }
+
+    for (std::size_t cycle = 0; cycle < kVectorCount; ++cycle) {
+        fabric.begin_cycle();
+        rx.evaluate(fabric, transport);
+        fabric.commit_cycle();
+
+        require(
+            transport.received.size() == kVectorCount - cycle - 1,
+            "C2C RX did not accept one complete 32-byte vector per cycle");
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+            const auto valid = tile <= cycle;
+            require(
+                fabric.segment_valid(
+                    kColumn, tile, StreamId::West(kStream)) == valid,
+                "C2C RX diagonal pipeline produced an invalid tile pattern");
+            if (!valid) continue;
+
+            const auto source_vector = cycle - tile;
+            const auto segment = fabric.segment(
+                kColumn, tile, StreamId::West(kStream));
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                const auto expected = static_cast<std::uint8_t>(
+                    source_vector * 0x20
+                    + tile * hw::kLanesPerTile + lane);
+                require(
+                    segment[lane].data == expected
+                        && segment[lane].vector_tag == source_vector,
+                    "C2C RX diagonal pipeline selected the wrong vector");
+            }
+        }
+    }
+}
+
+void test_tx_diagonal_pipeline_emits_one_vector_per_cycle()
+{
+    constexpr auto kColumn = 0U;
+    constexpr auto kStream = 7U;
+    constexpr auto kVectorCount = std::size_t {4};
+    auto fabric = StreamRegisterFabric(1);
+    auto tx = C2cTxSlice(
+        C2cStreamPortMap::InputEndpoint {
+            kColumn, StreamDirection::East});
+    auto transport = VectorTransport {};
+
+    for (std::size_t vector = 0; vector < kVectorCount; ++vector) {
+        tx.issue(C2cInstruction::Send(kStream));
+    }
+
+    for (std::size_t cycle = 0;
+         cycle < kVectorCount + hw::kTileRows - 1;
+         ++cycle) {
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+            if (cycle < tile || cycle - tile >= kVectorCount) continue;
+            const auto source_vector = cycle - tile;
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                fabric.initialize_cell(
+                    kColumn,
+                    tile,
+                    lane,
+                    StreamId::East(kStream),
+                    StreamCell::Valid(
+                        static_cast<std::uint8_t>(
+                            source_vector * 0x20
+                            + tile * hw::kLanesPerTile + lane),
+                        lane + 1 == hw::kLanesPerTile,
+                        source_vector));
+            }
+        }
+
+        fabric.begin_cycle();
+        tx.evaluate(fabric, transport);
+        fabric.commit_cycle();
+
+        const auto expected_completed = cycle + 1 < hw::kTileRows
+            ? 0
+            : std::min(
+                kVectorCount,
+                cycle - hw::kTileRows + 2);
+        require(
+            transport.sent.size() == expected_completed,
+            "C2C TX did not emit one complete 32-byte vector per cycle");
+    }
+
+    require(tx.idle(), "C2C TX diagonal pipeline did not drain");
+    for (std::size_t vector = 0; vector < kVectorCount; ++vector) {
+        const auto expected = make_vector(
+            static_cast<std::uint8_t>(vector * 0x20), vector);
+        require(
+            transport.sent[vector].payload == expected.payload
+                && transport.sent[vector].vector_tag == vector,
+            "C2C TX diagonal pipeline assembled the wrong vector");
     }
 }
 
@@ -232,6 +375,8 @@ void test_dual_hemisphere_endpoints_transfer_in_parallel()
 
 int main()
 {
+    test_rx_diagonal_pipeline_accepts_one_vector_per_cycle();
+    test_tx_diagonal_pipeline_emits_one_vector_per_cycle();
     test_link_credit_and_serialization();
     test_dual_chip_rx_notifies_mem_and_writes_sram();
     test_dual_hemisphere_endpoints_transfer_in_parallel();

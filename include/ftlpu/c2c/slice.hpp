@@ -1,8 +1,11 @@
 #pragma once
 
 #include "ftlpu/c2c/instruction.hpp"
+#include "ftlpu/c2c/types.hpp"
 #include "ftlpu/core/stream_port.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -63,8 +66,8 @@ public:
     void reset()
     {
         queue_.clear();
-        buffer_ = {};
-        next_tile_ = 0;
+        pipeline_ = {};
+        completed_.clear();
     }
 
     void issue(C2cInstruction instruction)
@@ -75,63 +78,97 @@ public:
         queue_.push_back(std::move(instruction));
     }
 
-    bool idle() const noexcept { return queue_.empty(); }
+    bool idle() const noexcept
+    {
+        return queue_.empty() && completed_.empty()
+            && std::none_of(
+                pipeline_.begin(), pipeline_.end(),
+                [](const auto& stage) { return stage.has_value(); });
+    }
     std::size_t queued_instruction_count() const noexcept { return queue_.size(); }
-    std::size_t gathered_tile_count() const noexcept { return next_tile_; }
+    std::size_t gathered_tile_count() const noexcept
+    {
+        return static_cast<std::size_t>(std::count_if(
+            pipeline_.begin(), pipeline_.end(),
+            [](const auto& stage) { return stage.has_value(); }));
+    }
 
     template <typename Transport>
     void evaluate(
         StreamRegisterFabric& fabric,
         Transport& external)
     {
-        if (queue_.empty()) {
-            return;
+        if (!completed_.empty() && external.can_send()) {
+            external.send(std::move(completed_.front()));
+            completed_.pop_front();
         }
 
-        if (next_tile_ == hw::kTileRows) {
-            try_send(external);
-            return;
+        if (!queue_.empty() && !pipeline_[0].has_value()) {
+            pipeline_[0] = ActiveSend {std::move(queue_.front()), {}};
+            queue_.pop_front();
         }
 
-        const auto& instruction = queue_.front();
         auto input = StreamInputPort(
             fabric, endpoint_.column, endpoint_.direction, name_);
-        if (!input.segment_valid(next_tile_, instruction.stream_index)) {
-            return;
+        auto advance = std::array<bool, hw::kTileRows> {};
+        for (std::size_t tile = hw::kTileRows; tile-- > 0;) {
+            auto& stage = pipeline_[tile];
+            if (!stage.has_value()) {
+                continue;
+            }
+            const auto downstream_ready = tile + 1 == hw::kTileRows
+                ? completed_.empty()
+                : !pipeline_[tile + 1].has_value()
+                    || advance[tile + 1];
+            advance[tile] = downstream_ready
+                && input.segment_valid(
+                    tile, stage->instruction.stream_index);
         }
 
-        const auto segment =
-            input.consume_segment(next_tile_, instruction.stream_index);
-        if (next_tile_ == 0) {
-            buffer_.vector_tag = segment.front().vector_tag;
+        auto next_pipeline =
+            std::array<std::optional<ActiveSend>, hw::kTileRows> {};
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+            auto& stage = pipeline_[tile];
+            if (!stage.has_value()) {
+                continue;
+            }
+            if (!advance[tile]) {
+                next_pipeline[tile] = std::move(stage);
+                continue;
+            }
+            const auto segment = input.consume_segment(
+                tile, stage->instruction.stream_index);
+            if (tile == 0) {
+                stage->vector.vector_tag = segment.front().vector_tag;
+            }
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                stage->vector.payload[tile][lane] = segment[lane].data;
+            }
+            if (tile + 1 == hw::kTileRows) {
+                completed_.push_back(std::move(stage->vector));
+            } else {
+                next_pipeline[tile + 1] = std::move(stage);
+            }
         }
-        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            buffer_.payload[next_tile_][lane] = segment[lane].data;
-        }
-        ++next_tile_;
-        if (next_tile_ == hw::kTileRows) {
-            try_send(external);
+        pipeline_ = std::move(next_pipeline);
+
+        if (!completed_.empty() && external.can_send()) {
+            external.send(std::move(completed_.front()));
+            completed_.pop_front();
         }
     }
 
 private:
-    template <typename Transport>
-    void try_send(Transport& external)
-    {
-        if (!external.can_send()) {
-            return;
-        }
-        external.send(std::move(buffer_));
-        queue_.pop_front();
-        buffer_ = {};
-        next_tile_ = 0;
-    }
+    struct ActiveSend {
+        C2cInstruction instruction{};
+        C2cVector vector{};
+    };
 
     C2cStreamPortMap::InputEndpoint endpoint_{};
     std::string name_{};
     std::deque<C2cInstruction> queue_{};
-    C2cVector buffer_{};
-    std::size_t next_tile_{0};
+    std::array<std::optional<ActiveSend>, hw::kTileRows> pipeline_{};
+    std::deque<C2cVector> completed_{};
 };
 
 class C2cRxSlice {
@@ -147,8 +184,7 @@ public:
     void reset()
     {
         queue_.clear();
-        vector_.reset();
-        next_tile_ = 0;
+        pipeline_ = {};
     }
 
     void issue(C2cInstruction instruction)
@@ -159,57 +195,71 @@ public:
         queue_.push_back(std::move(instruction));
     }
 
-    bool idle() const noexcept { return queue_.empty() && !vector_.has_value(); }
+    bool idle() const noexcept
+    {
+        return queue_.empty()
+            && std::none_of(
+                pipeline_.begin(), pipeline_.end(),
+                [](const auto& stage) { return stage.has_value(); });
+    }
     std::size_t queued_instruction_count() const noexcept { return queue_.size(); }
-    std::size_t replayed_tile_count() const noexcept { return next_tile_; }
+    std::size_t replayed_tile_count() const noexcept
+    {
+        return static_cast<std::size_t>(std::count_if(
+            pipeline_.begin(), pipeline_.end(),
+            [](const auto& stage) { return stage.has_value(); }));
+    }
 
     template <typename Transport>
     std::optional<C2cReceiveNotification> evaluate(
         StreamRegisterFabric& fabric,
         Transport& external)
     {
-        if (queue_.empty()) {
-            return std::nullopt;
+        for (std::size_t tile = hw::kTileRows - 1; tile > 0; --tile) {
+            pipeline_[tile] = std::move(pipeline_[tile - 1]);
         }
+        pipeline_[0].reset();
 
         std::optional<C2cReceiveNotification> notification;
-        if (!vector_.has_value()) {
-            if (!external.receive_ready()) {
-                return std::nullopt;
-            }
-            vector_ = external.pop_received();
-            next_tile_ = 0;
+        if (!queue_.empty() && external.receive_ready()) {
+            auto vector = external.pop_received();
             notification = C2cReceiveNotification {
                 queue_.front().consumer,
                 queue_.front().stream_index,
-                vector_->vector_tag,
+                vector.vector_tag,
             };
+            pipeline_[0] = ActiveReceive {
+                std::move(queue_.front()), std::move(vector)};
+            queue_.pop_front();
         }
 
-        const auto& instruction = queue_.front();
         auto output = StreamOutputPort(
             fabric, endpoint_.column, endpoint_.direction, name_);
-        output.write_payload_segment(
-            next_tile_,
-            instruction.stream_index,
-            vector_->payload[next_tile_],
-            vector_->vector_tag);
-
-        ++next_tile_;
-        if (next_tile_ == hw::kTileRows) {
-            vector_.reset();
-            queue_.pop_front();
-            next_tile_ = 0;
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+            const auto& stage = pipeline_[tile];
+            if (!stage.has_value()) {
+                continue;
+            }
+            output.write_payload_segment(
+                tile,
+                stage->instruction.stream_index,
+                stage->vector.payload[tile],
+                stage->vector.vector_tag);
         }
+        pipeline_.back().reset();
         return notification;
     }
 
 private:
+    struct ActiveReceive {
+        C2cInstruction instruction{};
+        C2cVector vector{};
+    };
+
     C2cStreamPortMap::OutputEndpoint endpoint_{};
     std::string name_{};
     std::deque<C2cInstruction> queue_{};
-    std::optional<C2cVector> vector_{};
-    std::size_t next_tile_{0};
+    std::array<std::optional<ActiveReceive>, hw::kTileRows> pipeline_{};
 };
 
 class C2cEndpoint {

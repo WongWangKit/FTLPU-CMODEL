@@ -183,6 +183,19 @@ public:
         mems_[hemisphere_index(hemisphere)].set_sram_lane_byte(column, tile, row, lane, value);
     }
 
+    void initialize_mem_sram_lane_byte(
+        Hemisphere hemisphere,
+        std::size_t column,
+        std::size_t bank,
+        std::size_t tile,
+        std::size_t row,
+        std::size_t lane,
+        std::uint8_t value)
+    {
+        mems_[hemisphere_index(hemisphere)].set_sram_lane_byte(
+            column, bank, tile, row, lane, value);
+    }
+
     std::uint8_t read_mem_sram_lane_byte(
         std::size_t column,
         std::size_t tile,
@@ -200,6 +213,18 @@ public:
         std::size_t lane) const
     {
         return mems_[hemisphere_index(hemisphere)].sram_lane_byte(column, tile, row, lane);
+    }
+
+    std::uint8_t read_mem_sram_lane_byte(
+        Hemisphere hemisphere,
+        std::size_t column,
+        std::size_t bank,
+        std::size_t tile,
+        std::size_t row,
+        std::size_t lane) const
+    {
+        return mems_[hemisphere_index(hemisphere)].sram_lane_byte(
+            column, bank, tile, row, lane);
     }
 
     InstructionControlUnit& icu()
@@ -454,10 +479,12 @@ private:
                 *c2c_outbound_links_[hemisphere],
                 *c2c_inbound_links_[hemisphere]);
         }
-        if (notification.has_value()) {
+        if (notification.has_value()
+            && notification->consumer.notify_mem) {
             icu_.notify(IcuLocation::Mem(
                 notification->consumer.hemisphere,
-                notification->consumer.mem_slice));
+                notification->consumer.mem_slice,
+                notification->consumer.mem_bank));
         }
     }
 

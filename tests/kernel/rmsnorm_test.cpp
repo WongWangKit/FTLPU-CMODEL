@@ -41,10 +41,10 @@ constexpr std::size_t kSquareSumAddress = 256;
 constexpr std::size_t kInverseRmsAddress = 320;
 constexpr std::size_t kOutputAddress = 512;
 
-std::size_t mem_queue(std::size_t slice)
+std::size_t mem_queue(std::size_t slice, std::size_t bank = 0)
 {
     return ftlpu::InstructionControlUnit::mem_queue(
-        ftlpu::Hemisphere::East, slice);
+        ftlpu::Hemisphere::East, slice, bank);
 }
 
 std::size_t mem_to_vxm_latency(std::size_t slice)
@@ -92,6 +92,27 @@ public:
         }
         mem_[mem_queue(slice)] = cycle + count;
         end_cycle_ = std::max(end_cycle_, cycle + count);
+    }
+
+    void mem_repeat_at_bank(
+        std::size_t slice, std::size_t bank, std::size_t cycle,
+        ftlpu::MemInstruction instruction, std::size_t count,
+        std::int64_t address_stride)
+    {
+        if (count == 0) return;
+        auto& cursor = mem_[mem_queue(slice, bank)];
+        if (cycle < cursor) {
+            throw std::logic_error("RMSNorm schedule overlaps MEM bank");
+        }
+        icu_.enqueue_mem_nop(mem_queue(slice, bank), cycle - cursor);
+        icu_.enqueue_mem(
+            mem_queue(slice, bank), std::move(instruction));
+        if (count > 1) {
+            icu_.enqueue_mem_repeat(
+                mem_queue(slice, bank), count - 1, 1, address_stride);
+        }
+        cursor = cycle + count;
+        end_cycle_ = std::max(end_cycle_, cursor);
     }
 
     void vxm_at(
@@ -411,10 +432,9 @@ std::size_t build_schedule(Schedule& schedule)
             schedule, kXRhsGammaSlices, token, kGammaAddress,
             token * 4 + 2, kNormalizeInputCycle, kElements, 1);
 
-        // Every East-hemisphere slice is already occupied by x or gamma.
-        // The dual-port MEM instruction overlaps the middle of the x read
-        // stream with the delayed VXM result write.  Prefix/suffix transfers
-        // cover the non-overlapping pipeline fill and drain cycles.
+        // Bank 0 streams x while the independent single-port bank 1 accepts
+        // the delayed VXM result. Prefix/suffix transfers cover pipeline fill
+        // and drain; the middle region uses both bank queues concurrently.
         for (std::size_t byte = 0; byte < 2; ++byte) {
             const auto slice = kXLhsSlices[token * 2 + byte];
             const auto read_cycle =
@@ -424,7 +444,7 @@ std::size_t build_schedule(Schedule& schedule)
             const auto overlap_offset = write_cycle - read_cycle;
             if (overlap_offset >= kElements) {
                 throw std::logic_error(
-                    "RMSNorm vector is too short to overlap MEM ReadWrite");
+                    "RMSNorm vector is too short to overlap MEM banks");
             }
 
             schedule.mem_repeat_at(
@@ -435,14 +455,18 @@ std::size_t build_schedule(Schedule& schedule)
                 overlap_offset, 1);
             schedule.mem_repeat_at(
                 slice, write_cycle,
-                ftlpu::MemInstruction::ReadWrite(
+                ftlpu::MemInstruction::Read(
                     kXAddress + overlap_offset,
-                    ftlpu::StreamId::West(token * 4 + byte),
+                    ftlpu::StreamId::West(token * 4 + byte)),
+                kElements - overlap_offset, 1);
+            schedule.mem_repeat_at_bank(
+                slice, 1, write_cycle,
+                ftlpu::MemInstruction::Write(
                     kOutputAddress,
                     ftlpu::StreamId::East(token * 2 + byte)),
                 kElements - overlap_offset, 1);
-            schedule.mem_repeat_at(
-                slice, read_cycle + kElements,
+            schedule.mem_repeat_at_bank(
+                slice, 1, read_cycle + kElements,
                 ftlpu::MemInstruction::Write(
                     kOutputAddress + kElements - overlap_offset,
                     ftlpu::StreamId::East(token * 2 + byte)),
@@ -457,9 +481,11 @@ float read_output(
     std::size_t element, std::size_t tile, std::size_t lane)
 {
     const auto low = system.read_mem_sram_lane_byte(
-        kOutputSlices[token * 2], tile, kOutputAddress + element, lane);
+        ftlpu::Hemisphere::East, kOutputSlices[token * 2], 1,
+        tile, kOutputAddress + element, lane);
     const auto high = system.read_mem_sram_lane_byte(
-        kOutputSlices[token * 2 + 1], tile, kOutputAddress + element, lane);
+        ftlpu::Hemisphere::East, kOutputSlices[token * 2 + 1], 1,
+        tile, kOutputAddress + element, lane);
     return ftlpu::Fp16::from_bits(
         static_cast<std::uint16_t>(low)
         | (static_cast<std::uint16_t>(high) << 8)).to_float();

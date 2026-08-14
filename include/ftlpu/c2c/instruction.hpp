@@ -17,6 +17,8 @@ enum class C2cOpcode : std::uint8_t {
 struct C2cConsumer {
     Hemisphere hemisphere{Hemisphere::East};
     std::size_t mem_slice{0};
+    std::size_t mem_bank{0};
+    bool notify_mem{true};
 };
 
 struct C2cInstruction {
@@ -33,17 +35,25 @@ struct C2cInstruction {
     static C2cInstruction Receive(
         std::size_t stream_index,
         Hemisphere consumer_hemisphere,
-        std::size_t consumer_mem_slice)
+        std::size_t consumer_mem_slice,
+        std::size_t consumer_mem_bank = 0,
+        bool notify_mem = true)
     {
         validate_stream(stream_index);
         if (consumer_mem_slice >= hw::kMemSliceColumns) {
             throw std::out_of_range(
                 "C2C Receive consumer is outside the MEM slice array");
         }
+        if (consumer_mem_bank >= hw::kMemBanksPerSlice) {
+            throw std::out_of_range(
+                "C2C Receive consumer is outside the MEM bank array");
+        }
         return C2cInstruction {
             C2cOpcode::Receive,
             stream_index,
-            C2cConsumer {consumer_hemisphere, consumer_mem_slice},
+            C2cConsumer {
+                consumer_hemisphere, consumer_mem_slice, consumer_mem_bank,
+                notify_mem},
         };
     }
 

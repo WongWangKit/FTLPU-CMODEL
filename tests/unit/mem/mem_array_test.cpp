@@ -146,7 +146,7 @@ int main()
         for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
             for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
                 mem.set_sram_lane_byte(
-                    kMemSlice, tile, kReadAddress, lane,
+                    kMemSlice, 0, tile, kReadAddress, lane,
                     static_cast<std::uint8_t>(0xa0 + tile * 8 + lane));
             }
         }
@@ -155,10 +155,12 @@ int main()
              cycle < kIssueCycle + ftlpu::hw::kTileRows;
              ++cycle) {
             if (cycle == kIssueCycle) {
-                mem.enqueue_instruction(
-                    kMemSlice,
-                    ftlpu::MemInstruction::ReadWrite(
-                        kReadAddress, read_stream, kWriteAddress, write_stream));
+                mem.enqueue_instruction(kMemSlice, 0,
+                    ftlpu::MemInstruction::Read(
+                        kReadAddress, read_stream));
+                mem.enqueue_instruction(kMemSlice, 1,
+                    ftlpu::MemInstruction::Write(
+                        kWriteAddress, write_stream));
             }
 
             fabric.begin_cycle();
@@ -169,7 +171,7 @@ int main()
                 for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
                     bytes[lane] = static_cast<std::uint8_t>(0x40 + cycle * 8 + lane);
                 }
-                fabric.stage_payload_segment(0, cycle, write_stream, bytes, cycle, "dual-port source");
+                fabric.stage_payload_segment(0, cycle, write_stream, bytes, cycle, "bank1 source");
             }
             fabric.commit_cycle();
         }
@@ -182,19 +184,10 @@ int main()
         }
         for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
             for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-                assert(mem.sram_lane_byte(kMemSlice, tile, kWriteAddress, lane)
+                assert(mem.sram_lane_byte(kMemSlice, 1, tile, kWriteAddress, lane)
                     == static_cast<std::uint8_t>(0x40 + tile * 8 + lane));
             }
         }
-
-        bool rejected_same_address = false;
-        try {
-            static_cast<void>(ftlpu::MemInstruction::ReadWrite(
-                kReadAddress, read_stream, kReadAddress, write_stream));
-        } catch (const std::invalid_argument&) {
-            rejected_same_address = true;
-        }
-        assert(rejected_same_address);
     }
 
     {
@@ -209,7 +202,7 @@ int main()
 
         for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
             for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-                mem.set_sram_lane_byte(kMemSlice, tile, kReadAddress, lane,
+                mem.set_sram_lane_byte(kMemSlice, 0, tile, kReadAddress, lane,
                     static_cast<std::uint8_t>(0xc0 + tile * 8 + lane));
             }
         }
@@ -218,9 +211,12 @@ int main()
              cycle < kIssueCycle + ftlpu::hw::kTileRows;
              ++cycle) {
             if (cycle == kIssueCycle) {
-                mem.enqueue_instruction(kMemSlice,
-                    ftlpu::MemInstruction::ReadWriteTap(kReadAddress,
-                        read_stream, kWriteAddress, write_stream));
+                mem.enqueue_instruction(kMemSlice, 0,
+                    ftlpu::MemInstruction::Read(
+                        kReadAddress, read_stream));
+                mem.enqueue_instruction(kMemSlice, 1,
+                    ftlpu::MemInstruction::WriteTap(
+                        kWriteAddress, write_stream));
             }
             fabric.begin_cycle();
             mem.evaluate(fabric);
@@ -232,14 +228,14 @@ int main()
                         0x80 + cycle * 8 + lane);
                 }
                 fabric.stage_payload_segment(0, cycle, write_stream,
-                    bytes, cycle, "dual-port tap source");
+                    bytes, cycle, "bank1 tap source");
             }
             fabric.commit_cycle();
         }
 
         for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
             for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-                assert(mem.sram_lane_byte(kMemSlice, tile, kWriteAddress, lane)
+                assert(mem.sram_lane_byte(kMemSlice, 1, tile, kWriteAddress, lane)
                     == static_cast<std::uint8_t>(0x80 + tile * 8 + lane));
             }
         }
@@ -250,6 +246,32 @@ int main()
         assert(forwarded.valid);
         assert(forwarded.data
             == static_cast<std::uint8_t>(0x80 + kLastTile * 8));
+    }
+
+    {
+        ftlpu::StreamRegisterFabric fabric(
+            ftlpu::hw::kMemBoundaryStreamRegisterColumns);
+        ftlpu::MemArrayModel mem(
+            ftlpu::MemStreamPortMap::BetweenBoundaries(),
+            ftlpu::MemArrayModel::MissingStreamPolicy::ZeroFill);
+        constexpr std::size_t kAddress = 226;
+        const auto stream = ftlpu::StreamId::West(3);
+        for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile)
+            for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane)
+                mem.set_sram_lane_byte(kMemSlice, 0, tile, kAddress, lane, 0x5a);
+
+        mem.enqueue_instruction(kMemSlice, 0,
+            ftlpu::MemInstruction::WriteTap(kAddress, stream));
+        for (std::size_t cycle = 0; cycle < ftlpu::hw::kTileRows; ++cycle) {
+            fabric.begin_cycle();
+            mem.evaluate(fabric);
+            fabric.stage_linear_links();
+            fabric.commit_cycle();
+        }
+        for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile)
+            for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane)
+                assert(mem.sram_lane_byte(kMemSlice, 0, tile, kAddress, lane)
+                    == 0x5a);
     }
 
     return 0;

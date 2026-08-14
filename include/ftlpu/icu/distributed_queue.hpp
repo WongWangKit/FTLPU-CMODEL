@@ -78,16 +78,6 @@ inline MemInstruction apply_icu_repeat_stride(
         throw std::out_of_range("ICU MEM Repeat address stride underflow");
     }
     instruction.address = static_cast<std::size_t>(address + delta);
-    if (instruction.opcode == MemOpcode::ReadWrite) {
-        const auto write_address =
-            static_cast<std::int64_t>(instruction.write_address);
-        if (delta < 0 && write_address < -delta) {
-            throw std::out_of_range(
-                "ICU MEM Repeat write-address stride underflow");
-        }
-        instruction.write_address =
-            static_cast<std::size_t>(write_address + delta);
-    }
     return instruction;
 }
 
@@ -131,17 +121,37 @@ inline MxmControlInstruction apply_icu_repeat_2d_stride(
                 "ICU Repeat2D has a stride without an MXM induction target");
         return instruction;
     }
-    if (target != IcuInductionTarget::MxmWeightColumn
-        || instruction.opcode != MxmControlOpcode::IW)
-        throw std::invalid_argument(
-            "ICU Repeat2D weight-column induction requires an MXM IW instruction");
-    const auto column = static_cast<std::int64_t>(instruction.weight_column)
-        + delta;
-    if (column < 0 || column >= static_cast<std::int64_t>(hw::kMxmColumns))
-        throw std::out_of_range(
-            "ICU Repeat2D MXM weight-column induction is outside the MXM");
-    instruction.weight_column = static_cast<std::size_t>(column);
-    return instruction;
+    if (target == IcuInductionTarget::MxmWeightColumn) {
+        if (instruction.opcode != MxmControlOpcode::IW)
+            throw std::invalid_argument(
+                "ICU Repeat2D weight-column induction requires an MXM IW instruction");
+        const auto column =
+            static_cast<std::int64_t>(instruction.weight_column) + delta;
+        if (column < 0
+            || column >= static_cast<std::int64_t>(hw::kMxmColumns))
+            throw std::out_of_range(
+                "ICU Repeat2D MXM weight-column induction is outside the MXM");
+        instruction.weight_column = static_cast<std::size_t>(column);
+        return instruction;
+    }
+    if (target == IcuInductionTarget::MxmAccumulatorAddress) {
+        if (instruction.opcode != MxmControlOpcode::Compute
+            && instruction.opcode != MxmControlOpcode::AccumulatorRead)
+            throw std::invalid_argument(
+                "ICU Repeat2D accumulator induction requires an MXM compute or accumulator-read instruction");
+        const auto address =
+            static_cast<std::int64_t>(instruction.accumulator_address)
+            + delta;
+        if (address < 0)
+            throw std::out_of_range(
+                "ICU Repeat2D MXM accumulator-address induction underflow");
+        MxmControlInstruction::check_accumulator_address(
+            static_cast<std::size_t>(address), instruction.compute_mode);
+        instruction.accumulator_address = static_cast<std::size_t>(address);
+        return instruction;
+    }
+    throw std::invalid_argument(
+        "ICU Repeat2D induction target is invalid for an MXM queue");
 }
 
 } // namespace detail

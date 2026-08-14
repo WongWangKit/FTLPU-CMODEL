@@ -12,10 +12,9 @@ The Loop issue cycle is also the issue cycle of the first replayed
 instruction. `interval` is the distance, in cycles, between round starts and
 must be at least `window_size`.
 
-For a MEM queue, `address_stride` is multiplied by the replay-round index and
-added to read and read-write destination addresses. Other queue types require
-a zero stride. Loop windows cannot contain control instructions and cannot be
-nested.
+For a MEM bank queue, `address_stride` is multiplied by the replay-round index
+and added to the bank-local row address. Other queue types require a zero
+stride. Loop windows cannot contain control instructions and cannot be nested.
 
 ## 32-bit Encoding
 
