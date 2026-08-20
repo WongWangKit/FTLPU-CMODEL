@@ -3,8 +3,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -15,7 +13,7 @@ constexpr std::size_t kMatrixSize = ftlpu::hw::kPhysicalVectorBytes;
 constexpr std::size_t kBlockSize = ftlpu::hw::kLanesPerTile;
 constexpr std::size_t kBlocks = ftlpu::hw::kTileRows;
 constexpr std::size_t kStreams = 2 * kBlockSize;
-constexpr std::size_t kMatrixCount = 4;
+constexpr std::size_t kMatrixCount = 96;
 constexpr std::size_t kInputBeats = kMatrixCount * kBlocks;
 constexpr std::size_t kRouteStart = 3;
 constexpr std::size_t kMemToSxmLatency =
@@ -23,6 +21,12 @@ constexpr std::size_t kMemToSxmLatency =
     + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 1;
 constexpr std::size_t kCaptureStart = kRouteStart + kMemToSxmLatency;
 constexpr std::size_t kOutputAddressBase = 32;
+constexpr std::array<std::size_t, kStreams> kInputSlices {
+    18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31, 34, 35};
+constexpr std::array<std::size_t, kStreams> kOutputSlices {
+    0, 1, 2, 3, 8, 9, 10, 11,
+    12, 13, 14, 15, 16, 17, 32, 33};
 
 static_assert(kMatrixSize == 32);
 static_assert(kBlockSize == 8);
@@ -70,7 +74,9 @@ ftlpu::SxmInstruction::PermuteMap wavefront_map(std::size_t wave)
 
 class Schedule {
 public:
-    explicit Schedule(ftlpu::InstructionControlUnit& icu) : icu_(icu) {}
+    Schedule(ftlpu::InstructionControlUnit& icu, ftlpu::Hemisphere hemisphere)
+        : icu_(icu), hemisphere_(hemisphere)
+    {}
 
     void mem_repeat(
         std::size_t slice,
@@ -80,7 +86,7 @@ public:
         std::int64_t stride)
     {
         const auto queue = ftlpu::InstructionControlUnit::mem_queue(
-            ftlpu::Hemisphere::East, slice, 0);
+            hemisphere_, slice, 0);
         pad(mem_[queue], cycle,
             [&](std::size_t n) { icu_.enqueue_mem_nop(queue, n); });
         icu_.enqueue_mem(queue, instruction);
@@ -91,15 +97,19 @@ public:
 
     void transpose_at(std::size_t cycle, ftlpu::SxmInstruction instruction)
     {
-        pad(transpose_, cycle, [&](std::size_t n) { icu_.enqueue_sxm_transpose_nop(n); });
-        icu_.enqueue_sxm_transpose(std::move(instruction));
+        pad(transpose_, cycle, [&](std::size_t n) {
+            icu_.enqueue_sxm_transpose_nop(hemisphere_, n);
+        });
+        icu_.enqueue_sxm_transpose(hemisphere_, std::move(instruction));
         transpose_ = cycle + 1;
     }
 
     void permute_at(std::size_t cycle, ftlpu::SxmInstruction instruction)
     {
-        pad(permute_, cycle, [&](std::size_t n) { icu_.enqueue_sxm_permute_nop(n); });
-        icu_.enqueue_sxm_permute(std::move(instruction));
+        pad(permute_, cycle, [&](std::size_t n) {
+            icu_.enqueue_sxm_permute_nop(hemisphere_, n);
+        });
+        icu_.enqueue_sxm_permute(hemisphere_, std::move(instruction));
         permute_ = cycle + 1;
     }
 
@@ -112,12 +122,14 @@ private:
     }
 
     ftlpu::InstructionControlUnit& icu_;
+    ftlpu::Hemisphere hemisphere_;
     std::array<std::size_t, ftlpu::InstructionControlUnit::kMemQueues> mem_{};
     std::size_t transpose_{0};
     std::size_t permute_{0};
 };
 
-void initialize_matrix(ftlpu::TspSliceSystem& system)
+void initialize_matrix(
+    ftlpu::TspSliceSystem& system, ftlpu::Hemisphere hemisphere)
 {
     for (std::size_t matrix = 0; matrix < kMatrixCount; ++matrix) {
         for (std::size_t block_row = 0; block_row < kBlocks; ++block_row) {
@@ -130,7 +142,8 @@ void initialize_matrix(ftlpu::TspSliceSystem& system)
                             block_column * kBlockSize + local_column);
                         for (std::size_t byte = 0; byte < 2; ++byte) {
                             system.initialize_mem_sram_lane_byte(
-                                2 * local_row + byte,
+                                hemisphere,
+                                kInputSlices[2 * local_row + byte],
                                 block_column,
                                 matrix * kBlocks + block_row,
                                 local_column,
@@ -145,25 +158,31 @@ void initialize_matrix(ftlpu::TspSliceSystem& system)
 
 void build_schedule(Schedule& schedule)
 {
-    const auto transpose_src = east_streams(0, kStreams);
-    const auto transpose_internal = east_streams(16, kStreams);
+    const auto transpose_src = east_streams(16, kStreams);
+    const auto transpose_internal = east_streams(0, kStreams);
     const auto transpose_dst = west_streams(0, kStreams);
 
     for (std::size_t stream = 0; stream < kStreams; ++stream) {
-        const auto group = stream / ftlpu::hw::kMemSlicesPerGroup;
-        const auto read_cycle = kRouteStart + group;
+        const auto input_slice = kInputSlices[stream];
+        const auto output_slice = kOutputSlices[stream];
+        const auto input_group =
+            input_slice / ftlpu::hw::kMemSlicesPerGroup;
+        const auto output_group =
+            output_slice / ftlpu::hw::kMemSlicesPerGroup;
+        const auto read_cycle = kRouteStart + input_group;
         schedule.mem_repeat(
-            stream,
+            input_slice,
             read_cycle,
-            ftlpu::MemInstruction::Read(0, ftlpu::StreamId::East(stream)),
+            ftlpu::MemInstruction::Read(
+                0, ftlpu::StreamId::East(16 + stream)),
             kInputBeats,
             1);
 
         const auto write_cycle = kCaptureStart + 1
             + ftlpu::hw::kMemGroups
-            + ftlpu::hw::kC2cToSxmStreamRegisterColumns - group;
+            + ftlpu::hw::kC2cToSxmStreamRegisterColumns - output_group;
         schedule.mem_repeat(
-            stream,
+            output_slice,
             write_cycle,
             ftlpu::MemInstruction::Write(
                 kOutputAddressBase, ftlpu::StreamId::West(stream)),
@@ -189,7 +208,8 @@ void build_schedule(Schedule& schedule)
     }
 }
 
-bool verify_transpose(const ftlpu::TspSliceSystem& system)
+bool verify_transpose(const ftlpu::TspSliceSystem& system,
+    ftlpu::Hemisphere hemisphere)
 {
     for (std::size_t matrix = 0; matrix < kMatrixCount; ++matrix) {
         for (std::size_t row = 0; row < kMatrixSize; ++row) {
@@ -197,7 +217,8 @@ bool verify_transpose(const ftlpu::TspSliceSystem& system)
                 std::uint16_t actual = 0;
                 for (std::size_t byte = 0; byte < 2; ++byte) {
                     actual |= static_cast<std::uint16_t>(system.read_mem_sram_lane_byte(
-                        2 * (row % kBlockSize) + byte,
+                        hemisphere,
+                        kOutputSlices[2 * (row % kBlockSize) + byte],
                         column / kBlockSize,
                         kOutputAddressBase + matrix * kBlocks + row / kBlockSize,
                         column % kBlockSize)) << (8 * byte);
@@ -216,36 +237,30 @@ bool verify_transpose(const ftlpu::TspSliceSystem& system)
     return true;
 }
 
+bool run_hemisphere(ftlpu::Hemisphere hemisphere)
+{
+    auto system = ftlpu::TspSliceSystem {};
+    initialize_matrix(system, hemisphere);
+    auto schedule = Schedule(system.icu(), hemisphere);
+    build_schedule(schedule);
+
+    constexpr std::size_t kRunCycles =
+        kCaptureStart + kInputBeats + 16 + kBlocks;
+    for (std::size_t cycle = 0; cycle < kRunCycles; ++cycle)
+        system.tick({});
+
+    return verify_transpose(system, hemisphere);
+}
+
 } // namespace
 
 int main()
 try {
-    auto system = ftlpu::TspSliceSystem {};
-    initialize_matrix(system);
-    auto schedule = Schedule(system.icu());
-    build_schedule(schedule);
-
-    const auto log_dir = std::filesystem::path("logs") / "sxm_mem_transpose";
-    std::filesystem::create_directories(log_dir);
-    auto icu_log = std::ofstream(log_dir / "icu.log", std::ios::trunc);
-    auto mem_log = std::ofstream(log_dir / "mem.log", std::ios::trunc);
-    auto sxm_log = std::ofstream(log_dir / "sxm.log", std::ios::trunc);
-    if (!icu_log || !mem_log || !sxm_log) throw std::runtime_error("cannot open test logs");
-
-    constexpr std::size_t kRunCycles =
-        kCaptureStart + kInputBeats + 16 + kBlocks;
-    for (std::size_t cycle = 0; cycle < kRunCycles; ++cycle) {
-        system.tick({
-            .icu = &icu_log,
-            .mem = &mem_log,
-            .sxm = &sxm_log,
-        });
-    }
-
-    if (!verify_transpose(system)) return 1;
-    std::cout << "MEM -> SXM -> MEM continuous 32x32 FP16 transpose passed: matrices="
-              << kMatrixCount << ", initiation_interval=" << kBlocks << "; logs="
-              << log_dir.string() << '\n';
+    if (!run_hemisphere(ftlpu::Hemisphere::East)
+        || !run_hemisphere(ftlpu::Hemisphere::West))
+        return 1;
+    std::cout << "bidirectional local MEM -> SXM -> MEM continuous 32x32 FP16 transpose passed: matrices="
+              << kMatrixCount << ", initiation_interval=" << kBlocks << '\n';
     return 0;
 } catch (const std::exception& error) {
     std::cerr << "SXM MEM transpose test failed: " << error.what() << '\n';

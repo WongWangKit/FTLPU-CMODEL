@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -41,6 +42,7 @@ public:
     explicit StreamRegisterFabric(std::size_t column_count)
         : current_(column_count)
         , next_(column_count)
+        , next_producers_(column_count)
         , consumed_(column_count)
     {
         if (column_count == 0) {
@@ -52,7 +54,11 @@ public:
     {
         clear_columns(current_);
         clear_columns(next_);
+        clear_producers();
         clear_consumed();
+        current_cells_.clear();
+        next_cells_.clear();
+        consumed_cells_.clear();
         cycle_ = 0;
         cycle_open_ = false;
         current_activity_ = {};
@@ -147,14 +153,20 @@ public:
 
         auto& destination = select(next_[column].lanes[tile][lane], stream);
         if (destination.valid) {
+            const auto existing = select(
+                next_producers_[column].lanes[tile][lane], stream);
             throw std::logic_error(
                 std::string("stream-register write collision at column ")
                 + std::to_string(column) + ", tile " + std::to_string(tile)
                 + ", lane " + std::to_string(lane) + ", stream "
                 + direction_name(stream.direction()) + std::to_string(stream.index())
-                + " while staging " + producer);
+                + " while staging " + producer + "; existing producer="
+                + producer_name(existing));
         }
         destination = value;
+        select(next_producers_[column].lanes[tile][lane], stream) =
+            classify_producer(producer);
+        next_cells_.push_back(encode_cell(column, tile, lane, stream));
         ++current_activity_.staged_writes;
         if (stream.direction() == StreamDirection::East)
             ++current_activity_.east_staged_writes;
@@ -214,6 +226,9 @@ public:
         // observe the same current-cycle cell; the shared flag only suppresses
         // passive forwarding after at least one consumer has read it.
         auto& consumed = select(consumed_[column].lanes[tile][lane], stream);
+        if (!consumed)
+            consumed_cells_.push_back(
+                encode_cell(column, tile, lane, stream));
         consumed = true;
     }
 
@@ -241,25 +256,18 @@ public:
         check_column(link.source_column);
         check_column(link.destination_column);
 
-        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                for (std::size_t index = 0; index < hw::kStreamsPerDirection; ++index) {
-                    const auto stream = link.direction == StreamDirection::East
-                        ? StreamId::East(index)
-                        : StreamId::West(index);
-                    const auto& source = cell(link.source_column, tile, lane, stream);
-                    if (!source.valid || is_consumed(link.source_column, tile, lane, stream)) {
-                        continue;
-                    }
-                    stage_write(
-                        link.destination_column,
-                        tile,
-                        lane,
-                        stream,
-                        source,
-                        "passive SR link");
-                }
-            }
+        for (const std::size_t encoded : current_cells_) {
+            const auto location = decode_cell(encoded);
+            if (location.column != link.source_column
+                || location.stream.direction() != link.direction
+                || is_consumed(location.column, location.tile,
+                    location.lane, location.stream))
+                continue;
+            stage_write(link.destination_column, location.tile,
+                location.lane, location.stream,
+                cell(location.column, location.tile,
+                    location.lane, location.stream),
+                "passive SR link");
         }
     }
 
@@ -274,11 +282,23 @@ public:
     void stage_linear_links()
     {
         require_open_cycle();
-        for (std::size_t column = 0; column + 1 < column_count(); ++column) {
-            stage_link(Link {column, column + 1, StreamDirection::East, true});
-        }
-        for (std::size_t column = column_count(); column > 1; --column) {
-            stage_link(Link {column - 1, column - 2, StreamDirection::West, true});
+        for (const std::size_t encoded : current_cells_) {
+            const auto location = decode_cell(encoded);
+            if (is_consumed(location.column, location.tile,
+                    location.lane, location.stream))
+                continue;
+            const bool east = location.stream.direction()
+                == StreamDirection::East;
+            if ((east && location.column + 1 >= column_count())
+                || (!east && location.column == 0))
+                continue;
+            const std::size_t destination = east
+                ? location.column + 1 : location.column - 1;
+            stage_write(destination, location.tile, location.lane,
+                location.stream,
+                cell(location.column, location.tile,
+                    location.lane, location.stream),
+                "passive SR link");
         }
     }
 
@@ -287,8 +307,26 @@ public:
         require_open_cycle();
         current_.swap(next_);
         last_activity_ = current_activity_;
-        clear_columns(next_);
-        clear_consumed();
+        for (const std::size_t encoded : current_cells_) {
+            const auto location = decode_cell(encoded);
+            select(next_[location.column].lanes[location.tile][location.lane],
+                location.stream) = StreamCell::Invalid();
+        }
+        current_cells_.swap(next_cells_);
+        next_cells_.clear();
+        for (const std::size_t encoded : current_cells_) {
+            const auto location = decode_cell(encoded);
+            select(next_producers_[location.column]
+                       .lanes[location.tile][location.lane],
+                location.stream) = ProducerKind::None;
+        }
+        for (const std::size_t encoded : consumed_cells_) {
+            const auto location = decode_cell(encoded);
+            select(consumed_[location.column]
+                       .lanes[location.tile][location.lane],
+                location.stream) = false;
+        }
+        consumed_cells_.clear();
         cycle_open_ = false;
         ++cycle_;
     }
@@ -306,10 +344,27 @@ public:
             throw std::logic_error("cannot initialize stream fabric during an open cycle");
         }
         check_location(column, tile, lane, stream);
-        select(current_[column].lanes[tile][lane], stream) = value;
+        auto& destination = select(
+            current_[column].lanes[tile][lane], stream);
+        if (!destination.valid && value.valid)
+            current_cells_.push_back(
+                encode_cell(column, tile, lane, stream));
+        else if (destination.valid && !value.valid) {
+            const std::size_t encoded =
+                encode_cell(column, tile, lane, stream);
+            std::erase(current_cells_, encoded);
+        }
+        destination = value;
     }
 
 private:
+    struct CellLocation {
+        std::size_t column{0};
+        std::size_t tile{0};
+        std::size_t lane{0};
+        StreamId stream{StreamId::East(0)};
+    };
+
     struct LaneConsumeMask {
         std::array<bool, hw::kEastStreams> east{};
         std::array<bool, hw::kWestStreams> west{};
@@ -317,6 +372,26 @@ private:
 
     struct ColumnConsumeMask {
         std::array<std::array<LaneConsumeMask, hw::kLanesPerTile>, hw::kTileRows> lanes{};
+    };
+
+    enum class ProducerKind : std::uint8_t {
+        None,
+        MemRead,
+        Sxm,
+        SxmBlock,
+        External,
+        C2c,
+        Other,
+    };
+
+    struct LaneProducerMap {
+        std::array<ProducerKind, hw::kEastStreams> east{};
+        std::array<ProducerKind, hw::kWestStreams> west{};
+    };
+
+    struct ColumnProducerMap {
+        std::array<std::array<LaneProducerMap, hw::kLanesPerTile>, hw::kTileRows>
+            lanes{};
     };
 
     static StreamCell& select(StreamLaneRegisterFile& lane, StreamId stream)
@@ -347,6 +422,64 @@ private:
             : lane.west[stream.index()];
     }
 
+    static ProducerKind& select(LaneProducerMap& lane, StreamId stream)
+    {
+        return stream.direction() == StreamDirection::East
+            ? lane.east[stream.index()]
+            : lane.west[stream.index()];
+    }
+
+    static ProducerKind classify_producer(const char* producer)
+    {
+        const std::string_view name = producer != nullptr
+            ? std::string_view(producer) : std::string_view {};
+        if (name == "MEM Read") return ProducerKind::MemRead;
+        if (name == "SXM") return ProducerKind::Sxm;
+        if (name == "SXM parallel block output") return ProducerKind::SxmBlock;
+        if (name == "external stream input") return ProducerKind::External;
+        if (name.find("c2c") != std::string_view::npos
+            || name.find("C2C") != std::string_view::npos)
+            return ProducerKind::C2c;
+        return name.empty() ? ProducerKind::None : ProducerKind::Other;
+    }
+
+    static const char* producer_name(ProducerKind producer)
+    {
+        switch (producer) {
+        case ProducerKind::None: return "none";
+        case ProducerKind::MemRead: return "MEM Read";
+        case ProducerKind::Sxm: return "SXM";
+        case ProducerKind::SxmBlock: return "SXM parallel block output";
+        case ProducerKind::External: return "external stream input";
+        case ProducerKind::C2c: return "C2C";
+        case ProducerKind::Other: return "other functional producer";
+        }
+        return "unknown";
+    }
+
+    static std::size_t encode_cell(
+        std::size_t column,
+        std::size_t tile,
+        std::size_t lane,
+        StreamId stream)
+    {
+        return (((column * hw::kTileRows + tile)
+                    * hw::kLanesPerTile + lane)
+                   * hw::kStreams)
+            + stream.packed();
+    }
+
+    static CellLocation decode_cell(std::size_t encoded)
+    {
+        const auto stream = StreamId::from_packed(encoded % hw::kStreams);
+        encoded /= hw::kStreams;
+        const std::size_t lane = encoded % hw::kLanesPerTile;
+        encoded /= hw::kLanesPerTile;
+        const std::size_t tile = encoded % hw::kTileRows;
+        return CellLocation {
+            encoded / hw::kTileRows, tile, lane, stream};
+    }
+
     static void clear_columns(std::vector<StreamRegisterColumn>& columns)
     {
         std::fill(columns.begin(), columns.end(), StreamRegisterColumn {});
@@ -355,6 +488,12 @@ private:
     void clear_consumed()
     {
         std::fill(consumed_.begin(), consumed_.end(), ColumnConsumeMask {});
+    }
+
+    void clear_producers()
+    {
+        std::fill(next_producers_.begin(), next_producers_.end(),
+            ColumnProducerMap {});
     }
 
     bool is_consumed(
@@ -415,7 +554,11 @@ private:
 
     std::vector<StreamRegisterColumn> current_{};
     std::vector<StreamRegisterColumn> next_{};
+    std::vector<ColumnProducerMap> next_producers_{};
     std::vector<ColumnConsumeMask> consumed_{};
+    std::vector<std::size_t> current_cells_{};
+    std::vector<std::size_t> next_cells_{};
+    std::vector<std::size_t> consumed_cells_{};
     std::size_t cycle_{0};
     bool cycle_open_{false};
     CycleActivity current_activity_{};

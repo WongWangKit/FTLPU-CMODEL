@@ -441,11 +441,15 @@ public:
         Hemisphere consumer_hemisphere,
         std::size_t consumer_mem_slice,
         std::size_t consumer_mem_bank = 0,
-        bool notify_mem = true)
+        bool notify_mem = true,
+        std::size_t base_row = 0,
+        std::size_t vector_count = 1,
+        std::size_t row_stride = 1)
     {
         enqueue_c2c(endpoint_hemisphere, C2cInstruction::Receive(
             stream_index, consumer_hemisphere, consumer_mem_slice,
-            consumer_mem_bank, notify_mem));
+            consumer_mem_bank, notify_mem, base_row, vector_count,
+            row_stride));
     }
 
     void enqueue_c2c_tx_nop(

@@ -20,12 +20,14 @@ struct C2cDmaInstruction {
     std::size_t vector_count{1};
     std::size_t address_stride_bytes{hw::kPhysicalVectorBytes};
     std::uint64_t vector_tag_base{0};
+    std::size_t stream_index{0};
 
     static C2cDmaInstruction Load(
         std::uint64_t ddr4_address,
         std::size_t vector_count = 1,
         std::size_t address_stride_bytes = hw::kPhysicalVectorBytes,
-        std::uint64_t vector_tag_base = 0)
+        std::uint64_t vector_tag_base = 0,
+        std::size_t stream_index = 0)
     {
         auto instruction = C2cDmaInstruction {
             C2cDmaDirection::Ddr4ToC2c,
@@ -33,6 +35,7 @@ struct C2cDmaInstruction {
             vector_count,
             address_stride_bytes,
             vector_tag_base,
+            stream_index,
         };
         instruction.validate();
         return instruction;
@@ -41,7 +44,8 @@ struct C2cDmaInstruction {
     static C2cDmaInstruction Store(
         std::uint64_t ddr4_address,
         std::size_t vector_count = 1,
-        std::size_t address_stride_bytes = hw::kPhysicalVectorBytes)
+        std::size_t address_stride_bytes = hw::kPhysicalVectorBytes,
+        std::size_t stream_index = 0)
     {
         auto instruction = C2cDmaInstruction {
             C2cDmaDirection::C2cToDdr4,
@@ -49,6 +53,7 @@ struct C2cDmaInstruction {
             vector_count,
             address_stride_bytes,
             0,
+            stream_index,
         };
         instruction.validate();
         return instruction;
@@ -74,6 +79,10 @@ struct C2cDmaInstruction {
         if (vector_count == 0) {
             throw std::invalid_argument(
                 "C2C DMA vector_count must be non-zero");
+        }
+        if (stream_index >= hw::kC2cStreamsPerDirection) {
+            throw std::out_of_range(
+                "C2C DMA stream index is outside the dedicated stream file");
         }
         (void)vector_address(vector_count - 1);
     }

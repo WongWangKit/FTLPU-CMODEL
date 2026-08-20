@@ -15,6 +15,7 @@ struct SystemHardwareConfiguration {
     std::size_t mxms_per_hemisphere{hw::kMxmsPerHemisphere};
     std::size_t mxm_weight_buffers{2};
     std::size_t vxm_alus{16};
+    std::size_t c2c_streams_per_direction{hw::kC2cStreamsPerDirection};
     bool mxm_local_dequant_enabled{true};
     bool mxm_block_compute_enabled{true};
     bool mxm_weight_activation_overlap_enabled{true};
@@ -34,6 +35,10 @@ struct SystemHardwareConfiguration {
         if (vxm_alus == 0 || vxm_alus > 16)
             throw std::invalid_argument(
                 "configured VXM ALU count exceeds the CModel physical capacity");
+        if (c2c_streams_per_direction == 0
+            || c2c_streams_per_direction > hw::kC2cStreamsPerDirection)
+            throw std::invalid_argument(
+                "configured C2C stream count exceeds the CModel physical capacity");
     }
 };
 

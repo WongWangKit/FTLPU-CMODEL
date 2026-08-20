@@ -111,6 +111,14 @@ ftlpu_add_test(stream_topology_test tests/subsystem/system/stream_topology_test.
     subsystem.topology.stream subsystem topology fast)
 ftlpu_add_test(full_chip_topology_test tests/subsystem/system/full_chip_topology_test.cpp
     subsystem.topology.full_chip subsystem topology fast)
+ftlpu_add_test(passive_vxm_bridge_test tests/subsystem/system/passive_vxm_bridge_test.cpp
+    subsystem.topology.passive_vxm_bridge subsystem topology vxm fast)
+ftlpu_add_test(distributed16_passive_copy_test
+    tests/subsystem/system/distributed16_passive_copy_test.cpp
+    subsystem.topology.distributed16_passive_copy subsystem topology vxm fast)
+ftlpu_add_test(vxm_repeated_distributed_input_test
+    tests/subsystem/system/vxm_repeated_distributed_input_test.cpp
+    subsystem.topology.vxm_repeated_distributed_input subsystem topology vxm fast)
 ftlpu_add_test(hardware_configuration_test tests/subsystem/system/hardware_configuration_test.cpp
     subsystem.hardware.configuration subsystem hardware fast)
 

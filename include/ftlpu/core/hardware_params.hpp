@@ -16,6 +16,14 @@ constexpr std::size_t kWestStreams = kStreamsPerDirection;
 constexpr std::size_t kStreams = kEastStreams + kWestStreams;
 constexpr std::size_t kStreamRegisterBytes = 1;
 
+// C2C owns a physically separate bidirectional stream fabric. These lanes do
+// not consume E0..E31/W0..W31 and each lane carries one complete 32-byte
+// vector per cycle.
+constexpr std::size_t kC2cStreamsPerDirection = 8;
+constexpr std::size_t kC2cBytesPerStreamPerCycle = kPhysicalVectorBytes;
+constexpr std::size_t kC2cBytesPerDirectionPerCycle =
+    kC2cStreamsPerDirection * kC2cBytesPerStreamPerCycle;
+
 // MEM/SRAM geometry for one modeled hemisphere.
 constexpr std::size_t kMemSliceColumns = 52;
 constexpr std::size_t kMemBanksPerSlice = 2;
@@ -108,7 +116,10 @@ constexpr std::size_t kIcuVxmImemDepth = 2048;
 // Existing whole-layer schedules are emitted as one flat program image. The
 // runtime frontend still exposes only a 16-entry IQ and one fetch per cycle.
 constexpr std::size_t kIcuMemImemDepth = 131072;
-constexpr std::size_t kIcuMxmImemDepth = 32768;
+// A Qwen2.5-1.5B seq128 decoder layer needs just over 32K compressed
+// compute commands in each MXM queue. Keep the next power-of-two capacity so
+// one complete layer can remain resident without runtime i-MEM paging.
+constexpr std::size_t kIcuMxmImemDepth = 65536;
 constexpr std::size_t kIcuSxmImemDepth = 2048;
 constexpr std::size_t kIcuC2cImemDepth = 32768;
 constexpr std::size_t kIcuVxmIqDepth = 16;
@@ -136,6 +147,7 @@ constexpr std::size_t kTotalSramBytes = kSramBlocks * kSramBlockBytes;
 constexpr std::size_t kPublicTotalSramBytes = kPublicSramBlocks * kSramBlockBytes;
 
 static_assert(kPhysicalVectorBytes == 32);
+static_assert(kC2cBytesPerDirectionPerCycle == 256);
 static_assert(kMemSliceColumns % kMemSlicesPerGroup == 0);
 static_assert(kMemBoundaryStreamRegisterColumns == 14);
 static_assert(kSystemStreamRegisterColumns == 16);

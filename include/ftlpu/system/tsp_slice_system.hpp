@@ -89,7 +89,7 @@ public:
         require_phase(CyclePhase::Idle, "attaching C2C DMA");
         const auto index = hemisphere_index(hemisphere);
         c2cs_[index].emplace(C2cStreamPortMap::EastEdge(
-            hw::kMemEastBoundaryStreamRegisterColumn));
+            hw::kMemEastBoundaryStreamRegisterColumn), "C2C DMA", true);
         c2c_outbound_links_[index] = nullptr;
         c2c_inbound_links_[index] = nullptr;
         c2c_dmas_[index] = &dma;
@@ -306,6 +306,26 @@ public:
         return cycle_;
     }
 
+    std::size_t passive_bridge_transfer_count(
+        Hemisphere source, std::size_t stream) const
+    {
+        if (stream >= hw::kWestStreams)
+            throw std::out_of_range("passive bridge stream is outside the westbound stream set");
+        return passive_bridge_transfer_counts_[hemisphere_index(source)][stream];
+    }
+
+    std::optional<std::size_t> last_passive_bridge_cycle(
+        Hemisphere source, std::size_t stream) const
+    {
+        if (stream >= hw::kWestStreams)
+            throw std::out_of_range("passive bridge stream is outside the westbound stream set");
+        const auto encoded =
+            last_passive_bridge_cycles_[hemisphere_index(source)][stream];
+        return encoded == 0
+            ? std::nullopt
+            : std::optional<std::size_t> {encoded - 1};
+    }
+
     void reset_execution_state()
     {
         require_phase(CyclePhase::Idle, "resetting execution state");
@@ -314,6 +334,8 @@ public:
         for (auto& sxm : sxms_) sxm.reset();
         for (auto& mxm : mxms_) mxm.reset();
         icu_.reset();
+        for (auto& counts : passive_bridge_transfer_counts_) counts.fill(0);
+        for (auto& cycles : last_passive_bridge_cycles_) cycles.fill(0);
         for (auto& endpoint : c2cs_) {
             if (endpoint.has_value()) endpoint->reset();
         }
@@ -401,31 +423,39 @@ private:
     {
         require_phase(CyclePhase::VxmEvaluated, "committing MEM and SXM");
         for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
-            sxms_[hemisphere].set_trace_enabled(sinks.sxm != nullptr);
-            if (sinks.mem != nullptr) {
-                *sinks.mem << "mem." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
-                           << " cycle " << cycle_ << '\n';
-                if (c2cs_[hemisphere].has_value()) {
-                    const auto evaluate = [this, hemisphere](StreamRegisterFabric& fabric) {
-                        evaluate_c2c(hemisphere, fabric);
-                    };
-                    mems_[hemisphere].tick(
-                        sxms_[hemisphere], evaluate, *sinks.mem,
-                        sinks.mem_log_tile);
+            try {
+                sxms_[hemisphere].set_trace_enabled(sinks.sxm != nullptr);
+                if (sinks.mem != nullptr) {
+                    *sinks.mem << "mem." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
+                               << " cycle " << cycle_ << '\n';
+                    if (c2cs_[hemisphere].has_value()) {
+                        const auto evaluate = [this, hemisphere](StreamRegisterFabric& fabric) {
+                            evaluate_c2c(hemisphere, fabric);
+                        };
+                        mems_[hemisphere].tick(
+                            sxms_[hemisphere], evaluate, *sinks.mem,
+                            sinks.mem_log_tile);
+                    } else {
+                        mems_[hemisphere].tick(
+                            sxms_[hemisphere], *sinks.mem,
+                            sinks.mem_log_tile);
+                    }
                 } else {
-                    mems_[hemisphere].tick(
-                        sxms_[hemisphere], *sinks.mem,
-                        sinks.mem_log_tile);
+                    if (c2cs_[hemisphere].has_value()) {
+                        const auto evaluate = [this, hemisphere](StreamRegisterFabric& fabric) {
+                            evaluate_c2c(hemisphere, fabric);
+                        };
+                        mems_[hemisphere].tick(sxms_[hemisphere], evaluate);
+                    } else {
+                        mems_[hemisphere].tick(sxms_[hemisphere]);
+                    }
                 }
-            } else {
-                if (c2cs_[hemisphere].has_value()) {
-                    const auto evaluate = [this, hemisphere](StreamRegisterFabric& fabric) {
-                        evaluate_c2c(hemisphere, fabric);
-                    };
-                    mems_[hemisphere].tick(sxms_[hemisphere], evaluate);
-                } else {
-                    mems_[hemisphere].tick(sxms_[hemisphere]);
-                }
+            } catch (const std::exception& error) {
+                throw std::logic_error(
+                    "MEM/SXM commit failed at system cycle "
+                    + std::to_string(cycle_) + " in hemisphere "
+                    + hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
+                    + ": " + error.what());
             }
             if (sinks.sxm != nullptr) {
                 *sinks.sxm << "sxm."
@@ -467,8 +497,33 @@ private:
 
         std::optional<C2cReceiveNotification> notification;
         if (c2c_dmas_[hemisphere] != nullptr) {
-            notification = endpoint->evaluate(
-                fabric, *c2c_dmas_[hemisphere], *c2c_dmas_[hemisphere]);
+            endpoint->tx().evaluate(fabric, *c2c_dmas_[hemisphere]);
+            endpoint->rx().evaluate_dedicated(
+                *c2c_dmas_[hemisphere],
+                hardware_configuration_.c2c_streams_per_direction,
+                [this](C2cReceiveNotification received) {
+                    const auto& consumer = received.consumer;
+                    for (std::size_t tile = 0; tile < hw::kTileRows;
+                         ++tile) {
+                        for (std::size_t lane = 0;
+                             lane < hw::kLanesPerTile; ++lane) {
+                            mems_[hemisphere_index(consumer.hemisphere)]
+                                .set_sram_lane_byte(
+                                    consumer.mem_slice,
+                                    consumer.mem_bank,
+                                    tile,
+                                    consumer.base_row,
+                                    lane,
+                                    received.vector.payload[tile][lane]);
+                        }
+                    }
+                    if (consumer.notify_mem) {
+                        icu_.notify(IcuLocation::Mem(
+                            consumer.hemisphere,
+                            consumer.mem_slice,
+                            consumer.mem_bank));
+                    }
+                });
         } else {
             if (c2c_outbound_links_[hemisphere] == nullptr
                 || c2c_inbound_links_[hemisphere] == nullptr) {
@@ -820,6 +875,8 @@ private:
                             stream,
                             TileArrayModel::DataWord {cell->data, cell->last});
                     }
+                    ++passive_bridge_transfer_counts_[source_index][stream];
+                    last_passive_bridge_cycles_[source_index][stream] = cycle_ + 1;
                     if (sinks.system != nullptr) {
                         *sinks.system << "  passive VXM bridge "
                                       << hemisphere_short_name(source) << ".W" << stream
@@ -895,6 +952,10 @@ private:
     std::array<C2cLink*, hw::kHemispheres> c2c_inbound_links_{};
     std::array<C2cDmaEngine*, hw::kHemispheres> c2c_dmas_{};
     std::size_t cycle_{0};
+    std::array<std::array<std::size_t, hw::kWestStreams>, hw::kHemispheres>
+        passive_bridge_transfer_counts_{};
+    std::array<std::array<std::size_t, hw::kWestStreams>, hw::kHemispheres>
+        last_passive_bridge_cycles_{};
     CyclePhase phase_{CyclePhase::Idle};
 };
 

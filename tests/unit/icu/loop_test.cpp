@@ -11,6 +11,8 @@ namespace {
 
 using Queue = ftlpu::DistributedIcuQueue<
     ftlpu::MemInstruction, 64, 64, 8, 1>;
+using MxmQueue = ftlpu::DistributedIcuQueue<
+    ftlpu::MxmControlInstruction, 128, 64, 8, 1>;
 
 void require(bool condition, const char* message)
 {
@@ -59,6 +61,27 @@ int main()
         require(std::equal(addresses.begin(), addresses.end(),
                     expectedAddresses.begin(), expectedAddresses.end()),
             "Loop MEM address-stride sequence is wrong");
+
+        MxmQueue mxm;
+        mxm.push_instruction(ftlpu::MxmControlInstruction::Compute(
+            0, 0, 0, 4, 1,
+            ftlpu::MxmAccumulatorDestination::Sram,
+            ftlpu::MxmDataFormat::BFloat16,
+            ftlpu::MxmComputeMode::Block8));
+        mxm.push_loop(ftlpu::IcuLoop {1, 2, 2, 3});
+        std::vector<std::size_t> accumulatorAddresses;
+        while (!mxm.done()) {
+            if (auto instruction = mxm.tick())
+                accumulatorAddresses.push_back(
+                    instruction->accumulator_address);
+        }
+        constexpr std::array<std::size_t, 3> expectedAccumulatorAddresses {
+            4, 7, 10};
+        require(std::equal(accumulatorAddresses.begin(),
+                    accumulatorAddresses.end(),
+                    expectedAccumulatorAddresses.begin(),
+                    expectedAccumulatorAddresses.end()),
+            "Loop MXM accumulator-address stride sequence is wrong");
 
         Queue invalid;
         invalid.push_instruction(ftlpu::MemInstruction::Read(0, 0));

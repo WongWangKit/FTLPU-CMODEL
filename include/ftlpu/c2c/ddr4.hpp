@@ -3,6 +3,7 @@
 #include "ftlpu/c2c/types.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -11,14 +12,16 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace ftlpu {
 
 struct Ddr4Config {
-    std::size_t beat_bytes{16};
+    std::size_t beat_bytes{hw::kPhysicalVectorBytes};
     std::size_t read_latency_cycles{12};
     std::size_t write_latency_cycles{8};
-    std::size_t request_queue_depth{8};
+    std::size_t request_queue_depth{256};
+    std::size_t transfer_channels{hw::kC2cStreamsPerDirection};
 
     void validate() const
     {
@@ -29,6 +32,11 @@ struct Ddr4Config {
         if (request_queue_depth == 0) {
             throw std::invalid_argument(
                 "DDR4 request queue depth must be non-zero");
+        }
+        if (transfer_channels == 0
+            || transfer_channels > hw::kC2cStreamsPerDirection) {
+            throw std::invalid_argument(
+                "DDR4 transfer channel count exceeds the C2C fabric");
         }
     }
 };
@@ -64,7 +72,7 @@ public:
     void reset_execution_state()
     {
         requests_.clear();
-        active_.reset();
+        active_.clear();
         read_completions_.clear();
         write_completions_.clear();
         cycle_ = 0;
@@ -83,7 +91,7 @@ public:
     std::size_t cycle() const noexcept { return cycle_; }
     bool idle() const noexcept
     {
-        return requests_.empty() && !active_.has_value();
+        return requests_.empty() && active_.empty();
     }
     const std::optional<BeatTrace>& last_beat() const noexcept
     {
@@ -91,7 +99,7 @@ public:
     }
     bool can_accept_request() const noexcept
     {
-        return requests_.size() + (active_.has_value() ? 1U : 0U)
+        return requests_.size() + active_.size()
             < config_.request_queue_depth;
     }
 
@@ -122,8 +130,10 @@ public:
 
     bool read_completion_ready(RequestId id) const noexcept
     {
-        return !read_completions_.empty()
-            && read_completions_.front().id == id;
+        return std::any_of(read_completions_.begin(), read_completions_.end(),
+            [id](const ReadCompletion& completion) {
+                return completion.id == id;
+            });
     }
 
     ReadCompletion pop_read_completion(RequestId id)
@@ -132,15 +142,22 @@ public:
             throw std::logic_error(
                 "DDR4 read completion is not ready or is out of order");
         }
-        auto completion = std::move(read_completions_.front());
-        read_completions_.pop_front();
+        const auto it = std::find_if(
+            read_completions_.begin(), read_completions_.end(),
+            [id](const ReadCompletion& completion) {
+                return completion.id == id;
+            });
+        auto completion = std::move(*it);
+        read_completions_.erase(it);
         return completion;
     }
 
     bool write_completion_ready(RequestId id) const noexcept
     {
-        return !write_completions_.empty()
-            && write_completions_.front().id == id;
+        return std::any_of(write_completions_.begin(), write_completions_.end(),
+            [id](const WriteCompletion& completion) {
+                return completion.id == id;
+            });
     }
 
     WriteCompletion pop_write_completion(RequestId id)
@@ -149,8 +166,13 @@ public:
             throw std::logic_error(
                 "DDR4 write completion is not ready or is out of order");
         }
-        const auto completion = write_completions_.front();
-        write_completions_.pop_front();
+        const auto it = std::find_if(
+            write_completions_.begin(), write_completions_.end(),
+            [id](const WriteCompletion& completion) {
+                return completion.id == id;
+            });
+        const auto completion = *it;
+        write_completions_.erase(it);
         return completion;
     }
 
@@ -167,9 +189,13 @@ public:
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                 const auto offset = tile * hw::kLanesPerTile + lane;
-                const auto it = bytes_.find(address + offset);
-                vector.payload[tile][lane] =
-                    it == bytes_.end() ? 0 : it->second;
+                const std::uint64_t byte_address = address + offset;
+                const auto page = pages_.find(
+                    byte_address / kStoragePageBytes);
+                vector.payload[tile][lane] = page == pages_.end()
+                    ? 0
+                    : page->second[static_cast<std::size_t>(
+                          byte_address % kStoragePageBytes)];
             }
         }
         return vector;
@@ -178,24 +204,29 @@ public:
     void tick()
     {
         last_beat_.reset();
-        if (!active_.has_value() && !requests_.empty()) {
-            active_ = ActiveRequest {std::move(requests_.front()), 0};
+        while (!requests_.empty()) {
+            active_.push_back(
+                ActiveRequest {std::move(requests_.front()), 0});
             requests_.pop_front();
         }
 
-        if (active_.has_value()) {
-            auto& active = *active_;
+        std::size_t channels_used = 0;
+        for (auto& active : active_) {
             if (active.request.remaining_latency != 0) {
                 --active.request.remaining_latency;
-            } else {
-                const auto remaining =
-                    hw::kPhysicalVectorBytes - active.bytes_transferred;
-                transfer_active_beat(
-                    std::min(config_.beat_bytes, remaining));
-                if (active.bytes_transferred == hw::kPhysicalVectorBytes) {
-                    complete_active_request();
-                }
+                continue;
             }
+            if (channels_used == config_.transfer_channels) continue;
+            const auto remaining =
+                hw::kPhysicalVectorBytes - active.bytes_transferred;
+            transfer_active_beat(active,
+                std::min(config_.beat_bytes, remaining));
+            ++channels_used;
+        }
+        for (std::size_t index = active_.size(); index-- > 0;) {
+            if (active_[index].bytes_transferred
+                == hw::kPhysicalVectorBytes)
+                complete_active_request(index);
         }
         ++cycle_;
     }
@@ -216,10 +247,10 @@ private:
         std::size_t bytes_transferred{0};
     };
 
-    void complete_active_request()
+    void complete_active_request(std::size_t index)
     {
-        auto request = std::move(active_->request);
-        active_.reset();
+        auto request = std::move(active_[index].request);
+        active_.erase(active_.begin() + index);
         if (request.operation == Operation::Read) {
             read_completions_.push_back(ReadCompletion {
                 request.id, request.address, std::move(request.vector)});
@@ -234,7 +265,11 @@ private:
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                 const auto offset = tile * hw::kLanesPerTile + lane;
-                bytes_[address + offset] = vector.payload[tile][lane];
+                const std::uint64_t byte_address = address + offset;
+                pages_[byte_address / kStoragePageBytes]
+                    [static_cast<std::size_t>(
+                        byte_address % kStoragePageBytes)] =
+                    vector.payload[tile][lane];
             }
         }
     }
@@ -263,11 +298,13 @@ private:
     }
 
     Ddr4Config config_{};
-    std::unordered_map<std::uint64_t, std::uint8_t> bytes_{};
+    static constexpr std::uint64_t kStoragePageBytes = 4096;
+    using StoragePage = std::array<std::uint8_t, kStoragePageBytes>;
+    std::unordered_map<std::uint64_t, StoragePage> pages_{};
     std::deque<Request> requests_{};
-    void transfer_active_beat(std::size_t byte_count)
+    void transfer_active_beat(
+        ActiveRequest& active, std::size_t byte_count)
     {
-        auto& active = *active_;
         const auto offset = active.bytes_transferred;
         for (std::size_t byte = 0; byte < byte_count; ++byte) {
             const auto vector_offset = offset + byte;
@@ -275,11 +312,16 @@ private:
             const auto lane = vector_offset % hw::kLanesPerTile;
             const auto address = active.request.address + vector_offset;
             if (active.request.operation == Operation::Read) {
-                const auto it = bytes_.find(address);
+                const auto page = pages_.find(
+                    address / kStoragePageBytes);
                 active.request.vector.payload[tile][lane] =
-                    it == bytes_.end() ? 0 : it->second;
+                    page == pages_.end() ? 0
+                    : page->second[static_cast<std::size_t>(
+                          address % kStoragePageBytes)];
             } else {
-                bytes_[address] =
+                pages_[address / kStoragePageBytes]
+                    [static_cast<std::size_t>(
+                        address % kStoragePageBytes)] =
                     active.request.vector.payload[tile][lane];
             }
         }
@@ -292,7 +334,7 @@ private:
         };
     }
 
-    std::optional<ActiveRequest> active_{};
+    std::vector<ActiveRequest> active_{};
     std::deque<ReadCompletion> read_completions_{};
     std::deque<WriteCompletion> write_completions_{};
     std::optional<BeatTrace> last_beat_{};

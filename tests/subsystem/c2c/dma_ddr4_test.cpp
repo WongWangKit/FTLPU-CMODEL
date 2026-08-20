@@ -2,6 +2,7 @@
 #include "ftlpu/icu/location.hpp"
 #include "ftlpu/system/c2c_dma_system.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -66,6 +67,100 @@ void test_ddr4_transfers_one_beat_per_cycle()
         "DDR4 beat sequence did not commit the complete vector");
 }
 
+void test_ddr4_exposes_eight_vector_channels()
+{
+    constexpr auto kBaseAddress = std::uint64_t {0x4000};
+    constexpr auto kChannels = std::size_t {8};
+    auto ddr4 = Ddr4Model(Ddr4Config {32, 2, 2, 64, kChannels});
+    auto requests = std::array<Ddr4Model::RequestId, kChannels> {};
+    for (std::size_t channel = 0; channel < kChannels; ++channel) {
+        const auto address =
+            kBaseAddress + channel * hw::kPhysicalVectorBytes;
+        ddr4.initialize_vector(
+            address, make_vector(static_cast<std::uint8_t>(channel * 16)));
+        requests[channel] = ddr4.request_read(address);
+    }
+
+    ddr4.tick();
+    ddr4.tick();
+    for (const auto request : requests)
+        require(!ddr4.read_completion_ready(request),
+            "parallel C2C transfer completed during external latency");
+    ddr4.tick();
+    for (const auto request : requests)
+        require(ddr4.read_completion_ready(request),
+            "C2C did not complete eight 32-byte vectors in one cycle");
+}
+
+void test_c2c_stream_count_is_runtime_selectable()
+{
+    auto hardware = SystemHardwareConfiguration {};
+    hardware.c2c_streams_per_direction = 4;
+    auto system = C2cDmaSystem(
+        Ddr4Config {32, 2, 2, 64, 4}, 16, hardware);
+    system.dma(Hemisphere::East).issue(
+        C2cDmaInstruction::Load(0x6000, 1, 32, 0, 3));
+
+    bool rejected = false;
+    try {
+        system.dma(Hemisphere::East).issue(
+            C2cDmaInstruction::Load(0x6020, 1, 32, 0, 4));
+    } catch (const std::out_of_range&) {
+        rejected = true;
+    }
+    require(rejected,
+        "C2C DMA accepted a stream disabled by hardware configuration");
+}
+
+void test_dedicated_c2c_overlaps_all_compute_streams()
+{
+    constexpr auto kTargetSlice = std::size_t {40};
+    constexpr auto kTargetRow = std::size_t {17};
+    constexpr auto kDdr4Address = std::uint64_t {0x7000};
+    auto system = C2cDmaSystem(Ddr4Config {32, 2, 2, 64, 8});
+    const auto expected = make_vector(0xa0, 91);
+    system.ddr4().initialize_vector(kDdr4Address, expected);
+
+    for (std::size_t stream = 0; stream < hw::kWestStreams; ++stream) {
+        const auto queue = InstructionControlUnit::mem_queue(
+            Hemisphere::West, stream, 0);
+        for (std::size_t cycle = 0; cycle < 16; ++cycle)
+            system.chip().icu().enqueue_mem(queue,
+                MemInstruction::Read(0, StreamId::West(stream)));
+    }
+    system.chip().icu().enqueue_c2c_dma(Hemisphere::West,
+        C2cDmaInstruction::Load(kDdr4Address, 1, 32, 91, 0));
+    system.chip().icu().enqueue_c2c_receive(
+        Hemisphere::West, 0, Hemisphere::West, kTargetSlice,
+        1, false, kTargetRow);
+
+    bool observed_overlap = false;
+    for (std::size_t cycle = 0; cycle < 32; ++cycle) {
+        system.tick();
+        std::size_t issued = 0;
+        for (std::size_t stream = 0; stream < hw::kWestStreams; ++stream) {
+            const auto queue = InstructionControlUnit::mem_queue(
+                Hemisphere::West, stream, 0);
+            issued += system.chip().icu().mem_iq(queue).last_trace().action
+                    == IcuQueueAction::FunctionalIssue
+                ? 1
+                : 0;
+        }
+        observed_overlap = observed_overlap
+            || (issued == hw::kWestStreams
+                && system.dma(Hemisphere::West).last_beat().has_value());
+    }
+    require(observed_overlap,
+        "all 32 compute streams blocked the dedicated C2C data path");
+    for (std::size_t tile = 0; tile < hw::kTileRows; ++tile)
+        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane)
+            require(system.chip().read_mem_sram_lane_byte(
+                        Hemisphere::West, kTargetSlice, 1, tile,
+                        kTargetRow, lane)
+                    == expected.payload[tile][lane],
+                "dedicated C2C write changed data under compute-stream load");
+}
+
 
 void test_ddr4_dma_rx_sr_mem()
 {
@@ -74,11 +169,6 @@ void test_ddr4_dma_rx_sr_mem()
     constexpr auto kTargetSlice = 16U;
     constexpr auto kTargetRow = 41U;
     constexpr auto kDdr4Address = std::uint64_t {0x1000};
-    constexpr auto kTargetGroup =
-        kTargetSlice / hw::kMemSlicesPerGroup;
-    constexpr auto kRxToTargetNops =
-        hw::kMemEastBoundaryStreamRegisterColumn
-        - (kTargetGroup + 1) - 1;
 
     auto system = C2cDmaSystem(Ddr4Config {8, 2, 2, 4});
     auto& chip = system.chip();
@@ -87,22 +177,18 @@ void test_ddr4_dma_rx_sr_mem()
 
     chip.icu().enqueue_c2c_dma(
         kHemisphere,
-        C2cDmaInstruction::Load(kDdr4Address, 1, 32, 77));
+        C2cDmaInstruction::Load(kDdr4Address, 1, 32, 77, kStream));
     chip.icu().enqueue_control(
         IcuLocation::C2cDma(kHemisphere),
         IcuControlInstruction::Sync());
     chip.icu().enqueue_c2c_receive(
-        kHemisphere, kStream, kHemisphere, kTargetSlice);
-
+        kHemisphere, kStream, kHemisphere, kTargetSlice,
+        0, true, kTargetRow);
     const auto target_queue = InstructionControlUnit::mem_queue(
         kHemisphere, kTargetSlice);
     chip.icu().enqueue_control(
         IcuLocation::Mem(kHemisphere, kTargetSlice),
         IcuControlInstruction::Sync());
-    chip.icu().enqueue_mem_nop(target_queue, kRxToTargetNops);
-    chip.icu().enqueue_mem(
-        target_queue,
-        MemInstruction::Write(kTargetRow, StreamId::West(kStream)));
 
     bool observed_dma_sync_wait = false;
     bool observed_dma_sync_release = false;
@@ -125,7 +211,7 @@ void test_ddr4_dma_rx_sr_mem()
     require(observed_dma_sync_release,
         "DDR4 read completion did not release the DMA ICU");
     require(observed_mem_sync_release,
-        "C2C RX did not notify the target MEM ICU");
+        "dedicated C2C RX did not notify the target MEM ICU");
     require(system.dma(kHemisphere).idle(),
         "DDR4-to-C2C DMA did not become idle");
 
@@ -207,6 +293,9 @@ void test_mem_sr_tx_dma_ddr4()
 int main()
 {
     test_ddr4_transfers_one_beat_per_cycle();
+    test_ddr4_exposes_eight_vector_channels();
+    test_c2c_stream_count_is_runtime_selectable();
+    test_dedicated_c2c_overlaps_all_compute_streams();
     test_ddr4_dma_rx_sr_mem();
     test_mem_sr_tx_dma_ddr4();
 }

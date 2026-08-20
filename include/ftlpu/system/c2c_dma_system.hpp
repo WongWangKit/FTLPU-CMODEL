@@ -14,11 +14,15 @@ class C2cDmaSystem {
 public:
     explicit C2cDmaSystem(
         Ddr4Config ddr4_config = {},
-        std::size_t dma_fifo_depth_vectors = 4)
+        std::size_t dma_fifo_depth_vectors = 16,
+        SystemHardwareConfiguration hardware = {})
         : ddr4_(ddr4_config)
         , dmas_ {
-            C2cDmaEngine(ddr4_, dma_fifo_depth_vectors),
-            C2cDmaEngine(ddr4_, dma_fifo_depth_vectors)}
+            C2cDmaEngine(ddr4_, dma_fifo_depth_vectors,
+                hardware.c2c_streams_per_direction),
+            C2cDmaEngine(ddr4_, dma_fifo_depth_vectors,
+                hardware.c2c_streams_per_direction)}
+        , chip_(hardware)
     {
         for (std::size_t index = 0; index < hw::kHemispheres; ++index) {
             const auto hemisphere = static_cast<Hemisphere>(index);

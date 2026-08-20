@@ -81,6 +81,40 @@ inline MemInstruction apply_icu_repeat_stride(
     return instruction;
 }
 
+inline MxmControlInstruction apply_icu_repeat_stride(
+    MxmControlInstruction instruction,
+    std::int64_t address_stride,
+    std::size_t repeat_index)
+{
+    if (address_stride == 0) return instruction;
+    const auto delta = address_stride
+        * static_cast<std::int64_t>(repeat_index);
+    if (instruction.opcode == MxmControlOpcode::Compute
+        || instruction.opcode == MxmControlOpcode::AccumulatorRead) {
+        const auto address = static_cast<std::int64_t>(
+            instruction.accumulator_address) + delta;
+        if (address < 0)
+            throw std::out_of_range(
+                "ICU MXM Loop accumulator-address stride underflow");
+        MxmControlInstruction::check_accumulator_address(
+            static_cast<std::size_t>(address), instruction.compute_mode);
+        instruction.accumulator_address = static_cast<std::size_t>(address);
+        return instruction;
+    }
+    if (instruction.opcode == MxmControlOpcode::IW) {
+        const auto column = static_cast<std::int64_t>(
+            instruction.weight_column) + delta;
+        if (column < 0
+            || column >= static_cast<std::int64_t>(hw::kMxmColumns))
+            throw std::out_of_range(
+                "ICU MXM Loop weight-column stride is outside the MXM");
+        instruction.weight_column = static_cast<std::size_t>(column);
+        return instruction;
+    }
+    throw std::invalid_argument(
+        "ICU MXM Loop stride requires compute, accumulator-read, or IW");
+}
+
 template <typename FuncInstruction>
 FuncInstruction apply_icu_repeat_2d_stride(
     FuncInstruction instruction,
