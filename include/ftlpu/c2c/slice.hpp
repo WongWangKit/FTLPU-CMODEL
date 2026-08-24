@@ -177,10 +177,12 @@ public:
     explicit C2cRxSlice(
         C2cStreamPortMap::OutputEndpoint endpoint,
         std::string name = "C2C RX",
-        bool dedicated = false)
+        bool dedicated = false,
+        bool indexed_transport = false)
         : endpoint_(endpoint)
         , name_(std::move(name))
         , dedicated_(dedicated)
+        , indexed_transport_(indexed_transport)
     {
     }
 
@@ -188,8 +190,10 @@ public:
     {
         queue_.clear();
         pipeline_ = {};
-        for (auto& queue : dedicated_queues_) queue.clear();
-        for (auto& active : dedicated_active_) active.reset();
+        for (auto& queue : stream_queues_) queue.clear();
+        for (auto& active : stream_active_) active.reset();
+        for (auto& ingress : shared_ingress_) ingress.reset();
+        for (auto& pipeline : shared_pipelines_) pipeline = {};
     }
 
     void issue(C2cInstruction instruction)
@@ -197,8 +201,8 @@ public:
         if (instruction.opcode != C2cOpcode::Receive) {
             throw std::invalid_argument("C2C RX accepts only Receive instructions");
         }
-        if (dedicated_) {
-            dedicated_queues_[instruction.stream_index].push_back(
+        if (dedicated_ || indexed_transport_) {
+            stream_queues_[instruction.stream_index].push_back(
                 std::move(instruction));
         } else {
             queue_.push_back(std::move(instruction));
@@ -207,13 +211,21 @@ public:
 
     bool idle() const noexcept
     {
-        const auto dedicated_idle = std::all_of(
-            dedicated_queues_.begin(), dedicated_queues_.end(),
+        const auto stream_queues_idle = std::all_of(
+            stream_queues_.begin(), stream_queues_.end(),
             [](const auto& queue) { return queue.empty(); })
             && std::none_of(
-                dedicated_active_.begin(), dedicated_active_.end(),
+                stream_active_.begin(), stream_active_.end(),
                 [](const auto& active) { return active.has_value(); });
-        return queue_.empty() && dedicated_idle
+        const auto shared_pipeline_idle = std::none_of(
+            shared_ingress_.begin(), shared_ingress_.end(),
+            [](const auto& ingress) { return ingress.has_value(); })
+            && std::all_of(shared_pipelines_.begin(),
+                shared_pipelines_.end(), [](const auto& pipeline) {
+                    return std::none_of(pipeline.begin(), pipeline.end(),
+                        [](const auto& stage) { return stage.has_value(); });
+                });
+        return queue_.empty() && stream_queues_idle && shared_pipeline_idle
             && std::none_of(
                 pipeline_.begin(), pipeline_.end(),
                 [](const auto& stage) { return stage.has_value(); });
@@ -233,11 +245,11 @@ public:
             throw std::out_of_range("invalid dedicated C2C stream count");
 
         for (std::size_t stream = 0; stream < stream_count; ++stream) {
-            auto& active = dedicated_active_[stream];
-            if (!active.has_value() && !dedicated_queues_[stream].empty()) {
+            auto& active = stream_active_[stream];
+            if (!active.has_value() && !stream_queues_[stream].empty()) {
                 active = ActiveDedicatedReceive {
-                    std::move(dedicated_queues_[stream].front()), 0};
-                dedicated_queues_[stream].pop_front();
+                    std::move(stream_queues_[stream].front()), 0};
+                stream_queues_[stream].pop_front();
             }
             if (!active.has_value() || !external.receive_ready(stream))
                 continue;
@@ -258,12 +270,82 @@ public:
                 active.reset();
         }
     }
-    std::size_t queued_instruction_count() const noexcept { return queue_.size(); }
+
+    template <typename Transport, typename Consumer>
+    void evaluate_shared(
+        StreamRegisterFabric& fabric,
+        Transport& external,
+        std::size_t stream_count,
+        Consumer&& notify)
+    {
+        if (dedicated_ || !indexed_transport_)
+            throw std::logic_error(
+                "C2C RX is not configured for the shared SR fabric");
+        if (stream_count == 0
+            || stream_count > hw::kC2cStreamsPerDirection)
+            throw std::out_of_range("invalid shared C2C stream count");
+
+        auto output = StreamOutputPort(
+            fabric, endpoint_.column, endpoint_.direction, name_);
+        for (std::size_t stream = 0; stream < stream_count; ++stream) {
+            auto& pipeline = shared_pipelines_[stream];
+            for (std::size_t tile = hw::kTileRows - 1; tile > 0; --tile)
+                pipeline[tile] = std::move(pipeline[tile - 1]);
+            pipeline[0] = std::move(shared_ingress_[stream]);
+            shared_ingress_[stream].reset();
+
+            auto& active = stream_active_[stream];
+            if (!active.has_value() && !stream_queues_[stream].empty()) {
+                active = ActiveDedicatedReceive {
+                    std::move(stream_queues_[stream].front()), 0};
+                stream_queues_[stream].pop_front();
+            }
+            if (active.has_value() && external.receive_ready(stream)) {
+                auto vector = external.pop_received(stream);
+                auto consumer = active->instruction.consumer;
+                consumer.base_row +=
+                    active->vector_index * consumer.row_stride;
+                consumer.vector_count = 1;
+                consumer.notify_mem = consumer.notify_mem
+                    && active->vector_index == 0;
+                notify(C2cReceiveNotification {
+                    consumer,
+                    active->instruction.fabric_stream_index,
+                    vector.vector_tag,
+                    {}});
+                shared_ingress_[stream] = ActiveReceive {
+                    active->instruction, std::move(vector)};
+                ++active->vector_index;
+                if (active->vector_index
+                    == active->instruction.consumer.vector_count)
+                    active.reset();
+            }
+
+            for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+                const auto& stage = pipeline[tile];
+                if (!stage.has_value()) continue;
+                output.write_payload_segment(tile,
+                    stage->instruction.fabric_stream_index,
+                    stage->vector.payload[tile],
+                    stage->vector.vector_tag);
+            }
+        }
+    }
+
+    std::size_t queued_instruction_count() const noexcept
+    {
+        std::size_t count = queue_.size();
+        for (const auto& queue : stream_queues_) count += queue.size();
+        return count;
+    }
     std::size_t replayed_tile_count() const noexcept
     {
         return static_cast<std::size_t>(std::count_if(
             pipeline_.begin(), pipeline_.end(),
-            [](const auto& stage) { return stage.has_value(); }));
+            [](const auto& stage) { return stage.has_value(); }))
+            + static_cast<std::size_t>(std::count_if(
+                shared_ingress_.begin(), shared_ingress_.end(),
+                [](const auto& stage) { return stage.has_value(); }));
     }
 
     template <typename Transport>
@@ -322,10 +404,15 @@ private:
     std::deque<C2cInstruction> queue_{};
     std::array<std::optional<ActiveReceive>, hw::kTileRows> pipeline_{};
     bool dedicated_{false};
+    bool indexed_transport_{false};
     std::array<std::deque<C2cInstruction>, hw::kC2cStreamsPerDirection>
-        dedicated_queues_{};
+        stream_queues_{};
     std::array<std::optional<ActiveDedicatedReceive>,
-        hw::kC2cStreamsPerDirection> dedicated_active_{};
+        hw::kC2cStreamsPerDirection> stream_active_{};
+    std::array<std::optional<ActiveReceive>, hw::kC2cStreamsPerDirection>
+        shared_ingress_{};
+    std::array<std::array<std::optional<ActiveReceive>, hw::kTileRows>,
+        hw::kC2cStreamsPerDirection> shared_pipelines_{};
 };
 
 class C2cEndpoint {
@@ -333,9 +420,10 @@ public:
     explicit C2cEndpoint(
         C2cStreamPortMap ports,
         std::string name = "C2C",
-        bool dedicated_rx = false)
+        bool dedicated_rx = false,
+        bool indexed_rx = false)
         : tx_(ports.tx_input, name + " TX")
-        , rx_(ports.rx_output, name + " RX", dedicated_rx)
+        , rx_(ports.rx_output, name + " RX", dedicated_rx, indexed_rx)
     {
     }
 

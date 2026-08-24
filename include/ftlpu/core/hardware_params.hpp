@@ -16,9 +16,9 @@ constexpr std::size_t kWestStreams = kStreamsPerDirection;
 constexpr std::size_t kStreams = kEastStreams + kWestStreams;
 constexpr std::size_t kStreamRegisterBytes = 1;
 
-// C2C owns a physically separate bidirectional stream fabric. These lanes do
-// not consume E0..E31/W0..W31 and each lane carries one complete 32-byte
-// vector per cycle.
+// C2C exposes independent external transport lanes. Each lane carries one
+// complete 32-byte vector per cycle; the default receive path then injects the
+// vector into an ordinary E/W stream for on-chip transport and MEM consumption.
 constexpr std::size_t kC2cStreamsPerDirection = 8;
 constexpr std::size_t kC2cBytesPerStreamPerCycle = kPhysicalVectorBytes;
 constexpr std::size_t kC2cBytesPerDirectionPerCycle =

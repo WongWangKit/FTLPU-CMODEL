@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <ostream>
 #include <optional>
 #include <sstream>
@@ -487,12 +488,14 @@ public:
         bool notify_mem = true,
         std::size_t base_row = 0,
         std::size_t vector_count = 1,
-        std::size_t row_stride = 1)
+        std::size_t row_stride = 1,
+        std::size_t fabric_stream_index =
+            std::numeric_limits<std::size_t>::max())
     {
         enqueue_c2c(endpoint_hemisphere, C2cInstruction::Receive(
             stream_index, consumer_hemisphere, consumer_mem_slice,
             consumer_mem_bank, notify_mem, base_row, vector_count,
-            row_stride));
+            row_stride, fabric_stream_index));
     }
 
     void enqueue_c2c_tx_nop(

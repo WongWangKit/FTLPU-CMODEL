@@ -201,6 +201,27 @@ int main()
     assert(topology.chain_count() == 2);
     assert(topology.is_chain_head(0) && topology.is_chain_tail(7));
 
+    const auto explicit_group = VxmLaneOperand::StreamFloat16(1.0f, 3);
+    assert(VxmLane::input_group_for_operand(0, false, explicit_group) == 3);
+    assert(VxmLane::input_group_for_operand(8, false, explicit_group) == 11);
+
+    auto selected_group = VxmLaneTestDriver{};
+    selected_group.set_chain_depth(VxmChainDepth::Two);
+    selected_group.enqueue_instruction(0, {VxmAluOpcode::Bypass,
+        VxmLaneOperand::StreamFloat16(1.0f, 3)});
+    selected_group.enqueue_instruction(1, output_bypass(0));
+    selected_group.tick();
+    auto selected_streams = VxmLane::StreamBytes{};
+    put_int32(selected_streams, 0, 2);
+    put_int32(selected_streams,
+        3 * VxmLane::kStreamGroupBytes, 9);
+    selected_group.set_stream_inputs(selected_streams);
+    selected_group.tick();
+    selected_group.tick();
+    assert(selected_group.output());
+    assert(VxmLane::unpack_float32(
+        selected_group.output()->bytes) == 9.0f);
+
     // One Current Config Register is held for several element cycles.  The
     // repeat counter advances only when that ALU actually executes.
     auto repeated_config = VxmLaneTestDriver{};

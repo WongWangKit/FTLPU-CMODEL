@@ -117,7 +117,10 @@ void test_dedicated_c2c_overlaps_all_compute_streams()
     constexpr auto kTargetSlice = std::size_t {40};
     constexpr auto kTargetRow = std::size_t {17};
     constexpr auto kDdr4Address = std::uint64_t {0x7000};
-    auto system = C2cDmaSystem(Ddr4Config {32, 2, 2, 64, 8});
+    auto hardware = SystemHardwareConfiguration {};
+    hardware.c2c_dedicated_streams = true;
+    auto system = C2cDmaSystem(
+        Ddr4Config {32, 2, 2, 64, 8}, 16, hardware);
     const auto expected = make_vector(0xa0, 91);
     system.ddr4().initialize_vector(kDdr4Address, expected);
 
@@ -166,6 +169,7 @@ void test_ddr4_dma_rx_sr_mem()
 {
     constexpr auto kHemisphere = Hemisphere::West;
     constexpr auto kStream = 5U;
+    constexpr auto kFabricStream = 29U;
     constexpr auto kTargetSlice = 16U;
     constexpr auto kTargetRow = 41U;
     constexpr auto kDdr4Address = std::uint64_t {0x1000};
@@ -183,17 +187,25 @@ void test_ddr4_dma_rx_sr_mem()
         IcuControlInstruction::Sync());
     chip.icu().enqueue_c2c_receive(
         kHemisphere, kStream, kHemisphere, kTargetSlice,
-        0, true, kTargetRow);
+        0, true, kTargetRow, 1, 1, kFabricStream);
     const auto target_queue = InstructionControlUnit::mem_queue(
         kHemisphere, kTargetSlice);
     chip.icu().enqueue_control(
         IcuLocation::Mem(kHemisphere, kTargetSlice),
         IcuControlInstruction::Sync());
+    constexpr auto kTargetGroup =
+        kTargetSlice / hw::kMemSlicesPerGroup;
+    constexpr auto kTransportNops =
+        hw::kMemEastBoundaryStreamRegisterColumn - (kTargetGroup + 1);
+    chip.icu().enqueue_mem_nop(target_queue, kTransportNops);
+    chip.icu().enqueue_mem(target_queue,
+        MemInstruction::Write(
+            kTargetRow, StreamId::West(kFabricStream)));
 
     bool observed_dma_sync_wait = false;
     bool observed_dma_sync_release = false;
     bool observed_mem_sync_release = false;
-    for (std::size_t cycle = 0; cycle < 40; ++cycle) {
+    for (std::size_t cycle = 0; cycle < 64; ++cycle) {
         system.tick();
         const auto dma_action =
             chip.icu().c2c_dma_iq(kHemisphere).last_trace().action;
@@ -211,7 +223,7 @@ void test_ddr4_dma_rx_sr_mem()
     require(observed_dma_sync_release,
         "DDR4 read completion did not release the DMA ICU");
     require(observed_mem_sync_release,
-        "dedicated C2C RX did not notify the target MEM ICU");
+        "shared C2C RX did not notify the target MEM ICU");
     require(system.dma(kHemisphere).idle(),
         "DDR4-to-C2C DMA did not become idle");
 
@@ -221,11 +233,64 @@ void test_ddr4_dma_rx_sr_mem()
                 kHemisphere, kTargetSlice, tile, kTargetRow, lane);
             if (actual != expected.payload[tile][lane]) {
                 throw std::runtime_error(
-                    "DDR4 -> DMA -> RX -> SR -> MEM mismatch at tile "
+                    "DDR4 -> DMA -> shared SR -> MEM Write mismatch at tile "
                     + std::to_string(tile) + ", lane "
                     + std::to_string(lane));
             }
         }
+    }
+}
+
+void test_eight_shared_c2c_lanes_write_through_mem()
+{
+    constexpr auto kHemisphere = Hemisphere::East;
+    constexpr auto kLaneCount = std::size_t {8};
+    constexpr auto kFabricBase = std::size_t {24};
+    constexpr auto kTargetRow = std::size_t {73};
+    constexpr auto kDdr4Base = std::uint64_t {0x10000};
+    auto system = C2cDmaSystem(Ddr4Config {32, 2, 2, 64, kLaneCount});
+    auto& chip = system.chip();
+
+    for (std::size_t lane = 0; lane < kLaneCount; ++lane) {
+        const auto targetSlice = std::size_t {20} + lane;
+        const auto address = kDdr4Base
+            + lane * hw::kPhysicalVectorBytes;
+        const auto expected = make_vector(
+            static_cast<std::uint8_t>(0x10 + lane * 0x10), 200 + lane);
+        system.ddr4().initialize_vector(address, expected);
+        chip.icu().enqueue_c2c_dma(kHemisphere,
+            C2cDmaInstruction::Load(address, 1,
+                hw::kPhysicalVectorBytes, 200 + lane, lane));
+        chip.icu().enqueue_c2c_receive(kHemisphere, lane,
+            kHemisphere, targetSlice, 1, true, kTargetRow,
+            1, 1, kFabricBase + lane);
+
+        const auto queue = InstructionControlUnit::mem_queue(
+            kHemisphere, targetSlice, 1);
+        chip.icu().enqueue_control(
+            IcuLocation::Mem(kHemisphere, targetSlice, 1),
+            IcuControlInstruction::Sync());
+        const auto group = targetSlice / hw::kMemSlicesPerGroup;
+        const auto transportNops =
+            hw::kMemEastBoundaryStreamRegisterColumn - (group + 1);
+        chip.icu().enqueue_mem_nop(queue, transportNops);
+        chip.icu().enqueue_mem(queue,
+            MemInstruction::Write(
+                kTargetRow, StreamId::West(kFabricBase + lane)));
+    }
+
+    for (std::size_t cycle = 0; cycle < 80; ++cycle) system.tick();
+
+    for (std::size_t lane = 0; lane < kLaneCount; ++lane) {
+        const auto targetSlice = std::size_t {20} + lane;
+        const auto expected = make_vector(
+            static_cast<std::uint8_t>(0x10 + lane * 0x10), 200 + lane);
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile)
+            for (std::size_t byte = 0; byte < hw::kLanesPerTile; ++byte)
+                require(chip.read_mem_sram_lane_byte(kHemisphere,
+                            targetSlice, 1, tile, kTargetRow, byte)
+                        == expected.payload[tile][byte],
+                    "parallel shared C2C lane did not write through MEM");
     }
 }
 
@@ -297,5 +362,6 @@ int main()
     test_c2c_stream_count_is_runtime_selectable();
     test_dedicated_c2c_overlaps_all_compute_streams();
     test_ddr4_dma_rx_sr_mem();
+    test_eight_shared_c2c_lanes_write_through_mem();
     test_mem_sr_tx_dma_ddr4();
 }

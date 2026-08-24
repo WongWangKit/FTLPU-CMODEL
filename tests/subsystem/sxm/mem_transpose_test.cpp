@@ -18,7 +18,7 @@ constexpr std::size_t kInputBeats = kMatrixCount * kBlocks;
 constexpr std::size_t kRouteStart = 3;
 constexpr std::size_t kMemToSxmLatency =
     ftlpu::hw::kMemGroups
-    + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 1;
+    + ftlpu::hw::kC2cToSxmStreamRegisterColumns;
 constexpr std::size_t kCaptureStart = kRouteStart + kMemToSxmLatency;
 constexpr std::size_t kOutputAddressBase = 32;
 constexpr std::array<std::size_t, kStreams> kInputSlices {

@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 
 namespace ftlpu {
@@ -26,13 +27,16 @@ struct C2cConsumer {
 
 struct C2cInstruction {
     C2cOpcode opcode{C2cOpcode::Send};
+    // The external transport lane and the ordinary SR index are independent.
     std::size_t stream_index{0};
+    std::size_t fabric_stream_index{0};
     C2cConsumer consumer{};
 
     static C2cInstruction Send(std::size_t stream_index)
     {
         validate_stream(stream_index);
-        return C2cInstruction {C2cOpcode::Send, stream_index, {}};
+        return C2cInstruction {
+            C2cOpcode::Send, stream_index, stream_index, {}};
     }
 
     static C2cInstruction Receive(
@@ -43,9 +47,17 @@ struct C2cInstruction {
         bool notify_mem = true,
         std::size_t base_row = 0,
         std::size_t vector_count = 1,
-        std::size_t row_stride = 1)
+        std::size_t row_stride = 1,
+        std::size_t fabric_stream_index =
+            std::numeric_limits<std::size_t>::max())
     {
         validate_stream(stream_index);
+        if (fabric_stream_index == std::numeric_limits<std::size_t>::max())
+            fabric_stream_index = stream_index;
+        if (fabric_stream_index >= hw::kStreamsPerDirection) {
+            throw std::out_of_range(
+                "C2C Receive stream is outside the ordinary SR file");
+        }
         if (consumer_mem_slice >= hw::kMemSliceColumns) {
             throw std::out_of_range(
                 "C2C Receive consumer is outside the MEM slice array");
@@ -67,6 +79,7 @@ struct C2cInstruction {
         return C2cInstruction {
             C2cOpcode::Receive,
             stream_index,
+            fabric_stream_index,
             C2cConsumer {
                 consumer_hemisphere, consumer_mem_slice, consumer_mem_bank,
                 base_row, vector_count, row_stride, notify_mem},
@@ -78,7 +91,7 @@ private:
     {
         if (stream_index >= hw::kC2cStreamsPerDirection) {
             throw std::out_of_range(
-                "C2C stream index is outside the dedicated directional stream file");
+                "C2C stream index is outside the directional transport lanes");
         }
     }
 };

@@ -447,7 +447,8 @@ private:
             && operand.kind != VxmLaneOperandKind::StreamBFloat16) {
             return;
         }
-        const auto group = VxmLane::fixed_input_group_for_stage(alu, rhs_port);
+        const auto group =
+            VxmLane::input_group_for_operand(alu, rhs_port, operand);
         // RequiredStreams describes the fixed logical 32-byte VXM input
         // bundle.  The separately configured group source selects which MEM
         // hemisphere supplies that same-numbered westbound SR group.

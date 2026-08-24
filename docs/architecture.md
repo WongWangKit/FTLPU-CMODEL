@@ -19,7 +19,7 @@ The central vector shape is:
 | MEM groups | 13 per hemisphere, 4 slices per group |
 | Stream-register columns | 16 per hemisphere (`sreg0..sreg15`) |
 | Streams per lane | 32 eastward + 32 westward |
-| Dedicated C2C streams | 8 eastward + 8 westward (runtime-selectable subset) |
+| External C2C lanes | 8 eastward + 8 westward (runtime-selectable subset) |
 | External C2C bandwidth | 32 bytes/lane/cycle, 256 bytes/cycle per direction |
 | Stream-register width | 1 byte |
 | SRAM capacity | 2 x 1 MiB single-port banks per slice, 208 MiB full chip |
@@ -45,14 +45,14 @@ Both hemispheres use the same local orientation:
 
 - `sreg0` is adjacent to VXM.
 - Thirteen MEM groups occupy the boundaries `sreg0..sreg13`.
-- Compute traffic retains the independent `E0..E31/W0..W31` stream-register
-  files. C2C DMA ingress has a separate directional lane/FIFO pool and never
-  consumes those stream IDs.
+- Compute traffic retains `E0..E31/W0..W31`. External C2C lane IDs are
+  independent, but shared-mode DMA ingress maps them onto selected ordinary SRs.
 - Each C2C TX/RX pair connects directly either to another chip's `C2cLink`
   or to an ICU-controlled DMA.
-- A DMA `Load` moves `DDR4 -> per-lane DMA RX FIFO -> dedicated C2C RX -> MEM`.
-  Up to eight 32-byte vectors can complete in one cycle and target independent
-  slice/bank rows. The lane count is selected by `SystemHardwareConfiguration`.
+- A shared-mode DMA `Load` moves `DDR4 -> per-lane DMA RX FIFO -> C2C RX ->
+  west SR -> MEM Write -> SRAM`. Up to eight 32-byte vectors can enter selected
+  SRs in one cycle and target independent slice/bank rows. The lane count is
+  selected by `SystemHardwareConfiguration`.
   A DMA `Store` moves `MEM -> east SR -> C2C TX -> DMA TX FIFO -> DDR4`.
 - The two hemisphere DMA engines have independent ICU queues and C2C-facing
   FIFOs; `C2cDmaSystem` models them sharing one sparse DDR4 address space.

@@ -44,8 +44,10 @@ bool same_vxm(const ftlpu::VxmLaneAluInstruction& lhs, const ftlpu::VxmLaneAluIn
     return lhs.operation == rhs.operation
         && lhs.lhs.kind == rhs.lhs.kind
         && lhs.lhs.immediate == rhs.lhs.immediate
+        && lhs.lhs.stream_group == rhs.lhs.stream_group
         && lhs.rhs.kind == rhs.rhs.kind
         && lhs.rhs.immediate == rhs.rhs.immediate
+        && lhs.rhs.stream_group == rhs.rhs.stream_group
         && lhs.precision == rhs.precision
         && lhs.output_type == rhs.output_type
         && lhs.output_stream == rhs.output_stream
@@ -406,6 +408,24 @@ bool verify_vxm_codec()
         return false;
     }
 
+    auto selected_streams = ftlpu::VxmLaneAluInstruction {};
+    selected_streams.operation = ftlpu::VxmAluOpcode::Add;
+    selected_streams.lhs =
+        ftlpu::VxmLaneOperand::StreamBFloat16(1.0f, 3);
+    selected_streams.rhs =
+        ftlpu::VxmLaneOperand::StreamFloat16(1.0f, 7);
+    const auto selected_packet = ftlpu::isa::encode_vxm_instruction(
+        0, depth, selected_streams);
+    const auto selected_decoded = ftlpu::isa::decode_vxm_instruction(
+        0, selected_packet);
+    if (!require(
+            selected_decoded.chain_depth == depth
+                && same_vxm(selected_streams,
+                    selected_decoded.instruction),
+            "VXM stream-group selectors were not preserved")) {
+        return false;
+    }
+
     return require_throws(
         [] {
             auto invalid = ftlpu::VxmLaneAluInstruction {};
@@ -414,7 +434,16 @@ bool verify_vxm_codec()
             ftlpu::isa::encode_vxm_instruction(
                 0, ftlpu::VxmChainDepth::Two, invalid);
         },
-        "VXM codec should reject two distinct immediate values");
+        "VXM codec should reject two distinct immediate values")
+        && require_throws(
+            [] {
+                auto invalid = ftlpu::VxmLaneAluInstruction {
+                    ftlpu::VxmAluOpcode::Bypass,
+                    ftlpu::VxmLaneOperand::StreamFloat16(1.0f, 8)};
+                ftlpu::isa::encode_vxm_instruction(
+                    0, ftlpu::VxmChainDepth::Two, invalid);
+            },
+            "VXM codec should reject stream groups outside 0..7");
 }
 
 bool verify_icu_command_codec()

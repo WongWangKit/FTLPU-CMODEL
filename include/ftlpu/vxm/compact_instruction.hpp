@@ -35,6 +35,7 @@ public:
     static constexpr std::uint64_t kOutputTypeMask = 0x3ull;
     static constexpr std::uint64_t kDepthMask = 0x3ull;
     static constexpr std::uint64_t kRepeatMask = 0xffffffffull;
+    static constexpr std::uint64_t kStreamGroupMask = 0x1full;
 
     static VxmCompactInstruction encode(
         std::size_t stage, VxmChainDepth depth,
@@ -79,6 +80,10 @@ public:
                kRepeatShift, kRepeatMask);
         insert(control, instruction.local_scalar_write ? 1 : 0,
                kLocalScalarWriteShift, 0x1);
+        insert(control, encode_stream_group(instruction.lhs),
+               kLhsStreamGroupShift, kStreamGroupMask);
+        insert(control, encode_stream_group(instruction.rhs),
+               kRhsStreamGroupShift, kStreamGroupMask);
 
         auto immediate = 0.0f;
         if (instruction.lhs.kind == VxmLaneOperandKind::Immediate) {
@@ -107,6 +112,10 @@ public:
             packet.control, kLhsShift, kOperandMask), immediate);
         instruction.rhs = decode_operand(extract(
             packet.control, kRhsShift, kOperandMask), immediate);
+        decode_stream_group(instruction.lhs, extract(packet.control,
+            kLhsStreamGroupShift, kStreamGroupMask));
+        decode_stream_group(instruction.rhs, extract(packet.control,
+            kRhsStreamGroupShift, kStreamGroupMask));
         instruction.precision = extract(
             packet.control, kPrecisionShift, 0x1)
             ? VxmAluPrecision::Float32 : VxmAluPrecision::Float16;
@@ -151,6 +160,8 @@ private:
     static constexpr unsigned kDepthShift = 17;
     static constexpr unsigned kRepeatShift = 19;
     static constexpr unsigned kLocalScalarWriteShift = 51;
+    static constexpr unsigned kLhsStreamGroupShift = 52;
+    static constexpr unsigned kRhsStreamGroupShift = 57;
 
     static void insert(std::uint64_t& word, std::uint64_t value,
                        unsigned shift, std::uint64_t mask)
@@ -209,6 +220,32 @@ private:
     static std::uint64_t encode_operand(VxmLaneOperandKind kind)
     {
         return static_cast<std::uint64_t>(kind);
+    }
+
+    static std::uint64_t encode_stream_group(
+        const VxmLaneOperand& operand)
+    {
+        if (operand.stream_group < 0) return 0;
+        if (operand.kind != VxmLaneOperandKind::StreamFloat16
+            && operand.kind != VxmLaneOperandKind::StreamBFloat16)
+            throw std::invalid_argument(
+                "only VXM stream operands may select a stream group");
+        if (operand.stream_group >= 8)
+            throw std::invalid_argument(
+                "VXM stream-group selector is outside 0..7");
+        return static_cast<std::uint64_t>(operand.stream_group + 1);
+    }
+
+    static void decode_stream_group(
+        VxmLaneOperand& operand, std::uint64_t encoded)
+    {
+        if (encoded == 0) return;
+        if (encoded > 8
+            || (operand.kind != VxmLaneOperandKind::StreamFloat16
+                && operand.kind != VxmLaneOperandKind::StreamBFloat16))
+            throw std::invalid_argument(
+                "VXM compact instruction has an invalid stream-group selector");
+        operand.stream_group = static_cast<std::int32_t>(encoded - 1);
     }
 
     static VxmLaneOperand decode_operand(

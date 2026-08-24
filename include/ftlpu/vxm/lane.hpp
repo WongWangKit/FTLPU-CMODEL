@@ -43,6 +43,9 @@ struct VxmLaneOperand {
     float immediate{0.0f};
     float scale{1.0f};
     std::int32_t zero_point{0};
+    // -1 keeps the stage-local fixed input group. Values 0..7 select a
+    // hemisphere-local group and mirror to 8..15 on the north chain.
+    std::int32_t stream_group{-1};
 
     static VxmLaneOperand Previous() { return {VxmLaneOperandKind::Previous}; }
     static VxmLaneOperand Original() { return {VxmLaneOperandKind::Original}; }
@@ -50,13 +53,17 @@ struct VxmLaneOperand {
     static VxmLaneOperand Acc() { return {VxmLaneOperandKind::Accumulator}; }
     static VxmLaneOperand Imm(float value) { return {VxmLaneOperandKind::Immediate, value}; }
     static VxmLaneOperand Feedback() { return {VxmLaneOperandKind::Feedback}; }
-    static VxmLaneOperand StreamFloat16(float scale = 1.0f)
+    static VxmLaneOperand StreamFloat16(
+        float scale = 1.0f, std::int32_t stream_group = -1)
     {
-        return {VxmLaneOperandKind::StreamFloat16, 0.0f, scale, 0};
+        return {VxmLaneOperandKind::StreamFloat16, 0.0f, scale, 0,
+            stream_group};
     }
-    static VxmLaneOperand StreamBFloat16(float scale = 1.0f)
+    static VxmLaneOperand StreamBFloat16(
+        float scale = 1.0f, std::int32_t stream_group = -1)
     {
-        return {VxmLaneOperandKind::StreamBFloat16, 0.0f, scale, 0};
+        return {VxmLaneOperandKind::StreamBFloat16, 0.0f, scale, 0,
+            stream_group};
     }
 };
 
@@ -363,6 +370,18 @@ public:
         std::size_t stage, bool rhs_port)
     {
         return block_for_stage(stage) * 2 + (rhs_port ? 1 : 0);
+    }
+
+    static std::size_t input_group_for_operand(std::size_t stage,
+        bool rhs_port, const VxmLaneOperand& operand)
+    {
+        if (operand.stream_group < 0)
+            return fixed_input_group_for_stage(stage, rhs_port);
+        if (operand.stream_group >= 8)
+            throw std::out_of_range(
+                "VXM operand stream group is outside one hemisphere");
+        return static_cast<std::size_t>(operand.stream_group)
+            + (stage >= 8 ? 8 : 0);
     }
 
     void validate_broadcast_instruction(
@@ -1089,8 +1108,8 @@ private:
         // The only input MUX selects this fixed Stream value or Immediate.
         if (operand.kind == VxmLaneOperandKind::Immediate) return operand.immediate;
         std::array<std::uint8_t, kStreamGroupBytes> bytes{};
-        const auto base = fixed_input_group_for_stage(stage, rhs_port)
-                        * kStreamGroupBytes;
+        const auto base = input_group_for_operand(stage, rhs_port, operand)
+            * kStreamGroupBytes;
         for (std::size_t byte = 0; byte < kStreamGroupBytes; ++byte) {
             bytes[byte] = stream_inputs_[base + byte];
         }

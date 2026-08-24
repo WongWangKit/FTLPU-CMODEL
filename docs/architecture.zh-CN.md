@@ -41,6 +41,8 @@ MXM2/MXM3 <-> SXM.W <-> C2C.W <-> MEM.W(52) <-> VXM <-> MEM.E(52) <-> C2C.E <-> 
 - `sreg0` 靠近 VXM；
 - 13 个 MEM group 位于 `sreg0..sreg13`；
 - 每个 hemisphere 在 MEM 边界 `sreg13` 各有独立的 C2C TX/RX endpoint；
+- 外部 C2C lane ID 与片内 stream ID 独立；默认 shared 模式把 RX 映射到选定的
+  普通 west stream，数据沿 SR 传播后由目标 MEM `Write` 写入 SRAM；
 - C2C 与 SXM 之间增加一拍 SR，`sreg14` 是 C2C/SXM 边界；
 - SXM 把 `sreg14` 连接到 MXM 边界 `sreg15`；
 - east stream 从 VXM 流向 MXM；
