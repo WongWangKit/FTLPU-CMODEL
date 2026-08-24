@@ -46,6 +46,10 @@ public:
     explicit TspSliceSystem(
         SystemHardwareConfiguration hardware = {})
         : hardware_configuration_(hardware)
+        , mems_ {
+            TileArrayModel(MemStreamPortMap::BetweenBoundaries()),
+            TileArrayModel(MemStreamPortMap::BetweenBoundaries()),
+        }
         , sxms_ {
             SxmSlice(make_sxm_port_map()),
             SxmSlice(make_sxm_port_map()),
@@ -625,8 +629,7 @@ private:
         }
         if (instruction->weight_input_mode
             == MxmWeightInputMode::Int8DequantBf16) {
-            const auto stream_base = local_mxm_index(mxm)
-                * hw::kMxmInt8LoadStreamStride;
+            const auto stream_base = instruction->weight_stream_base;
             if (instruction->weight_load_mode
                 == MxmWeightLoadMode::Column) {
                 const auto column = instruction->weight_inner_column;
@@ -666,7 +669,11 @@ private:
                             stream_base + column);
                     if (!word.has_value()) {
                         throw std::logic_error(
-                            "MXM INT8 IW reached tile before all eight weight streams arrived at the MXM boundary register");
+                            "MXM INT8 IW reached tile before all eight weight streams arrived at the MXM boundary register"
+                            " (tile=" + std::to_string(tile)
+                            + ", lane=" + std::to_string(lane)
+                            + ", stream="
+                            + std::to_string(stream_base + column) + ")");
                     }
                     input[lane][column] =
                         MxmArray::Supercell::InputWord {
@@ -679,8 +686,7 @@ private:
             return input;
         }
 
-        const auto stream_base =
-            local_mxm_index(mxm) * hw::kMxmLoadStreamStride;
+        const auto stream_base = instruction->weight_stream_base;
         if (instruction->weight_input_mode
             != MxmWeightInputMode::Direct16) {
             throw std::invalid_argument("MXM weight input mode is invalid");

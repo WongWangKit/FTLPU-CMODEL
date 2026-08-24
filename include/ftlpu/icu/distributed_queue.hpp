@@ -9,6 +9,7 @@
 #include <deque>
 #include <iterator>
 #include <optional>
+#include <queue>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -19,7 +20,14 @@
 namespace ftlpu {
 
 template <typename FuncInstruction>
-using IqEntry = std::variant<IcuControlInstruction, FuncInstruction>;
+struct IcuMacroInstruction {
+    IcuMacroSchedule schedule{};
+    FuncInstruction instruction{};
+};
+
+template <typename FuncInstruction>
+using IqEntry = std::variant<IcuControlInstruction, FuncInstruction,
+    IcuMacroInstruction<FuncInstruction>>;
 
 struct IcuProgramDescriptor {
     std::size_t base_pc{0};
@@ -40,6 +48,8 @@ enum class IcuQueueAction : std::uint8_t {
     LoopWait,
     Repeat2DIssue,
     Repeat2DWait,
+    MacroIssue,
+    MacroWait,
     SyncWait,
     SyncRelease,
     Notify,
@@ -242,6 +252,8 @@ public:
         repeat_2d_inner_ = 0;
         repeat_2d_outer_ = 0;
         repeat_2d_cooldown_ = 0;
+        active_macros_ = {};
+        macro_remaining_points_ = 0;
         static_history_pcs_.clear();
         loop_window_pcs_.clear();
         loop_rounds_remaining_ = 0;
@@ -360,6 +372,16 @@ public:
         append_control(IcuControlInstruction::Repeat2D(repeat));
     }
 
+    void push_macro(
+        IcuMacroSchedule schedule, FuncInstruction instruction)
+    {
+        validate_macro_schedule(schedule);
+        append_program(Entry {std::in_place_type<
+            IcuMacroInstruction<FuncInstruction>>,
+            IcuMacroInstruction<FuncInstruction> {
+                schedule, std::move(instruction)}});
+    }
+
     std::optional<FuncInstruction> dispatch_next()
     {
         return tick();
@@ -440,6 +462,7 @@ public:
     {
         if (nop_remaining_ != 0 || repeat_remaining_ != 0
             || loop_rounds_remaining_ != 0 || repeat_2d_active_
+            || !active_macros_.empty()
             || iq_.empty()) {
             return false;
         }
@@ -460,7 +483,7 @@ public:
             && nop_remaining_ == 0
             && repeat_remaining_ == 0
             && loop_rounds_remaining_ == 0
-            && !repeat_2d_active_;
+            && !repeat_2d_active_ && active_macros_.empty();
     }
 
     bool running() const { return !done(); }
@@ -508,6 +531,7 @@ public:
             + (program_end_pc_ - fetch_pc_)
             + repeat_remaining_ + nop_remaining_
             + repeat_2d_remaining_points()
+            + macro_remaining_points()
             + loop_rounds_remaining_ * loop_window_pcs_.size();
     }
 
@@ -603,6 +627,10 @@ private:
         if (repeat_2d_active_) {
             return tick_repeat_2d();
         }
+        if (!active_macros_.empty()
+            || (!iq_.empty() && std::holds_alternative<
+                IcuMacroInstruction<FuncInstruction>>(iq_.front())))
+            return tick_macros();
         if (loop_rounds_remaining_ > 0) {
             return tick_loop();
         }
@@ -802,6 +830,111 @@ private:
             + repeat_2d_.inner_count - repeat_2d_inner_;
     }
 
+    static void validate_macro_schedule(const IcuMacroSchedule& schedule)
+    {
+        if (schedule.inner_count == 0 || schedule.outer_count == 0
+            || schedule.inner_interval == 0
+            || schedule.outer_interval == 0
+            || (schedule.outer_count > 1
+                && schedule.outer_interval
+                    <= (schedule.inner_count - 1)
+                        * schedule.inner_interval)) {
+            throw std::invalid_argument(
+                "ICU macro has an invalid iteration space");
+        }
+    }
+
+    struct ActiveMacro {
+        IcuMacroInstruction<FuncInstruction> macro;
+        std::size_t pc{0};
+        std::size_t inner{0};
+        std::size_t outer{0};
+
+        std::size_t issue_cycle() const noexcept
+        {
+            return macro.schedule.start_cycle
+                + outer * macro.schedule.outer_interval
+                + inner * macro.schedule.inner_interval;
+        }
+    };
+
+    struct LaterMacroIssue {
+        bool operator()(const ActiveMacro& lhs,
+            const ActiveMacro& rhs) const noexcept
+        {
+            return lhs.issue_cycle() > rhs.issue_cycle();
+        }
+    };
+
+    std::optional<FuncInstruction> tick_macros()
+    {
+        if (!iq_.empty()) {
+            if (auto* macro = std::get_if<
+                    IcuMacroInstruction<FuncInstruction>>(&iq_.front())) {
+                validate_macro_schedule(macro->schedule);
+                if (cycle_ > macro->schedule.start_cycle) {
+                    std::ostringstream os;
+                    os << "ICU macro missed start cycle "
+                       << macro->schedule.start_cycle << " at cycle "
+                       << cycle_;
+                    throw StaticScheduleError(os.str());
+                }
+                macro_remaining_points_ += macro->schedule.inner_count
+                    * macro->schedule.outer_count;
+                active_macros_.push(ActiveMacro {
+                    std::move(*macro), iq_pcs_.front(), 0, 0});
+                iq_.pop_front();
+                iq_pcs_.pop_front();
+            } else if (!active_macros_.empty()) {
+                throw StaticScheduleError(
+                    "ICU queue mixes an in-flight macro with legacy commands");
+            }
+        }
+
+        if (active_macros_.empty()
+            || active_macros_.top().issue_cycle() > cycle_) {
+            last_trace_.action = IcuQueueAction::MacroWait;
+            return std::nullopt;
+        }
+        if (active_macros_.top().issue_cycle() < cycle_)
+            throw StaticScheduleError(
+                "ICU macro expansion missed an issue cycle");
+        auto due = active_macros_.top();
+        active_macros_.pop();
+        if (!active_macros_.empty()
+            && active_macros_.top().issue_cycle() == cycle_)
+            throw StaticScheduleError(
+                "overlapping ICU macros issue on the same queue cycle");
+
+        const auto delta = static_cast<std::int64_t>(due.inner)
+                * due.macro.schedule.inner_stride
+            + static_cast<std::int64_t>(due.outer)
+                * due.macro.schedule.outer_stride;
+        auto result = detail::apply_icu_repeat_2d_stride(
+            due.macro.instruction,
+            due.macro.schedule.induction_target, delta);
+        last_dispatched_ = result;
+        last_dispatched_pc_ = due.pc;
+        last_trace_.issue_pc = due.pc;
+        last_trace_.action = IcuQueueAction::MacroIssue;
+        ++issued_count_;
+        --macro_remaining_points_;
+
+        ++due.inner;
+        if (due.inner == due.macro.schedule.inner_count) {
+            due.inner = 0;
+            ++due.outer;
+        }
+        if (due.outer != due.macro.schedule.outer_count)
+            active_macros_.push(std::move(due));
+        return result;
+    }
+
+    std::size_t macro_remaining_points() const noexcept
+    {
+        return macro_remaining_points_;
+    }
+
     std::optional<FuncInstruction> begin_loop(
         const IcuControlInstruction& control)
     {
@@ -865,6 +998,9 @@ private:
     std::optional<FuncInstruction> last_dispatched_{};
     std::optional<FuncInstruction> repeat_instruction_{};
     std::optional<FuncInstruction> repeat_2d_instruction_{};
+    std::priority_queue<ActiveMacro, std::vector<ActiveMacro>,
+        LaterMacroIssue> active_macros_{};
+    std::size_t macro_remaining_points_{0};
     std::deque<std::size_t> static_history_pcs_{};
     std::vector<std::size_t> loop_window_pcs_{};
     std::optional<std::size_t> last_dispatched_pc_{};

@@ -139,10 +139,17 @@ constexpr std::size_t kPublicSramBlocks =
 constexpr std::size_t kSramBlocksPerSlice = kMemBanksPerSlice;
 constexpr std::size_t kSramBlocks = kModeledSramBlocks;
 constexpr std::size_t kSramRowBytes = kPhysicalVectorBytes;
-constexpr std::size_t kSramDepthRows = 32768;
+// Architectural SRAM capacity of one bank. A superlane owns two banks, so
+// 2048 x 32-byte rows gives 64 KiB per bank and 128 KiB per superlane.
+constexpr std::size_t kSramDepthRows = 2048;
+// Sparse backing capacity retained for tests that explicitly model a future
+// target with deeper SRAM.
+constexpr std::size_t kSramMaxDepthRows = 32768;
 // Compatibility alias for code that historically called a vector row a word.
 constexpr std::size_t kSramDepthWords = kSramDepthRows;
 constexpr std::size_t kSramBlockBytes = kSramRowBytes * kSramDepthRows;
+constexpr std::size_t kSramMaxBlockBytes =
+    kSramRowBytes * kSramMaxDepthRows;
 constexpr std::size_t kTotalSramBytes = kSramBlocks * kSramBlockBytes;
 constexpr std::size_t kPublicTotalSramBytes = kPublicSramBlocks * kSramBlockBytes;
 
@@ -187,8 +194,9 @@ static_assert(kIcuMemImemDepth >= kIcuMemIqDepth);
 static_assert(kIcuMxmImemDepth >= kIcuMxmIqDepth);
 static_assert(kIcuSxmImemDepth >= kIcuSxmIqDepth);
 static_assert(kIcuC2cImemDepth >= kIcuC2cIqDepth);
-static_assert(kSramBlockBytes == 1 * 1024 * 1024);
-static_assert(kTotalSramBytes == 104 * 1024 * 1024);
-static_assert(kPublicTotalSramBytes == 208 * 1024 * 1024);
+static_assert(kSramBlockBytes == 64 * 1024);
+static_assert(kSramMaxBlockBytes == 1 * 1024 * 1024);
+static_assert(kTotalSramBytes == 6656 * 1024);
+static_assert(kPublicTotalSramBytes == 13312 * 1024);
 
 } // namespace ftlpu::hw

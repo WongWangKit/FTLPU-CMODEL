@@ -273,6 +273,13 @@ public:
         mem_queues_[column].push_repeat(Repeat {count, interval, address_stride});
     }
 
+    void enqueue_mem_macro(std::size_t column,
+        IcuMacroSchedule schedule, MemInstruction instruction)
+    {
+        check_mem_queue(column);
+        mem_queues_[column].push_macro(schedule, std::move(instruction));
+    }
+
     void enqueue_mxm(std::size_t mxm, MxmControlInstruction instruction)
     {
         check_mxm_queue(mxm);
@@ -312,6 +319,42 @@ public:
     {
         check_mxm_queue(mxm);
         mxm_dequant_queues_[mxm].push_nop(cycles);
+    }
+
+    void enqueue_mxm_load_macro(std::size_t mxm,
+        IcuMacroSchedule schedule, MxmControlInstruction instruction)
+    {
+        check_mxm_queue(mxm);
+        if (instruction.opcode != MxmControlOpcode::IW
+            && !(instruction.opcode == MxmControlOpcode::Decode
+                && instruction.decode_operation
+                    == MxmDecodeOperation::LoadActivation))
+            throw std::invalid_argument(
+                "MXM load macro requires an IW/load-activation instruction");
+        mxm_load_queues_[mxm].push_macro(
+            schedule, std::move(instruction));
+    }
+
+    void enqueue_mxm_dequant_macro(std::size_t mxm,
+        IcuMacroSchedule schedule, MxmDequantInstruction instruction)
+    {
+        check_mxm_queue(mxm);
+        mxm_dequant_queues_[mxm].push_macro(
+            schedule, std::move(instruction));
+    }
+
+    void enqueue_mxm_compute_macro(std::size_t mxm,
+        IcuMacroSchedule schedule, MxmControlInstruction instruction)
+    {
+        check_mxm_queue(mxm);
+        if (instruction.opcode == MxmControlOpcode::IW
+            || (instruction.opcode == MxmControlOpcode::Decode
+                && instruction.decode_operation
+                    == MxmDecodeOperation::LoadActivation))
+            throw std::invalid_argument(
+                "MXM compute macro cannot carry a load instruction");
+        mxm_compute_queues_[mxm].push_macro(
+            schedule, std::move(instruction));
     }
 
     void enqueue_mxm_compute_nop(std::size_t mxm, std::size_t cycles)
@@ -945,7 +988,8 @@ private:
         std::ostringstream os;
         if (instruction.opcode == MxmControlOpcode::IW) {
             os << "IW b" << instruction.weight_buffer
-               << " col=" << instruction.weight_column;
+               << " col=" << instruction.weight_column
+               << " stream=" << instruction.weight_stream_base;
             if (instruction.weight_load_mode == MxmWeightLoadMode::Column) {
                 os << " inner=" << instruction.weight_inner_column
                    << " streams="

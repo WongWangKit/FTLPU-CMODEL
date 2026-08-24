@@ -101,6 +101,8 @@ ftlpu_add_test(icu_loop_test tests/unit/icu/loop_test.cpp
     unit.icu.loop unit icu fast)
 ftlpu_add_test(icu_repeat_2d_test tests/unit/icu/repeat_2d_test.cpp
     unit.icu.repeat_2d unit icu fast)
+ftlpu_add_test(icu_macro_schedule_test tests/unit/icu/macro_schedule_test.cpp
+    unit.icu.macro_schedule unit icu fast)
 
 # Subsystem tests: multiple hardware blocks connected by physical SR routes.
 ftlpu_add_test(c2c_test tests/subsystem/c2c/dual_chip_test.cpp

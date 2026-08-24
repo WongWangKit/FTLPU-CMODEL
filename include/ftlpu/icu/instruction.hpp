@@ -59,6 +59,21 @@ struct IcuRepeat2D {
     IcuInductionTarget induction_target{IcuInductionTarget::None};
 };
 
+// An absolute-cycle macro entry. Unlike Repeat/Repeat2D, this descriptor owns
+// its functional instruction and therefore needs neither a leading
+// instruction nor queue-local NOP padding. The local ICU expands one native
+// instruction at every point in the two-dimensional iteration space.
+struct IcuMacroSchedule {
+    std::size_t start_cycle{0};
+    std::size_t inner_count{1};
+    std::size_t inner_interval{1};
+    std::int64_t inner_stride{0};
+    std::size_t outer_count{1};
+    std::size_t outer_interval{1};
+    std::int64_t outer_stride{0};
+    IcuInductionTarget induction_target{IcuInductionTarget::None};
+};
+
 struct IcuControlInstruction {
     IcuControlOpcode opcode{IcuControlOpcode::Nop};
     std::size_t count{0};

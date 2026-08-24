@@ -54,6 +54,7 @@ enum class MxmComputeMode {
 struct MxmControlInstruction {
     MxmControlOpcode opcode{MxmControlOpcode::IW};
     std::size_t weight_buffer{0};
+    std::size_t weight_stream_base{0};
     std::size_t stream_base{0};
     std::size_t activation_stream_base{0};
     std::size_t weight_column{0};
@@ -77,26 +78,32 @@ struct MxmControlInstruction {
         std::size_t weight_buffer = 0,
         std::size_t weight_column = 0,
         MxmWeightInputMode weight_input_mode =
-            MxmWeightInputMode::Int8DequantBf16)
+            MxmWeightInputMode::Int8DequantBf16,
+        std::size_t weight_stream_base = 0)
     {
         check_weight_buffer(weight_buffer);
         check_column(weight_column);
+        check_weight_stream_base(weight_stream_base, weight_input_mode,
+            MxmWeightLoadMode::Supercell);
         auto instruction = MxmControlInstruction {};
         instruction.opcode = MxmControlOpcode::IW;
         instruction.weight_buffer = weight_buffer;
         instruction.weight_column = weight_column;
         instruction.weight_input_mode = weight_input_mode;
+        instruction.weight_stream_base = weight_stream_base;
         return instruction;
     }
 
     static MxmControlInstruction IWDirect16(
         std::size_t weight_buffer = 0,
-        std::size_t weight_column = 0)
+        std::size_t weight_column = 0,
+        std::size_t weight_stream_base = 0)
     {
         return IW(
             weight_buffer,
             weight_column,
-            MxmWeightInputMode::Direct16);
+            MxmWeightInputMode::Direct16,
+            weight_stream_base);
     }
 
     static MxmControlInstruction IWColumn(
@@ -104,7 +111,8 @@ struct MxmControlInstruction {
         std::size_t weight_column,
         std::size_t weight_inner_column,
         MxmWeightInputMode weight_input_mode =
-            MxmWeightInputMode::Int8DequantBf16)
+            MxmWeightInputMode::Int8DequantBf16,
+        std::size_t weight_stream_base = 0)
     {
         check_weight_buffer(weight_buffer);
         check_column(weight_column);
@@ -115,19 +123,24 @@ struct MxmControlInstruction {
             weight_input_mode);
         instruction.weight_load_mode = MxmWeightLoadMode::Column;
         instruction.weight_inner_column = weight_inner_column;
+        instruction.weight_stream_base = weight_stream_base;
+        check_weight_stream_base(weight_stream_base, weight_input_mode,
+            MxmWeightLoadMode::Column);
         return instruction;
     }
 
     static MxmControlInstruction IWColumnDirect16(
         std::size_t weight_buffer,
         std::size_t weight_column,
-        std::size_t weight_inner_column)
+        std::size_t weight_inner_column,
+        std::size_t weight_stream_base = 0)
     {
         return IWColumn(
             weight_buffer,
             weight_column,
             weight_inner_column,
-            MxmWeightInputMode::Direct16);
+            MxmWeightInputMode::Direct16,
+            weight_stream_base);
     }
 
     static MxmControlInstruction Compute(
@@ -171,7 +184,9 @@ struct MxmControlInstruction {
         bool clear = true,
         MxmComputeMode compute_mode = MxmComputeMode::Vector,
         MxmAccumulatorOutputFormat accumulator_output_format =
-            MxmAccumulatorOutputFormat::Float32)
+            MxmAccumulatorOutputFormat::Float32,
+        MxmAccumulatorDestination accumulator_destination =
+            MxmAccumulatorDestination::Stream)
     {
         check_compute_mode(compute_mode);
         check_accumulator_address(accumulator_address, compute_mode);
@@ -184,6 +199,7 @@ struct MxmControlInstruction {
         instruction.accumulator_clear = clear;
         instruction.compute_mode = compute_mode;
         instruction.accumulator_output_format = accumulator_output_format;
+        instruction.accumulator_destination = accumulator_destination;
         return instruction;
     }
 
@@ -291,6 +307,21 @@ struct MxmControlInstruction {
             return;
         }
         throw std::invalid_argument("MXM weight input mode is invalid");
+    }
+
+    static void check_weight_stream_base(std::size_t stream_base,
+        MxmWeightInputMode input_mode, MxmWeightLoadMode load_mode)
+    {
+        check_weight_input_mode(input_mode);
+        const auto stream_count = load_mode == MxmWeightLoadMode::Column
+            ? input_mode == MxmWeightInputMode::Int8DequantBf16 ? 1 : 2
+            : input_mode == MxmWeightInputMode::Int8DequantBf16
+            ? hw::kMxmInt8LoadStreamsPerCycle
+            : hw::kMxmLoadStreamsPerCycle;
+        if (stream_base + stream_count > hw::kEastStreams) {
+            throw std::out_of_range(
+                "MXM weight stream range is outside the east stream set");
+        }
     }
 
     static void check_data_format(MxmDataFormat format)
@@ -472,6 +503,8 @@ public:
         MxmComputeMode compute_mode{MxmComputeMode::Vector};
         MxmAccumulatorOutputFormat output_format{
             MxmAccumulatorOutputFormat::Float32};
+        MxmAccumulatorDestination destination{
+            MxmAccumulatorDestination::Stream};
     };
 
     explicit MxmControlSlice(MxmArray& array)
@@ -1047,6 +1080,9 @@ private:
                                    : "vector")
                            << (compute_instruction->accumulator_clear
                                    ? " clear" : " retain")
+                           << (compute_instruction->accumulator_destination
+                                       == MxmAccumulatorDestination::Stream
+                                   ? " dst=stream" : " dst=sram")
                            << '\n';
                     }
                     accumulator_read_pulse_details_[tile] =
@@ -1055,7 +1091,8 @@ private:
                             compute_instruction->stream_base,
                             compute_instruction->accumulator_clear,
                             compute_instruction->compute_mode,
-                            compute_instruction->accumulator_output_format};
+                            compute_instruction->accumulator_output_format,
+                            compute_instruction->accumulator_destination};
                 }
             }
             if (dequant_instruction.has_value() && !dequant_consumed) {

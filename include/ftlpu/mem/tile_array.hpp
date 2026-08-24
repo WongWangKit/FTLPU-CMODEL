@@ -43,6 +43,15 @@ public:
     {
     }
 
+    explicit TileArrayModel(
+        MemStreamPortMap ports,
+        MemArrayModel::MissingStreamPolicy missing_stream_policy =
+            MemArrayModel::MissingStreamPolicy::Error)
+        : mem_(std::move(ports), missing_stream_policy)
+        , streams_(hw::kSystemStreamRegisterColumns)
+    {
+    }
+
     void reset()
     {
         cycle_ = 0;

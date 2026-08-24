@@ -58,9 +58,9 @@ struct C2cInstruction {
             throw std::invalid_argument(
                 "C2C Receive vector_count must be non-zero");
         }
-        if (base_row >= hw::kSramDepthRows
+        if (base_row >= hw::kSramMaxDepthRows
             || (vector_count - 1) * row_stride
-                > hw::kSramDepthRows - 1 - base_row) {
+                > hw::kSramMaxDepthRows - 1 - base_row) {
             throw std::out_of_range(
                 "C2C Receive row sequence exceeds the MEM bank");
         }

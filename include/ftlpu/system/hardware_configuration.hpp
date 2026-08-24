@@ -22,7 +22,8 @@ struct SystemHardwareConfiguration {
 
     void validate() const
     {
-        if (sram_depth_rows == 0 || sram_depth_rows > hw::kSramDepthRows)
+        if (sram_depth_rows == 0
+            || sram_depth_rows > hw::kSramMaxDepthRows)
             throw std::invalid_argument(
                 "configured SRAM depth exceeds the CModel physical capacity");
         if (mxms_per_hemisphere == 0
