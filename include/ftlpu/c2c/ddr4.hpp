@@ -18,10 +18,20 @@ namespace ftlpu {
 
 struct Ddr4Config {
     std::size_t beat_bytes{hw::kPhysicalVectorBytes};
-    std::size_t read_latency_cycles{12};
-    std::size_t write_latency_cycles{8};
+    // Default platform: a 500 MHz LPU attached to dual-channel DDR4-3200.
+    // 51.2 GB/s corresponds to an average 102.4 bytes per LPU cycle.
+    std::size_t read_latency_cycles{35};
+    std::size_t write_latency_cycles{25};
     std::size_t request_queue_depth{256};
-    std::size_t transfer_channels{hw::kC2cStreamsPerDirection};
+    // Maximum requests serviced in one cycle. Aggregate byte bandwidth is
+    // independently limited by peak_bandwidth_bytes_per_second.
+    std::size_t transfer_channels{
+        hw::kHemispheres * hw::kC2cStreamsPerDirection};
+    std::uint64_t lpu_clock_hz{500'000'000};
+    std::uint64_t peak_bandwidth_bytes_per_second{51'200'000'000};
+    std::size_t read_latency_jitter_cycles{15};
+    std::size_t write_latency_jitter_cycles{10};
+    std::uint64_t latency_random_seed{0x46544c5055444452ULL};
 
     void validate() const
     {
@@ -34,9 +44,15 @@ struct Ddr4Config {
                 "DDR4 request queue depth must be non-zero");
         }
         if (transfer_channels == 0
-            || transfer_channels > hw::kC2cStreamsPerDirection) {
+            || transfer_channels
+                > hw::kHemispheres * hw::kC2cStreamsPerDirection) {
             throw std::invalid_argument(
-                "DDR4 transfer channel count exceeds the C2C fabric");
+                "DDR4 transfer channel count exceeds the aggregate C2C fabric");
+        }
+        if (lpu_clock_hz == 0
+            || peak_bandwidth_bytes_per_second == 0) {
+            throw std::invalid_argument(
+                "DDR4 clock and peak bandwidth must be non-zero");
         }
     }
 };
@@ -69,6 +85,19 @@ public:
         config_.validate();
     }
 
+    void configure(Ddr4Config config)
+    {
+        if (!idle())
+            throw std::logic_error(
+                "cannot reconfigure DDR4 while requests are active");
+        config.validate();
+        config_ = config;
+        bandwidth_remainder_ = 0;
+        round_robin_cursor_ = 0;
+        read_bytes_transferred_ = 0;
+        write_bytes_transferred_ = 0;
+    }
+
     void reset_execution_state()
     {
         requests_.clear();
@@ -78,15 +107,22 @@ public:
         cycle_ = 0;
         next_request_id_ = 1;
         last_beat_.reset();
+        bandwidth_remainder_ = 0;
+        round_robin_cursor_ = 0;
+        read_bytes_transferred_ = 0;
+        write_bytes_transferred_ = 0;
     }
 
     const Ddr4Config& config() const noexcept { return config_; }
     std::size_t read_vector_service_cycles() const noexcept
     {
-        const std::size_t beats =
-            (hw::kPhysicalVectorBytes + config_.beat_bytes - 1)
-            / config_.beat_bytes;
-        return config_.read_latency_cycles + beats + 1;
+        const auto transferCycles = static_cast<std::size_t>(
+            (static_cast<std::uint64_t>(hw::kPhysicalVectorBytes)
+                    * config_.lpu_clock_hz
+                + config_.peak_bandwidth_bytes_per_second - 1)
+            / config_.peak_bandwidth_bytes_per_second);
+        return config_.read_latency_cycles
+            + config_.read_latency_jitter_cycles + transferCycles + 1;
     }
     std::size_t cycle() const noexcept { return cycle_; }
     bool idle() const noexcept
@@ -96,6 +132,18 @@ public:
     const std::optional<BeatTrace>& last_beat() const noexcept
     {
         return last_beat_;
+    }
+    std::uint64_t read_bytes_transferred() const noexcept
+    {
+        return read_bytes_transferred_;
+    }
+    std::uint64_t write_bytes_transferred() const noexcept
+    {
+        return write_bytes_transferred_;
+    }
+    std::uint64_t bytes_transferred() const noexcept
+    {
+        return read_bytes_transferred_ + write_bytes_transferred_;
     }
     bool can_accept_request() const noexcept
     {
@@ -109,7 +157,9 @@ public:
         validate_vector_range(address);
         const auto id = allocate_request_id();
         requests_.push_back(Request {
-            id, Operation::Read, address, {}, config_.read_latency_cycles});
+            id, Operation::Read, address, {},
+            config_.read_latency_cycles
+                + latency_jitter(id, address, Operation::Read)});
         return id;
     }
 
@@ -123,7 +173,8 @@ public:
             Operation::Write,
             address,
             std::move(vector),
-            config_.write_latency_cycles,
+            config_.write_latency_cycles
+                + latency_jitter(id, address, Operation::Write),
         });
         return id;
     }
@@ -210,18 +261,35 @@ public:
             requests_.pop_front();
         }
 
-        std::size_t channels_used = 0;
-        for (auto& active : active_) {
-            if (active.request.remaining_latency != 0) {
-                --active.request.remaining_latency;
-                continue;
-            }
-            if (channels_used == config_.transfer_channels) continue;
+        bandwidth_remainder_ += config_.peak_bandwidth_bytes_per_second;
+        std::uint64_t byteBudget =
+            bandwidth_remainder_ / config_.lpu_clock_hz;
+        bandwidth_remainder_ %= config_.lpu_clock_hz;
+
+        std::size_t channelsUsed = 0;
+        const std::size_t activeCount = active_.size();
+        const std::size_t start = activeCount == 0
+            ? 0 : round_robin_cursor_ % activeCount;
+        for (std::size_t visited = 0;
+             visited < activeCount && byteBudget != 0
+                && channelsUsed < config_.transfer_channels;
+             ++visited) {
+            auto& active = active_[(start + visited) % activeCount];
+            if (active.request.remaining_latency != 0) continue;
             const auto remaining =
                 hw::kPhysicalVectorBytes - active.bytes_transferred;
-            transfer_active_beat(active,
-                std::min(config_.beat_bytes, remaining));
-            ++channels_used;
+            const auto byteCount = static_cast<std::size_t>(
+                std::min<std::uint64_t>(
+                    {config_.beat_bytes, remaining, byteBudget}));
+            transfer_active_beat(active, byteCount);
+            byteBudget -= byteCount;
+            ++channelsUsed;
+        }
+        if (activeCount != 0)
+            round_robin_cursor_ = (start + 1) % activeCount;
+        for (auto& active : active_) {
+            if (active.request.remaining_latency != 0)
+                --active.request.remaining_latency;
         }
         for (std::size_t index = active_.size(); index-- > 0;) {
             if (active_[index].bytes_transferred
@@ -288,6 +356,25 @@ private:
         }
         return next_request_id_++;
     }
+    std::size_t latency_jitter(
+        RequestId id, std::uint64_t address, Operation operation) const
+    {
+        const std::size_t maximum = operation == Operation::Read
+            ? config_.read_latency_jitter_cycles
+            : config_.write_latency_jitter_cycles;
+        if (maximum == 0) return 0;
+        std::uint64_t value = config_.latency_random_seed
+            ^ (id * 0x9e3779b97f4a7c15ULL)
+            ^ (address + (operation == Operation::Write
+                    ? 0xd1b54a32d192ed03ULL : 0));
+        value ^= value >> 30;
+        value *= 0xbf58476d1ce4e5b9ULL;
+        value ^= value >> 27;
+        value *= 0x94d049bb133111ebULL;
+        value ^= value >> 31;
+        return static_cast<std::size_t>(
+            value % (static_cast<std::uint64_t>(maximum) + 1));
+    }
 
     static void validate_vector_range(std::uint64_t address)
     {
@@ -326,6 +413,10 @@ private:
             }
         }
         active.bytes_transferred += byte_count;
+        if (active.request.operation == Operation::Read)
+            read_bytes_transferred_ += byte_count;
+        else
+            write_bytes_transferred_ += byte_count;
         last_beat_ = BeatTrace {
             active.request.id,
             active.request.operation == Operation::Write,
@@ -340,6 +431,10 @@ private:
     std::optional<BeatTrace> last_beat_{};
     RequestId next_request_id_{1};
     std::size_t cycle_{0};
+    std::uint64_t bandwidth_remainder_{0};
+    std::size_t round_robin_cursor_{0};
+    std::uint64_t read_bytes_transferred_{0};
+    std::uint64_t write_bytes_transferred_{0};
 };
 
 } // namespace ftlpu

@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <optional>
 #include <ostream>
+#include <string>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -154,6 +155,7 @@ public:
         std::size_t sr_column{0};
         StreamId stream{StreamId::East(0)};
         std::size_t address{0};
+        std::uint64_t vector_tag{0};
         StreamPayloadTileSegment bytes{};
     };
 
@@ -513,6 +515,7 @@ private:
                 sr_column,
                 stream,
                 physical_address,
+                vector_tag,
                 bytes,
             });
         }
@@ -533,11 +536,13 @@ private:
             sr_column,
             stream.direction(),
             "MEM Write");
+        std::uint64_t vector_tag = 0;
 
         if (input.segment_valid(tile, stream.index())) {
             const auto segment = instruction.preserve_stream
                 ? input.peek_segment(tile, stream.index())
                 : input.consume_segment(tile, stream.index());
+            vector_tag = segment.front().vector_tag;
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                 bytes[lane] = segment[lane].data;
             }
@@ -547,7 +552,14 @@ private:
             // selected stream may update SRAM.
             return;
         } else if (missing_stream_policy_ == MissingStreamPolicy::Error) {
-            throw std::logic_error("MEM Write reached an invalid stream segment");
+            throw std::logic_error(
+                "MEM Write reached an invalid stream segment: slice="
+                + std::to_string(mem_slice)
+                + " bank=" + std::to_string(bank)
+                + " tile=" + std::to_string(tile)
+                + " sr_column=" + std::to_string(sr_column)
+                + " stream=" + std::to_string(stream.packed())
+                + " address=" + std::to_string(instruction.address));
         }
 
         sram_.bank(mem_slice, bank).write_segment(
@@ -561,6 +573,7 @@ private:
                 sr_column,
                 stream,
                 instruction.address,
+                vector_tag,
                 bytes,
             });
         }
@@ -641,7 +654,8 @@ private:
                        ? "store"
                        : "load")
                << ' ' << direction_name(transfer.stream.direction()) << transfer.stream.index()
-               << " addr=" << transfer.address << " bytes=0x";
+               << " addr=" << transfer.address
+               << " tag=" << transfer.vector_tag << " bytes=0x";
             print_hex_bytes(os, transfer.bytes);
             os << '\n';
         }

@@ -218,10 +218,8 @@ private:
     {
         auto& active = *active_[stream];
         auto& pending = pending_requests_[stream];
-        if (!pending.empty()) {
-            if (!ddr4_.write_completion_ready(pending.front().id)) {
-                return;
-            }
+        while (!pending.empty()
+            && ddr4_.write_completion_ready(pending.front().id)) {
             const auto completion =
                 ddr4_.pop_write_completion(pending.front().id);
             const auto request = pending.front();
@@ -233,10 +231,12 @@ private:
                 request.vector_tag,
             };
             ++active.completed_vectors;
-            finish_transfer_if_complete(stream);
-            if (!active_[stream].has_value()) return;
         }
-        if (!outbound_[stream].empty() && ddr4_.can_accept_request()) {
+        finish_transfer_if_complete(stream);
+        if (!active_[stream].has_value()) return;
+        while (!outbound_[stream].empty()
+            && pending.size() < fifo_depth_vectors_
+            && ddr4_.can_accept_request()) {
             auto vector = std::move(outbound_[stream].front());
             outbound_[stream].pop_front();
             const auto vector_index = active.next_vector_index++;

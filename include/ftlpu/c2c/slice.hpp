@@ -58,9 +58,11 @@ class C2cTxSlice {
 public:
     explicit C2cTxSlice(
         C2cStreamPortMap::InputEndpoint endpoint,
-        std::string name = "C2C TX")
+        std::string name = "C2C TX",
+        bool indexed_transport = false)
         : endpoint_(endpoint)
         , name_(std::move(name))
+        , indexed_transport_(indexed_transport)
     {
     }
 
@@ -69,6 +71,9 @@ public:
         queue_.clear();
         pipeline_ = {};
         completed_.clear();
+        for (auto& queue : stream_queues_) queue.clear();
+        for (auto& pipeline : stream_pipelines_) pipeline = {};
+        for (auto& completed : stream_completed_) completed.clear();
     }
 
     void issue(C2cInstruction instruction)
@@ -76,12 +81,29 @@ public:
         if (instruction.opcode != C2cOpcode::Send) {
             throw std::invalid_argument("C2C TX accepts only Send instructions");
         }
-        queue_.push_back(std::move(instruction));
+        const auto vector_count = instruction.vector_count;
+        instruction.vector_count = 1;
+        auto& queue = indexed_transport_
+            ? stream_queues_[instruction.stream_index]
+            : queue_;
+        for (std::size_t vector = 0; vector < vector_count; ++vector)
+            queue.push_back(instruction);
     }
 
     bool idle() const noexcept
     {
-        return queue_.empty() && completed_.empty()
+        const bool indexed_idle = std::all_of(
+            stream_queues_.begin(), stream_queues_.end(),
+            [](const auto& queue) { return queue.empty(); })
+            && std::all_of(stream_completed_.begin(), stream_completed_.end(),
+                [](const auto& completed) { return completed.empty(); })
+            && std::all_of(stream_pipelines_.begin(), stream_pipelines_.end(),
+                [](const auto& pipeline) {
+                    return std::none_of(
+                        pipeline.begin(), pipeline.end(),
+                        [](const auto& stage) { return stage.has_value(); });
+                });
+        return queue_.empty() && completed_.empty() && indexed_idle
             && std::none_of(
                 pipeline_.begin(), pipeline_.end(),
                 [](const auto& stage) { return stage.has_value(); });
@@ -99,6 +121,10 @@ public:
         StreamRegisterFabric& fabric,
         Transport& external)
     {
+        if (indexed_transport_) {
+            evaluate_indexed(fabric, external);
+            return;
+        }
         if (!completed_.empty() && external.can_send()) {
             external.send(std::move(completed_.front()));
             completed_.pop_front();
@@ -123,7 +149,7 @@ public:
                     || advance[tile + 1];
             advance[tile] = downstream_ready
                 && input.segment_valid(
-                    tile, stage->instruction.stream_index);
+                    tile, stage->instruction.fabric_stream_index);
         }
 
         auto next_pipeline =
@@ -138,7 +164,7 @@ public:
                 continue;
             }
             const auto segment = input.consume_segment(
-                tile, stage->instruction.stream_index);
+                tile, stage->instruction.fabric_stream_index);
             if (tile == 0) {
                 stage->vector.vector_tag = segment.front().vector_tag;
             }
@@ -165,11 +191,108 @@ private:
         C2cVector vector{};
     };
 
+    template <typename Transport>
+    void evaluate_indexed(
+        StreamRegisterFabric& fabric,
+        Transport& external)
+    {
+        auto input = StreamInputPort(
+            fabric, endpoint_.column, endpoint_.direction, name_);
+        for (std::size_t stream = 0;
+             stream < hw::kC2cStreamsPerDirection; ++stream) {
+            auto& completed = stream_completed_[stream];
+            if (!completed.empty()
+                && transport_can_send(external, stream)) {
+                transport_send(
+                    external, std::move(completed.front()), stream);
+                completed.pop_front();
+            }
+
+            auto& queue = stream_queues_[stream];
+            auto& pipeline = stream_pipelines_[stream];
+            if (!queue.empty() && !pipeline[0].has_value()) {
+                pipeline[0] = ActiveSend {std::move(queue.front()), {}};
+                queue.pop_front();
+            }
+
+            auto advance = std::array<bool, hw::kTileRows> {};
+            for (std::size_t tile = hw::kTileRows; tile-- > 0;) {
+                auto& stage = pipeline[tile];
+                if (!stage.has_value()) continue;
+                const bool downstream_ready = tile + 1 == hw::kTileRows
+                    ? completed.empty()
+                    : !pipeline[tile + 1].has_value()
+                        || advance[tile + 1];
+                advance[tile] = downstream_ready
+                    && input.segment_valid(
+                        tile, stage->instruction.fabric_stream_index);
+            }
+
+            auto next_pipeline =
+                std::array<std::optional<ActiveSend>, hw::kTileRows> {};
+            for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+                auto& stage = pipeline[tile];
+                if (!stage.has_value()) continue;
+                if (!advance[tile]) {
+                    next_pipeline[tile] = std::move(stage);
+                    continue;
+                }
+                const auto segment = input.consume_segment(
+                    tile, stage->instruction.fabric_stream_index);
+                if (tile == 0)
+                    stage->vector.vector_tag = segment.front().vector_tag;
+                for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane)
+                    stage->vector.payload[tile][lane] = segment[lane].data;
+                if (tile + 1 == hw::kTileRows)
+                    completed.push_back(std::move(stage->vector));
+                else
+                    next_pipeline[tile + 1] = std::move(stage);
+            }
+            pipeline = std::move(next_pipeline);
+
+            if (!completed.empty()
+                && transport_can_send(external, stream)) {
+                transport_send(
+                    external, std::move(completed.front()), stream);
+                completed.pop_front();
+            }
+        }
+    }
+
+    template <typename Transport>
+    static bool transport_can_send(
+        const Transport& external, std::size_t stream)
+    {
+        if constexpr (requires { external.can_send(stream); })
+            return external.can_send(stream);
+        else
+            return stream == 0 && external.can_send();
+    }
+
+    template <typename Transport>
+    static void transport_send(
+        Transport& external, C2cVector vector, std::size_t stream)
+    {
+        if constexpr (requires {
+                          external.send(std::move(vector), stream);
+                      })
+            external.send(std::move(vector), stream);
+        else
+            external.send(std::move(vector));
+    }
+
     C2cStreamPortMap::InputEndpoint endpoint_{};
     std::string name_{};
+    bool indexed_transport_{false};
     std::deque<C2cInstruction> queue_{};
     std::array<std::optional<ActiveSend>, hw::kTileRows> pipeline_{};
     std::deque<C2cVector> completed_{};
+    std::array<std::deque<C2cInstruction>, hw::kC2cStreamsPerDirection>
+        stream_queues_{};
+    std::array<std::array<std::optional<ActiveSend>, hw::kTileRows>,
+        hw::kC2cStreamsPerDirection> stream_pipelines_{};
+    std::array<std::deque<C2cVector>, hw::kC2cStreamsPerDirection>
+        stream_completed_{};
 };
 
 class C2cRxSlice {
@@ -194,6 +317,7 @@ public:
         for (auto& active : stream_active_) active.reset();
         for (auto& ingress : shared_ingress_) ingress.reset();
         for (auto& pipeline : shared_pipelines_) pipeline = {};
+        completed_instructions_ = {};
     }
 
     void issue(C2cInstruction instruction)
@@ -266,8 +390,10 @@ public:
                 std::move(vector)});
             ++active->vector_index;
             if (active->vector_index
-                == active->instruction.consumer.vector_count)
+                == active->instruction.consumer.vector_count) {
+                ++completed_instructions_[stream];
                 active.reset();
+            }
         }
     }
 
@@ -337,6 +463,13 @@ public:
         std::size_t count = queue_.size();
         for (const auto& queue : stream_queues_) count += queue.size();
         return count;
+    }
+    std::size_t completed_instruction_count(
+        std::size_t stream) const
+    {
+        if (stream >= completed_instructions_.size())
+            throw std::out_of_range("C2C RX completion stream is invalid");
+        return completed_instructions_[stream];
     }
     std::size_t replayed_tile_count() const noexcept
     {
@@ -413,6 +546,8 @@ private:
         shared_ingress_{};
     std::array<std::array<std::optional<ActiveReceive>, hw::kTileRows>,
         hw::kC2cStreamsPerDirection> shared_pipelines_{};
+    std::array<std::size_t, hw::kC2cStreamsPerDirection>
+        completed_instructions_{};
 };
 
 class C2cEndpoint {
@@ -422,7 +557,7 @@ public:
         std::string name = "C2C",
         bool dedicated_rx = false,
         bool indexed_rx = false)
-        : tx_(ports.tx_input, name + " TX")
+        : tx_(ports.tx_input, name + " TX", indexed_rx)
         , rx_(ports.rx_output, name + " RX", dedicated_rx, indexed_rx)
     {
     }

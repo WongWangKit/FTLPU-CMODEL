@@ -472,11 +472,15 @@ public:
 
     void enqueue_c2c_send(
         Hemisphere endpoint_hemisphere,
-        std::size_t stream_index)
+        std::size_t stream_index,
+        std::size_t vector_count = 1,
+        std::size_t fabric_stream_index =
+            std::numeric_limits<std::size_t>::max())
     {
         enqueue_c2c(
             endpoint_hemisphere,
-            C2cInstruction::Send(stream_index));
+            C2cInstruction::Send(
+                stream_index, vector_count, fabric_stream_index));
     }
 
     void enqueue_c2c_receive(

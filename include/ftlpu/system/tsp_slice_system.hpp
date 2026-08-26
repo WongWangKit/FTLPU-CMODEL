@@ -62,9 +62,20 @@ public:
     {
         require_phase(CyclePhase::Idle, "configuring hardware");
         hardware.validate();
+        const bool rebuild_c2c =
+            hardware.c2c_dedicated_streams
+                != hardware_configuration_.c2c_dedicated_streams;
         hardware_configuration_ = hardware;
         for (auto& mem : mems_)
             mem.set_sram_depth_rows(hardware.sram_depth_rows);
+        if (rebuild_c2c) {
+            for (std::size_t index = 0; index < hw::kHemispheres; ++index) {
+                if (c2c_dmas_[index] == nullptr) continue;
+                c2cs_[index].emplace(C2cStreamPortMap::EastEdge(
+                    hw::kMemEastBoundaryStreamRegisterColumn), "C2C DMA",
+                    hardware_configuration_.c2c_dedicated_streams, true);
+            }
+        }
     }
 
     const SystemHardwareConfiguration& hardware_configuration() const noexcept

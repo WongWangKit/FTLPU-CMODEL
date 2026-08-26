@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 
@@ -31,10 +32,29 @@ C2cVector make_vector(std::uint8_t base, std::uint64_t tag = 0)
     }
     return vector;
 }
+
+Ddr4Config ideal_ddr4(std::size_t beat_bytes,
+    std::size_t read_latency, std::size_t write_latency,
+    std::size_t queue_depth,
+    std::size_t channels = 1)
+{
+    Ddr4Config config;
+    config.beat_bytes = beat_bytes;
+    config.read_latency_cycles = read_latency;
+    config.write_latency_cycles = write_latency;
+    config.request_queue_depth = queue_depth;
+    config.transfer_channels = channels;
+    config.peak_bandwidth_bytes_per_second =
+        config.lpu_clock_hz * beat_bytes * channels;
+    config.read_latency_jitter_cycles = 0;
+    config.write_latency_jitter_cycles = 0;
+    return config;
+}
+
 void test_ddr4_transfers_one_beat_per_cycle()
 {
     constexpr auto kAddress = std::uint64_t {0x800};
-    auto ddr4 = Ddr4Model(Ddr4Config {8, 2, 2, 2});
+    auto ddr4 = Ddr4Model(ideal_ddr4(8, 2, 2, 2));
     const auto expected = make_vector(0x20);
     const auto request = ddr4.request_write(kAddress, expected);
 
@@ -71,7 +91,8 @@ void test_ddr4_exposes_eight_vector_channels()
 {
     constexpr auto kBaseAddress = std::uint64_t {0x4000};
     constexpr auto kChannels = std::size_t {8};
-    auto ddr4 = Ddr4Model(Ddr4Config {32, 2, 2, 64, kChannels});
+    auto ddr4 = Ddr4Model(
+        ideal_ddr4(32, 2, 2, 64, kChannels));
     auto requests = std::array<Ddr4Model::RequestId, kChannels> {};
     for (std::size_t channel = 0; channel < kChannels; ++channel) {
         const auto address =
@@ -92,12 +113,84 @@ void test_ddr4_exposes_eight_vector_channels()
             "C2C did not complete eight 32-byte vectors in one cycle");
 }
 
+void test_default_ddr4_bandwidth_and_latency_jitter()
+{
+    auto config = Ddr4Config {};
+    require(config.lpu_clock_hz == 500'000'000
+            && config.peak_bandwidth_bytes_per_second == 51'200'000'000,
+        "default DDR4 platform is not 500 MHz dual-channel DDR4-3200");
+
+    config.read_latency_cycles = 0;
+    config.read_latency_jitter_cycles = 0;
+    auto bandwidthModel = Ddr4Model(config);
+    constexpr auto kRequestCount = std::size_t {128};
+    for (std::size_t index = 0; index < kRequestCount; ++index) {
+        const auto address = std::uint64_t {0x80000}
+            + index * hw::kPhysicalVectorBytes;
+        bandwidthModel.initialize_vector(
+            address, make_vector(static_cast<std::uint8_t>(index)));
+        (void)bandwidthModel.request_read(address);
+    }
+    for (std::size_t cycle = 0; cycle < 10; ++cycle)
+        bandwidthModel.tick();
+    require(bandwidthModel.read_bytes_transferred() == 1024,
+        "DDR4 did not enforce an average 102.4-byte/cycle read ceiling");
+
+    const auto completionCycles = [](Ddr4Config jitterConfig) {
+        auto model = Ddr4Model(jitterConfig);
+        auto requests = std::array<Ddr4Model::RequestId, 16> {};
+        auto completed = std::array<std::size_t, 16> {};
+        for (std::size_t index = 0; index < requests.size(); ++index) {
+            const auto address = std::uint64_t {0x90000}
+                + index * hw::kPhysicalVectorBytes;
+            model.initialize_vector(
+                address, make_vector(static_cast<std::uint8_t>(index * 3)));
+            requests[index] = model.request_read(address);
+        }
+        std::size_t remaining = requests.size();
+        for (std::size_t elapsed = 1; elapsed <= 256 && remaining != 0;
+             ++elapsed) {
+            model.tick();
+            for (std::size_t index = 0; index < requests.size(); ++index) {
+                if (completed[index] == 0
+                    && model.read_completion_ready(requests[index])) {
+                    completed[index] = elapsed;
+                    --remaining;
+                }
+            }
+        }
+        require(remaining == 0,
+            "DDR4 jitter test did not complete every request");
+        return completed;
+    };
+
+    config = Ddr4Config {};
+    config.peak_bandwidth_bytes_per_second =
+        config.lpu_clock_hz * hw::kPhysicalVectorBytes
+        * config.transfer_channels;
+    const auto first = completionCycles(config);
+    const auto second = completionCycles(config);
+    require(first == second,
+        "DDR4 latency jitter is not deterministic for a fixed seed");
+    bool observedVariation = false;
+    for (std::size_t index = 0; index < first.size(); ++index) {
+        require(first[index] >= config.read_latency_cycles + 1
+                && first[index] <= config.read_latency_cycles
+                        + config.read_latency_jitter_cycles + 1,
+            "DDR4 read completion escaped the configured jitter window");
+        observedVariation = observedVariation
+            || (index != 0 && first[index] != first[0]);
+    }
+    require(observedVariation,
+        "DDR4 latency jitter produced no request-level variation");
+}
+
 void test_c2c_stream_count_is_runtime_selectable()
 {
     auto hardware = SystemHardwareConfiguration {};
     hardware.c2c_streams_per_direction = 4;
     auto system = C2cDmaSystem(
-        Ddr4Config {32, 2, 2, 64, 4}, 16, hardware);
+        ideal_ddr4(32, 2, 2, 64, 4), 16, hardware);
     system.dma(Hemisphere::East).issue(
         C2cDmaInstruction::Load(0x6000, 1, 32, 0, 3));
 
@@ -120,7 +213,7 @@ void test_dedicated_c2c_overlaps_all_compute_streams()
     auto hardware = SystemHardwareConfiguration {};
     hardware.c2c_dedicated_streams = true;
     auto system = C2cDmaSystem(
-        Ddr4Config {32, 2, 2, 64, 8}, 16, hardware);
+        ideal_ddr4(32, 2, 2, 64, 8), 16, hardware);
     const auto expected = make_vector(0xa0, 91);
     system.ddr4().initialize_vector(kDdr4Address, expected);
 
@@ -174,7 +267,7 @@ void test_ddr4_dma_rx_sr_mem()
     constexpr auto kTargetRow = 41U;
     constexpr auto kDdr4Address = std::uint64_t {0x1000};
 
-    auto system = C2cDmaSystem(Ddr4Config {8, 2, 2, 4});
+    auto system = C2cDmaSystem(ideal_ddr4(8, 2, 2, 4));
     auto& chip = system.chip();
     const auto expected = make_vector(0x40, 77);
     system.ddr4().initialize_vector(kDdr4Address, expected);
@@ -248,7 +341,8 @@ void test_eight_shared_c2c_lanes_write_through_mem()
     constexpr auto kFabricBase = std::size_t {24};
     constexpr auto kTargetRow = std::size_t {73};
     constexpr auto kDdr4Base = std::uint64_t {0x10000};
-    auto system = C2cDmaSystem(Ddr4Config {32, 2, 2, 64, kLaneCount});
+    auto system = C2cDmaSystem(
+        ideal_ddr4(32, 2, 2, 64, kLaneCount));
     auto& chip = system.chip();
 
     for (std::size_t lane = 0; lane < kLaneCount; ++lane) {
@@ -302,7 +396,7 @@ void test_mem_sr_tx_dma_ddr4()
     constexpr auto kSourceRow = 23U;
     constexpr auto kDdr4Address = std::uint64_t {0x2000};
 
-    auto system = C2cDmaSystem(Ddr4Config {8, 2, 2, 4});
+    auto system = C2cDmaSystem(ideal_ddr4(8, 2, 2, 4));
     auto& chip = system.chip();
     const auto expected = make_vector(0x80, 99);
 
@@ -325,7 +419,8 @@ void test_mem_sr_tx_dma_ddr4()
         MemInstruction::Read(kSourceRow, StreamId::East(kStream)));
     chip.icu().enqueue_c2c_send(kHemisphere, kStream);
     chip.icu().enqueue_c2c_dma(
-        kHemisphere, C2cDmaInstruction::Store(kDdr4Address));
+        kHemisphere, C2cDmaInstruction::Store(
+            kDdr4Address, 1, hw::kPhysicalVectorBytes, kStream));
     chip.icu().enqueue_control(
         IcuLocation::C2cDma(kHemisphere),
         IcuControlInstruction::Sync());
@@ -353,15 +448,83 @@ void test_mem_sr_tx_dma_ddr4()
         "MEM -> SR -> TX -> DMA -> DDR4 changed the vector payload");
 }
 
+void test_eight_indexed_tx_lanes_store_to_ddr4()
+{
+    constexpr auto kHemisphere = Hemisphere::East;
+    constexpr auto kLaneCount = std::size_t {8};
+    constexpr auto kSourceRow = std::size_t {91};
+    constexpr auto kDdr4Base = std::uint64_t {0x20000};
+    auto system = C2cDmaSystem(
+        ideal_ddr4(32, 2, 2, 128, kLaneCount));
+    auto& chip = system.chip();
+
+    for (std::size_t lane = 0; lane < kLaneCount; ++lane) {
+        const auto sourceSlice = std::size_t {36} + lane;
+        const auto expected = make_vector(
+            static_cast<std::uint8_t>(0x20 + lane * 7), 300 + lane);
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile)
+            for (std::size_t byte = 0; byte < hw::kLanesPerTile; ++byte)
+                chip.initialize_mem_sram_lane_byte(kHemisphere,
+                    sourceSlice, tile, kSourceRow, byte,
+                    expected.payload[tile][byte]);
+
+        const auto queue = InstructionControlUnit::mem_queue(
+            kHemisphere, sourceSlice);
+        chip.icu().enqueue_mem_nop(queue, kLaneCount);
+        chip.icu().enqueue_mem(queue,
+            MemInstruction::Read(
+                kSourceRow, StreamId::East(lane)));
+        chip.icu().enqueue_c2c_send(kHemisphere, lane, 1, lane);
+        chip.icu().enqueue_c2c_dma(kHemisphere,
+            C2cDmaInstruction::Store(
+                kDdr4Base + lane * hw::kPhysicalVectorBytes,
+                1, hw::kPhysicalVectorBytes, lane));
+    }
+
+    for (std::size_t cycle = 0; cycle < 80; ++cycle) system.tick();
+
+    for (std::size_t lane = 0; lane < kLaneCount; ++lane) {
+        const auto expected = make_vector(
+            static_cast<std::uint8_t>(0x20 + lane * 7), 300 + lane);
+        const auto actual = system.ddr4().read_vector(
+            kDdr4Base + lane * hw::kPhysicalVectorBytes);
+        if (actual.payload != expected.payload)
+            throw std::runtime_error(
+                "indexed C2C TX lane stored the wrong payload: lane="
+                + std::to_string(lane)
+                + " actual0=" + std::to_string(actual.payload[0][0])
+                + " expected0=" + std::to_string(expected.payload[0][0])
+                + " tx_idle=" + std::to_string(
+                    chip.c2c_endpoint(kHemisphere).tx().idle())
+                + " tx_queued=" + std::to_string(
+                    chip.c2c_endpoint(kHemisphere).tx()
+                        .queued_instruction_count())
+                + " dma_idle=" + std::to_string(
+                    system.dma(kHemisphere).idle())
+                + " dma_outbound=" + std::to_string(
+                    system.dma(kHemisphere).outbound_queue_size(lane))
+                + " mem_done=" + std::to_string(
+                    chip.icu().mem_iq(InstructionControlUnit::mem_queue(
+                        kHemisphere, 36 + lane)).done()));
+    }
+}
+
 } // namespace
 
 int main()
-{
+try {
     test_ddr4_transfers_one_beat_per_cycle();
     test_ddr4_exposes_eight_vector_channels();
+    test_default_ddr4_bandwidth_and_latency_jitter();
     test_c2c_stream_count_is_runtime_selectable();
     test_dedicated_c2c_overlaps_all_compute_streams();
     test_ddr4_dma_rx_sr_mem();
     test_eight_shared_c2c_lanes_write_through_mem();
     test_mem_sr_tx_dma_ddr4();
+    test_eight_indexed_tx_lanes_store_to_ddr4();
+    return 0;
+} catch (const std::exception& error) {
+    std::cerr << "c2c_dma_ddr4_test failed: "
+              << error.what() << '\n';
+    return 1;
 }
