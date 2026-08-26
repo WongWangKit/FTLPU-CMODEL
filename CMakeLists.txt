@@ -17,7 +17,6 @@ endif()
 add_library(ftlpu_cmodel STATIC
     src/mem/sram.cpp
     src/mxm/accumulator.cpp
-    src/mxm/block_accumulator.cpp
 )
 target_include_directories(ftlpu_cmodel PUBLIC include)
 target_compile_definitions(ftlpu_cmodel PUBLIC
@@ -67,8 +66,6 @@ ftlpu_add_test(mxm_control_slice_test tests/unit/mxm/control_slice_test.cpp
     unit.mxm.control_slice unit mxm fast)
 ftlpu_add_test(mxm_accumulator_test tests/unit/mxm/accumulator_test.cpp
     unit.mxm.accumulator unit mxm fast)
-ftlpu_add_test(mxm_block_accumulator_test tests/unit/mxm/block_accumulator_test.cpp
-    unit.mxm.block_accumulator unit mxm fast)
 ftlpu_add_test(mxm_weight_dequantizer_test tests/unit/mxm/weight_dequantizer_test.cpp
     unit.mxm.weight_dequantizer unit mxm fast)
 
@@ -147,9 +144,6 @@ ftlpu_add_test(rmsnorm_test tests/kernel/rmsnorm_test.cpp
 ftlpu_add_test(smollm2_decode_layout_comparison_test
     tests/model/smollm2/decode_layout_comparison_test.cpp
     model.smollm2.decode_layout_comparison model smollm2 slow serial)
-ftlpu_add_test(smollm2_block8_dequant_ffn_test
-    tests/model/smollm2/prefill_ffn_block8_test.cpp
-    model.smollm2.prefill_ffn_block8 model smollm2 slow serial)
 ftlpu_add_test(smollm2_attention_test
     tests/model/smollm2/prefill_attention_test.cpp
     model.smollm2.prefill_attention model smollm2 slow serial)
@@ -163,46 +157,15 @@ ftlpu_add_test(smollm2_decode_attention_test
     tests/model/smollm2/decode_attention_test.cpp
     model.smollm2.decode_attention model smollm2 slow serial)
 
-add_library(smollm2_layer_phases STATIC
-    tests/model/smollm2/prefill_attention_test.cpp
-    tests/model/smollm2/prefill_ffn_block8_test.cpp
-    tests/model/smollm2/decode_attention_test.cpp
-    tests/model/smollm2/decode_ffn_test.cpp
-)
-target_compile_definitions(
-    smollm2_layer_phases PRIVATE FTLPU_SMOLLM2_LAYER_PHASE_ONLY)
-target_link_libraries(smollm2_layer_phases PRIVATE ftlpu_cmodel)
-target_include_directories(
-    smollm2_layer_phases
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/support)
-
-add_executable(
-    smollm2_prefill_decode_layer_test
-    tests/model/smollm2/prefill_decode_layer_test.cpp)
-target_link_libraries(
-    smollm2_prefill_decode_layer_test
-    PRIVATE ftlpu_cmodel smollm2_layer_phases)
-target_include_directories(
-    smollm2_prefill_decode_layer_test
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/support)
-add_test(
-    NAME model.smollm2.prefill_decode_layer
-    COMMAND $<TARGET_FILE:smollm2_prefill_decode_layer_test>)
-set_tests_properties(
-    model.smollm2.prefill_decode_layer
-    PROPERTIES LABELS "model;smollm2;slow;serial")
-
 # CPU- and memory-heavy schedules run one at a time.
 set_tests_properties(
     kernel.projection.w8a16
     kernel.swiglu.w8a16
     model.smollm2.decode_layout_comparison
-    model.smollm2.prefill_ffn_block8
     model.smollm2.prefill_attention
     model.decoder.decode_layer
     model.smollm2.decode_ffn
     model.smollm2.decode_attention
-    model.smollm2.prefill_decode_layer
     PROPERTIES RUN_SERIAL TRUE
 )
 

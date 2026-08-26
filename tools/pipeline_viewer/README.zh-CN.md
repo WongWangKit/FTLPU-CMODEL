@@ -7,7 +7,7 @@ schedule trace。浏览器直接打开 `index.html`，然后载入
 通过 HTTP 启动仓库目录时，也可以用 URL 直接打开某个 trace：
 
 ```text
-http://127.0.0.1:8765/tools/pipeline_viewer/?trace=/docs/traces/smollm2_block8_dequant_ffn_schedule.csv
+http://127.0.0.1:8765/tools/pipeline_viewer/?trace=/docs/traces/smollm2_attention_schedule.csv
 ```
 
 输入格式：

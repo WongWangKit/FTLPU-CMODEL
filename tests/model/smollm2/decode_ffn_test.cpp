@@ -215,8 +215,7 @@ public:
         icu_.enqueue_mxm(
             mxm,
             ftlpu::MxmControlInstruction::AccumulatorRead(
-                address, stream_base, clear,
-                ftlpu::MxmComputeMode::Vector, output_format));
+                address, stream_base, clear, output_format));
         advance(mxm_compute_[mxm], cycle + 1);
     }
 

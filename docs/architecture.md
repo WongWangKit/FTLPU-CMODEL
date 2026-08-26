@@ -22,18 +22,21 @@ The central vector shape is:
 | External C2C lanes | 8 eastward + 8 westward (runtime-selectable subset) |
 | External C2C bandwidth | 32 bytes/lane/cycle, 256 bytes/cycle per direction |
 | Stream-register width | 1 byte |
-| SRAM capacity | 2 x 1 MiB single-port banks per slice, 208 MiB full chip |
+| SRAM capacity | 2 x 128 KiB single-port banks per slice, 26 MiB full chip |
 | MXM units | 4 total, 2 per hemisphere |
 | MXM array | 32 x 32 FP16/BF16 multiply with FP32 accumulation |
 | VXM | 1 central slice, 16 ALUs per lane |
 | SXM | 1 four-tile slice per hemisphere |
 
-One MEM slice owns two independent `32768 x 32-byte` single-port SRAM banks.
-Each row spans all four tiles; one tile accesses its local 8-byte segment when
-the instruction wave reaches that tile. The model has 104 homogeneous slices
-across two hemispheres, for `104 x 2 x 1 MiB = 208 MiB` total SRAM. Bank
-selection belongs to the ICU queue identity; the MEM instruction carries only
-a 15-bit bank-local row address.
+A reference MEM slice has 8192 vector-wide rows, for
+`320 bytes x 8192 = 2.5 MiB`. The model preserves that total slice depth and
+scales each row to 32 bytes, so one modeled slice stores 256 KiB. Its two
+independent single-port SRAM banks partition the rows evenly: each bank is
+`4096 x 32-byte = 128 KiB`. Each row spans all four tiles; one tile accesses its
+local 8-byte segment when the instruction wave reaches that tile. The model has
+104 homogeneous slices across two hemispheres, for
+`104 x 2 x 128 KiB = 26 MiB` total SRAM. Bank selection belongs to the ICU queue
+identity; the MEM instruction carries only a 12-bit bank-local row address.
 
 ## 2. Full-Chip Topology
 
@@ -141,12 +144,13 @@ The public-style software address layout used as reference is:
 [26]    hemisphere
 [25:20] slice
 [19]    bank
-[18:4]  row offset within the bank
+[18:16] reserved
+[15:4]  row offset within the bank
 [3:0]   software byte offset
 ```
 
-`MemInstruction::address` stores only the 15-bit bank-local row field
-corresponding to software bits `[18:4]`, giving rows `0..32767`. The queue
+`MemInstruction::address` stores only the 12-bit bank-local row field
+corresponding to software bits `[15:4]`, giving rows `0..4095`. The queue
 selects software bit `[19]`. Test initialization/result APIs expose bank, tile,
 and lane byte selection separately.
 
@@ -211,27 +215,12 @@ incoming FP16/BF16 bits unchanged.
 
 ### Compute
 
-`Compute(buffer, activation_stream_base, output_stream_base, ..., data_format,
-compute_mode)` is a one-cycle control pulse. The selected buffer, stream bases,
-FP16/BF16 format, and compute mode travel with the activation wave.
-
-| Mode | Activation input per tile | Result per MXM pulse | MACs per supercell |
-|---|---:|---:|---:|
-| `Vector` | `1 x 8`, 2 byte streams | `1 x 32` | 64 |
-| `Block8` | `8 x 8`, 16 byte streams | `8 x 32` | 512 |
-
-Both modes interpret the raw weight bits using the Compute format. `Vector`
-preserves the original behavior: consecutive pulses inject consecutive rows,
-and a Stream destination emits one FP32 row over four west byte streams.
-
-`Block8` treats each stream pair as one activation row and each lane as one K
-element. One pulse computes eight output rows, advances the row counter by
-eight, and selects one logical `8 x 32` FP32 accumulator row. Each supercell
-column updates its `8 x 8` segment at that same wide-row address.
-Block8 is accumulator-only. A Block8 `AccumulatorRead` emits one `8 x 8`
-column segment per cycle over all 32 west byte streams; the four column
-segments drain the full `8 x 32` row in four cycles. Up to four consecutive
-Block8 pulses form one `32 x 32` output tile.
+`Compute(buffer, activation_stream_base, output_stream_base, ..., data_format)`
+is a one-cycle control pulse. The selected buffer, stream bases, and FP16/BF16
+format travel with the activation wave. Each tile consumes one `1 x 8`
+activation from two byte streams; one pulse produces a `1 x 32` row and performs
+64 MACs per supercell. Consecutive pulses inject consecutive rows, and a Stream
+destination emits one FP32 row over four west byte streams.
 
 Activations move east across the four supercell columns while partial sums move
 north and accumulate as FP32. There is no separate MXM output command or
@@ -350,20 +339,11 @@ and the MXM Dequant/load queues are explicit scheduling resources.
 
 ### Accumulator Lifetime
 
-Each MXM owns two mode-specific FP32 accumulator SRAMs:
-
-| Mode | SRAM geometry | Row width | Capacity |
-|---|---:|---:|---:|
-| `Vector` | `(block_count * 32) x 32 FP32` | 128 bytes | 384 KiB at 96 blocks |
-| `Block8` | `(block_count * 4) x (8 x 32 FP32)` | 1024 bytes | 384 KiB at 96 blocks |
-
+Each MXM owns one FP32 accumulator SRAM with
+`(block_count * 32) x 32 FP32` geometry and 128-byte rows.
 `FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT` is a CMake cache parameter and defaults to
-96 complete 32x32 partial-sum blocks. Vector Compute writes one eight-column
-segment of a narrow row. Block8 Compute writes the same eight-column segment
-for all eight output rows, and the four column segments share one logical wide
-address. The Compute/AccumulatorRead mode bit selects the SRAM. A Block8 read
-occupies all 32 west streams, so its output window must be scheduled against
-the local peer MXM. Address reuse is legal only after the final result has been
+256 complete 32x32 partial-sum blocks (1 MiB). Compute writes one eight-column
+segment of a row. Address reuse is legal only after the final result has been
 emitted and cleared.
 
 ### Single-Port MEM
@@ -385,44 +365,6 @@ Weights use symmetric per-output-column W8 scales. VXM dequantizes weights,
 MXM0/1 compute adjacent output blocks, and their MXM-local accumulators sum
 18 K tiles. All 196,608 outputs are compared against an FP16-aware scalar
 golden model.
-
-### Block8 + MXM Dequant FFN
-
-`smollm2_block8_dequant_ffn_test` uses the same SmolLM2 dimensions:
-
-```text
-X[128,576] BF16
-  -> gate/up[128,1536]
-  -> BF16 SwiGLU[128,1536]
-  -> down[128,576] FP32
-```
-
-Weights enter every MXM as eight INT8 streams. The independent Dequant queue
-supplies one BF16 scale per eight-column group, and the converted BF16 values
-are written directly into the weight buffers. Gate, up, and down all use
-Block8 Compute and the configurable `(block_count * 4) x (8 x 32 FP32)` wide accumulator.
-
-Four consecutive Block8 pulses cover one physical 32-row tile. The 128 input
-rows are scheduled as four such groups, with enough separation for the last
-column wave to leave the internal partial-sum rows before they are reused.
-Gate/up accumulator results are checked exactly and materialized as FP32 VXM
-inputs at an explicit test phase boundary. The six-stage VXM SwiGLU pipeline
-accepts one 32-element vector per cycle, casts the result to BF16, and writes
-the 16-stream packed activation layout into both hemispheres. Down consumes
-that VXM output through the full 48-reduction projection. Down results use a
-scaled FP32 tolerance because the hardware accumulates tile partial sums in a
-different association than the scalar golden loop.
-
-Accumulator state is encoded on the owning `MXM.*.Compute` event rather than
-drawn as a separate functional-unit lane. Partial reductions are purple; the
-final reduction is dark purple because the completed sum is ready but still
-retained in SRAM. Red is reserved for a Compute or AccumulatorRead operation
-that explicitly emits to stream and clears the slot.
-
-The generated schedule artifacts are
-[`smollm2_block8_dequant_ffn_schedule.csv`](traces/smollm2_block8_dequant_ffn_schedule.csv)
-and
-[`smollm2_block8_dequant_ffn_schedule_detail.svg`](figures/smollm2_block8_dequant_ffn_schedule_detail.svg).
 
 ### RMSNorm
 

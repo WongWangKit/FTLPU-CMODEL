@@ -107,7 +107,7 @@ inline MxmControlInstruction apply_icu_repeat_stride(
             throw std::out_of_range(
                 "ICU MXM Loop accumulator-address stride underflow");
         MxmControlInstruction::check_accumulator_address(
-            static_cast<std::size_t>(address), instruction.compute_mode);
+            static_cast<std::size_t>(address));
         instruction.accumulator_address = static_cast<std::size_t>(address);
         return instruction;
     }
@@ -190,7 +190,7 @@ inline MxmControlInstruction apply_icu_repeat_2d_stride(
             throw std::out_of_range(
                 "ICU Repeat2D MXM accumulator-address induction underflow");
         MxmControlInstruction::check_accumulator_address(
-            static_cast<std::size_t>(address), instruction.compute_mode);
+            static_cast<std::size_t>(address));
         instruction.accumulator_address = static_cast<std::size_t>(address);
         return instruction;
     }

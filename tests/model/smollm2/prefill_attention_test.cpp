@@ -736,7 +736,7 @@ void schedule_qk(Schedule& schedule)
                 0, 0, query * 2, kQkAccumulatorAddress, 1,
                 ftlpu::MxmAccumulatorDestination::Stream,
                 ftlpu::MxmDataFormat::BFloat16,
-                ftlpu::MxmComputeMode::Vector, true,
+                true,
                 ftlpu::MxmAccumulatorOutputFormat::BFloat16));
     }
 
@@ -1050,7 +1050,7 @@ void schedule_pv(Schedule& schedule)
                 kPvAccumulatorAddress, 1,
                 ftlpu::MxmAccumulatorDestination::Stream,
                 ftlpu::MxmDataFormat::BFloat16,
-                ftlpu::MxmComputeMode::Vector, true,
+                true,
                 ftlpu::MxmAccumulatorOutputFormat::BFloat16));
     }
 

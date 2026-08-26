@@ -487,7 +487,6 @@ inline std::size_t schedule_gate_up(
                                     ? MxmAccumulatorDestination::Stream
                                     : MxmAccumulatorDestination::Sram,
                                 MxmDataFormat::BFloat16,
-                                MxmComputeMode::Vector,
                                 final_reduction,
                                 MxmAccumulatorOutputFormat::BFloat16),
                             rows);

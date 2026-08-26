@@ -67,7 +67,7 @@ int main()
             0, 0, 0, 4, 1,
             ftlpu::MxmAccumulatorDestination::Sram,
             ftlpu::MxmDataFormat::BFloat16,
-            ftlpu::MxmComputeMode::Block8));
+            true));
         mxm.push_loop(ftlpu::IcuLoop {1, 2, 2, 3});
         std::vector<std::size_t> accumulatorAddresses;
         while (!mxm.done()) {

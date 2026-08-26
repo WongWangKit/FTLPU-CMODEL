@@ -33,7 +33,6 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
         && lhs.accumulator_destination == rhs.accumulator_destination
         && lhs.accumulator_clear == rhs.accumulator_clear
         && lhs.data_format == rhs.data_format
-        && lhs.compute_mode == rhs.compute_mode
         && lhs.accumulator_output_format == rhs.accumulator_output_format
         && lhs.decode_operation == rhs.decode_operation
         && lhs.decode_layout == rhs.decode_layout;
@@ -102,12 +101,19 @@ bool verify_mem_codec()
     if (!require_throws(
         [] {
             ftlpu::isa::encode_mem_instruction(
-                ftlpu::MemInstruction::Read(ftlpu::hw::kSramDepthRows, 0));
+                ftlpu::MemInstruction::Read(
+                    ftlpu::hw::kSramDepthRows, 0));
         },
         "MEM codec should reject row addresses outside the configured bank")) {
         return false;
     }
-    return true;
+    return require_throws(
+        [] {
+            const auto reserved_address_bit = std::uint64_t {1} << 27;
+            static_cast<void>(ftlpu::isa::decode_mem_instruction(
+                reserved_address_bit));
+        },
+        "MEM codec should reject address bits above the modeled row depth");
 }
 
 bool verify_mxm_codec()
@@ -134,39 +140,14 @@ bool verify_mxm_codec()
             1,
             ftlpu::MxmAccumulatorDestination::Stream,
             ftlpu::MxmDataFormat::BFloat16),
-        ftlpu::MxmControlInstruction::Compute(
-            0,
-            16,
-            0,
-            ftlpu::hw::kMxmBlockAccumulatorRows / 2,
-            1,
-            ftlpu::MxmAccumulatorDestination::Sram,
-            ftlpu::MxmDataFormat::Float16,
-            ftlpu::MxmComputeMode::Block8),
-        ftlpu::MxmControlInstruction::Compute(
-            0,
-            16,
-            0,
-            ftlpu::hw::kMxmBlockAccumulatorRows / 2,
-            1,
-            ftlpu::MxmAccumulatorDestination::Stream,
-            ftlpu::MxmDataFormat::BFloat16,
-            ftlpu::MxmComputeMode::Block8,
-            false),
         ftlpu::MxmControlInstruction::AccumulatorRead(
             ftlpu::hw::kMxmAccumulatorRows - 1, 16, false),
         ftlpu::MxmControlInstruction::AccumulatorRead(
             0,
             0,
             true,
-            ftlpu::MxmComputeMode::Vector,
             ftlpu::MxmAccumulatorOutputFormat::BFloat16,
             ftlpu::MxmAccumulatorDestination::Sram),
-        ftlpu::MxmControlInstruction::AccumulatorRead(
-            ftlpu::hw::kMxmBlockAccumulatorRows - 1,
-            0,
-            true,
-            ftlpu::MxmComputeMode::Block8),
         ftlpu::MxmControlInstruction::DecodeLoadActivation(
             1,
             4,
@@ -252,7 +233,7 @@ bool verify_mxm_codec()
     }
     if (!require(
             (bf16_compute & (std::uint64_t {1} << 46)) == 0,
-            "legacy Vector Compute encoding changed while adding Block8")) {
+            "MXM Compute must keep reserved bit 46 clear")) {
         return false;
     }
     const auto bf16_output_compute =
@@ -264,7 +245,6 @@ bool verify_mxm_codec()
             1,
             ftlpu::MxmAccumulatorDestination::Stream,
             ftlpu::MxmDataFormat::BFloat16,
-            ftlpu::MxmComputeMode::Vector,
             true,
             ftlpu::MxmAccumulatorOutputFormat::BFloat16);
     const auto encoded_bf16_output =
@@ -278,21 +258,6 @@ bool verify_mxm_codec()
             "MXM accumulator BF16 output codec round-trip failed")) {
         return false;
     }
-    const auto block_compute = ftlpu::isa::encode_mxm_instruction(
-        ftlpu::MxmControlInstruction::Compute(
-            0,
-            0,
-            0,
-            0,
-            1,
-            ftlpu::MxmAccumulatorDestination::Sram,
-            ftlpu::MxmDataFormat::Float16,
-            ftlpu::MxmComputeMode::Block8));
-    if (!require(
-            (block_compute & (std::uint64_t {1} << 46)) != 0,
-            "MXM Block8 Compute mode bit was not encoded")) {
-        return false;
-    }
     const auto retain_compute = ftlpu::isa::encode_mxm_instruction(
         ftlpu::MxmControlInstruction::Compute(
             0,
@@ -302,7 +267,6 @@ bool verify_mxm_codec()
             1,
             ftlpu::MxmAccumulatorDestination::Stream,
             ftlpu::MxmDataFormat::BFloat16,
-            ftlpu::MxmComputeMode::Block8,
             false));
     if (!require(
             (retain_compute & (std::uint64_t {1} << 47)) != 0,
@@ -314,7 +278,7 @@ bool verify_mxm_codec()
             ftlpu::hw::kMxmAccumulatorRows - 1, 16, false));
     if (!require(
             (vector_read & (std::uint64_t {1} << 46)) == 0,
-            "legacy Vector AccumulatorRead encoding changed")) {
+            "MXM AccumulatorRead must keep reserved bit 46 clear")) {
         return false;
     }
     const auto sram_read = ftlpu::isa::encode_mxm_instruction(
@@ -322,7 +286,6 @@ bool verify_mxm_codec()
             0,
             0,
             true,
-            ftlpu::MxmComputeMode::Vector,
             ftlpu::MxmAccumulatorOutputFormat::BFloat16,
             ftlpu::MxmAccumulatorDestination::Sram));
     const auto decoded_sram_read =
@@ -337,43 +300,11 @@ bool verify_mxm_codec()
             "MXM SRAM AccumulatorRead fields were not encoded")) {
         return false;
     }
-    const auto block_read = ftlpu::isa::encode_mxm_instruction(
-        ftlpu::MxmControlInstruction::AccumulatorRead(
-            ftlpu::hw::kMxmBlockAccumulatorRows - 1,
-            0,
-            false,
-            ftlpu::MxmComputeMode::Block8));
-    if (!require(
-            (block_read & (std::uint64_t {1} << 46)) != 0,
-            "MXM Block8 AccumulatorRead mode bit was not encoded")) {
-        return false;
-    }
-
     return require_throws(
         [] {
             ftlpu::isa::encode_mxm_instruction(ftlpu::MxmControlInstruction::IW(32));
         },
         "MXM codec should reject weight buffers outside the two-buffer set")
-        && require_throws(
-            [] {
-                static_cast<void>(
-                    ftlpu::MxmControlInstruction::AccumulatorRead(
-                        ftlpu::hw::kMxmBlockAccumulatorRows,
-                        0,
-                        true,
-                        ftlpu::MxmComputeMode::Block8));
-            },
-            "MXM Block8 accumulator read should reject addresses past its configured depth")
-        && require_throws(
-            [] {
-                static_cast<void>(
-                    ftlpu::MxmControlInstruction::AccumulatorRead(
-                        0,
-                        1,
-                        true,
-                        ftlpu::MxmComputeMode::Block8));
-            },
-            "MXM Block8 accumulator read should occupy all west streams")
         && require_throws(
             [] {
                 auto invalid = ftlpu::MxmControlInstruction::IW(0, 0);

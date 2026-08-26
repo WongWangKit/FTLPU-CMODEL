@@ -1009,11 +1009,7 @@ private:
             os << "Compute b" << instruction.weight_buffer
                << " stream=" << instruction.activation_stream_base
                << " acc=" << instruction.accumulator_address
-               << " out=" << instruction.stream_base
-               << " mode="
-               << (instruction.compute_mode == MxmComputeMode::Block8
-                       ? "block8"
-                       : "vector");
+               << " out=" << instruction.stream_base;
         } else if (instruction.opcode == MxmControlOpcode::Decode) {
             if (instruction.decode_operation
                 == MxmDecodeOperation::LoadActivation) {
@@ -1030,11 +1026,7 @@ private:
             }
         } else {
             os << "AccumulatorRead address=" << instruction.accumulator_address
-               << " out=" << instruction.stream_base
-               << " mode="
-               << (instruction.compute_mode == MxmComputeMode::Block8
-                       ? "block8"
-                       : "vector");
+               << " out=" << instruction.stream_base;
         }
         return os.str();
     }

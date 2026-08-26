@@ -24,11 +24,6 @@ PhaseResult run_prefill_attention(
     const std::vector<float>& input,
     const std::filesystem::path& trace_path = {});
 
-PhaseResult run_prefill_ffn(
-    TspSliceSystem& system,
-    const std::vector<float>& input,
-    const std::filesystem::path& trace_path = {});
-
 PhaseResult run_decode_attention(
     TspSliceSystem& system,
     const std::vector<float>& input,

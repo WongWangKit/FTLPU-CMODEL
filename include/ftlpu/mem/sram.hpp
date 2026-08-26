@@ -13,16 +13,16 @@
 namespace ftlpu {
 
 // One single-port SRAM bank owned by one MEM functional slice. It contains
-// 2048 architecturally visible rows by default, and
+// 4096 bank-local rows, and
 // every row spans all configured tiles:
 //
-//   2048 rows * (4 tiles * 8 bytes) = 64 KiB.
+//   4096 rows * (4 tiles * 8 bytes) = 128 KiB.
 //
 // MEM instructions address rows.  As an instruction travels through a tile,
 // that tile reads or writes its own contiguous 8-byte portion of the row.
 class Sram {
 public:
-    static constexpr std::size_t kRows = hw::kSramMaxDepthRows;
+    static constexpr std::size_t kRows = hw::kSramDepthRows;
     static constexpr std::size_t kBytesPerRow = hw::kSramRowBytes;
     static constexpr std::size_t kBytesPerTileSegment = hw::kLanesPerTile;
     static constexpr std::size_t kCapacityBytes = kRows * kBytesPerRow;

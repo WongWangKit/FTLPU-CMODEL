@@ -7,7 +7,7 @@ schedule traces. Open `index.html` in a browser and load the CSV emitted by
 When serving the repository over HTTP, a trace can also be opened directly:
 
 ```text
-http://127.0.0.1:8765/tools/pipeline_viewer/?trace=/docs/traces/smollm2_block8_dequant_ffn_schedule.csv
+http://127.0.0.1:8765/tools/pipeline_viewer/?trace=/docs/traces/smollm2_attention_schedule.csv
 ```
 
 Supported input columns:

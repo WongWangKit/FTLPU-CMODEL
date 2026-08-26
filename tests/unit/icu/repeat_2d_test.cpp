@@ -71,7 +71,7 @@ try {
     MxmQueue compute;
     compute.push_instruction(MxmControlInstruction::Compute(
         0, 0, 0, 4, 1, MxmAccumulatorDestination::Sram,
-        MxmDataFormat::BFloat16, MxmComputeMode::Block8, false));
+        MxmDataFormat::BFloat16, false));
     compute.push_repeat_2d(IcuRepeat2D {
         4, 1, 0,
         3, 8, 4,

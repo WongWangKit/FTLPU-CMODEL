@@ -17,7 +17,7 @@ bit-accurate。当前目标是提供一个可验证的数据流调度目标，�
 | 向量形态 | 4 个 tile/superlane x 8 lane = 32 个元素 |
 | Stream | 32 条 eastward + 32 条 westward，每个寄存器 1 byte |
 | MEM | 每个 hemisphere 52 个 slice，每 slice 两条 bank queue，全芯片 208 条 ICU queue |
-| SRAM | 每 slice 两个 1 MiB 单口 bank，每侧 104 MiB，全芯片 208 MiB |
+| SRAM | 每 slice 两个 128 KiB 单口 bank，每侧 13 MiB，全芯片 26 MiB |
 | Accumulator | 每个 MXM 内置一个 1 MiB FP32 accumulator |
 | MXM | 四个 32 x 32 FP16 GEMM 阵列，每侧两个 |
 | MXM 权重 | 每个 supercell 两个对等 buffer，由 `IW`/`Compute` 选择 |
@@ -109,6 +109,10 @@ build-vs2026\Release\smollm2_attention_test.exe
 
 整系统日志默认关闭，因为逐拍 trace 会显著拖慢模拟。小型测试和 demo 可以通过
 `TspSliceSystem::LogSinks` 分别输出 ICU、MEM、MXM、VXM、SXM 和 system 日志。
+参考 Groq 的单个 MEM slice 共有 8192 个向量 row，容量为
+`320 B x 8192 = 2.5 MiB`。模型保持总 depth 8192，将 row 宽从 320 byte 缩为
+32 byte，因此每个 slice 为 256 KiB。两个 bank 平分这些 row，即每个 bank
+拥有 4096 个本地 row、容量 128 KiB。后备存储按 4 KiB page 延迟分配。
 
 ## 调度图
 

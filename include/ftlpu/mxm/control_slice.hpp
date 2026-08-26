@@ -46,11 +46,6 @@ enum class MxmAccumulatorOutputFormat {
     BFloat16 = 1,
 };
 
-enum class MxmComputeMode {
-    Vector = 0,
-    Block8 = 1,
-};
-
 struct MxmControlInstruction {
     MxmControlOpcode opcode{MxmControlOpcode::IW};
     std::size_t weight_buffer{0};
@@ -68,7 +63,6 @@ struct MxmControlInstruction {
         MxmWeightInputMode::Int8DequantBf16};
     std::size_t weight_inner_column{0};
     MxmDataFormat data_format{MxmDataFormat::Float16};
-    MxmComputeMode compute_mode{MxmComputeMode::Vector};
     MxmAccumulatorOutputFormat accumulator_output_format{
         MxmAccumulatorOutputFormat::Float32};
     MxmDecodeOperation decode_operation{MxmDecodeOperation::LoadActivation};
@@ -152,17 +146,13 @@ struct MxmControlInstruction {
         MxmAccumulatorDestination accumulator_destination =
             MxmAccumulatorDestination::Stream,
         MxmDataFormat data_format = MxmDataFormat::Float16,
-        MxmComputeMode compute_mode = MxmComputeMode::Vector,
         bool accumulator_clear = true,
         MxmAccumulatorOutputFormat accumulator_output_format =
             MxmAccumulatorOutputFormat::Float32)
     {
         check_weight_buffer(weight_buffer);
-        check_compute_mode(compute_mode);
-        check_activation_stream_base(activation_stream_base, compute_mode);
-        check_stream_base(
-            stream_base, compute_mode, accumulator_output_format);
-        check_compute_destination(compute_mode, accumulator_destination);
+        check_activation_stream_base(activation_stream_base);
+        check_stream_base(stream_base, accumulator_output_format);
         auto instruction = MxmControlInstruction {};
         instruction.opcode = MxmControlOpcode::Compute;
         instruction.weight_buffer = weight_buffer;
@@ -173,7 +163,6 @@ struct MxmControlInstruction {
         instruction.accumulator_destination = accumulator_destination;
         instruction.accumulator_clear = accumulator_clear;
         instruction.data_format = data_format;
-        instruction.compute_mode = compute_mode;
         instruction.accumulator_output_format = accumulator_output_format;
         return instruction;
     }
@@ -182,22 +171,19 @@ struct MxmControlInstruction {
         std::size_t accumulator_address,
         std::size_t stream_base = 0,
         bool clear = true,
-        MxmComputeMode compute_mode = MxmComputeMode::Vector,
         MxmAccumulatorOutputFormat accumulator_output_format =
             MxmAccumulatorOutputFormat::Float32,
         MxmAccumulatorDestination accumulator_destination =
             MxmAccumulatorDestination::Stream)
     {
-        check_compute_mode(compute_mode);
-        check_accumulator_address(accumulator_address, compute_mode);
+        check_accumulator_address(accumulator_address);
         check_accumulator_read_stream_base(
-            stream_base, compute_mode, accumulator_output_format);
+            stream_base, accumulator_output_format);
         auto instruction = MxmControlInstruction {};
         instruction.opcode = MxmControlOpcode::AccumulatorRead;
         instruction.stream_base = stream_base;
         instruction.accumulator_address = accumulator_address;
         instruction.accumulator_clear = clear;
-        instruction.compute_mode = compute_mode;
         instruction.accumulator_output_format = accumulator_output_format;
         instruction.accumulator_destination = accumulator_destination;
         return instruction;
@@ -238,8 +224,7 @@ struct MxmControlInstruction {
         check_weight_buffer(activation_buffer);
         check_data_format(data_format);
         check_decode_layout(decode_layout);
-        check_accumulator_address(
-            accumulator_address, MxmComputeMode::Vector);
+        check_accumulator_address(accumulator_address);
         check_column(accumulator_column);
         if (accumulator_destination
             == MxmAccumulatorDestination::Stream) {
@@ -334,47 +319,22 @@ struct MxmControlInstruction {
         throw std::invalid_argument("MXM data format is invalid");
     }
 
-    static void check_compute_mode(MxmComputeMode mode)
-    {
-        switch (mode) {
-        case MxmComputeMode::Vector:
-        case MxmComputeMode::Block8:
-            return;
-        }
-        throw std::invalid_argument("MXM compute mode is invalid");
-    }
-
     static void check_activation_stream_base(
-        std::size_t activation_stream_base,
-        MxmComputeMode mode)
+        std::size_t activation_stream_base)
     {
-        check_compute_mode(mode);
-        const auto stream_count = mode == MxmComputeMode::Block8
-            ? hw::kMxmActivationStreamsPerBlock
-            : hw::kMxmActivationStreamsPerVector;
+        const auto stream_count = hw::kMxmActivationStreamsPerVector;
         if (activation_stream_base + stream_count > hw::kEastStreams) {
             throw std::out_of_range(
                 "MXM activation stream range is outside the east stream set");
         }
     }
 
-    static void check_compute_destination(
-        MxmComputeMode mode,
-        MxmAccumulatorDestination destination)
-    {
-        (void)mode;
-        (void)destination;
-    }
-
     static void check_stream_base(
         std::size_t stream_base,
-        MxmComputeMode mode,
         MxmAccumulatorOutputFormat output_format =
             MxmAccumulatorOutputFormat::Float32)
     {
-        const auto stream_count = mode == MxmComputeMode::Block8
-            ? hw::kMxmBlockRows * sizeof(std::uint16_t)
-            : output_format == MxmAccumulatorOutputFormat::BFloat16
+        const auto stream_count = output_format == MxmAccumulatorOutputFormat::BFloat16
             ? sizeof(std::uint16_t)
             : sizeof(float);
         if (stream_base + stream_count > hw::kWestStreams) {
@@ -385,16 +345,10 @@ struct MxmControlInstruction {
 
     static void check_accumulator_read_stream_base(
         std::size_t stream_base,
-        MxmComputeMode mode,
         MxmAccumulatorOutputFormat output_format =
             MxmAccumulatorOutputFormat::Float32)
     {
-        const auto stream_count = mode == MxmComputeMode::Block8
-            ? hw::kMxmBlockRows
-                * (output_format == MxmAccumulatorOutputFormat::BFloat16
-                       ? sizeof(std::uint16_t)
-                       : sizeof(float))
-            : output_format == MxmAccumulatorOutputFormat::BFloat16
+        const auto stream_count = output_format == MxmAccumulatorOutputFormat::BFloat16
             ? sizeof(std::uint16_t)
             : sizeof(float);
         if (stream_base + stream_count > hw::kWestStreams) {
@@ -403,14 +357,9 @@ struct MxmControlInstruction {
         }
     }
 
-    static void check_accumulator_address(
-        std::size_t address,
-        MxmComputeMode mode = MxmComputeMode::Vector)
+    static void check_accumulator_address(std::size_t address)
     {
-        check_compute_mode(mode);
-        const auto rows = mode == MxmComputeMode::Block8
-            ? hw::kMxmBlockAccumulatorRows
-            : hw::kMxmAccumulatorRows;
+        const auto rows = hw::kMxmAccumulatorRows;
         if (address >= rows) {
             throw std::out_of_range(
                 "MXM accumulator address " + std::to_string(address)
@@ -470,7 +419,6 @@ public:
             MxmAccumulatorDestination::Stream};
         bool accumulator_clear{true};
         MxmDataFormat data_format{MxmDataFormat::Float16};
-        MxmComputeMode compute_mode{MxmComputeMode::Vector};
         MxmAccumulatorOutputFormat accumulator_output_format{
             MxmAccumulatorOutputFormat::Float32};
     };
@@ -500,7 +448,6 @@ public:
         std::size_t address{0};
         std::size_t stream_base{0};
         bool clear{true};
-        MxmComputeMode compute_mode{MxmComputeMode::Vector};
         MxmAccumulatorOutputFormat output_format{
             MxmAccumulatorOutputFormat::Float32};
         MxmAccumulatorDestination destination{
@@ -722,21 +669,13 @@ private:
         if (instruction.opcode == MxmControlOpcode::Compute) {
             MxmControlInstruction::check_data_format(
                 instruction.data_format);
-            MxmControlInstruction::check_compute_mode(
-                instruction.compute_mode);
             MxmControlInstruction::check_activation_stream_base(
-                instruction.activation_stream_base,
-                instruction.compute_mode);
+                instruction.activation_stream_base);
             MxmControlInstruction::check_stream_base(
                 instruction.stream_base,
-                instruction.compute_mode,
                 instruction.accumulator_output_format);
-            MxmControlInstruction::check_compute_destination(
-                instruction.compute_mode,
-                instruction.accumulator_destination);
             MxmControlInstruction::check_accumulator_address(
-                instruction.accumulator_address,
-                instruction.compute_mode);
+                instruction.accumulator_address);
             if (instruction.accumulator_row_stride == 0) {
                 throw std::invalid_argument(
                     "MXM accumulator row stride must be at least one");
@@ -754,8 +693,7 @@ private:
             } else if (instruction.decode_operation
                 == MxmDecodeOperation::StreamCompute) {
                 MxmControlInstruction::check_accumulator_address(
-                    instruction.accumulator_address,
-                    MxmComputeMode::Vector);
+                    instruction.accumulator_address);
                 MxmControlInstruction::check_column(
                     instruction.weight_column);
                 if (instruction.accumulator_destination
@@ -768,14 +706,10 @@ private:
                     "MXM decode operation is invalid");
             }
         } else if (instruction.opcode == MxmControlOpcode::AccumulatorRead) {
-            MxmControlInstruction::check_compute_mode(
-                instruction.compute_mode);
             MxmControlInstruction::check_accumulator_address(
-                instruction.accumulator_address,
-                instruction.compute_mode);
+                instruction.accumulator_address);
             MxmControlInstruction::check_accumulator_read_stream_base(
                 instruction.stream_base,
-                instruction.compute_mode,
                 instruction.accumulator_output_format);
         } else {
             MxmControlInstruction::check_column(instruction.weight_column);
@@ -995,11 +929,6 @@ private:
                            << " format="
                            << mxm_data_format_name(
                                   compute_instruction->data_format)
-                           << " mode="
-                           << (compute_instruction->compute_mode
-                                      == MxmComputeMode::Block8
-                                   ? "block8"
-                                   : "vector")
                            << " acc=" << compute_instruction->accumulator_address
                            << " out=" << compute_instruction->stream_base << '\n';
                     }
@@ -1013,7 +942,6 @@ private:
                         compute_instruction->accumulator_destination,
                         compute_instruction->accumulator_clear,
                         compute_instruction->data_format,
-                        compute_instruction->compute_mode,
                         compute_instruction->accumulator_output_format,
                     };
                 } else if (
@@ -1073,11 +1001,6 @@ private:
                         os << "  tile " << tile << " AccumulatorRead address="
                            << compute_instruction->accumulator_address
                            << " out=" << compute_instruction->stream_base
-                           << " mode="
-                           << (compute_instruction->compute_mode
-                                      == MxmComputeMode::Block8
-                                   ? "block8"
-                                   : "vector")
                            << (compute_instruction->accumulator_clear
                                    ? " clear" : " retain")
                            << (compute_instruction->accumulator_destination
@@ -1090,7 +1013,6 @@ private:
                             compute_instruction->accumulator_address,
                             compute_instruction->stream_base,
                             compute_instruction->accumulator_clear,
-                            compute_instruction->compute_mode,
                             compute_instruction->accumulator_output_format,
                             compute_instruction->accumulator_destination};
                 }

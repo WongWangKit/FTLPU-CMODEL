@@ -11,5 +11,5 @@ Generated files keep stable names so they can be regenerated in place. For
 example, serve the repository and open:
 
 ```text
-http://127.0.0.1:8765/tools/pipeline_viewer/?trace=/docs/traces/smollm2_block8_c2c_ffn_schedule.csv
+http://127.0.0.1:8765/tools/pipeline_viewer/?trace=/docs/traces/smollm2_attention_schedule.csv
 ```

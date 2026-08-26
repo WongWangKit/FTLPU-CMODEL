@@ -18,13 +18,12 @@ struct SystemHardwareConfiguration {
     std::size_t c2c_streams_per_direction{hw::kC2cStreamsPerDirection};
     bool c2c_dedicated_streams{false};
     bool mxm_local_dequant_enabled{true};
-    bool mxm_block_compute_enabled{true};
     bool mxm_weight_activation_overlap_enabled{true};
 
     void validate() const
     {
         if (sram_depth_rows == 0
-            || sram_depth_rows > hw::kSramMaxDepthRows)
+            || sram_depth_rows > hw::kSramDepthRows)
             throw std::invalid_argument(
                 "configured SRAM depth exceeds the CModel physical capacity");
         if (mxms_per_hemisphere == 0

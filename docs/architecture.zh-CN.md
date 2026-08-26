@@ -19,16 +19,19 @@
 | Stream-register column | 每侧 16 个（`sreg0..sreg15`） |
 | 每 lane stream | 32 条 eastward + 32 条 westward |
 | Stream-register 位宽 | 1 byte |
-| SRAM 容量 | 每 slice 两个 1 MiB 单口 bank，全芯片 208 MiB |
+| SRAM 容量 | 每 slice 两个 128 KiB 单口 bank，全芯片 26 MiB |
 | MXM | 共 4 个，每侧 2 个 |
 | MXM 阵列 | 32 x 32 FP16/BF16 乘法、FP32 累加 |
 | VXM | 中心 1 个 slice，每 lane 16 个 ALU |
 | SXM | 每侧 1 个四-tile slice |
 
-一个 MEM slice 拥有两个独立的 `32768 x 32-byte` 单口 SRAM bank。每个 row 横跨
+参考 Groq MEM slice 共有 8192 个向量 row，容量为
+`320 byte x 8192 = 2.5 MiB`。模型保持单 slice 的总 depth 为 8192，同时将每个
+row 缩小为 32 byte，因此每个模型 slice 容量为 256 KiB。两个独立的单口 SRAM
+bank 平分这些 row：每个 bank 为 `4096 x 32-byte = 128 KiB`。每个 row 横跨
 4 个 tile；指令波到达某个 tile 时，该 tile 只访问自己的 8-byte segment。两个
-hemisphere 共 104 个同构 slice，总容量为 `104 x 2 x 1 MiB = 208 MiB`。bank 由
-ICU queue 身份选择，MEM 指令只携带 15-bit bank-local row address。
+hemisphere 共 104 个同构 slice，总容量为 `104 x 2 x 128 KiB = 26 MiB`。bank 由
+ICU queue 身份选择，MEM 指令只携带 12-bit bank-local row address。
 
 ## 2. 完整芯片拓扑
 
@@ -112,12 +115,13 @@ slice 组成一个 group，位于两个 stream-register boundary 之间。全部
 [26]    hemisphere
 [25:20] slice
 [19]    bank
-[18:4]  bank 内 row offset
+[18:16] 保留
+[15:4]  bank 内 row offset
 [3:0]   软件 byte offset
 ```
 
-`MemInstruction::address` 只保存对应软件位 `[18:4]` 的 15-bit bank-local row，
-范围为 `0..32767`；queue 选择软件位 `[19]`。测试的初始化/结果 API 另外指定
+`MemInstruction::address` 只保存对应软件位 `[15:4]` 的 12-bit bank-local row，
+范围为 `0..4095`；queue 选择软件位 `[19]`。测试的初始化/结果 API 另外指定
 bank、tile 和 lane byte。
 
 ## 5. MXM
@@ -162,25 +166,11 @@ scale immediate 广播到本拍装入的 8 列。`IWDirect16` 和 `IWColumnDirec
 
 ### Compute
 
-`Compute(buffer, activation_stream_base, output_stream_base, ..., data_format,
-compute_mode)` 是一拍 control pulse。buffer、stream base、FP16/BF16 格式和 compute
-mode 会随 activation 波传播。
-
-| 模式 | 每个 tile 的 activation 输入 | 每个 MXM pulse 的结果 | 每个 supercell 的 MAC |
-|---|---:|---:|---:|
-| `Vector` | `1 x 8`，2 条 byte stream | `1 x 32` | 64 |
-| `Block8` | `8 x 8`，16 条 byte stream | `8 x 32` | 512 |
-
-两种模式都按 Compute 指定的格式解释原始 weight bits。`Vector` 保持原行为：连续
-pulse 注入连续输出行，Stream destination 通过四条 west byte stream 输出一行
-FP32。
-
-`Block8` 把每对 stream 解释成一行 activation、把 lane 解释成 K 元素。一拍计算八行
-输出，row counter 前进 8，并选择一个逻辑 `8 x 32 FP32` accumulator 宽行；每个
-supercell column 更新该宽行地址中的一个 `8 x 8` segment。Block8 只允许 accumulator
-destination。Block8 `AccumulatorRead` 每拍使用全部 32 条 west byte stream 输出一个
-`8 x 8` 列分块，四拍读完一个 `8 x 32` 宽行。连续四拍 Block8 构成一个 `32 x 32`
-output tile。
+`Compute(buffer, activation_stream_base, output_stream_base, ..., data_format)`
+是一拍 control pulse。buffer、stream base 和 FP16/BF16 格式会随 activation 波传播。
+每个 tile 从 2 条 byte stream 消费一个 `1 x 8` activation；一拍产生一行
+`1 x 32` 结果，每个 supercell 执行 64 次 MAC。连续 pulse 注入连续输出行，
+Stream destination 通过四条 west byte stream 输出一行 FP32。
 
 activation 向东穿过四个 supercell column，partial sum 向北传播并按 FP32 累加。
 不存在独立 MXM output 指令，也不存在软件输出队列。
@@ -287,19 +277,10 @@ load queue 都是显式调度资源。
 
 ### Accumulator 生命周期
 
-每个 MXM 内置两个按模式区分的 FP32 accumulator SRAM：
-
-| 模式 | SRAM 组织 | 行宽 | 容量 |
-|---|---:|---:|---:|
-| `Vector` | `(block_count * 32) x 32 FP32` | 128 bytes | 96 blocks 时 384 KiB |
-| `Block8` | `(block_count * 4) x (8 x 32 FP32)` | 1024 bytes | 96 blocks 时 384 KiB |
-
-`FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT` 是 CMake cache 参数，默认容量为 96 个完整
-32x32 部分和 block。Vector Compute 每次写窄行中的一个 8 列 segment；
-Block8 Compute 同时写相同 8 列上的 8 个输出行，四个列 segment 共用一个逻辑宽行
-地址。Compute/AccumulatorRead 的 mode bit 选择目标 SRAM。Block8 read 会占满 32
-条 west stream，因此输出窗口需要与本地另一个 MXM 协同调度。只有最终结果输出并
-清零后，地址才可复用。
+每个 MXM 内置一个 `(block_count * 32) x 32 FP32` accumulator SRAM，
+行宽 128 byte。`FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT` 是 CMake cache 参数，
+默认容纳 256 个完整 32x32 部分和 block（共 1 MiB）。Compute 每次写一个
+8 列 segment；只有最终结果输出并清零后，地址才可复用。
 
 ### 单端口 MEM
 
@@ -319,39 +300,6 @@ A[128,576] fp16 x W[576,1536] int8 -> C[128,1536] fp32
 权重采用按输出列的 W8 对称 scale。VXM 反量化权重，MXM0/1 计算相邻 output block，
 两个 MXM 本地 accumulator 累加 18 个 K tile。全部 196,608 个输出与考虑 FP16
 舍入的 scalar golden model 比较。
-
-### Block8 + MXM Dequant FFN
-
-`smollm2_block8_dequant_ffn_test` 使用相同的 SmolLM2 参数：
-
-```text
-X[128,576] BF16
-  -> gate/up[128,1536]
-  -> BF16 SwiGLU[128,1536]
-  -> down[128,576] FP32
-```
-
-权重以 8 条 INT8 stream 进入每个 MXM；独立 Dequant queue 为每个 8 列 group 提供
-一个 BF16 scale，转换后的 BF16 权重直接写入 weight buffer。gate、up 和 down 全部
-使用 Block8 Compute 与可配置的 `(block_count * 4) x (8 x 32 FP32)` 宽 accumulator。
-
-连续 4 个 Block8 pulse 覆盖一个物理 32-row tile。128 行输入分成 4 组调度，组间只
-保留最后一个 column wave 离开内部 partial-sum row 所需的间隔。gate/up accumulator
-结果逐位检查，并在显式测试 phase boundary materialize 为 FP32 VXM 输入。六级 VXM
-SwiGLU 流水每拍接收一个 32-element vector，将结果 cast 为 BF16，并把 16-stream
-packed activation layout 同时写入两个半球。down 直接消费该 VXM 输出并完成全部
-48 次 reduction。down 使用带尺度的 FP32 容差，因为硬件按 K tile partial sum
-累加，与标量 golden 的线性结合顺序不同。
-
-accumulator 状态直接编码在所属的 `MXM.*.Compute` event 上，不再单独画成功能单元
-lane。非末次 reduction 用紫色表示 partial sum 留在 SRAM；末次 reduction 用深紫色
-表示结果已经 ready、但仍保留在 SRAM。红色只表示 Compute 或 AccumulatorRead 显式
-送到 stream 并清零 slot。
-
-生成的调度文件为
-[`smollm2_block8_dequant_ffn_schedule.csv`](traces/smollm2_block8_dequant_ffn_schedule.csv)
-和
-[`smollm2_block8_dequant_ffn_schedule_detail.svg`](figures/smollm2_block8_dequant_ffn_schedule_detail.svg)。
 
 ### RMSNorm
 

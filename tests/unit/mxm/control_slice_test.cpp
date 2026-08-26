@@ -172,12 +172,6 @@ int main()
         return 1;
     }
     if (!require(
-            parallel_control.compute_pulse(0)->compute_mode
-                == ftlpu::MxmComputeMode::Vector,
-            "legacy Compute should default to vector mode")) {
-        return 1;
-    }
-    if (!require(
             parallel_array->buffered_weight(kBuffer, 0, 0, 7, 7) == expected_weight(0, 0, 7, 7),
             "parallel IW should fill weight buffer")) {
         return 1;
@@ -226,65 +220,6 @@ int main()
         caught = true;
     }
     if (!require(caught, "expected bad inner weight column to throw")) {
-        return 1;
-    }
-
-    const auto block_stream_compute =
-        ftlpu::MxmControlInstruction::Compute(
-            0,
-            0,
-            0,
-            0,
-            1,
-            ftlpu::MxmAccumulatorDestination::Stream,
-            ftlpu::MxmDataFormat::BFloat16,
-            ftlpu::MxmComputeMode::Block8,
-            true);
-    if (!require(
-            block_stream_compute.accumulator_destination
-                    == ftlpu::MxmAccumulatorDestination::Stream
-                && block_stream_compute.accumulator_clear,
-            "Block8 Compute should support clear-on-stream output")) {
-        return 1;
-    }
-
-    caught = false;
-    try {
-        static_cast<void>(ftlpu::MxmControlInstruction::Compute(
-            0,
-            ftlpu::hw::kEastStreams
-                - ftlpu::hw::kMxmActivationStreamsPerBlock + 1,
-            0,
-            0,
-            1,
-            ftlpu::MxmAccumulatorDestination::Sram,
-            ftlpu::MxmDataFormat::Float16,
-            ftlpu::MxmComputeMode::Block8));
-    } catch (const std::out_of_range&) {
-        caught = true;
-    }
-    if (!require(
-            caught,
-            "Block8 Compute should require 16 consecutive activation streams")) {
-        return 1;
-    }
-
-    auto read_array = std::make_unique<ftlpu::MxmArray>();
-    ftlpu::MxmControlSlice read_control(*read_array);
-    read_control.issue_south(
-        ftlpu::MxmControlInstruction::AccumulatorRead(
-            17,
-            0,
-            false,
-            ftlpu::MxmComputeMode::Block8));
-    read_control.tick(log);
-    const auto block_read = read_control.accumulator_read_pulse(0);
-    if (!require(
-            block_read.has_value()
-                && block_read->compute_mode == ftlpu::MxmComputeMode::Block8
-                && block_read->address == 17
-                && !block_read->clear,
-            "Block8 accumulator read pulse should retain its mode and controls")) {
         return 1;
     }
 

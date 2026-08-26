@@ -27,7 +27,6 @@ try {
     compact.mxm_weight_buffers = 1;
     compact.vxm_alus = 8;
     compact.mxm_local_dequant_enabled = false;
-    compact.mxm_block_compute_enabled = false;
     compact.mxm_weight_activation_overlap_enabled = false;
 
     ftlpu::TspSliceSystem system(compact);
@@ -37,7 +36,6 @@ try {
         || active.mxm_weight_buffers != 1
         || active.vxm_alus != 8
         || active.mxm_local_dequant_enabled
-        || active.mxm_block_compute_enabled
         || active.mxm_weight_activation_overlap_enabled)
         throw std::logic_error("compact hardware configuration was not retained");
 
