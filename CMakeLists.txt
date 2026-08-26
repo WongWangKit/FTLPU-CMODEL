@@ -6,21 +6,24 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT 256 CACHE STRING
-    "Number of complete 32x32 FP32 partial-sum blocks per MXM accumulator")
-if(NOT FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT MATCHES "^[1-9][0-9]*$" OR
-   FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT GREATER 256)
-    message(FATAL_ERROR
-        "FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT must be an integer in [1, 256]")
-endif()
+set(FTLPU_HARDWARE_CONFIG
+    "${CMAKE_CURRENT_SOURCE_DIR}/config/ftlpu-lpu32.json"
+    CACHE FILEPATH
+    "Shared FTLPU hardware target JSON used by the CModel and software")
+set(FTLPU_GENERATED_INCLUDE_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/include")
+include(cmake/FTLPUHardwareConfig.cmake)
+ftlpu_generate_hardware_config(
+    "${FTLPU_HARDWARE_CONFIG}"
+    "${FTLPU_GENERATED_INCLUDE_DIR}/ftlpu/core/hardware_config.hpp")
 
 add_library(ftlpu_cmodel STATIC
     src/mem/sram.cpp
     src/mxm/accumulator.cpp
 )
-target_include_directories(ftlpu_cmodel PUBLIC include)
-target_compile_definitions(ftlpu_cmodel PUBLIC
-    FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT=${FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT})
+target_include_directories(ftlpu_cmodel PUBLIC
+    "${FTLPU_GENERATED_INCLUDE_DIR}"
+    include)
 
 enable_testing()
 

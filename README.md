@@ -18,7 +18,7 @@ provide a concrete target for dataflow scheduling and future compiler work.
 | Streams | 32 eastward + 32 westward streams, one byte per register |
 | MEM | 52 slices per hemisphere, two bank queues per slice, 208 ICU queues total |
 | SRAM | Two 128 KiB single-port banks per slice, 13 MiB per hemisphere, 26 MiB total |
-| Accumulators | Configurable complete 32x32 FP32 block count per MXM (256 blocks / 1 MiB by default) |
+| Accumulators | JSON-configured complete 32x32 FP32 block count per MXM (32 blocks / 128 KiB by default) |
 | MXM | Four 32 x 32 FP16 GEMM arrays, two per hemisphere |
 | MXM weights | Two peer buffers per supercell, selected by `IW`/`Compute` |
 | MXM decode | Selectable `Linear1x16` or activation-stationary `Native4x4` |
@@ -89,6 +89,14 @@ the same golden GEMV. The SmolLM2 decode FFN selects `Native4x4`; the current
 decode attention resident layout intentionally remains on `Linear1x16`.
 
 ## Build
+
+The hardware target is defined once in
+[`config/ftlpu-lpu32.json`](config/ftlpu-lpu32.json). CMake validates this file
+and generates the compile-time constants used by fixed-size CModel structures.
+Select another compatible target at configure time with
+`-DFTLPU_HARDWARE_CONFIG=<target.json>`. FTLPU-SOFTWARE uses the same cache
+variable and JSON file, so changing physical geometry requires reconfiguring
+and rebuilding both projects.
 
 The current Windows build is tested with Visual Studio 2026 Community:
 
@@ -175,6 +183,7 @@ an MXM-local accumulator and red for final `stream+clear` operations.
 
 ## Documentation
 
+- [JSON hardware configuration guide (Chinese)](docs/hardware_configuration.zh-CN.md)
 - [Architecture reference](docs/architecture.md)
 - [中文架构说明](docs/architecture.zh-CN.md)
 - [Attention pipeline optimization study](docs/attention_pipeline_optimization.md)

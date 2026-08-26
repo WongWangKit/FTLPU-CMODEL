@@ -1,36 +1,45 @@
 #pragma once
 
+#include "ftlpu/core/hardware_config.hpp"
+
 #include <cstddef>
+#include <string_view>
 
 namespace ftlpu::hw {
 
-constexpr std::size_t kTileRows = 4;
-constexpr std::size_t kLanesPerTile = 8;
-constexpr std::size_t kPhysicalVectorBytes = kTileRows * kLanesPerTile;
+constexpr std::size_t kHardwareSchemaVersion = config::kSchemaVersion;
+constexpr std::string_view kTargetName = config::kTargetName;
+constexpr std::size_t kHemispheres = config::kHemispheres;
+constexpr std::size_t kTileRows = config::kTilesPerSlice;
+constexpr std::size_t kLanesPerTile = config::kLanesPerTile;
+constexpr std::size_t kMemBytesPerLane = config::kMemBytesPerLane;
+constexpr std::size_t kPhysicalVectorBytes =
+    kTileRows * kLanesPerTile * kMemBytesPerLane;
 constexpr std::size_t kReferenceVectorBytes = 320;
 constexpr std::size_t kVectorWidthScale =
     kReferenceVectorBytes / kPhysicalVectorBytes;
 
 // Stream identity is 0..31 plus a direction.  kStreams is retained as the
 // packed ISA selector count (E0..E31, W0..W31).
-constexpr std::size_t kStreamsPerDirection = 32;
+constexpr std::size_t kStreams = config::kStreamRegistersPerLane;
+constexpr std::size_t kStreamsPerDirection = kStreams / 2;
 constexpr std::size_t kEastStreams = kStreamsPerDirection;
 constexpr std::size_t kWestStreams = kStreamsPerDirection;
-constexpr std::size_t kStreams = kEastStreams + kWestStreams;
-constexpr std::size_t kStreamRegisterBytes = 1;
+constexpr std::size_t kStreamRegisterBytes =
+    config::kBytesPerStreamPerLane;
 
 // C2C exposes independent external transport lanes. Each lane carries one
 // complete 32-byte vector per cycle; the default receive path then injects the
 // vector into an ordinary E/W stream for on-chip transport and MEM consumption.
-constexpr std::size_t kC2cStreamsPerDirection = 8;
+constexpr std::size_t kC2cStreamsPerDirection = kLanesPerTile;
 constexpr std::size_t kC2cBytesPerStreamPerCycle = kPhysicalVectorBytes;
 constexpr std::size_t kC2cBytesPerDirectionPerCycle =
     kC2cStreamsPerDirection * kC2cBytesPerStreamPerCycle;
 
 // MEM/SRAM geometry for one modeled hemisphere.
-constexpr std::size_t kMemSliceColumns = 52;
-constexpr std::size_t kMemBanksPerSlice = 2;
-constexpr std::size_t kMemSlicesPerGroup = 4;
+constexpr std::size_t kMemSliceColumns = config::kMemSlicesPerHemisphere;
+constexpr std::size_t kMemBanksPerSlice = config::kMemBanksPerSlice;
+constexpr std::size_t kMemSlicesPerGroup = kTileRows;
 constexpr std::size_t kMemGroups = kMemSliceColumns / kMemSlicesPerGroup;
 constexpr std::size_t kMemBoundaryStreamRegisterColumns = kMemGroups + 1;
 constexpr std::size_t kC2cToSxmStreamRegisterColumns = 1;
@@ -82,17 +91,20 @@ constexpr std::size_t kMxmInt8LoadStreamStride =
 constexpr std::size_t kMxmActivationStreamsPerVector = 2;
 constexpr std::size_t kMxmLoadBytesPerCycle = kLanesPerTile * kMxmLoadStreamsPerCycle * kStreamRegisterBytes;
 // One partial-sum block contains a complete 32x32 FP32 output tile.
-#ifndef FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT
-#define FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT 32
-#endif
 constexpr std::size_t kMxmAccumulatorBlockCount =
-    FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT;
+    config::kMxmAccumulatorContexts;
 constexpr std::size_t kMxmAccumulatorRows =
     kMxmAccumulatorBlockCount * kMxmRows;
 constexpr std::size_t kMxmAccumulatorBytes =
     kMxmAccumulatorRows * kMxmColumns * sizeof(float);
 
-constexpr std::size_t kSxmConcurrentStreamOps = 16;
+constexpr bool kMxmSupportsNative4x4 = config::kMxmSupportsNative4x4;
+constexpr bool kMxmSupportsLinear1x16 = config::kMxmSupportsLinear1x16;
+
+constexpr std::size_t kVxmAlusPerDirection =
+    config::kVxmAlusPerDirection;
+constexpr std::size_t kVxmAluCount = 2 * kVxmAlusPerDirection;
+constexpr std::size_t kSxmConcurrentStreamOps = 2 * kLanesPerTile;
 
 // Distributed ICU geometry. Every functional queue owns local instruction
 // memory and a finite prefetch IQ; instruction fetch never consumes MEM/SR
@@ -121,7 +133,6 @@ constexpr std::size_t kIcuMxmIqDepth = 16;
 constexpr std::size_t kIcuSxmIqDepth = 16;
 constexpr std::size_t kIcuC2cIqDepth = 16;
 
-constexpr std::size_t kHemispheres = 2;
 constexpr std::size_t kMxmsPerHemisphere = 2;
 constexpr std::size_t kMxmCount = kHemispheres * kMxmsPerHemisphere;
 constexpr std::size_t kModeledSramBlocks =
@@ -132,13 +143,9 @@ constexpr std::size_t kPublicSramBlocks =
 constexpr std::size_t kSramBlocksPerSlice = kMemBanksPerSlice;
 constexpr std::size_t kSramBlocks = kModeledSramBlocks;
 constexpr std::size_t kSramRowBytes = kPhysicalVectorBytes;
-// A reference MEM slice has 8192 vector-wide rows. The two physical banks
-// partition that depth evenly, so each bank owns 4096 rows. Scaling the row
-// width from 320 bytes to 32 bytes keeps depth unchanged and reduces capacity
-// by 10x: 128 KiB per bank and 256 KiB per MEM slice.
-constexpr std::size_t kMemSliceDepthRows = 8192;
-constexpr std::size_t kSramDepthRows =
-    kMemSliceDepthRows / kMemBanksPerSlice;
+constexpr std::size_t kSramDepthRows = config::kMemRowsPerBank;
+constexpr std::size_t kMemSliceDepthRows =
+    kSramDepthRows * kMemBanksPerSlice;
 // Compatibility alias for code that historically called a vector row a word.
 constexpr std::size_t kSramDepthWords = kSramDepthRows;
 constexpr std::size_t kSramBlockBytes = kSramRowBytes * kSramDepthRows;
@@ -149,34 +156,23 @@ constexpr std::size_t kReferenceMemSliceBytes =
 constexpr std::size_t kTotalSramBytes = kSramBlocks * kSramBlockBytes;
 constexpr std::size_t kPublicTotalSramBytes = kPublicSramBlocks * kSramBlockBytes;
 
-static_assert(kPhysicalVectorBytes == 32);
+static_assert(kHardwareSchemaVersion == 1);
+static_assert(!kTargetName.empty());
+static_assert(kHemispheres > 0);
+static_assert(kTileRows > 0);
+static_assert(kLanesPerTile > 0);
+static_assert(kStreams > 0 && kStreams <= 64 && kStreams % 2 == 0);
+static_assert(kStreamRegisterBytes == kMemBytesPerLane);
 static_assert(kReferenceVectorBytes % kPhysicalVectorBytes == 0);
-static_assert(kVectorWidthScale == 10);
-static_assert(kC2cBytesPerDirectionPerCycle == 256);
 static_assert(kMemSliceColumns % kMemSlicesPerGroup == 0);
-static_assert(kMemBoundaryStreamRegisterColumns == 14);
-static_assert(kSystemStreamRegisterColumns == 16);
-static_assert(kMemEastBoundaryStreamRegisterColumn == 13);
-static_assert(kC2cSxmBoundaryStreamRegisterColumn == 14);
-static_assert(kMxmBoundaryStreamRegisterColumn == 15);
 static_assert(kModeledSramBlocks
     == kMemSliceColumns * kMemBanksPerSlice);
-static_assert(kPublicSramBlocks == 208);
-static_assert(kSramBlocks == 104);
-static_assert(kSramBlocksPerSlice == 2);
-static_assert(kMemSliceDepthRows % kMemBanksPerSlice == 0);
 static_assert(kEastStreams + kWestStreams == kStreams);
-static_assert(kLanesPerTile == 8);
-static_assert(kMemReadBytesPerCycle == 8);
-static_assert(kMemWriteBytesPerCycle == 8);
 static_assert(kMxmRows == kMxmSupercellRows * kMxmSupercellsPerPlane);
 static_assert(kMxmColumns == kMxmSupercellColumns * kMxmSupercellsPerPlane);
-static_assert(kMxmLoadStreamsPerCycle == 16);
-static_assert(kMxmInt8LoadStreamsPerCycle == 8);
 static_assert(kMxmInt8ColumnLoadStreamsPerCycle == 1);
-static_assert(kMxmLoadStreamStride == 16);
-static_assert(kMxmInt8LoadStreamStride == 8);
-static_assert(kMxmLoadBytesPerCycle == 128);
+static_assert(kMxmLoadStreamsPerCycle <= kStreamsPerDirection);
+static_assert(kMxmInt8LoadStreamsPerCycle <= kStreamsPerDirection);
 static_assert(kMxmAccumulatorBlockCount > 0);
 static_assert(kMxmAccumulatorBlockCount <= 256,
     "the 13-bit MXM accumulator address supports at most 256 blocks");
@@ -188,13 +184,11 @@ static_assert(kIcuMemImemDepth >= kIcuMemIqDepth);
 static_assert(kIcuMxmImemDepth >= kIcuMxmIqDepth);
 static_assert(kIcuSxmImemDepth >= kIcuSxmIqDepth);
 static_assert(kIcuC2cImemDepth >= kIcuC2cIqDepth);
-static_assert(kSramDepthRows == 4096);
-static_assert(kSramBlockBytes == 128 * 1024);
-static_assert(kMemSliceBytes == 256 * 1024);
-static_assert(kReferenceMemSliceBytes == 2560 * 1024);
+static_assert(kMemSliceBytes
+    == kPhysicalVectorBytes * kMemSliceDepthRows);
+static_assert(kReferenceMemSliceBytes
+    == kReferenceVectorBytes * kMemSliceDepthRows);
 static_assert(kMemSliceBytes * kVectorWidthScale
     == kReferenceMemSliceBytes);
-static_assert(kTotalSramBytes == 13 * 1024 * 1024);
-static_assert(kPublicTotalSramBytes == 26 * 1024 * 1024);
 
 } // namespace ftlpu::hw

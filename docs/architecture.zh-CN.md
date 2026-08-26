@@ -278,9 +278,9 @@ load queue 都是显式调度资源。
 ### Accumulator 生命周期
 
 每个 MXM 内置一个 `(block_count * 32) x 32 FP32` accumulator SRAM，
-行宽 128 byte。`FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT` 是 CMake cache 参数，
-默认容纳 256 个完整 32x32 部分和 block（共 1 MiB）。Compute 每次写一个
-8 列 segment；只有最终结果输出并清零后，地址才可复用。
+行宽 128 byte。共享硬件 JSON 中的 `mxm.accum_contexts` 默认配置为 32 个完整
+32x32 部分和 block（共 128 KiB）。Compute 每次写一个 8 列 segment；只有最终
+结果输出并清零后，地址才可复用。
 
 ### 单端口 MEM
 

@@ -1,0 +1,30 @@
+#pragma once
+
+#include <cstddef>
+#include <string_view>
+
+namespace ftlpu::hw::config {
+
+inline constexpr std::size_t kSchemaVersion = @FTLPU_HW_SCHEMA_VERSION@;
+inline constexpr std::string_view kTargetName = "@FTLPU_HW_TARGET_NAME@";
+
+inline constexpr std::size_t kHemispheres = @FTLPU_HW_HEMISPHERES@;
+inline constexpr std::size_t kTilesPerSlice = @FTLPU_HW_TILES_PER_SLICE@;
+inline constexpr std::size_t kLanesPerTile = @FTLPU_HW_LANES_PER_TILE@;
+
+inline constexpr std::size_t kMemSlicesPerHemisphere = @FTLPU_HW_MEM_SLICES@;
+inline constexpr std::size_t kMemBanksPerSlice = @FTLPU_HW_MEM_BANKS@;
+inline constexpr std::size_t kMemRowsPerBank = @FTLPU_HW_MEM_ROWS_PER_BANK@;
+inline constexpr std::size_t kMemBytesPerLane = @FTLPU_HW_MEM_BYTES_PER_LANE@;
+
+inline constexpr std::size_t kStreamRegistersPerLane = @FTLPU_HW_SR_REGISTERS@;
+inline constexpr std::size_t kBytesPerStreamPerLane = @FTLPU_HW_SR_BYTES_PER_STREAM@;
+
+inline constexpr std::size_t kMxmAccumulatorContexts = @FTLPU_HW_MXM_ACCUM_CONTEXTS@;
+inline constexpr bool kMxmSupportsNative4x4 = @FTLPU_HW_MXM_SUPPORTS_NATIVE4X4@;
+inline constexpr bool kMxmSupportsLinear1x16 = @FTLPU_HW_MXM_SUPPORTS_LINEAR1X16@;
+
+// JSON `vxm.alus` is the number of stages in each mirrored direction chain.
+inline constexpr std::size_t kVxmAlusPerDirection = @FTLPU_HW_VXM_ALUS_PER_DIRECTION@;
+
+} // namespace ftlpu::hw::config

@@ -97,15 +97,15 @@ struct VxmLaneAluTrace {
     std::optional<float> result{};
 };
 
-inline constexpr std::size_t kVxmAluStageCount = 16;
+inline constexpr std::size_t kVxmAluStageCount = hw::kVxmAluCount;
 using VxmLaneConfigs =
     std::array<std::optional<VxmLaneAluInstruction>, kVxmAluStageCount>;
 using VxmLaneExecutionMask = std::array<bool, kVxmAluStageCount>;
 
 class VxmLane {
 public:
-    static constexpr std::size_t kAluCount = 16;
-    static constexpr std::size_t kBlockCount = 8;
+    static constexpr std::size_t kAluCount = hw::kVxmAluCount;
+    static constexpr std::size_t kBlockCount = hw::kVxmAlusPerDirection;
     static constexpr std::size_t kStagesPerBlock = 2;
     static constexpr std::size_t kInputStreams = hw::kStreamsPerDirection;
     static constexpr std::size_t kStreamGroupBytes = 2;

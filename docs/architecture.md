@@ -341,10 +341,9 @@ and the MXM Dequant/load queues are explicit scheduling resources.
 
 Each MXM owns one FP32 accumulator SRAM with
 `(block_count * 32) x 32 FP32` geometry and 128-byte rows.
-`FTLPU_MXM_ACCUMULATOR_BLOCK_COUNT` is a CMake cache parameter and defaults to
-256 complete 32x32 partial-sum blocks (1 MiB). Compute writes one eight-column
-segment of a row. Address reuse is legal only after the final result has been
-emitted and cleared.
+`mxm.accum_contexts` in the shared hardware JSON defaults to 32 complete 32x32
+partial-sum blocks (128 KiB). Compute writes one eight-column segment of a row.
+Address reuse is legal only after the final result has been emitted and cleared.
 
 ### Single-Port MEM
 

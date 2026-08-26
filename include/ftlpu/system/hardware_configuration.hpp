@@ -14,7 +14,7 @@ struct SystemHardwareConfiguration {
     std::size_t sram_depth_rows{hw::kSramDepthRows};
     std::size_t mxms_per_hemisphere{hw::kMxmsPerHemisphere};
     std::size_t mxm_weight_buffers{2};
-    std::size_t vxm_alus{16};
+    std::size_t vxm_alus{hw::kVxmAluCount};
     std::size_t c2c_streams_per_direction{hw::kC2cStreamsPerDirection};
     bool c2c_dedicated_streams{false};
     bool mxm_local_dequant_enabled{true};
@@ -33,7 +33,7 @@ struct SystemHardwareConfiguration {
         if (mxm_weight_buffers == 0 || mxm_weight_buffers > 2)
             throw std::invalid_argument(
                 "configured MXM weight-buffer count is unsupported");
-        if (vxm_alus == 0 || vxm_alus > 16)
+        if (vxm_alus == 0 || vxm_alus > hw::kVxmAluCount)
             throw std::invalid_argument(
                 "configured VXM ALU count exceeds the CModel physical capacity");
         if (c2c_streams_per_direction == 0

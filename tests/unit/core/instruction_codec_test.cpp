@@ -109,7 +109,8 @@ bool verify_mem_codec()
     }
     return require_throws(
         [] {
-            const auto reserved_address_bit = std::uint64_t {1} << 27;
+            const auto reserved_address_bit =
+                static_cast<std::uint64_t>(ftlpu::hw::kSramDepthRows) << 15;
             static_cast<void>(ftlpu::isa::decode_mem_instruction(
                 reserved_address_bit));
         },

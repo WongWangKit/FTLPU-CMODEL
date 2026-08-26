@@ -22,7 +22,8 @@ namespace isa {
 //
 // MEM instruction word (32b):
 //   [2:0] opcode, [8:3] stream, [14:9] map stream,
-//   [26:15] bank-local SRAM row address, [30:27] reserved,
+//   [15 + address_bits - 1:15] bank-local SRAM row address; remaining bits
+//   through [30] are reserved,
 //   [31] preserves a Write input for passive forwarding. The distributed ICU
 //   queue identifies one of the slice's two single-port SRAM banks.
 // MXM control 49b:
@@ -190,7 +191,8 @@ inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
     const auto stream = static_cast<std::size_t>(detail::low_bits(word, 3, 0x3f));
     const auto address = static_cast<std::size_t>(
         detail::low_bits(word, 15, hw::kSramDepthRows - 1));
-    constexpr std::uint64_t kUsedMask = 0x87ffffffull;
+    constexpr std::uint64_t kUsedMask = 0x80007fffull
+        | ((hw::kSramDepthRows - 1) << 15);
     detail::require_reserved_zero(word, kUsedMask, "encoded MEM instruction has non-zero reserved bits");
     const auto map_stream = static_cast<std::size_t>(detail::low_bits(word, 9, 0x3f));
     const bool preserve_stream = detail::low_bits(word, 31, 0x1) != 0;

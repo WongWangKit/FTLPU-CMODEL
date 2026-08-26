@@ -18,7 +18,7 @@ bit-accurate。当前目标是提供一个可验证的数据流调度目标，�
 | Stream | 32 条 eastward + 32 条 westward，每个寄存器 1 byte |
 | MEM | 每个 hemisphere 52 个 slice，每 slice 两条 bank queue，全芯片 208 条 ICU queue |
 | SRAM | 每 slice 两个 128 KiB 单口 bank，每侧 13 MiB，全芯片 26 MiB |
-| Accumulator | 每个 MXM 内置一个 1 MiB FP32 accumulator |
+| Accumulator | 每个 MXM 的完整 32x32 FP32 block 数由 JSON 配置，默认 32 blocks / 128 KiB |
 | MXM | 四个 32 x 32 FP16 GEMM 阵列，每侧两个 |
 | MXM 权重 | 每个 supercell 两个对等 buffer，由 `IW`/`Compute` 选择 |
 | MXM decode | 可选择 `Linear1x16` 或 activation-stationary `Native4x4` |
@@ -81,6 +81,12 @@ vector，并在同一物理行的 4 个 supercell 间广播；阵列并行形成
 的 resident layout 暂时明确保留 `Linear1x16`。
 
 ## 构建
+
+硬件 target 统一定义在
+[`config/ftlpu-lpu32.json`](config/ftlpu-lpu32.json)。CMake 会严格校验该文件，
+并为需要固定数组尺寸的 CModel 结构生成编译期常量。可在配置阶段通过
+`-DFTLPU_HARDWARE_CONFIG=<target.json>` 选择其他兼容配置。FTLPU-SOFTWARE 使用
+同一个 cache 变量和同一份 JSON，因此修改物理几何参数后需要重新配置并构建两个工程。
 
 当前 Windows 配置使用 Visual Studio 2026 Community：
 
@@ -164,6 +170,7 @@ python scripts\render_schedule_trace.py `
 
 ## 更多文档
 
+- [JSON 硬件配置指南](docs/hardware_configuration.zh-CN.md)
 - [架构说明](docs/architecture.zh-CN.md)
 - [English architecture reference](docs/architecture.md)
 - [Attention pipeline 优化分析](docs/attention_pipeline_optimization.md)

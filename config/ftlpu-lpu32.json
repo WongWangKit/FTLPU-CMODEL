@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+
+  "target": {
+    "name": "ftlpu-lpu32"
+  },
+
+  "topology": {
+    "hemispheres": 2,
+    "tiles_per_slice": 4,
+    "lanes_per_tile": 8
+  },
+
+  "mem": {
+    "slices_per_hemisphere": 52,
+    "banks_per_slice": 2,
+    "rows_per_bank": 4096,
+    "bytes_per_lane": 1
+  },
+
+  "sr": {
+    "registers_per_lane": 64,
+    "bytes_per_stream_per_lane": 1
+  },
+
+  "mxm": {
+    "accum_contexts": 32,
+    "supported_modes": [
+      "native4x4",
+      "linear1x16"
+    ]
+  },
+
+  "vxm": {
+    "alus": 8
+  }
+}

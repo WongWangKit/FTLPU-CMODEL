@@ -9,7 +9,7 @@
 
 namespace ftlpu {
 
-// Persistent 1 MiB FP32 accumulator local to one MXM.
+// Persistent JSON-sized FP32 accumulator local to one MXM.
 class MxmAccumulator {
 public:
     using Row = std::array<float, hw::kMxmColumns>;

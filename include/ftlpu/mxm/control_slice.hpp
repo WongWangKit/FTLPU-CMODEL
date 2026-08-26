@@ -374,6 +374,13 @@ struct MxmControlInstruction {
             && layout != MxmDecodeLayout::Native4x4) {
             throw std::out_of_range("MXM decode layout is invalid");
         }
+        if ((layout == MxmDecodeLayout::Linear1x16
+                && !hw::kMxmSupportsLinear1x16)
+            || (layout == MxmDecodeLayout::Native4x4
+                && !hw::kMxmSupportsNative4x4)) {
+            throw std::invalid_argument(
+                "MXM decode layout is disabled by the hardware configuration");
+        }
     }
 
     static void check_decode_activation_stream_base(
