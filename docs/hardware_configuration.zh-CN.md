@@ -23,7 +23,7 @@ CMake 配置阶段读取它并生成编译期常量，Software 编译器也可�
   "mem": {
     "slices_per_hemisphere": 52,
     "banks_per_slice": 2,
-    "rows_per_bank": 4096,
+    "rows_per_bank": 8192,
     "bytes_per_lane": 1
   },
   "sr": {
@@ -72,7 +72,7 @@ row_lanes = tiles_per_slice × lanes_per_tile
 | --- | --- | ---: |
 | `mem.slices_per_hemisphere` | 每个 hemisphere 的 MEM slice 数 | 52 |
 | `mem.banks_per_slice` | 每个 MEM slice 的 bank 数 | 2 |
-| `mem.rows_per_bank` | 单个 bank 的 row depth | 4096 |
+| `mem.rows_per_bank` | 单个 bank 的 row depth | 8192 |
 | `mem.bytes_per_lane` | 一个 row 中每条 lane 的字节数 | 1 |
 
 容量按照以下关系派生：
@@ -88,14 +88,13 @@ chip_capacity_bytes  = hemispheres × slices_per_hemisphere × slice_capacity_by
 
 ```text
 row_bytes        = 4 × 8 × 1 = 32 bytes
-slice_depth      = 2 × 4096 = 8192 rows
-单 slice 容量   = 32 × 8192 = 256 KiB
-全芯片 MEM 容量 = 2 × 52 × 256 KiB = 26 MiB
+slice_depth      = 2 × 8192 = 16384 rows
+单 slice 容量   = 32 × 16384 = 512 KiB
+全芯片 MEM 容量 = 2 × 52 × 512 KiB = 52 MiB
 ```
 
-Groq MEM slice 为 `320 × 8192 bytes = 2.5 MiB`。当前配置把 row 宽度缩小为
-32 bytes，但保持总 depth 为 8192，所以容量按 `32/320` 等比例缩小为 256 KiB。
-JSON 中 `rows_per_bank` 表示单 bank depth；两个 bank 时应填写 4096，而不是 8192。
+`rows_per_bank` 是单个 bank 的地址深度，不是整个 slice 在两个 bank 之间平分后的
+总深度。修改该值后，CModel 和 Software 都需要重新配置并构建。
 
 ### SR
 
@@ -219,7 +218,7 @@ name = "ftlpu-lpu32"
 hemispheres = 2
 slices_per_hemisphere = 52
 banks_per_slice = 2
-sram_depth_rows = 4096
+sram_depth_rows = 8192
 mxm_accumulator_blocks = 32
 vxm_alus = 16
 ```

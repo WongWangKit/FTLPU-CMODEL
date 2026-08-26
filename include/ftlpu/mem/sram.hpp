@@ -12,11 +12,9 @@
 
 namespace ftlpu {
 
-// One single-port SRAM bank owned by one MEM functional slice. It contains
-// 4096 bank-local rows, and
-// every row spans all configured tiles:
-//
-//   4096 rows * (4 tiles * 8 bytes) = 128 KiB.
+// One single-port SRAM bank owned by one MEM functional slice. Its row depth
+// comes from the hardware target JSON, and every row spans all configured
+// tiles.
 //
 // MEM instructions address rows.  As an instruction travels through a tile,
 // that tile reads or writes its own contiguous 8-byte portion of the row.

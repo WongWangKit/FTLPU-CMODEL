@@ -17,7 +17,7 @@ provide a concrete target for dataflow scheduling and future compiler work.
 | Vector shape | 4 tiles/superlanes x 8 lanes = 32 elements |
 | Streams | 32 eastward + 32 westward streams, one byte per register |
 | MEM | 52 slices per hemisphere, two bank queues per slice, 208 ICU queues total |
-| SRAM | Two 128 KiB single-port banks per slice, 13 MiB per hemisphere, 26 MiB total |
+| SRAM | Two 256 KiB single-port banks per slice, 26 MiB per hemisphere, 52 MiB total |
 | Accumulators | JSON-configured complete 32x32 FP32 block count per MXM (32 blocks / 128 KiB by default) |
 | MXM | Four 32 x 32 FP16 GEMM arrays, two per hemisphere |
 | MXM weights | Two peer buffers per supercell, selected by `IW`/`Compute` |
@@ -126,12 +126,10 @@ build-vs2026\Release\smollm2_attention_test.exe
 Whole-system logging is disabled by default because per-cycle traces are
 expensive. Small tests and demos can provide `TspSliceSystem::LogSinks` for
 separate ICU, MEM, MXM, VXM, SXM, and system logs.
-The no-log path skips MEM/VXM/SXM trace construction. A reference MEM slice has
-8192 vector rows, so its capacity is `320 B x 8192 = 2.5 MiB`. The model keeps
-the same total slice depth while scaling the vector row from 320 bytes to
-32 bytes, giving 256 KiB per slice. Its two banks partition those rows evenly:
-4096 bank-local rows and 128 KiB per bank. Backing storage is allocated lazily
-in 4 KiB pages.
+The no-log path skips MEM/VXM/SXM trace construction. SRAM geometry comes from
+the hardware target JSON. The default target uses 8192 bank-local rows at
+32 bytes per row, giving 256 KiB per bank and 512 KiB per MEM slice. Backing
+storage is allocated lazily in 4 KiB pages.
 
 ## Schedule Diagrams
 

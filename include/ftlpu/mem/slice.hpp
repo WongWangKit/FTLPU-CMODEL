@@ -21,8 +21,8 @@ enum class MemOpcode {
 
 struct MemInstruction {
     MemOpcode opcode{MemOpcode::Read};
-    // Bank-local SRAM row address (0..4095), not a byte address. The ICU
-    // queue selects the bank, so no bank bit is carried in this instruction.
+    // Bank-local SRAM row address, not a byte address. The target JSON sets
+    // the valid range; the ICU queue selects the bank.
     std::size_t address{0};
 
     // Packed ISA selector retained for codec compatibility:

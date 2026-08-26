@@ -19,19 +19,17 @@
 | Stream-register column | 每侧 16 个（`sreg0..sreg15`） |
 | 每 lane stream | 32 条 eastward + 32 条 westward |
 | Stream-register 位宽 | 1 byte |
-| SRAM 容量 | 每 slice 两个 128 KiB 单口 bank，全芯片 26 MiB |
+| SRAM 容量 | 每 slice 两个 256 KiB 单口 bank，全芯片 52 MiB |
 | MXM | 共 4 个，每侧 2 个 |
 | MXM 阵列 | 32 x 32 FP16/BF16 乘法、FP32 累加 |
 | VXM | 中心 1 个 slice，每 lane 16 个 ALU |
 | SXM | 每侧 1 个四-tile slice |
 
-参考 Groq MEM slice 共有 8192 个向量 row，容量为
-`320 byte x 8192 = 2.5 MiB`。模型保持单 slice 的总 depth 为 8192，同时将每个
-row 缩小为 32 byte，因此每个模型 slice 容量为 256 KiB。两个独立的单口 SRAM
-bank 平分这些 row：每个 bank 为 `4096 x 32-byte = 128 KiB`。每个 row 横跨
-4 个 tile；指令波到达某个 tile 时，该 tile 只访问自己的 8-byte segment。两个
-hemisphere 共 104 个同构 slice，总容量为 `104 x 2 x 128 KiB = 26 MiB`。bank 由
-ICU queue 身份选择，MEM 指令只携带 12-bit bank-local row address。
+SRAM 几何参数由硬件 target JSON 选择。默认配置中，每个 MEM slice 拥有两个独立的
+`8192 x 32-byte = 256 KiB` 单口 bank。每个 row 横跨 4 个 tile；指令波到达某个
+tile 时，该 tile 只访问自己的 8-byte segment。两个 hemisphere 共 104 个同构
+slice，总容量为 `104 x 2 x 256 KiB = 52 MiB`。bank 由 ICU queue 身份选择，
+MEM 指令携带 bank-local row address。
 
 ## 2. 完整芯片拓扑
 
@@ -115,13 +113,13 @@ slice 组成一个 group，位于两个 stream-register boundary 之间。全部
 [26]    hemisphere
 [25:20] slice
 [19]    bank
-[18:16] 保留
-[15:4]  bank 内 row offset
+[18:17] 保留
+[16:4]  bank 内 row offset
 [3:0]   软件 byte offset
 ```
 
-`MemInstruction::address` 只保存对应软件位 `[15:4]` 的 12-bit bank-local row，
-范围为 `0..4095`；queue 选择软件位 `[19]`。测试的初始化/结果 API 另外指定
+`MemInstruction::address` 只保存对应软件位 `[16:4]` 的 13-bit bank-local row，
+默认范围为 `0..8191`；queue 选择软件位 `[19]`。测试的初始化/结果 API 另外指定
 bank、tile 和 lane byte。
 
 ## 5. MXM

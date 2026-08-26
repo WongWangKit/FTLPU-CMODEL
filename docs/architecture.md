@@ -22,21 +22,19 @@ The central vector shape is:
 | External C2C lanes | 8 eastward + 8 westward (runtime-selectable subset) |
 | External C2C bandwidth | 32 bytes/lane/cycle, 256 bytes/cycle per direction |
 | Stream-register width | 1 byte |
-| SRAM capacity | 2 x 128 KiB single-port banks per slice, 26 MiB full chip |
+| SRAM capacity | 2 x 256 KiB single-port banks per slice, 52 MiB full chip |
 | MXM units | 4 total, 2 per hemisphere |
 | MXM array | 32 x 32 FP16/BF16 multiply with FP32 accumulation |
 | VXM | 1 central slice, 16 ALUs per lane |
 | SXM | 1 four-tile slice per hemisphere |
 
-A reference MEM slice has 8192 vector-wide rows, for
-`320 bytes x 8192 = 2.5 MiB`. The model preserves that total slice depth and
-scales each row to 32 bytes, so one modeled slice stores 256 KiB. Its two
-independent single-port SRAM banks partition the rows evenly: each bank is
-`4096 x 32-byte = 128 KiB`. Each row spans all four tiles; one tile accesses its
-local 8-byte segment when the instruction wave reaches that tile. The model has
-104 homogeneous slices across two hemispheres, for
-`104 x 2 x 128 KiB = 26 MiB` total SRAM. Bank selection belongs to the ICU queue
-identity; the MEM instruction carries only a 12-bit bank-local row address.
+SRAM geometry is selected by the hardware target JSON. The default target has
+two independent `8192 x 32-byte = 256 KiB` single-port banks per MEM slice.
+Each row spans all four tiles; one tile accesses its local 8-byte segment when
+the instruction wave reaches that tile. The model has 104 homogeneous slices
+across two hemispheres, for `104 x 2 x 256 KiB = 52 MiB` total SRAM. Bank
+selection belongs to the ICU queue identity; the MEM instruction carries a
+bank-local row address.
 
 ## 2. Full-Chip Topology
 
@@ -144,13 +142,13 @@ The public-style software address layout used as reference is:
 [26]    hemisphere
 [25:20] slice
 [19]    bank
-[18:16] reserved
-[15:4]  row offset within the bank
+[18:17] reserved
+[16:4]  row offset within the bank
 [3:0]   software byte offset
 ```
 
-`MemInstruction::address` stores only the 12-bit bank-local row field
-corresponding to software bits `[15:4]`, giving rows `0..4095`. The queue
+`MemInstruction::address` stores only the 13-bit bank-local row field
+corresponding to software bits `[16:4]`, giving default rows `0..8191`. The queue
 selects software bit `[19]`. Test initialization/result APIs expose bank, tile,
 and lane byte selection separately.
 
