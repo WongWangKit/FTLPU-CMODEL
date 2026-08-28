@@ -18,7 +18,7 @@ provide a concrete target for dataflow scheduling and future compiler work.
 | Streams | 32 eastward + 32 westward streams, one byte per register |
 | MEM | 52 slices per hemisphere, two bank queues per slice, 208 ICU queues total |
 | SRAM | Two 256 KiB single-port banks per slice, 26 MiB per hemisphere, 52 MiB total |
-| Accumulators | JSON-configured complete 32x32 FP32 block count per MXM (32 blocks / 128 KiB by default) |
+| Accumulators | JSON-configured complete 32x32 FP32 block count per MXM (256 blocks / 1 MiB by default) |
 | MXM | Four 32 x 32 FP16 GEMM arrays, two per hemisphere |
 | MXM weights | Two peer buffers per supercell, selected by `IW`/`Compute` |
 | MXM decode | Selectable `Linear1x16` or activation-stationary `Native4x4` |

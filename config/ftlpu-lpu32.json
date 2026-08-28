@@ -24,7 +24,7 @@
   },
 
   "mxm": {
-    "accum_contexts": 32,
+    "accum_contexts": 256,
     "supported_modes": [
       "native4x4",
       "linear1x16"
@@ -33,5 +33,40 @@
 
   "vxm": {
     "alus": 8
+  },
+
+  "memory": {
+    "dedicated_slice_roles": 1,
+    "w8a16_weight_slice_base": 20,
+    "w8a16_weight_slice_stride": 4,
+    "w8a16_output_weight_spare_slices": [22, 38],
+    "w8a16_activation_slice_base": 0,
+    "w8a16_hidden_slice_base": 0,
+    "w8a16_hidden_base_row": 0,
+    "w8a16_fused_gate_temp_slices": [0, 4, 8, 12],
+    "w8a16_fused_up_temp_slices": [1, 5, 9, 13],
+    "attention_mask_base_row": 7936,
+    "matmul_result_base_row": 1600,
+    "w8a16_result_slice_base": 16
+  },
+
+  "throughput": {
+    "mxms_per_hemisphere": 1,
+    "mxm_weight_buffers": 2,
+    "mxm_local_dequant_enabled": 1,
+    "mxm_block_compute_enabled": 0,
+    "mxm_weight_activation_overlap_enabled": 1
+  },
+
+  "external_memory": {
+    "lpu_clock_mhz": 500,
+    "ddr_peak_bandwidth_mbytes_per_second": 51200,
+    "ddr_scheduling_efficiency_percent": 90,
+    "ddr_read_latency_cycles": 35,
+    "ddr_write_latency_cycles": 25,
+    "ddr_read_latency_jitter_cycles": 15,
+    "ddr_write_latency_jitter_cycles": 10,
+    "ddr_request_queue_depth": 256,
+    "ddr_latency_random_seed": 1179929680
   }
 }

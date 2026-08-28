@@ -31,7 +31,7 @@ CMake 配置阶段读取它并生成编译期常量，Software 编译器也可�
     "bytes_per_stream_per_lane": 1
   },
   "mxm": {
-    "accum_contexts": 32,
+    "accum_contexts": 256,
     "supported_modes": [
       "native4x4",
       "linear1x16"
@@ -110,7 +110,7 @@ slice_depth      = 2 × 8192 = 16384 rows
 
 | 字段 | 含义 | 默认值 |
 | --- | --- | ---: |
-| `mxm.accum_contexts` | 每个 MXM 的完整 32 x 32 FP32 accumulator context 数 | 32 |
+| `mxm.accum_contexts` | 每个 MXM 的完整 32 x 32 FP32 accumulator context 数 | 256 |
 | `mxm.supported_modes` | target 支持的 MXM decode layout | `native4x4`、`linear1x16` |
 
 `Block8` 已删除，不能再写入 `supported_modes`。模式列表不能为空，不能重复，也不能包含
@@ -219,7 +219,7 @@ hemispheres = 2
 slices_per_hemisphere = 52
 banks_per_slice = 2
 sram_depth_rows = 8192
-mxm_accumulator_blocks = 32
+mxm_accumulator_blocks = 256
 vxm_alus = 16
 ```
 

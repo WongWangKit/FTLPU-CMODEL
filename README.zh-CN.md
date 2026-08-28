@@ -18,7 +18,7 @@ bit-accurate。当前目标是提供一个可验证的数据流调度目标，�
 | Stream | 32 条 eastward + 32 条 westward，每个寄存器 1 byte |
 | MEM | 每个 hemisphere 52 个 slice，每 slice 两条 bank queue，全芯片 208 条 ICU queue |
 | SRAM | 每 slice 两个 256 KiB 单口 bank，每侧 26 MiB，全芯片 52 MiB |
-| Accumulator | 每个 MXM 的完整 32x32 FP32 block 数由 JSON 配置，默认 32 blocks / 128 KiB |
+| Accumulator | 每个 MXM 的完整 32x32 FP32 block 数由 JSON 配置，默认 256 blocks / 1 MiB |
 | MXM | 四个 32 x 32 FP16 GEMM 阵列，每侧两个 |
 | MXM 权重 | 每个 supercell 两个对等 buffer，由 `IW`/`Compute` 选择 |
 | MXM decode | 可选择 `Linear1x16` 或 activation-stationary `Native4x4` |
