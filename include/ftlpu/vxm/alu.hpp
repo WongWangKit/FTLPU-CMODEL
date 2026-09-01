@@ -3,6 +3,7 @@
 #include "ftlpu/vxm/data_format.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <optional>
 #include <stdexcept>
@@ -18,6 +19,8 @@ enum class VxmAluOpcode {
     Multiply,
     Negate,
     Max,
+    FusedMultiplyAdd,
+    FusedMultiplySubtract,
 };
 
 enum class VxmAluPrecision {
@@ -41,15 +44,19 @@ public:
     static constexpr std::size_t latency(const VxmAluInstruction& instruction)
     {
         return instruction.opcode == VxmAluOpcode::Multiply
+                || instruction.opcode == VxmAluOpcode::FusedMultiplyAdd
+                || instruction.opcode == VxmAluOpcode::FusedMultiplySubtract
             ? kMultiplyLatency : kDefaultLatency;
     }
 
     static float execute(const VxmAluInstruction& instruction,
-                         float lhs, float rhs = 0.0f)
+                         float lhs, float rhs = 0.0f,
+                         float addend = 0.0f)
     {
         if (instruction.precision == VxmAluPrecision::Float16) {
             lhs = VxmDataFormat::round_fp16_ftz(lhs);
             rhs = VxmDataFormat::round_fp16_ftz(rhs);
+            addend = VxmDataFormat::round_fp16_ftz(addend);
         }
 
         float result = 0.0f;
@@ -60,6 +67,12 @@ public:
         case VxmAluOpcode::Multiply: result = lhs * rhs; break;
         case VxmAluOpcode::Negate: result = -lhs; break;
         case VxmAluOpcode::Max: result = std::max(lhs, rhs); break;
+        case VxmAluOpcode::FusedMultiplyAdd:
+            result = std::fma(lhs, rhs, addend);
+            break;
+        case VxmAluOpcode::FusedMultiplySubtract:
+            result = std::fma(-lhs, rhs, addend);
+            break;
         }
 
         return instruction.precision == VxmAluPrecision::Float16
@@ -77,6 +90,7 @@ public:
             float lhs{0.0f};
             float rhs{0.0f};
             Metadata metadata{};
+            float addend{0.0f};
         };
 
         struct Result {
@@ -93,7 +107,8 @@ public:
 
             auto result = Result{
                 VxmAlu::execute(request->instruction,
-                                request->lhs, request->rhs),
+                                request->lhs, request->rhs,
+                                request->addend),
                 std::move(request->metadata)};
 
             if (VxmAlu::latency(request->instruction) == kDefaultLatency) {

@@ -577,6 +577,7 @@ public:
         return *lanes_[index];
     }
     std::size_t cycle() const { return cycle_; }
+    VxmChainDepth chain_depth() const { return lanes_[0]->chain_depth(); }
     bool idle() const
     {
         if (pending_chain_depth_) return false;

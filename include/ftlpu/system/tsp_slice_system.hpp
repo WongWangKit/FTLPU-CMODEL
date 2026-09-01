@@ -62,20 +62,9 @@ public:
     {
         require_phase(CyclePhase::Idle, "configuring hardware");
         hardware.validate();
-        const bool rebuild_c2c =
-            hardware.c2c_dedicated_streams
-                != hardware_configuration_.c2c_dedicated_streams;
         hardware_configuration_ = hardware;
         for (auto& mem : mems_)
             mem.set_sram_depth_rows(hardware.sram_depth_rows);
-        if (rebuild_c2c) {
-            for (std::size_t index = 0; index < hw::kHemispheres; ++index) {
-                if (c2c_dmas_[index] == nullptr) continue;
-                c2cs_[index].emplace(C2cStreamPortMap::EastEdge(
-                    hw::kMemEastBoundaryStreamRegisterColumn), "C2C DMA",
-                    hardware_configuration_.c2c_dedicated_streams, true);
-            }
-        }
     }
 
     const SystemHardwareConfiguration& hardware_configuration() const noexcept
@@ -105,7 +94,7 @@ public:
         const auto index = hemisphere_index(hemisphere);
         c2cs_[index].emplace(C2cStreamPortMap::EastEdge(
             hw::kMemEastBoundaryStreamRegisterColumn), "C2C DMA",
-            hardware_configuration_.c2c_dedicated_streams, true);
+            true);
         c2c_outbound_links_[index] = nullptr;
         c2c_inbound_links_[index] = nullptr;
         c2c_dmas_[index] = &dma;
@@ -517,40 +506,16 @@ private:
             const auto notify = [this](C2cReceiveNotification received) {
                 const auto& consumer = received.consumer;
                 if (consumer.notify_mem) {
-                    icu_.notify(IcuLocation::Mem(
+                    icu_.notify_c2c_mem(IcuLocation::Mem(
                         consumer.hemisphere,
                         consumer.mem_slice,
-                        consumer.mem_bank));
+                        consumer.mem_bank), received.stream_index);
                 }
             };
-            if (hardware_configuration_.c2c_dedicated_streams) {
-                endpoint->rx().evaluate_dedicated(
-                    *c2c_dmas_[hemisphere],
-                    hardware_configuration_.c2c_streams_per_direction,
-                    [this, &notify](C2cReceiveNotification received) {
-                        const auto& consumer = received.consumer;
-                        for (std::size_t tile = 0; tile < hw::kTileRows;
-                             ++tile) {
-                            for (std::size_t lane = 0;
-                                 lane < hw::kLanesPerTile; ++lane) {
-                                mems_[hemisphere_index(consumer.hemisphere)]
-                                    .set_sram_lane_byte(
-                                        consumer.mem_slice,
-                                        consumer.mem_bank,
-                                        tile,
-                                        consumer.base_row,
-                                        lane,
-                                        received.vector.payload[tile][lane]);
-                            }
-                        }
-                        notify(std::move(received));
-                    });
-            } else {
-                endpoint->rx().evaluate_shared(
-                    fabric, *c2c_dmas_[hemisphere],
-                    hardware_configuration_.c2c_streams_per_direction,
-                    notify);
-            }
+            endpoint->rx().evaluate_shared(
+                fabric, *c2c_dmas_[hemisphere],
+                hardware_configuration_.c2c_streams_per_direction,
+                notify);
         } else {
             if (c2c_outbound_links_[hemisphere] == nullptr
                 || c2c_inbound_links_[hemisphere] == nullptr) {

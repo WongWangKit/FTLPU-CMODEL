@@ -55,7 +55,9 @@
     "mxm_weight_buffers": 2,
     "mxm_local_dequant_enabled": 1,
     "mxm_block_compute_enabled": 0,
-    "mxm_weight_activation_overlap_enabled": 1
+    "mxm_weight_activation_overlap_enabled": 1,
+    "vxm_cross_hemisphere_streams_enabled": 1,
+    "vxm_fma_enabled": 1
   },
 
   "external_memory": {

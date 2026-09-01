@@ -204,6 +204,14 @@ int main()
     const auto explicit_group = VxmLaneOperand::StreamFloat16(1.0f, 3);
     assert(VxmLane::input_group_for_operand(0, false, explicit_group) == 3);
     assert(VxmLane::input_group_for_operand(8, false, explicit_group) == 11);
+    const auto east_group = VxmLaneOperand::StreamFloat16(
+        1.0f, 3, VxmStreamSource::East);
+    const auto west_group = VxmLaneOperand::StreamFloat16(
+        1.0f, 3, VxmStreamSource::West);
+    assert(VxmLane::input_group_for_operand(0, false, east_group) == 3);
+    assert(VxmLane::input_group_for_operand(8, false, east_group) == 3);
+    assert(VxmLane::input_group_for_operand(0, false, west_group) == 11);
+    assert(VxmLane::input_group_for_operand(8, false, west_group) == 11);
 
     auto selected_group = VxmLaneTestDriver{};
     selected_group.set_chain_depth(VxmChainDepth::Two);
@@ -221,6 +229,81 @@ int main()
     assert(selected_group.output());
     assert(VxmLane::unpack_float32(
         selected_group.output()->bytes) == 9.0f);
+
+    // RoPE-style direct fusion. The chain head captures both its own input
+    // pair and the following FMA/FMS stream pair in the same row cycle. The
+    // captured operands stay aligned while the two fully-pipelined
+    // multipliers advance consecutive rows.
+    auto fused_rope = VxmLaneTestDriver{};
+    fused_rope.set_chain_depth(VxmChainDepth::Two);
+    auto low_product = VxmLaneAluInstruction{
+        VxmAluOpcode::Multiply,
+        VxmLaneOperand::StreamFloat16(
+            1.0f, 0, VxmStreamSource::East),
+        VxmLaneOperand::StreamFloat16(
+            1.0f, 4, VxmStreamSource::East)};
+    low_product.repeat_count = 2;
+    fused_rope.enqueue_instruction(0, low_product);
+    auto low_rotate = VxmLaneAluInstruction{
+        VxmAluOpcode::FusedMultiplySubtract,
+        VxmLaneOperand::StreamFloat16(
+            1.0f, 0, VxmStreamSource::West),
+        VxmLaneOperand::StreamFloat16(
+            1.0f, 5, VxmStreamSource::East)};
+    low_rotate.output_stream = 0;
+    low_rotate.output_type = VxmCastTarget::Float32;
+    low_rotate.repeat_count = 2;
+    fused_rope.enqueue_instruction(1, low_rotate);
+
+    auto high_product = VxmLaneAluInstruction{
+        VxmAluOpcode::Multiply,
+        VxmLaneOperand::StreamFloat16(
+            1.0f, 0, VxmStreamSource::West),
+        VxmLaneOperand::StreamFloat16(
+            1.0f, 4, VxmStreamSource::East)};
+    high_product.repeat_count = 2;
+    fused_rope.enqueue_instruction(2, high_product);
+    auto high_rotate = VxmLaneAluInstruction{
+        VxmAluOpcode::FusedMultiplyAdd,
+        VxmLaneOperand::StreamFloat16(
+            1.0f, 0, VxmStreamSource::East),
+        VxmLaneOperand::StreamFloat16(
+            1.0f, 5, VxmStreamSource::East)};
+    high_rotate.output_stream = 2;
+    high_rotate.output_type = VxmCastTarget::Float32;
+    high_rotate.repeat_count = 2;
+    fused_rope.enqueue_instruction(3, high_rotate);
+
+    fused_rope.tick();
+    for (int row = 0; row < 2; ++row) {
+        auto streams = VxmLane::StreamBytes{};
+        put_int32(streams, 0, row == 0 ? 2 : 5);
+        put_int32(streams, 8 * VxmLane::kStreamGroupBytes,
+                  row == 0 ? 3 : 7);
+        put_int32(streams, 4 * VxmLane::kStreamGroupBytes,
+                  row == 0 ? 4 : 2);
+        put_int32(streams, 5 * VxmLane::kStreamGroupBytes,
+                  row == 0 ? 1 : 3);
+        fused_rope.set_stream_inputs(streams);
+        fused_rope.tick();
+    }
+    fused_rope.tick();
+    fused_rope.tick();
+    assert(fused_rope.outputs().size() == 4);
+    assert(VxmLane::unpack_float32(
+        fused_rope.outputs()[0].bytes) == 5.0f);
+    assert(VxmLane::unpack_float32(
+        fused_rope.outputs()[1].bytes) == 5.0f);
+    assert(VxmLane::unpack_float32(
+        fused_rope.outputs()[2].bytes) == 11.0f);
+    assert(VxmLane::unpack_float32(
+        fused_rope.outputs()[3].bytes) == 11.0f);
+    fused_rope.tick();
+    assert(fused_rope.outputs().size() == 4);
+    assert(VxmLane::unpack_float32(
+        fused_rope.outputs()[0].bytes) == -11.0f);
+    assert(VxmLane::unpack_float32(
+        fused_rope.outputs()[2].bytes) == 29.0f);
 
     // One Current Config Register is held for several element cycles.  The
     // repeat counter advances only when that ALU actually executes.

@@ -300,11 +300,9 @@ public:
     explicit C2cRxSlice(
         C2cStreamPortMap::OutputEndpoint endpoint,
         std::string name = "C2C RX",
-        bool dedicated = false,
         bool indexed_transport = false)
         : endpoint_(endpoint)
         , name_(std::move(name))
-        , dedicated_(dedicated)
         , indexed_transport_(indexed_transport)
     {
     }
@@ -325,7 +323,7 @@ public:
         if (instruction.opcode != C2cOpcode::Receive) {
             throw std::invalid_argument("C2C RX accepts only Receive instructions");
         }
-        if (dedicated_ || indexed_transport_) {
+        if (indexed_transport_) {
             stream_queues_[instruction.stream_index].push_back(
                 std::move(instruction));
         } else {
@@ -356,55 +354,13 @@ public:
     }
 
     template <typename Transport, typename Consumer>
-    void evaluate_dedicated(
-        Transport& external,
-        std::size_t stream_count,
-        Consumer&& consume)
-    {
-        if (!dedicated_)
-            throw std::logic_error(
-                "legacy C2C RX cannot use the dedicated stream fabric");
-        if (stream_count == 0
-            || stream_count > hw::kC2cStreamsPerDirection)
-            throw std::out_of_range("invalid dedicated C2C stream count");
-
-        for (std::size_t stream = 0; stream < stream_count; ++stream) {
-            auto& active = stream_active_[stream];
-            if (!active.has_value() && !stream_queues_[stream].empty()) {
-                active = ActiveDedicatedReceive {
-                    std::move(stream_queues_[stream].front()), 0};
-                stream_queues_[stream].pop_front();
-            }
-            if (!active.has_value() || !external.receive_ready(stream))
-                continue;
-
-            auto vector = external.pop_received(stream);
-            auto consumer = active->instruction.consumer;
-            consumer.base_row +=
-                active->vector_index * consumer.row_stride;
-            consumer.vector_count = 1;
-            consume(C2cReceiveNotification {
-                consumer,
-                stream,
-                vector.vector_tag,
-                std::move(vector)});
-            ++active->vector_index;
-            if (active->vector_index
-                == active->instruction.consumer.vector_count) {
-                ++completed_instructions_[stream];
-                active.reset();
-            }
-        }
-    }
-
-    template <typename Transport, typename Consumer>
     void evaluate_shared(
         StreamRegisterFabric& fabric,
         Transport& external,
         std::size_t stream_count,
         Consumer&& notify)
     {
-        if (dedicated_ || !indexed_transport_)
+        if (!indexed_transport_)
             throw std::logic_error(
                 "C2C RX is not configured for the shared SR fabric");
         if (stream_count == 0
@@ -422,7 +378,7 @@ public:
 
             auto& active = stream_active_[stream];
             if (!active.has_value() && !stream_queues_[stream].empty()) {
-                active = ActiveDedicatedReceive {
+                active = ActiveIndexedReceive {
                     std::move(stream_queues_[stream].front()), 0};
                 stream_queues_[stream].pop_front();
             }
@@ -432,8 +388,6 @@ public:
                 consumer.base_row +=
                     active->vector_index * consumer.row_stride;
                 consumer.vector_count = 1;
-                consumer.notify_mem = consumer.notify_mem
-                    && active->vector_index == 0;
                 notify(C2cReceiveNotification {
                     consumer,
                     active->instruction.fabric_stream_index,
@@ -443,8 +397,10 @@ public:
                     active->instruction, std::move(vector)};
                 ++active->vector_index;
                 if (active->vector_index
-                    == active->instruction.consumer.vector_count)
+                    == active->instruction.consumer.vector_count) {
+                    ++completed_instructions_[stream];
                     active.reset();
+                }
             }
 
             for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
@@ -527,7 +483,7 @@ private:
         C2cVector vector{};
     };
 
-    struct ActiveDedicatedReceive {
+    struct ActiveIndexedReceive {
         C2cInstruction instruction{};
         std::size_t vector_index{0};
     };
@@ -536,11 +492,10 @@ private:
     std::string name_{};
     std::deque<C2cInstruction> queue_{};
     std::array<std::optional<ActiveReceive>, hw::kTileRows> pipeline_{};
-    bool dedicated_{false};
     bool indexed_transport_{false};
     std::array<std::deque<C2cInstruction>, hw::kC2cStreamsPerDirection>
         stream_queues_{};
-    std::array<std::optional<ActiveDedicatedReceive>,
+    std::array<std::optional<ActiveIndexedReceive>,
         hw::kC2cStreamsPerDirection> stream_active_{};
     std::array<std::optional<ActiveReceive>, hw::kC2cStreamsPerDirection>
         shared_ingress_{};
@@ -555,10 +510,9 @@ public:
     explicit C2cEndpoint(
         C2cStreamPortMap ports,
         std::string name = "C2C",
-        bool dedicated_rx = false,
         bool indexed_rx = false)
         : tx_(ports.tx_input, name + " TX", indexed_rx)
-        , rx_(ports.rx_output, name + " RX", dedicated_rx, indexed_rx)
+        , rx_(ports.rx_output, name + " RX", indexed_rx)
     {
     }
 

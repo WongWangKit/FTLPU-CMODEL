@@ -26,8 +26,18 @@ struct IcuMacroInstruction {
 };
 
 template <typename FuncInstruction>
+struct IcuSynchronizedInstruction {
+    std::size_t count{0};
+    std::size_t synchronization_tag{0};
+    std::size_t transport_delay{0};
+    std::int64_t address_stride{0};
+    FuncInstruction instruction{};
+};
+
+template <typename FuncInstruction>
 using IqEntry = std::variant<IcuControlInstruction, FuncInstruction,
-    IcuMacroInstruction<FuncInstruction>>;
+    IcuMacroInstruction<FuncInstruction>,
+    IcuSynchronizedInstruction<FuncInstruction>>;
 
 struct IcuProgramDescriptor {
     std::size_t base_pc{0};
@@ -50,6 +60,9 @@ enum class IcuQueueAction : std::uint8_t {
     Repeat2DWait,
     MacroIssue,
     MacroWait,
+    SynchronizedWait,
+    SynchronizedDelay,
+    SynchronizedIssue,
     SyncWait,
     SyncRelease,
     Notify,
@@ -254,6 +267,10 @@ public:
         repeat_2d_cooldown_ = 0;
         active_macros_ = {};
         macro_remaining_points_ = 0;
+        synchronized_instruction_.reset();
+        synchronized_remaining_ = 0;
+        synchronized_index_ = 0;
+        synchronized_waiting_ = false;
         static_history_pcs_.clear();
         loop_window_pcs_.clear();
         loop_rounds_remaining_ = 0;
@@ -264,6 +281,8 @@ public:
         loop_round_index_ = 0;
         last_dispatched_pc_.reset();
         notification_tokens_ = 0;
+        notification_cycles_.clear();
+        synchronized_notifications_.clear();
         notify_emitted_ = false;
         fetch_pc_ = 0;
         program_end_pc_ = 0;
@@ -382,6 +401,21 @@ public:
                 schedule, std::move(instruction)}});
     }
 
+    void push_synchronized(std::size_t count,
+        std::size_t synchronization_tag, std::size_t transport_delay,
+        std::int64_t address_stride,
+        FuncInstruction instruction)
+    {
+        if (count == 0)
+            throw std::invalid_argument(
+                "ICU synchronized instruction count must be non-zero");
+        append_program(Entry {std::in_place_type<
+            IcuSynchronizedInstruction<FuncInstruction>>,
+            IcuSynchronizedInstruction<FuncInstruction> {count,
+                synchronization_tag, transport_delay, address_stride,
+                std::move(instruction)}});
+    }
+
     std::optional<FuncInstruction> dispatch_next()
     {
         return tick();
@@ -449,7 +483,17 @@ public:
         return tick();
     }
 
-    void notify() { ++notification_tokens_; }
+    void notify()
+    {
+        ++notification_tokens_;
+        notification_cycles_.push_back(cycle_);
+    }
+
+    void notify(std::size_t synchronization_tag)
+    {
+        synchronized_notifications_.push_back(
+            TaggedNotification {synchronization_tag, cycle_});
+    }
 
     bool take_notify()
     {
@@ -483,7 +527,8 @@ public:
             && nop_remaining_ == 0
             && repeat_remaining_ == 0
             && loop_rounds_remaining_ == 0
-            && !repeat_2d_active_ && active_macros_.empty();
+            && !repeat_2d_active_ && active_macros_.empty()
+            && !synchronized_instruction_.has_value();
     }
 
     bool running() const { return !done(); }
@@ -536,6 +581,11 @@ public:
     }
 
 private:
+    struct TaggedNotification {
+        std::size_t tag{0};
+        std::size_t cycle{0};
+    };
+
     struct PendingFetch {
         std::size_t pc{0};
         Entry entry;
@@ -627,6 +677,10 @@ private:
         if (repeat_2d_active_) {
             return tick_repeat_2d();
         }
+        if (synchronized_instruction_.has_value()
+            || (!iq_.empty() && std::holds_alternative<
+                IcuSynchronizedInstruction<FuncInstruction>>(iq_.front())))
+            return tick_synchronized();
         if (!active_macros_.empty()
             || (!iq_.empty() && std::holds_alternative<
                 IcuMacroInstruction<FuncInstruction>>(iq_.front())))
@@ -695,6 +749,7 @@ private:
             last_trace_.issue_pc = iq_pcs_.front();
             last_trace_.action = IcuQueueAction::SyncRelease;
             --notification_tokens_;
+            notification_cycles_.pop_front();
             iq_.pop_front();
             iq_pcs_.pop_front();
             return std::nullopt;
@@ -751,6 +806,65 @@ private:
         last_trace_.issue_pc = last_dispatched_pc_;
         last_trace_.action = IcuQueueAction::RepeatIssue;
         ++issued_count_;
+        return result;
+    }
+
+    std::optional<FuncInstruction> tick_synchronized()
+    {
+        if (!synchronized_instruction_.has_value()) {
+            auto* descriptor = std::get_if<
+                IcuSynchronizedInstruction<FuncInstruction>>(&iq_.front());
+            if (descriptor == nullptr)
+                throw std::logic_error(
+                    "ICU synchronized dispatcher lost its descriptor");
+            synchronized_instruction_ = std::move(*descriptor);
+            synchronized_remaining_ = synchronized_instruction_->count;
+            synchronized_index_ = 0;
+            synchronized_waiting_ = true;
+            iq_.pop_front();
+            iq_pcs_.pop_front();
+        }
+
+        if (synchronized_waiting_) {
+            const auto notification = std::find_if(
+                synchronized_notifications_.begin(),
+                synchronized_notifications_.end(),
+                [&](const TaggedNotification& candidate) {
+                    return candidate.tag
+                        == synchronized_instruction_->synchronization_tag;
+                });
+            if (notification == synchronized_notifications_.end()) {
+                last_trace_.action = IcuQueueAction::SynchronizedWait;
+                return std::nullopt;
+            }
+
+            // Notifications can arrive every cycle while an earlier vector is
+            // still crossing the SR fabric. Keep their original arrival cycle
+            // so transport latency is pipelined instead of serialized.
+            const auto issueCycle = notification->cycle
+                + synchronized_instruction_->transport_delay + 1;
+            if (cycle_ < issueCycle) {
+                last_trace_.action = IcuQueueAction::SynchronizedDelay;
+                return std::nullopt;
+            }
+            synchronized_notifications_.erase(notification);
+            synchronized_waiting_ = false;
+        }
+
+        auto result = detail::apply_icu_repeat_stride(
+            synchronized_instruction_->instruction,
+            synchronized_instruction_->address_stride,
+            synchronized_index_);
+        ++synchronized_index_;
+        --synchronized_remaining_;
+        last_dispatched_ = result;
+        last_trace_.action = IcuQueueAction::SynchronizedIssue;
+        ++issued_count_;
+        if (synchronized_remaining_ == 0) {
+            synchronized_instruction_.reset();
+        } else {
+            synchronized_waiting_ = true;
+        }
         return result;
     }
 
@@ -1001,6 +1115,11 @@ private:
     std::priority_queue<ActiveMacro, std::vector<ActiveMacro>,
         LaterMacroIssue> active_macros_{};
     std::size_t macro_remaining_points_{0};
+    std::optional<IcuSynchronizedInstruction<FuncInstruction>>
+        synchronized_instruction_{};
+    std::size_t synchronized_remaining_{0};
+    std::size_t synchronized_index_{0};
+    bool synchronized_waiting_{false};
     std::deque<std::size_t> static_history_pcs_{};
     std::vector<std::size_t> loop_window_pcs_{};
     std::optional<std::size_t> last_dispatched_pc_{};
@@ -1022,6 +1141,8 @@ private:
     std::int64_t loop_address_stride_{0};
     std::size_t loop_round_index_{0};
     std::size_t notification_tokens_{0};
+    std::deque<std::size_t> notification_cycles_{};
+    std::deque<TaggedNotification> synchronized_notifications_{};
     bool notify_emitted_{false};
     std::size_t fetch_pc_{0};
     std::size_t program_end_pc_{0};
