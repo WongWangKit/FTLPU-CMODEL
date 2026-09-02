@@ -4,6 +4,7 @@
 #include "ftlpu/mem/slice.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -65,6 +66,8 @@ enum class IcuQueueAction : std::uint8_t {
     SynchronizedIssue,
     SyncWait,
     SyncRelease,
+    EventWait,
+    EventRelease,
     Notify,
     Underflow,
 };
@@ -225,6 +228,7 @@ template <
     std::size_t FetchLatency = 1>
 class DistributedIcuQueue {
 public:
+    using FunctionalInstruction = FuncInstruction;
     using Entry = IqEntry<FuncInstruction>;
 
     static_assert(
@@ -511,9 +515,15 @@ public:
             return false;
         }
         const auto* control = std::get_if<IcuControlInstruction>(&iq_.front());
-        return control != nullptr
-            && control->opcode == IcuControlOpcode::Sync
-            && notification_tokens_ == 0;
+        if (control == nullptr) return false;
+        if (control->opcode == IcuControlOpcode::Sync)
+            return notification_tokens_ == 0;
+        if (control->opcode != IcuControlOpcode::WaitEvent) return false;
+        return std::none_of(synchronized_notifications_.begin(),
+            synchronized_notifications_.end(),
+            [&](const TaggedNotification& notification) {
+                return notification.tag == control->event_tag;
+            });
     }
 
     bool done() const
@@ -547,6 +557,10 @@ public:
     const IcuQueueCycleTrace& last_trace() const noexcept
     {
         return last_trace_;
+    }
+    const std::optional<FuncInstruction>& last_dispatched() const noexcept
+    {
+        return last_dispatched_;
     }
     std::size_t free_iq_entries() const noexcept
     {
@@ -753,6 +767,25 @@ private:
             iq_.pop_front();
             iq_pcs_.pop_front();
             return std::nullopt;
+        case IcuControlOpcode::WaitEvent: {
+            const auto notification = std::find_if(
+                synchronized_notifications_.begin(),
+                synchronized_notifications_.end(),
+                [&](const TaggedNotification& candidate) {
+                    return candidate.tag == control.event_tag;
+                });
+            if (notification == synchronized_notifications_.end()) {
+                last_trace_.issue_pc = iq_pcs_.front();
+                last_trace_.action = IcuQueueAction::EventWait;
+                return std::nullopt;
+            }
+            synchronized_notifications_.erase(notification);
+            last_trace_.issue_pc = iq_pcs_.front();
+            last_trace_.action = IcuQueueAction::EventRelease;
+            iq_.pop_front();
+            iq_pcs_.pop_front();
+            return std::nullopt;
+        }
         case IcuControlOpcode::Notify:
             last_trace_.issue_pc = iq_pcs_.front();
             last_trace_.action = IcuQueueAction::Notify;
