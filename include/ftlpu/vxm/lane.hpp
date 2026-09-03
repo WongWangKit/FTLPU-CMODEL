@@ -38,14 +38,21 @@ enum class VxmLaneOperandKind {
     Feedback = 7,
 };
 
+enum class VxmStreamSource {
+    Local,
+    East,
+    West,
+};
+
 struct VxmLaneOperand {
     VxmLaneOperandKind kind{VxmLaneOperandKind::Immediate};
     float immediate{0.0f};
     float scale{1.0f};
     std::int32_t zero_point{0};
-    // -1 keeps the stage-local fixed input group. Values 0..7 select a
-    // hemisphere-local group and mirror to 8..15 on the north chain.
+    // -1 keeps the stage-local fixed input group. Values 0..7 select a group
+    // from the local, absolute-East, or absolute-West SR hemisphere.
     std::int32_t stream_group{-1};
+    VxmStreamSource stream_source{VxmStreamSource::Local};
 
     static VxmLaneOperand Previous() { return {VxmLaneOperandKind::Previous}; }
     static VxmLaneOperand Original() { return {VxmLaneOperandKind::Original}; }
@@ -54,16 +61,18 @@ struct VxmLaneOperand {
     static VxmLaneOperand Imm(float value) { return {VxmLaneOperandKind::Immediate, value}; }
     static VxmLaneOperand Feedback() { return {VxmLaneOperandKind::Feedback}; }
     static VxmLaneOperand StreamFloat16(
-        float scale = 1.0f, std::int32_t stream_group = -1)
+        float scale = 1.0f, std::int32_t stream_group = -1,
+        VxmStreamSource stream_source = VxmStreamSource::Local)
     {
         return {VxmLaneOperandKind::StreamFloat16, 0.0f, scale, 0,
-            stream_group};
+            stream_group, stream_source};
     }
     static VxmLaneOperand StreamBFloat16(
-        float scale = 1.0f, std::int32_t stream_group = -1)
+        float scale = 1.0f, std::int32_t stream_group = -1,
+        VxmStreamSource stream_source = VxmStreamSource::Local)
     {
         return {VxmLaneOperandKind::StreamBFloat16, 0.0f, scale, 0,
-            stream_group};
+            stream_group, stream_source};
     }
 };
 
@@ -375,13 +384,26 @@ public:
     static std::size_t input_group_for_operand(std::size_t stage,
         bool rhs_port, const VxmLaneOperand& operand)
     {
-        if (operand.stream_group < 0)
+        if (operand.stream_group < 0) {
+            if (operand.stream_source != VxmStreamSource::Local) {
+                throw std::invalid_argument(
+                    "absolute VXM stream source requires an explicit group");
+            }
             return fixed_input_group_for_stage(stage, rhs_port);
+        }
         if (operand.stream_group >= 8)
             throw std::out_of_range(
                 "VXM operand stream group is outside one hemisphere");
-        return static_cast<std::size_t>(operand.stream_group)
-            + (stage >= 8 ? 8 : 0);
+        const auto group = static_cast<std::size_t>(operand.stream_group);
+        switch (operand.stream_source) {
+        case VxmStreamSource::Local:
+            return group + (stage >= 8 ? 8 : 0);
+        case VxmStreamSource::East:
+            return group;
+        case VxmStreamSource::West:
+            return group + 8;
+        }
+        throw std::logic_error("unsupported VXM stream source");
     }
 
     void validate_broadcast_instruction(
@@ -485,7 +507,12 @@ public:
             const auto& instruction = *issued[stage];
             std::optional<Token> source;
             if (is_chain_head(stage)) {
-                if (!head_operands_ready(instruction, stage)) {
+                const auto captures_fused_operands =
+                    stage + 1 < kAluCount && issued[stage + 1]
+                    && is_fused_multiply_operation(
+                        issued[stage + 1]->operation);
+                if (!head_operands_ready(instruction, stage)
+                    || (captures_fused_operands && !stream_inputs_valid_)) {
                     waiting_for_input[stage] = true;
                     continue;
                 }
@@ -497,6 +524,14 @@ public:
                     const auto rhs =
                         read_head_operand(instruction.rhs, stage, true);
                     source = Token {0.0f, lhs, rhs, true};
+                    if (captures_fused_operands) {
+                        const auto& fused = *issued[stage + 1];
+                        source->fused_lhs = read_head_operand(
+                            fused.lhs, stage + 1, false);
+                        source->fused_rhs = read_head_operand(
+                            fused.rhs, stage + 1, true);
+                        source->fused_operands_valid = true;
+                    }
                 }
             } else {
                 source = stage_inputs_[stage];
@@ -507,8 +542,18 @@ public:
             }
 
             prepare_accumulator(stage, instruction);
-            const auto a = read_operand(instruction.lhs, *source, stage, false);
-            const auto b = read_operand(instruction.rhs, *source, stage, true);
+            const auto fused =
+                is_fused_multiply_operation(instruction.operation);
+            if (fused && !source->fused_operands_valid) {
+                throw std::logic_error(
+                    "VXM fused multiply operands were not captured at the chain head");
+            }
+            const auto a = fused ? source->fused_lhs
+                                 : read_operand(
+                                       instruction.lhs, *source, stage, false);
+            const auto b = fused ? source->fused_rhs
+                                 : read_operand(
+                                       instruction.rhs, *source, stage, true);
             auto metadata = ExecutionMetadata{*source, instruction};
             if (const auto* special =
                     std::get_if<VxmSpecialAluOpcode>(&instruction.operation)) {
@@ -525,10 +570,12 @@ public:
                         "VXM configuration changed to Basic while a LUT "
                         "result remained in flight");
                 }
-                basic_requests[stage] = BasicPipeline::Request{
+                auto request = BasicPipeline::Request{
                     {std::get<VxmAluOpcode>(instruction.operation),
                      instruction.precision},
                     a, b, std::move(metadata)};
+                if (fused) request.addend = source->value;
+                basic_requests[stage] = std::move(request);
             }
             consumed[stage] = true;
         }
@@ -599,7 +646,9 @@ public:
 
             const auto& source = completed->metadata.source;
             auto token = Token{
-                completed->value, source.original, source.auxiliary, true};
+                completed->value, source.original, source.auxiliary, true,
+                source.fused_lhs, source.fused_rhs,
+                source.fused_operands_valid};
             if (is_chain_tail(stage)) {
                 // Fixed tail-to-head feedback bypasses Stream Register and
                 // the tail output register.  The destination head's already
@@ -859,6 +908,8 @@ public:
         case VxmAluOpcode::Multiply: return "mul";
         case VxmAluOpcode::Negate: return "neg";
         case VxmAluOpcode::Max: return "max";
+        case VxmAluOpcode::FusedMultiplyAdd: return "fma";
+        case VxmAluOpcode::FusedMultiplySubtract: return "fms";
             }
         }
         if (const auto* opcode = std::get_if<VxmSpecialAluOpcode>(&operation)) {
@@ -900,6 +951,9 @@ private:
         float original{0.0f};
         float auxiliary{0.0f};
         bool valid{false};
+        float fused_lhs{0.0f};
+        float fused_rhs{0.0f};
+        bool fused_operands_valid{false};
     };
 
     struct PendingFeedback {
@@ -929,6 +983,15 @@ private:
     {
         return kind == VxmLaneOperandKind::StreamFloat16
             || kind == VxmLaneOperandKind::StreamBFloat16;
+    }
+
+    static bool is_fused_multiply_operation(
+        const VxmLaneOperation& operation)
+    {
+        const auto* opcode = std::get_if<VxmAluOpcode>(&operation);
+        return opcode != nullptr
+            && (*opcode == VxmAluOpcode::FusedMultiplyAdd
+                || *opcode == VxmAluOpcode::FusedMultiplySubtract);
     }
 
     static bool is_chain_head_for(std::size_t stage, VxmChainDepth depth)
@@ -972,7 +1035,13 @@ private:
                    && stage % 4 != 1 && stage % 4 != 3) {
             throw std::invalid_argument("only C1/C3 may read their local scalar register");
         }
+        const auto fused = is_fused_multiply_operation(
+            instruction.operation);
         if (is_chain_head_for(stage, depth)) {
+            if (fused) {
+                throw std::invalid_argument(
+                    "VXM fused multiply must follow a chain head");
+            }
             const auto allowed = [](VxmLaneOperandKind kind) {
                 return is_stream(kind) || kind == VxmLaneOperandKind::Immediate;
             };
@@ -985,6 +1054,14 @@ private:
                     "except LHS may select its fixed tail feedback path");
             }
         } else {
+            if (fused) {
+                if (!is_chain_head_for(stage - 1, depth)
+                    || !is_stream(instruction.lhs.kind)
+                    || !is_stream(instruction.rhs.kind)) {
+                    throw std::invalid_argument(
+                        "VXM fused multiply must immediately follow a chain head and use two stream operands");
+                }
+            } else {
             if (instruction.lhs.kind != VxmLaneOperandKind::Previous) {
                 throw std::invalid_argument("internal stage lhs is fixed to the preceding pipeline register");
             }
@@ -996,6 +1073,7 @@ private:
                                       && rhs == VxmLaneOperandKind::Accumulator);
             if (!rhs_allowed) {
                 throw std::invalid_argument("internal stage rhs is outside its small local mux");
+            }
             }
         }
         if (instruction.output_stream) {

@@ -44,9 +44,11 @@ bool same_vxm(const ftlpu::VxmLaneAluInstruction& lhs, const ftlpu::VxmLaneAluIn
         && lhs.lhs.kind == rhs.lhs.kind
         && lhs.lhs.immediate == rhs.lhs.immediate
         && lhs.lhs.stream_group == rhs.lhs.stream_group
+        && lhs.lhs.stream_source == rhs.lhs.stream_source
         && lhs.rhs.kind == rhs.rhs.kind
         && lhs.rhs.immediate == rhs.rhs.immediate
         && lhs.rhs.stream_group == rhs.rhs.stream_group
+        && lhs.rhs.stream_source == rhs.rhs.stream_source
         && lhs.precision == rhs.precision
         && lhs.output_type == rhs.output_type
         && lhs.output_stream == rhs.output_stream
@@ -341,15 +343,17 @@ bool verify_vxm_codec()
     }
 
     auto selected_streams = ftlpu::VxmLaneAluInstruction {};
-    selected_streams.operation = ftlpu::VxmAluOpcode::Add;
+    selected_streams.operation = ftlpu::VxmAluOpcode::FusedMultiplyAdd;
     selected_streams.lhs =
-        ftlpu::VxmLaneOperand::StreamBFloat16(1.0f, 3);
+        ftlpu::VxmLaneOperand::StreamBFloat16(
+            1.0f, 3, ftlpu::VxmStreamSource::East);
     selected_streams.rhs =
-        ftlpu::VxmLaneOperand::StreamFloat16(1.0f, 7);
+        ftlpu::VxmLaneOperand::StreamFloat16(
+            1.0f, 7, ftlpu::VxmStreamSource::West);
     const auto selected_packet = ftlpu::isa::encode_vxm_instruction(
-        0, depth, selected_streams);
+        1, depth, selected_streams);
     const auto selected_decoded = ftlpu::isa::decode_vxm_instruction(
-        0, selected_packet);
+        1, selected_packet);
     if (!require(
             selected_decoded.chain_depth == depth
                 && same_vxm(selected_streams,

@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -200,13 +202,13 @@ void test_dual_chip_rx_notifies_mem_and_writes_sram()
         - (kTargetGroup + 1) - 1;
     static_assert(kTargetGroup == 4);
 
-    auto system = DualChipC2cSystem(C2cLinkConfig {
+    auto system = std::make_unique<DualChipC2cSystem>(C2cLinkConfig {
         hw::kPhysicalVectorBytes,
         0,
         2,
     });
-    auto& source = system.chip(0);
-    auto& destination = system.chip(1);
+    auto& source = system->chip(0);
+    auto& destination = system->chip(1);
 
     for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
@@ -246,7 +248,7 @@ void test_dual_chip_rx_notifies_mem_and_writes_sram()
     bool observed_sync_wait = false;
     bool observed_sync_release = false;
     for (std::size_t cycle = 0; cycle < 24; ++cycle) {
-        system.tick();
+        system->tick();
         const auto action = destination.icu().mem_iq(target_queue).last_trace().action;
         observed_sync_wait = observed_sync_wait
             || action == IcuQueueAction::SyncWait;
@@ -294,13 +296,13 @@ void test_dual_hemisphere_endpoints_transfer_in_parallel()
     constexpr std::array kSourceRows {51U, 52U};
     constexpr std::array kTargetRows {61U, 62U};
 
-    auto system = DualChipC2cSystem(C2cLinkConfig {
+    auto system = std::make_unique<DualChipC2cSystem>(C2cLinkConfig {
         hw::kPhysicalVectorBytes,
         0,
         2,
     });
-    auto& source = system.chip(0);
-    auto& destination = system.chip(1);
+    auto& source = system->chip(0);
+    auto& destination = system->chip(1);
 
     for (std::size_t source_index = 0; source_index < hw::kHemispheres;
          ++source_index) {
@@ -347,7 +349,7 @@ void test_dual_hemisphere_endpoints_transfer_in_parallel()
                 kTargetRows[source_index], StreamId::West(kStream)));
     }
 
-    for (std::size_t cycle = 0; cycle < 24; ++cycle) system.tick();
+    for (std::size_t cycle = 0; cycle < 24; ++cycle) system->tick();
 
     for (std::size_t source_index = 0; source_index < hw::kHemispheres;
          ++source_index) {
@@ -374,10 +376,14 @@ void test_dual_hemisphere_endpoints_transfer_in_parallel()
 } // namespace
 
 int main()
-{
+try {
     test_rx_diagonal_pipeline_accepts_one_vector_per_cycle();
     test_tx_diagonal_pipeline_emits_one_vector_per_cycle();
     test_link_credit_and_serialization();
     test_dual_chip_rx_notifies_mem_and_writes_sram();
     test_dual_hemisphere_endpoints_transfer_in_parallel();
+    return 0;
+} catch (const std::exception& error) {
+    std::cerr << "c2c_test failed: " << error.what() << '\n';
+    return 1;
 }

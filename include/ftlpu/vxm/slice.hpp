@@ -364,7 +364,10 @@ private:
                 const auto instruction =
                     superlanes_[tile].next_instruction(alu);
                 if (!instruction
-                    || !instruction_uses_stream(*instruction)) {
+                    || alu % static_cast<std::size_t>(
+                           superlanes_[tile].chain_depth()) != 0
+                    || !head_configuration_uses_stream(
+                        superlanes_[tile], alu, *instruction)) {
                     continue;
                 }
                 stream_consumers[alu] = true;
@@ -470,6 +473,28 @@ private:
         return operand_uses_stream(instruction.lhs) || operand_uses_stream(instruction.rhs);
     }
 
+    static bool is_fused_multiply(
+        const VxmLaneAluInstruction& instruction)
+    {
+        const auto* opcode =
+            std::get_if<VxmAluOpcode>(&instruction.operation);
+        return opcode != nullptr
+            && (*opcode == VxmAluOpcode::FusedMultiplyAdd
+                || *opcode == VxmAluOpcode::FusedMultiplySubtract);
+    }
+
+    static bool head_configuration_uses_stream(
+        const Superlane& superlane, std::size_t alu,
+        const VxmLaneAluInstruction& instruction)
+    {
+        if (instruction_uses_stream(instruction)) return true;
+        const auto successor = alu + 1;
+        if (successor >= kAluQueues) return false;
+        const auto next = superlane.next_instruction(successor);
+        return next && is_fused_multiply(*next)
+            && instruction_uses_stream(*next);
+    }
+
     void refresh_required_streams()
     {
         for (auto& required : required_streams_) {
@@ -479,7 +504,10 @@ private:
         for (std::size_t tile = 0; tile < kTileCount; ++tile) {
             auto required = RequiredStreams {};
             bool any = false;
+            const auto depth = static_cast<std::size_t>(
+                superlanes_[tile].chain_depth());
             for (std::size_t alu = 0; alu < kAluQueues; ++alu) {
+                if (alu % depth != 0) continue;
                 // A held Current Config takes precedence over a new packet
                 // merely passing this tile toward the shared Superlane queue.
                 auto instruction = superlanes_[tile].next_instruction(alu);
@@ -500,6 +528,27 @@ private:
                     required, instruction->lhs, mirrored, false);
                 mark_operand_streams(
                     required, instruction->rhs, mirrored, true);
+                const auto successor = alu + 1;
+                if (successor < kAluQueues) {
+                    const auto fused =
+                        superlanes_[tile].next_instruction(successor);
+                    if (fused && is_fused_multiply(*fused)) {
+                        mark_operand_streams(
+                            required, fused->lhs, successor, false);
+                        mark_operand_streams(
+                            required, fused->rhs, successor, true);
+                        mark_operand_streams(required, fused->lhs,
+                            successor
+                                + VxmSuperlaneInstructionControl::
+                                    kMirroredStageOffset,
+                            false);
+                        mark_operand_streams(required, fused->rhs,
+                            successor
+                                + VxmSuperlaneInstructionControl::
+                                    kMirroredStageOffset,
+                            true);
+                    }
+                }
                 any = true;
             }
             if (any) {

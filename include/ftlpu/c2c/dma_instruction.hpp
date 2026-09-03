@@ -82,7 +82,7 @@ struct C2cDmaInstruction {
         }
         if (stream_index >= hw::kC2cStreamsPerDirection) {
             throw std::out_of_range(
-                "C2C DMA stream index is outside the dedicated stream file");
+                "C2C DMA lane index is outside the configured lane range");
         }
         (void)vector_address(vector_count - 1);
     }

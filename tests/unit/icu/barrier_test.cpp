@@ -98,6 +98,46 @@ void test_tsp_automatic_advance()
     assert(system.icu().vxm_iq(1).done());
 }
 
+void test_tagged_event_wait()
+{
+    auto icu = InstructionControlUnit{};
+    auto vxm = VxmSlice{};
+    constexpr std::size_t eventTag = 0x1234;
+    icu.enqueue_control(IcuLocation::Vxm(0),
+        IcuControlInstruction::WaitEvent(eventTag));
+
+    tick_vxm(icu, vxm);
+    assert(icu.vxm_iq(0).blocked_on_sync());
+    assert(icu.vxm_iq(0).last_trace().action
+           == IcuQueueAction::EventWait);
+    icu.notify_tagged(IcuLocation::Vxm(0), eventTag + 1);
+    tick_vxm(icu, vxm);
+    assert(icu.vxm_iq(0).blocked_on_sync());
+    icu.notify_tagged(IcuLocation::Vxm(0), eventTag);
+    tick_vxm(icu, vxm);
+    assert(icu.vxm_iq(0).done());
+    assert(icu.vxm_iq(0).last_trace().action
+           == IcuQueueAction::EventRelease);
+}
+
+void test_program_issue_hold_keeps_transport_running()
+{
+    auto system = ftlpu::TspSliceSystem{};
+    system.icu().enqueue_mem_nop(0, 4);
+    system.icu().enqueue_c2c_dma_nop(ftlpu::Hemisphere::East, 4);
+    system.icu().set_program_issue_enabled(false);
+
+    for (std::size_t cycle = 0; cycle < 3; ++cycle)
+        system.tick(ftlpu::TspSliceSystem::LogSinks{});
+    assert(system.icu().mem_iq(0).cycle() == 0);
+    assert(system.icu().c2c_dma_iq(ftlpu::Hemisphere::East).cycle() == 3);
+
+    system.icu().set_program_issue_enabled(true);
+    system.tick(ftlpu::TspSliceSystem::LogSinks{});
+    assert(system.icu().mem_iq(0).cycle() == 1);
+    assert(system.icu().c2c_dma_iq(ftlpu::Hemisphere::East).cycle() == 4);
+}
+
 } // namespace
 
 int main()
@@ -105,4 +145,6 @@ int main()
     test_delayed_broadcast();
     test_zero_latency_and_direct_notify();
     test_tsp_automatic_advance();
+    test_tagged_event_wait();
+    test_program_issue_hold_keeps_transport_running();
 }

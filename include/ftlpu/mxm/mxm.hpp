@@ -213,7 +213,14 @@ public:
                     << " stream=" << stream_base
                     << " format="
                     << mxm_data_format_name(compute.data_format)
-                    << " out=" << output_stream_base << '\n';
+                    << " out=" << output_stream_base
+                    << " values=[";
+                for (std::size_t lane = 0;
+                     lane < data.front().size(); ++lane) {
+                    if (lane != 0) *os << ',';
+                    *os << data.front()[lane];
+                }
+                *os << "]\n";
             }
         }
 
@@ -226,7 +233,8 @@ public:
                     computing[tile][column_block] = true;
                     compute_column_block(event, column_block);
                     if (event.tile + 1 == hw::kMxmSupercellsPerPlane) {
-                        emit_column_output(mem, column_block, event);
+                        emit_column_output(
+                            mem, column_block, event, mxm_id, os);
                     }
                     if (column_block + 1 < hw::kMxmSupercellsPerPlane) {
                         next_pipeline[column_block + 1][tile].push_back(event);
@@ -854,7 +862,12 @@ private:
         return true;
     }
 
-    void emit_column_output(TileArrayModel& mem, std::size_t column_block, const ActivationEvent& event)
+    void emit_column_output(
+        TileArrayModel& mem,
+        std::size_t column_block,
+        const ActivationEvent& event,
+        std::size_t mxm_id,
+        std::ostream* os)
     {
         const auto row_count = compute_row_count();
         for (std::size_t output_row = 0;
@@ -886,6 +899,20 @@ private:
 
             const auto accumulated =
                 accumulator_.read(address, column_block);
+            if (os != nullptr) {
+                *os << "  MXM" << mxm_id
+                    << " emit result row=" << row
+                    << " column_block=" << column_block
+                    << " buffer=" << event.weight_buffer
+                    << " acc=" << address
+                    << " values=[";
+                for (std::size_t lane = 0;
+                     lane < accumulated.size(); ++lane) {
+                    if (lane != 0) *os << ',';
+                    *os << accumulated[lane];
+                }
+                *os << "]\n";
+            }
             if (event.accumulator_output_format
                 == MxmAccumulatorOutputFormat::BFloat16) {
                 emit_bf16_stream_values(

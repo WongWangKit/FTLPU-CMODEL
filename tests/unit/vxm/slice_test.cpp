@@ -190,6 +190,42 @@ void test_missing_bundle_is_schedule_error()
     assert(schedule_error);
 }
 
+void test_fused_operand_bundle_capture()
+{
+    using namespace ftlpu;
+
+    auto slice = VxmSlice{};
+    slice.set_chain_depth(VxmChainDepth::Two);
+    auto head = VxmLaneAluInstruction{
+        VxmAluOpcode::Multiply,
+        VxmLaneOperand::StreamFloat16(
+            1.0f, 0, VxmStreamSource::East),
+        VxmLaneOperand::StreamFloat16(
+            1.0f, 4, VxmStreamSource::East)};
+    auto tail = VxmLaneAluInstruction{
+        VxmAluOpcode::FusedMultiplySubtract,
+        VxmLaneOperand::StreamFloat16(
+            1.0f, 0, VxmStreamSource::West),
+        VxmLaneOperand::StreamFloat16(
+            1.0f, 5, VxmStreamSource::East)};
+    tail.output_stream = 0;
+    tail.output_type = VxmCastTarget::Float32;
+    slice.issue_south(0, VxmCompactInstructionCodec::encode(
+        0, VxmChainDepth::Two, head));
+    slice.issue_south(1, VxmCompactInstructionCodec::encode(
+        1, VxmChainDepth::Two, tail));
+
+    slice.tick();
+    slice.prepare_cycle();
+    const auto required = slice.required_streams_at(0);
+    assert(required);
+    for (const auto group : {0U, 4U, 5U, 8U}) {
+        const auto base = group * VxmLane::kStreamGroupBytes;
+        assert((*required)[base]);
+        assert((*required)[base + 1]);
+    }
+}
+
 }
 
 int main()
@@ -280,6 +316,7 @@ int main()
     assert(repeated.output_at(0));
     test_feedback_2_to_8();
     test_missing_bundle_is_schedule_error();
+    test_fused_operand_bundle_capture();
     vxm_hardware_test::write_pass_result(
         "slice_test_results.txt", "slice_test");
     return 0;

@@ -24,6 +24,7 @@ enum class IcuControlOpcode : std::uint8_t {
     Notify = 4,
     Loop = 5,
     Repeat2D = 6,
+    WaitEvent = 7,
 };
 
 enum class IcuInductionTarget : std::uint8_t {
@@ -81,6 +82,7 @@ struct IcuControlInstruction {
     std::int64_t address_stride{0};
     std::size_t window_size{0};
     IcuRepeat2D repeat_2d{};
+    std::size_t event_tag{0};
 
     static constexpr IcuControlInstruction Nop(std::size_t cycles) noexcept
     {
@@ -130,6 +132,15 @@ struct IcuControlInstruction {
     static constexpr IcuControlInstruction Notify() noexcept
     {
         return IcuControlInstruction {IcuControlOpcode::Notify};
+    }
+
+    static constexpr IcuControlInstruction WaitEvent(
+        std::size_t tag) noexcept
+    {
+        IcuControlInstruction instruction;
+        instruction.opcode = IcuControlOpcode::WaitEvent;
+        instruction.event_tag = tag;
+        return instruction;
     }
 };
 

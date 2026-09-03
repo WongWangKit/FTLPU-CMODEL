@@ -189,6 +189,8 @@ private:
             case VxmAluOpcode::Multiply: return 3;
             case VxmAluOpcode::Negate: return 4;
             case VxmAluOpcode::Max: return 5;
+            case VxmAluOpcode::FusedMultiplyAdd: return 9;
+            case VxmAluOpcode::FusedMultiplySubtract: return 10;
             }
         }
         switch (std::get<VxmSpecialAluOpcode>(operation)) {
@@ -211,6 +213,8 @@ private:
         case 6: return VxmSpecialAluOpcode::Exp;
         case 7: return VxmSpecialAluOpcode::Reciprocal;
         case 8: return VxmSpecialAluOpcode::Rsqrt;
+        case 9: return VxmAluOpcode::FusedMultiplyAdd;
+        case 10: return VxmAluOpcode::FusedMultiplySubtract;
         default:
             throw std::invalid_argument(
                 "VXM compact instruction has an invalid opcode");
@@ -233,19 +237,34 @@ private:
         if (operand.stream_group >= 8)
             throw std::invalid_argument(
                 "VXM stream-group selector is outside 0..7");
-        return static_cast<std::uint64_t>(operand.stream_group + 1);
+        const auto group = static_cast<std::uint64_t>(operand.stream_group);
+        switch (operand.stream_source) {
+        case VxmStreamSource::Local: return group + 1;
+        case VxmStreamSource::East: return group + 9;
+        case VxmStreamSource::West: return group + 17;
+        }
+        throw std::invalid_argument("unsupported VXM stream source");
     }
 
     static void decode_stream_group(
         VxmLaneOperand& operand, std::uint64_t encoded)
     {
         if (encoded == 0) return;
-        if (encoded > 8
+        if (encoded > 24
             || (operand.kind != VxmLaneOperandKind::StreamFloat16
                 && operand.kind != VxmLaneOperandKind::StreamBFloat16))
             throw std::invalid_argument(
                 "VXM compact instruction has an invalid stream-group selector");
-        operand.stream_group = static_cast<std::int32_t>(encoded - 1);
+        if (encoded <= 8) {
+            operand.stream_group = static_cast<std::int32_t>(encoded - 1);
+            operand.stream_source = VxmStreamSource::Local;
+        } else if (encoded <= 16) {
+            operand.stream_group = static_cast<std::int32_t>(encoded - 9);
+            operand.stream_source = VxmStreamSource::East;
+        } else {
+            operand.stream_group = static_cast<std::int32_t>(encoded - 17);
+            operand.stream_source = VxmStreamSource::West;
+        }
     }
 
     static VxmLaneOperand decode_operand(
