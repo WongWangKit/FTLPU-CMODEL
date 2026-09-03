@@ -64,43 +64,50 @@ public:
         hw::kIcuVxmInstructionBits,
         hw::kIcuVxmImemDepth,
         hw::kIcuVxmIqDepth,
-        hw::kIcuFetchLatencyCycles>;
+        hw::kIcuFetchLatencyCycles,
+        hw::kIcuVxmMacroContextDepth>;
     using MemIcu = DistributedIcuQueue<
         MemInstruction,
         hw::kIcuMemInstructionBits,
         hw::kIcuMemImemDepth,
         hw::kIcuMemIqDepth,
-        hw::kIcuFetchLatencyCycles>;
+        hw::kIcuFetchLatencyCycles,
+        hw::kIcuMemMacroContextDepth>;
     using MxmIcu = DistributedIcuQueue<
         MxmControlInstruction,
         hw::kIcuMxmInstructionBits,
         hw::kIcuMxmImemDepth,
         hw::kIcuMxmIqDepth,
-        hw::kIcuFetchLatencyCycles>;
+        hw::kIcuFetchLatencyCycles,
+        hw::kIcuMxmMacroContextDepth>;
     using MxmDequantIcu = DistributedIcuQueue<
         MxmDequantInstruction,
         hw::kIcuMxmInstructionBits,
         hw::kIcuMxmImemDepth,
         hw::kIcuMxmIqDepth,
-        hw::kIcuFetchLatencyCycles>;
+        hw::kIcuFetchLatencyCycles,
+        hw::kIcuMxmMacroContextDepth>;
     using SxmIcu = DistributedIcuQueue<
         SxmInstruction,
         hw::kIcuSxmInstructionBits,
         hw::kIcuSxmImemDepth,
         hw::kIcuSxmIqDepth,
-        hw::kIcuFetchLatencyCycles>;
+        hw::kIcuFetchLatencyCycles,
+        hw::kIcuSxmMacroContextDepth>;
     using C2cIcu = DistributedIcuQueue<
         C2cInstruction,
         hw::kIcuC2cInstructionBits,
         hw::kIcuC2cImemDepth,
         hw::kIcuC2cIqDepth,
-        hw::kIcuFetchLatencyCycles>;
+        hw::kIcuFetchLatencyCycles,
+        hw::kIcuC2cMacroContextDepth>;
     using C2cDmaIcu = DistributedIcuQueue<
         C2cDmaInstruction,
         hw::kIcuC2cDmaInstructionBits,
         hw::kIcuC2cImemDepth,
         hw::kIcuC2cIqDepth,
-        hw::kIcuFetchLatencyCycles>;
+        hw::kIcuFetchLatencyCycles,
+        hw::kIcuC2cMacroContextDepth>;
 
     explicit InstructionControlUnit(
         std::size_t barrier_latency_cycles = hw::kIcuBarrierLatencyCycles)

@@ -4,6 +4,7 @@
 #include "ftlpu/mem/slice.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -209,7 +210,8 @@ template <
     std::size_t InstructionBits,
     std::size_t ImemDepth,
     std::size_t IqDepth,
-    std::size_t FetchLatency = 1>
+    std::size_t FetchLatency = 1,
+    std::size_t MacroContextDepth = IqDepth>
 class DistributedIcuQueue {
 public:
     using Entry = IqEntry<FuncInstruction>;
@@ -220,11 +222,13 @@ public:
     static_assert(ImemDepth > 0);
     static_assert(IqDepth > 0);
     static_assert(FetchLatency > 0);
+    static_assert(MacroContextDepth > 0);
 
     static constexpr std::size_t instruction_bits = InstructionBits;
     static constexpr std::size_t imem_depth = ImemDepth;
     static constexpr std::size_t iq_depth = IqDepth;
     static constexpr std::size_t fetch_latency = FetchLatency;
+    static constexpr std::size_t macro_context_depth = MacroContextDepth;
 
     void reset()
     {
@@ -254,6 +258,7 @@ public:
         repeat_2d_cooldown_ = 0;
         active_macros_ = {};
         macro_remaining_points_ = 0;
+        peak_active_macros_ = 0;
         static_history_pcs_.clear();
         loop_window_pcs_.clear();
         loop_rounds_remaining_ = 0;
@@ -498,6 +503,10 @@ public:
     std::size_t fetch_pc() const noexcept { return fetch_pc_; }
     std::size_t fetched_count() const noexcept { return fetched_count_; }
     std::size_t issued_count() const noexcept { return issued_count_; }
+    std::size_t peak_active_macros() const noexcept
+    {
+        return peak_active_macros_;
+    }
     std::size_t start_cycle() const noexcept { return start_cycle_; }
     const IcuQueueCycleTrace& last_trace() const noexcept
     {
@@ -879,12 +888,24 @@ private:
                        << cycle_;
                     throw StaticScheduleError(os.str());
                 }
-                macro_remaining_points_ += macro->schedule.inner_count
-                    * macro->schedule.outer_count;
-                active_macros_.push(ActiveMacro {
-                    std::move(*macro), iq_pcs_.front(), 0, 0});
-                iq_.pop_front();
-                iq_pcs_.pop_front();
+                if (active_macros_.size() >= MacroContextDepth) {
+                    if (macro->schedule.start_cycle <= cycle_) {
+                        std::ostringstream os;
+                        os << "ICU Macro context capacity "
+                           << MacroContextDepth
+                           << " is exhausted at cycle " << cycle_;
+                        throw StaticScheduleError(os.str());
+                    }
+                } else {
+                    macro_remaining_points_ += macro->schedule.inner_count
+                        * macro->schedule.outer_count;
+                    active_macros_.push(ActiveMacro {
+                        std::move(*macro), iq_pcs_.front(), 0, 0});
+                    peak_active_macros_ = std::max(
+                        peak_active_macros_, active_macros_.size());
+                    iq_.pop_front();
+                    iq_pcs_.pop_front();
+                }
             } else if (!active_macros_.empty()) {
                 throw StaticScheduleError(
                     "ICU queue mixes an in-flight macro with legacy commands");
@@ -1001,6 +1022,7 @@ private:
     std::priority_queue<ActiveMacro, std::vector<ActiveMacro>,
         LaterMacroIssue> active_macros_{};
     std::size_t macro_remaining_points_{0};
+    std::size_t peak_active_macros_{0};
     std::deque<std::size_t> static_history_pcs_{};
     std::vector<std::size_t> loop_window_pcs_{};
     std::optional<std::size_t> last_dispatched_pc_{};

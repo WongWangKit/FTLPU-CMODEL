@@ -132,6 +132,19 @@ constexpr std::size_t kIcuMemIqDepth = 16;
 constexpr std::size_t kIcuMxmIqDepth = 16;
 constexpr std::size_t kIcuSxmIqDepth = 16;
 constexpr std::size_t kIcuC2cIqDepth = 16;
+// Macro descriptors expand independently of the fetch IQ. These finite
+// context files are sized from the maximum simultaneous live descriptors in
+// the seq128 reference schedule (MEM=32, MXM compute=136).
+constexpr std::size_t kIcuMemMacroContextDepth = 32;
+constexpr std::size_t kIcuMxmMacroContextDepth = 136;
+constexpr std::size_t kIcuVxmMacroContextDepth = 4;
+constexpr std::size_t kIcuSxmMacroContextDepth = 4;
+constexpr std::size_t kIcuC2cMacroContextDepth = 4;
+// Five 32-bit words hold the decoded template, loop state, next issue cycle,
+// and base induction value. The bitstream remains packed in i-MEM; contexts
+// are the independently addressable expansion state.
+constexpr std::size_t kIcuMemMacroContextBits = 160;
+constexpr std::size_t kIcuMxmMacroContextBits = 160;
 
 constexpr std::size_t kMxmsPerHemisphere = 2;
 constexpr std::size_t kMxmCount = kHemispheres * kMxmsPerHemisphere;

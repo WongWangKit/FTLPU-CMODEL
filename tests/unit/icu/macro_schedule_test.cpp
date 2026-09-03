@@ -54,6 +54,29 @@ try {
         {8, 201}, {11, 102}, {12, 202}},
         "ICU did not interleave independent macro descriptors");
     require(interleaved.done(), "interleaved macro queue did not complete");
+    require(interleaved.peak_active_macros() == 2,
+        "interleaved macro peak-context count is incorrect");
+
+    using OneContextQueue =
+        DistributedIcuQueue<MemInstruction, 128, 32, 8, 1, 1>;
+    OneContextQueue constrained;
+    constrained.push_macro(IcuMacroSchedule {
+        3, 3, 4, 1, 1, 1, 0,
+        IcuInductionTarget::MemAddress,
+    }, MemInstruction::Read(100, 0));
+    constrained.push_macro(IcuMacroSchedule {
+        4, 3, 4, 1, 1, 1, 0,
+        IcuInductionTarget::MemAddress,
+    }, MemInstruction::Read(200, 1));
+    bool contextOverflow = false;
+    try {
+        for (std::size_t cycle = 0; cycle < 6; ++cycle)
+            (void)constrained.tick();
+    } catch (const StaticScheduleError&) {
+        contextOverflow = true;
+    }
+    require(contextOverflow,
+        "finite ICU Macro context capacity was not enforced");
 
     std::cout << "icu_macro_schedule_test passed\n";
     return 0;
