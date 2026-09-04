@@ -262,6 +262,15 @@ public:
         vxm_queues_[alu].push_repeat(Repeat {count, interval, 0});
     }
 
+    void enqueue_vxm_stream_nd(std::size_t alu,
+        IcuVxmStreamNdSchedule schedule,
+        VxmCompactInstruction instruction)
+    {
+        check_vxm_queue(alu);
+        vxm_queues_[alu].push_vxm_stream_nd(
+            schedule, std::move(instruction));
+    }
+
     void enqueue_mem(std::size_t column, MemInstruction instruction)
     {
         check_mem_queue(column);
@@ -289,6 +298,14 @@ public:
     {
         check_mem_queue(column);
         mem_queues_[column].push_macro(schedule, std::move(instruction));
+    }
+
+    void enqueue_mem_stream_nd(std::size_t column,
+        IcuMemStreamNdSchedule schedule, MemInstruction instruction)
+    {
+        check_mem_queue(column);
+        mem_queues_[column].push_mem_stream_nd(
+            schedule, std::move(instruction));
     }
 
     void enqueue_c2c_mem_control(
@@ -383,11 +400,35 @@ public:
             schedule, std::move(instruction));
     }
 
+    void enqueue_mxm_load_stream_nd(std::size_t mxm,
+        IcuMxmStreamNdSchedule schedule,
+        MxmControlInstruction instruction)
+    {
+        check_mxm_queue(mxm);
+        if (instruction.opcode != MxmControlOpcode::IW
+            && !(instruction.opcode == MxmControlOpcode::Decode
+                && instruction.decode_operation
+                    == MxmDecodeOperation::LoadActivation))
+            throw std::invalid_argument(
+                "MXM load STREAM_ND requires IW/load-activation");
+        mxm_load_queues_[mxm].push_mxm_stream_nd(
+            schedule, std::move(instruction));
+    }
+
     void enqueue_mxm_dequant_macro(std::size_t mxm,
         IcuMacroSchedule schedule, MxmDequantInstruction instruction)
     {
         check_mxm_queue(mxm);
         mxm_dequant_queues_[mxm].push_macro(
+            schedule, std::move(instruction));
+    }
+
+    void enqueue_mxm_dequant_stream_nd(std::size_t mxm,
+        IcuMxmStreamNdSchedule schedule,
+        MxmDequantInstruction instruction)
+    {
+        check_mxm_queue(mxm);
+        mxm_dequant_queues_[mxm].push_mxm_stream_nd(
             schedule, std::move(instruction));
     }
 
@@ -402,6 +443,21 @@ public:
             throw std::invalid_argument(
                 "MXM compute macro cannot carry a load instruction");
         mxm_compute_queues_[mxm].push_macro(
+            schedule, std::move(instruction));
+    }
+
+    void enqueue_mxm_compute_stream_nd(std::size_t mxm,
+        IcuMxmStreamNdSchedule schedule,
+        MxmControlInstruction instruction)
+    {
+        check_mxm_queue(mxm);
+        if (instruction.opcode == MxmControlOpcode::IW
+            || (instruction.opcode == MxmControlOpcode::Decode
+                && instruction.decode_operation
+                    == MxmDecodeOperation::LoadActivation))
+            throw std::invalid_argument(
+                "MXM compute STREAM_ND cannot carry a load instruction");
+        mxm_compute_queues_[mxm].push_mxm_stream_nd(
             schedule, std::move(instruction));
     }
 
@@ -452,6 +508,16 @@ public:
         sxm_transpose_queues_[hemisphere_index(hemisphere)].push_instruction(std::move(instruction));
     }
 
+    void enqueue_sxm_transpose_tile_program(Hemisphere hemisphere,
+        IcuSxmTileProgramSchedule schedule, SxmInstruction instruction)
+    {
+        if (instruction.opcode != SxmOpcode::Transpose)
+            throw std::invalid_argument(
+                "ICU SXM transpose tile program requires Transpose");
+        sxm_transpose_queues_[hemisphere_index(hemisphere)]
+            .push_sxm_tile_program(schedule, std::move(instruction));
+    }
+
     void enqueue_sxm_permute(SxmInstruction instruction)
     {
         enqueue_sxm_permute(Hemisphere::East, std::move(instruction));
@@ -463,6 +529,16 @@ public:
             throw std::invalid_argument("ICU SXM permute queue requires a Permute instruction");
         }
         sxm_permute_queues_[hemisphere_index(hemisphere)].push_instruction(std::move(instruction));
+    }
+
+    void enqueue_sxm_permute_tile_program(Hemisphere hemisphere,
+        IcuSxmTileProgramSchedule schedule, SxmInstruction instruction)
+    {
+        if (instruction.opcode != SxmOpcode::Permute)
+            throw std::invalid_argument(
+                "ICU SXM permute tile program requires Permute");
+        sxm_permute_queues_[hemisphere_index(hemisphere)]
+            .push_sxm_tile_program(schedule, std::move(instruction));
     }
 
     void enqueue_sxm_transpose_nop(std::size_t cycles)

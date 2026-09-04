@@ -392,7 +392,7 @@ bool verify_icu_command_codec()
         return false;
     }
 
-    const auto repeat = ftlpu::InstructionControlUnit::Repeat {7, 3, -16};
+    const auto repeat = ftlpu::IcuRepeat {7, 3, -16};
     const auto decoded = ftlpu::isa::decode_icu_repeat(ftlpu::isa::encode_icu_repeat(repeat));
     if (!require(
             decoded.count == repeat.count
@@ -404,7 +404,7 @@ bool verify_icu_command_codec()
 
     return require_throws(
         [] {
-            ftlpu::isa::encode_icu_repeat(ftlpu::InstructionControlUnit::Repeat {1, 1, 2048});
+            ftlpu::isa::encode_icu_repeat(ftlpu::IcuRepeat {1, 1, 2048});
         },
         "ICU Repeat codec should reject strides wider than signed 12 bits");
 }

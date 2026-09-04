@@ -97,12 +97,18 @@ ftlpu_add_test(sxm_attention_transpose_test tests/unit/sxm/attention_transpose_t
     unit.sxm.attention_transpose unit sxm fast)
 ftlpu_add_test(icu_barrier_test tests/unit/icu/barrier_test.cpp
     unit.icu.barrier unit icu fast)
-ftlpu_add_test(icu_loop_test tests/unit/icu/loop_test.cpp
-    unit.icu.loop unit icu fast)
 ftlpu_add_test(icu_repeat_2d_test tests/unit/icu/repeat_2d_test.cpp
     unit.icu.repeat_2d unit icu fast)
 ftlpu_add_test(icu_macro_schedule_test tests/unit/icu/macro_schedule_test.cpp
     unit.icu.macro_schedule unit icu fast)
+ftlpu_add_test(icu_mem_stream_nd_test tests/unit/icu/mem_stream_nd_test.cpp
+    unit.icu.mem_stream_nd unit icu fast)
+ftlpu_add_test(icu_mxm_stream_nd_test tests/unit/icu/mxm_stream_nd_test.cpp
+    unit.icu.mxm_stream_nd unit icu mxm fast)
+ftlpu_add_test(icu_vxm_stream_nd_test tests/unit/icu/vxm_stream_nd_test.cpp
+    unit.icu.vxm_stream_nd unit icu vxm fast)
+ftlpu_add_test(icu_sxm_tile_program_test tests/unit/icu/sxm_tile_program_test.cpp
+    unit.icu.sxm_tile_program unit icu sxm fast)
 
 # Subsystem tests: multiple hardware blocks connected by physical SR routes.
 ftlpu_add_test(c2c_test tests/subsystem/c2c/dual_chip_test.cpp

@@ -14,7 +14,7 @@ delta(o, i) = o * outer_stride + i * inner_stride
 
 | 位段 | 字段 |
 | --- | --- |
-| 1:0 | 扩展控制 opcode，复用 Loop 类别 |
+| 1:0 | `Extended` 扩展控制 opcode |
 | 11:2 | inner_count |
 | 21:12 | outer_count |
 | 37:22 | inner_interval |

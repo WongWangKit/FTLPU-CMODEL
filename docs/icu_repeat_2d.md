@@ -17,7 +17,7 @@ descriptor is active.
 
 | Bits | Field |
 | --- | --- |
-| 1:0 | extended-control opcode in the Loop class |
+| 1:0 | `Extended` control opcode |
 | 11:2 | inner_count |
 | 21:12 | outer_count |
 | 37:22 | inner_interval |

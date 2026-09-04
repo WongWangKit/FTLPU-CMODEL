@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -22,7 +23,6 @@ enum class IcuControlOpcode : std::uint8_t {
     Repeat = 2,
     Sync = 3,
     Notify = 4,
-    Loop = 5,
     Repeat2D = 6,
     WaitEvent = 7,
 };
@@ -35,13 +35,6 @@ enum class IcuInductionTarget : std::uint8_t {
 };
 
 struct IcuRepeat {
-    std::size_t count{0};
-    std::size_t interval{1};
-    std::int64_t address_stride{0};
-};
-
-struct IcuLoop {
-    std::size_t window_size{0};
     std::size_t count{0};
     std::size_t interval{1};
     std::int64_t address_stride{0};
@@ -75,12 +68,31 @@ struct IcuMacroSchedule {
     IcuInductionTarget induction_target{IcuInductionTarget::None};
 };
 
+// A coarse functional-unit instruction owns one native operation plus an
+// affine iteration space. Dimension zero is the innermost counter. The local
+// ICU advances the counters and emits one native operation at each absolute
+// issue cycle.
+struct IcuStreamNdSchedule {
+    static constexpr std::size_t kMaxRank = 3;
+
+    std::size_t start_cycle{0};
+    std::size_t rank{1};
+    std::array<std::size_t, kMaxRank> counts{1, 1, 1};
+    std::array<std::size_t, kMaxRank> cycle_strides{1, 1, 1};
+    std::array<std::int64_t, kMaxRank> operand_strides{0, 0, 0};
+    IcuInductionTarget induction_target{IcuInductionTarget::None};
+};
+
+using IcuMemStreamNdSchedule = IcuStreamNdSchedule;
+using IcuMxmStreamNdSchedule = IcuStreamNdSchedule;
+using IcuVxmStreamNdSchedule = IcuStreamNdSchedule;
+using IcuSxmTileProgramSchedule = IcuStreamNdSchedule;
+
 struct IcuControlInstruction {
     IcuControlOpcode opcode{IcuControlOpcode::Nop};
     std::size_t count{0};
     std::size_t interval{1};
     std::int64_t address_stride{0};
-    std::size_t window_size{0};
     IcuRepeat2D repeat_2d{};
     std::size_t event_tag{0};
 
@@ -99,20 +111,6 @@ struct IcuControlInstruction {
             count,
             interval,
             address_stride};
-    }
-
-    static constexpr IcuControlInstruction Loop(
-        std::size_t window_size,
-        std::size_t count,
-        std::size_t interval,
-        std::int64_t address_stride = 0) noexcept
-    {
-        return IcuControlInstruction {
-            IcuControlOpcode::Loop,
-            count,
-            interval,
-            address_stride,
-            window_size};
     }
 
     static constexpr IcuControlInstruction Repeat2D(

@@ -3,17 +3,22 @@
 #include "ftlpu/icu/instruction.hpp"
 #include "ftlpu/mem/slice.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
+#include "ftlpu/sxm/instruction.hpp"
+#include "ftlpu/vxm/compact_instruction.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <queue>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -23,6 +28,12 @@ namespace ftlpu {
 template <typename FuncInstruction>
 struct IcuMacroInstruction {
     IcuMacroSchedule schedule{};
+    FuncInstruction instruction{};
+};
+
+template <typename FuncInstruction>
+struct IcuStreamNdInstruction {
+    IcuStreamNdSchedule schedule{};
     FuncInstruction instruction{};
 };
 
@@ -38,6 +49,7 @@ struct IcuSynchronizedInstruction {
 template <typename FuncInstruction>
 using IqEntry = std::variant<IcuControlInstruction, FuncInstruction,
     IcuMacroInstruction<FuncInstruction>,
+    IcuStreamNdInstruction<FuncInstruction>,
     IcuSynchronizedInstruction<FuncInstruction>>;
 
 struct IcuProgramDescriptor {
@@ -55,12 +67,18 @@ enum class IcuQueueAction : std::uint8_t {
     NopWait,
     RepeatIssue,
     RepeatWait,
-    LoopIssue,
-    LoopWait,
     Repeat2DIssue,
     Repeat2DWait,
     MacroIssue,
     MacroWait,
+    MemStreamNdIssue,
+    MemStreamNdWait,
+    MxmStreamNdIssue,
+    MxmStreamNdWait,
+    VxmStreamNdIssue,
+    VxmStreamNdWait,
+    SxmTileProgramIssue,
+    SxmTileProgramWait,
     SynchronizedWait,
     SynchronizedDelay,
     SynchronizedIssue,
@@ -121,7 +139,7 @@ inline MxmControlInstruction apply_icu_repeat_stride(
             instruction.accumulator_address) + delta;
         if (address < 0)
             throw std::out_of_range(
-                "ICU MXM Loop accumulator-address stride underflow");
+                "ICU MXM Repeat accumulator-address stride underflow");
         MxmControlInstruction::check_accumulator_address(
             static_cast<std::size_t>(address));
         instruction.accumulator_address = static_cast<std::size_t>(address);
@@ -133,12 +151,12 @@ inline MxmControlInstruction apply_icu_repeat_stride(
         if (column < 0
             || column >= static_cast<std::int64_t>(hw::kMxmColumns))
             throw std::out_of_range(
-                "ICU MXM Loop weight-column stride is outside the MXM");
+                "ICU MXM Repeat weight-column stride is outside the MXM");
         instruction.weight_column = static_cast<std::size_t>(column);
         return instruction;
     }
     throw std::invalid_argument(
-        "ICU MXM Loop stride requires compute, accumulator-read, or IW");
+        "ICU MXM Repeat stride requires compute, accumulator-read, or IW");
 }
 
 template <typename FuncInstruction>
@@ -275,18 +293,12 @@ public:
         active_macros_ = {};
         macro_remaining_points_ = 0;
         peak_active_macros_ = 0;
+        active_stream_nd_ = {};
+        stream_nd_remaining_points_ = 0;
         synchronized_instruction_.reset();
         synchronized_remaining_ = 0;
         synchronized_index_ = 0;
         synchronized_waiting_ = false;
-        static_history_pcs_.clear();
-        loop_window_pcs_.clear();
-        loop_rounds_remaining_ = 0;
-        loop_window_index_ = 0;
-        loop_interval_ = 1;
-        loop_cooldown_ = 0;
-        loop_address_stride_ = 0;
-        loop_round_index_ = 0;
         last_dispatched_pc_.reset();
         notification_tokens_ = 0;
         notification_cycles_.clear();
@@ -387,13 +399,6 @@ public:
         }
     }
 
-    void push_loop(IcuLoop loop)
-    {
-        append_control(IcuControlInstruction::Loop(
-            loop.window_size, loop.count, loop.interval,
-            loop.address_stride));
-    }
-
     void push_repeat_2d(IcuRepeat2D repeat)
     {
         append_control(IcuControlInstruction::Repeat2D(repeat));
@@ -407,6 +412,117 @@ public:
             IcuMacroInstruction<FuncInstruction>>,
             IcuMacroInstruction<FuncInstruction> {
                 schedule, std::move(instruction)}});
+    }
+
+    void push_mem_stream_nd(IcuMemStreamNdSchedule schedule,
+        FuncInstruction instruction)
+    {
+        if constexpr (!std::is_same_v<FuncInstruction, MemInstruction>) {
+            throw std::invalid_argument(
+                "MEM_STREAM_ND is valid only on a MEM ICU queue");
+        } else {
+            if (schedule.induction_target != IcuInductionTarget::None
+                && schedule.induction_target
+                    != IcuInductionTarget::MemAddress)
+                throw std::invalid_argument(
+                    "MEM_STREAM_ND requires MEM-address induction");
+            schedule.induction_target = IcuInductionTarget::MemAddress;
+            validate_stream_nd_schedule(schedule);
+            append_program(Entry {std::in_place_type<
+                IcuStreamNdInstruction<FuncInstruction>>,
+                IcuStreamNdInstruction<FuncInstruction> {
+                    schedule, std::move(instruction)}});
+        }
+    }
+
+    void push_mxm_stream_nd(IcuMxmStreamNdSchedule schedule,
+        FuncInstruction instruction)
+    {
+        if constexpr (!std::is_same_v<FuncInstruction,
+                          MxmControlInstruction>
+            && !std::is_same_v<FuncInstruction,
+                MxmDequantInstruction>) {
+            throw std::invalid_argument(
+                "MXM_STREAM_ND is valid only on an MXM ICU queue");
+        } else {
+            validate_stream_nd_schedule(schedule);
+            const bool hasOperandInduction = std::any_of(
+                schedule.operand_strides.begin(),
+                schedule.operand_strides.begin() + schedule.rank,
+                [](std::int64_t stride) { return stride != 0; });
+            if (!hasOperandInduction)
+                schedule.induction_target = IcuInductionTarget::None;
+            if constexpr (std::is_same_v<FuncInstruction,
+                              MxmDequantInstruction>) {
+                if (hasOperandInduction)
+                    throw std::invalid_argument(
+                        "MXM dequant STREAM_ND cannot induce an operand");
+            } else if (hasOperandInduction) {
+                if (schedule.induction_target
+                        == IcuInductionTarget::MxmWeightColumn
+                    && instruction.opcode != MxmControlOpcode::IW)
+                    throw std::invalid_argument(
+                        "MXM load STREAM_ND induction requires IW");
+                if (schedule.induction_target
+                        == IcuInductionTarget::MxmAccumulatorAddress
+                    && instruction.opcode != MxmControlOpcode::Compute
+                    && instruction.opcode
+                        != MxmControlOpcode::AccumulatorRead)
+                    throw std::invalid_argument(
+                        "MXM compute STREAM_ND induction requires compute or accumulator-read");
+            }
+            append_program(Entry {std::in_place_type<
+                IcuStreamNdInstruction<FuncInstruction>>,
+                IcuStreamNdInstruction<FuncInstruction> {
+                    schedule, std::move(instruction)}});
+        }
+    }
+
+    void push_vxm_stream_nd(IcuVxmStreamNdSchedule schedule,
+        FuncInstruction instruction)
+    {
+        if constexpr (!std::is_same_v<FuncInstruction,
+                          VxmCompactInstruction>) {
+            throw std::invalid_argument(
+                "VXM_STREAM_ND is valid only on a VXM ICU queue");
+        } else {
+            const bool hasOperandInduction = std::any_of(
+                schedule.operand_strides.begin(),
+                schedule.operand_strides.begin() + schedule.rank,
+                [](std::int64_t stride) { return stride != 0; });
+            if (hasOperandInduction
+                || schedule.induction_target != IcuInductionTarget::None)
+                throw std::invalid_argument(
+                    "VXM_STREAM_ND cannot induce a compact-config operand");
+            validate_stream_nd_schedule(schedule);
+            append_program(Entry {std::in_place_type<
+                IcuStreamNdInstruction<FuncInstruction>>,
+                IcuStreamNdInstruction<FuncInstruction> {
+                    schedule, std::move(instruction)}});
+        }
+    }
+
+    void push_sxm_tile_program(IcuSxmTileProgramSchedule schedule,
+        FuncInstruction instruction)
+    {
+        if constexpr (!std::is_same_v<FuncInstruction, SxmInstruction>) {
+            throw std::invalid_argument(
+                "SXM_TILE_PROGRAM is valid only on an SXM ICU queue");
+        } else {
+            const bool hasOperandInduction = std::any_of(
+                schedule.operand_strides.begin(),
+                schedule.operand_strides.begin() + schedule.rank,
+                [](std::int64_t stride) { return stride != 0; });
+            if (hasOperandInduction
+                || schedule.induction_target != IcuInductionTarget::None)
+                throw std::invalid_argument(
+                    "SXM_TILE_PROGRAM cannot induce an instruction field");
+            validate_stream_nd_schedule(schedule);
+            append_program(Entry {std::in_place_type<
+                IcuStreamNdInstruction<FuncInstruction>>,
+                IcuStreamNdInstruction<FuncInstruction> {
+                    schedule, std::move(instruction)}});
+        }
     }
 
     void push_synchronized(std::size_t count,
@@ -513,8 +629,9 @@ public:
     bool blocked_on_sync() const
     {
         if (nop_remaining_ != 0 || repeat_remaining_ != 0
-            || loop_rounds_remaining_ != 0 || repeat_2d_active_
+            || repeat_2d_active_
             || !active_macros_.empty()
+            || !active_stream_nd_.empty()
             || iq_.empty()) {
             return false;
         }
@@ -540,8 +657,8 @@ public:
             && iq_.empty()
             && nop_remaining_ == 0
             && repeat_remaining_ == 0
-            && loop_rounds_remaining_ == 0
             && !repeat_2d_active_ && active_macros_.empty()
+            && active_stream_nd_.empty()
             && !synchronized_instruction_.has_value();
     }
 
@@ -572,7 +689,7 @@ public:
     }
     std::size_t free_iq_entries() const noexcept
     {
-        return IqDepth - iq_.size() - pending_fetches_.size();
+        return IqDepth - iq_.size() - pending_fetch_count();
     }
     std::size_t pending_issue_cycles() const noexcept
     {
@@ -580,11 +697,7 @@ public:
             if (repeat_2d_active_)
                 return nop_remaining_ + repeat_2d_cooldown_
                     + repeat_2d_remaining_points();
-            if (loop_rounds_remaining_ == 0) return nop_remaining_;
-            const auto current_round = loop_window_pcs_.size()
-                - loop_window_index_;
-            return nop_remaining_ + loop_cooldown_ + current_round
-                + (loop_rounds_remaining_ - 1) * loop_interval_;
+            return nop_remaining_;
         }
         return nop_remaining_ + repeat_cooldown_ + 1
             + (repeat_remaining_ - 1) * repeat_interval_;
@@ -599,7 +712,7 @@ public:
             + repeat_remaining_ + nop_remaining_
             + repeat_2d_remaining_points()
             + macro_remaining_points()
-            + loop_rounds_remaining_ * loop_window_pcs_.size();
+            + stream_nd_remaining_points();
     }
 
 private:
@@ -699,6 +812,10 @@ private:
         if (repeat_2d_active_) {
             return tick_repeat_2d();
         }
+        if (!active_stream_nd_.empty()
+            || (!iq_.empty() && std::holds_alternative<
+                IcuStreamNdInstruction<FuncInstruction>>(iq_.front())))
+            return tick_stream_nd();
         if (synchronized_instruction_.has_value()
             || (!iq_.empty() && std::holds_alternative<
                 IcuSynchronizedInstruction<FuncInstruction>>(iq_.front())))
@@ -707,11 +824,8 @@ private:
             || (!iq_.empty() && std::holds_alternative<
                 IcuMacroInstruction<FuncInstruction>>(iq_.front())))
             return tick_macros();
-        if (loop_rounds_remaining_ > 0) {
-            return tick_loop();
-        }
         if (iq_.empty()) {
-            if (fetch_pc_ != program_end_pc_ || !pending_fetches_.empty()) {
+            if (fetch_pc_ != program_end_pc_ || pending_fetch_count() != 0) {
                 underflowed_ = true;
                 last_trace_.action = IcuQueueAction::Underflow;
                 std::ostringstream os;
@@ -730,10 +844,6 @@ private:
             iq_.pop_front();
             iq_pcs_.pop_front();
             last_dispatched_ = result;
-            static_history_pcs_.push_back(*last_dispatched_pc_);
-            if (static_history_pcs_.size() > 63) {
-                static_history_pcs_.pop_front();
-            }
             ++issued_count_;
             return result;
         }
@@ -758,8 +868,6 @@ private:
             return std::nullopt;
         case IcuControlOpcode::Repeat:
             return begin_repeat(control);
-        case IcuControlOpcode::Loop:
-            return begin_loop(control);
         case IcuControlOpcode::Repeat2D:
             return begin_repeat_2d(control);
         case IcuControlOpcode::Sync:
@@ -985,6 +1093,176 @@ private:
             + repeat_2d_.inner_count - repeat_2d_inner_;
     }
 
+    static void validate_stream_nd_schedule(
+        const IcuStreamNdSchedule& schedule)
+    {
+        if (schedule.rank == 0
+            || schedule.rank > IcuMemStreamNdSchedule::kMaxRank)
+            throw std::invalid_argument(
+                "STREAM_ND rank must be between one and three");
+
+        std::size_t lowerSpan = 0;
+        std::size_t points = 1;
+        for (std::size_t dimension = 0;
+             dimension < schedule.rank; ++dimension) {
+            const auto count = schedule.counts[dimension];
+            const auto stride = schedule.cycle_strides[dimension];
+            if (count == 0 || stride == 0)
+                throw std::invalid_argument(
+                    "STREAM_ND counts and cycle strides must be non-zero");
+            if (dimension != 0 && count > 1 && stride <= lowerSpan)
+                throw std::invalid_argument(
+                    "STREAM_ND dimensions overlap in issue time");
+            if (count > std::numeric_limits<std::size_t>::max() / points)
+                throw std::overflow_error(
+                    "STREAM_ND iteration count overflows");
+            points *= count;
+            const auto steps = count - 1;
+            if (steps != 0
+                && stride > (std::numeric_limits<std::size_t>::max()
+                    - lowerSpan) / steps)
+                throw std::overflow_error(
+                    "STREAM_ND cycle span overflows");
+            lowerSpan += steps * stride;
+        }
+        if (schedule.start_cycle
+            > std::numeric_limits<std::size_t>::max() - lowerSpan)
+            throw std::overflow_error(
+                "STREAM_ND final issue cycle overflows");
+        const bool hasOperandInduction = std::any_of(
+            schedule.operand_strides.begin(),
+            schedule.operand_strides.begin() + schedule.rank,
+            [](std::int64_t stride) { return stride != 0; });
+        if (hasOperandInduction
+            && schedule.induction_target == IcuInductionTarget::None)
+            throw std::invalid_argument(
+                "STREAM_ND operand stride requires an induction target");
+    }
+
+    struct ActiveStreamNd {
+        IcuStreamNdInstruction<FuncInstruction> stream;
+        std::size_t pc{0};
+        std::array<std::size_t, IcuStreamNdSchedule::kMaxRank>
+            indices{};
+
+        std::size_t issue_cycle() const noexcept
+        {
+            auto result = stream.schedule.start_cycle;
+            for (std::size_t dimension = 0;
+                 dimension < stream.schedule.rank; ++dimension)
+                result += indices[dimension]
+                    * stream.schedule.cycle_strides[dimension];
+            return result;
+        }
+
+        std::int64_t operand_delta() const noexcept
+        {
+            auto result = std::int64_t {0};
+            for (std::size_t dimension = 0;
+                 dimension < stream.schedule.rank; ++dimension)
+                result += static_cast<std::int64_t>(indices[dimension])
+                    * stream.schedule.operand_strides[dimension];
+            return result;
+        }
+
+        bool advance() noexcept
+        {
+            for (std::size_t dimension = 0;
+                 dimension < stream.schedule.rank; ++dimension) {
+                ++indices[dimension];
+                if (indices[dimension]
+                    != stream.schedule.counts[dimension])
+                    return true;
+                indices[dimension] = 0;
+            }
+            return false;
+        }
+    };
+
+    struct LaterStreamNdIssue {
+        bool operator()(const ActiveStreamNd& lhs,
+            const ActiveStreamNd& rhs) const noexcept
+        {
+            return lhs.issue_cycle() > rhs.issue_cycle();
+        }
+    };
+
+    std::optional<FuncInstruction> tick_stream_nd()
+    {
+        if (!iq_.empty()) {
+            if (auto* stream = std::get_if<
+                    IcuStreamNdInstruction<FuncInstruction>>(
+                        &iq_.front())) {
+                validate_stream_nd_schedule(stream->schedule);
+                if (cycle_ > stream->schedule.start_cycle) {
+                    std::ostringstream os;
+                    os << "STREAM_ND missed start cycle "
+                       << stream->schedule.start_cycle << " at cycle "
+                       << cycle_;
+                    throw StaticScheduleError(os.str());
+                }
+                std::size_t points = 1;
+                for (std::size_t dimension = 0;
+                     dimension < stream->schedule.rank; ++dimension)
+                    points *= stream->schedule.counts[dimension];
+                stream_nd_remaining_points_ += points;
+                active_stream_nd_.push(ActiveStreamNd {
+                    std::move(*stream), iq_pcs_.front(), {}});
+                iq_.pop_front();
+                iq_pcs_.pop_front();
+            } else if (!active_stream_nd_.empty()) {
+                throw StaticScheduleError(
+                    "ICU mixes an in-flight STREAM_ND with legacy commands");
+            }
+        }
+
+        constexpr bool isMem =
+            std::is_same_v<FuncInstruction, MemInstruction>;
+        constexpr bool isVxm =
+            std::is_same_v<FuncInstruction, VxmCompactInstruction>;
+        constexpr bool isSxm =
+            std::is_same_v<FuncInstruction, SxmInstruction>;
+        if (active_stream_nd_.empty()
+            || active_stream_nd_.top().issue_cycle() > cycle_) {
+            last_trace_.action = isMem
+                ? IcuQueueAction::MemStreamNdWait
+                : isVxm ? IcuQueueAction::VxmStreamNdWait
+                : isSxm ? IcuQueueAction::SxmTileProgramWait
+                        : IcuQueueAction::MxmStreamNdWait;
+            return std::nullopt;
+        }
+        if (active_stream_nd_.top().issue_cycle() < cycle_)
+            throw StaticScheduleError(
+                "STREAM_ND expansion missed an issue cycle");
+        auto due = active_stream_nd_.top();
+        active_stream_nd_.pop();
+        if (!active_stream_nd_.empty()
+            && active_stream_nd_.top().issue_cycle() == cycle_)
+            throw StaticScheduleError(
+                "overlapping STREAM_ND descriptors issue on one ICU queue cycle");
+
+        auto result = detail::apply_icu_repeat_2d_stride(
+            due.stream.instruction,
+            due.stream.schedule.induction_target, due.operand_delta());
+        last_dispatched_ = result;
+        last_dispatched_pc_ = due.pc;
+        last_trace_.issue_pc = due.pc;
+        last_trace_.action = isMem
+            ? IcuQueueAction::MemStreamNdIssue
+            : isVxm ? IcuQueueAction::VxmStreamNdIssue
+            : isSxm ? IcuQueueAction::SxmTileProgramIssue
+                    : IcuQueueAction::MxmStreamNdIssue;
+        ++issued_count_;
+        --stream_nd_remaining_points_;
+        if (due.advance()) active_stream_nd_.push(std::move(due));
+        return result;
+    }
+
+    std::size_t stream_nd_remaining_points() const noexcept
+    {
+        return stream_nd_remaining_points_;
+    }
+
     static void validate_macro_schedule(const IcuMacroSchedule& schedule)
     {
         if (schedule.inner_count == 0 || schedule.outer_count == 0
@@ -1102,62 +1380,6 @@ private:
         return macro_remaining_points_;
     }
 
-    std::optional<FuncInstruction> begin_loop(
-        const IcuControlInstruction& control)
-    {
-        if (control.window_size == 0 || control.count == 0
-            || control.interval < control.window_size) {
-            throw std::invalid_argument(
-                "ICU Loop requires count > 0 and interval >= window size > 0");
-        }
-        if (control.window_size > static_history_pcs_.size()) {
-            throw std::logic_error(
-                "ICU Loop window exceeds prior functional instructions");
-        }
-        last_trace_.issue_pc = iq_pcs_.front();
-        iq_.pop_front();
-        iq_pcs_.pop_front();
-        loop_window_pcs_.assign(
-            static_history_pcs_.end() - control.window_size,
-            static_history_pcs_.end());
-        loop_rounds_remaining_ = control.count;
-        loop_window_index_ = 0;
-        loop_interval_ = control.interval;
-        loop_cooldown_ = 0;
-        loop_address_stride_ = control.address_stride;
-        loop_round_index_ = 1;
-        return tick_loop();
-    }
-
-    std::optional<FuncInstruction> tick_loop()
-    {
-        if (loop_cooldown_ > 0) {
-            --loop_cooldown_;
-            last_trace_.action = IcuQueueAction::LoopWait;
-            return std::nullopt;
-        }
-        auto result = detail::apply_icu_repeat_stride(
-            std::get<FuncInstruction>(
-                read_imem(loop_window_pcs_[loop_window_index_])),
-            loop_address_stride_,
-            loop_round_index_);
-        last_trace_.issue_pc = loop_window_pcs_[loop_window_index_];
-        last_trace_.action = IcuQueueAction::LoopIssue;
-        last_dispatched_ = result;
-        last_dispatched_pc_ = loop_window_pcs_[loop_window_index_];
-        ++issued_count_;
-        ++loop_window_index_;
-        if (loop_window_index_ == loop_window_pcs_.size()) {
-            --loop_rounds_remaining_;
-            loop_window_index_ = 0;
-            ++loop_round_index_;
-            if (loop_rounds_remaining_ > 0) {
-                loop_cooldown_ = loop_interval_ - loop_window_pcs_.size();
-            }
-        }
-        return result;
-    }
-
     std::vector<std::optional<Entry>> imem_{};
     std::deque<Entry> iq_{};
     std::deque<std::size_t> iq_pcs_{};
@@ -1169,13 +1391,15 @@ private:
         LaterMacroIssue> active_macros_{};
     std::size_t macro_remaining_points_{0};
     std::size_t peak_active_macros_{0};
+    std::priority_queue<ActiveStreamNd,
+        std::vector<ActiveStreamNd>, LaterStreamNdIssue>
+        active_stream_nd_{};
+    std::size_t stream_nd_remaining_points_{0};
     std::optional<IcuSynchronizedInstruction<FuncInstruction>>
         synchronized_instruction_{};
     std::size_t synchronized_remaining_{0};
     std::size_t synchronized_index_{0};
     bool synchronized_waiting_{false};
-    std::deque<std::size_t> static_history_pcs_{};
-    std::vector<std::size_t> loop_window_pcs_{};
     std::optional<std::size_t> last_dispatched_pc_{};
     std::size_t nop_remaining_{0};
     std::size_t repeat_remaining_{0};
@@ -1188,12 +1412,6 @@ private:
     std::size_t repeat_2d_inner_{0};
     std::size_t repeat_2d_outer_{0};
     std::size_t repeat_2d_cooldown_{0};
-    std::size_t loop_rounds_remaining_{0};
-    std::size_t loop_window_index_{0};
-    std::size_t loop_interval_{1};
-    std::size_t loop_cooldown_{0};
-    std::int64_t loop_address_stride_{0};
-    std::size_t loop_round_index_{0};
     std::size_t notification_tokens_{0};
     std::deque<std::size_t> notification_cycles_{};
     std::deque<TaggedNotification> synchronized_notifications_{};

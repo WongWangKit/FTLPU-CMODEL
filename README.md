@@ -184,5 +184,7 @@ an MXM-local accumulator and red for final `stream+clear` operations.
 - [JSON hardware configuration guide (Chinese)](docs/hardware_configuration.zh-CN.md)
 - [Architecture reference](docs/architecture.md)
 - [中文架构说明](docs/architecture.zh-CN.md)
+- [MEM ICU N-D stream descriptor](docs/icu_mem_stream_nd.md)
+- [MXM ICU N-D stream descriptor](docs/icu_mxm_stream_nd.md)
 - [Attention pipeline optimization study](docs/attention_pipeline_optimization.md)
 - [Editable topology diagram](docs/FTLPU.drawio)

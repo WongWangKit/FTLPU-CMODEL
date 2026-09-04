@@ -6,6 +6,10 @@
 - Markdown design notes remain directly under `docs/`.
 - `c2c_shared_streams.md` and `c2c_shared_streams.zh-CN.md` describe the
   default C2C RX -> ordinary SR -> MEM Write path.
+- `icu_vxm_stream_nd.md` and `icu_vxm_stream_nd.zh-CN.md` describe the merged
+  VXM packet and N-D launch domain.
+- `icu_sxm_tile_program.md` and `icu_sxm_tile_program.zh-CN.md` describe the
+  coarse transpose/permute tile program.
 
 Generated files keep stable names so they can be regenerated in place. For
 example, serve the repository and open:
