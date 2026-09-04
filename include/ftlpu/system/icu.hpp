@@ -308,6 +308,13 @@ public:
             schedule, std::move(instruction));
     }
 
+    void enqueue_mem_slice_program(
+        std::size_t column, IcuMemSliceProgram program)
+    {
+        check_mem_queue(column);
+        mem_queues_[column].push_mem_slice_program(std::move(program));
+    }
+
     void enqueue_c2c_mem_control(
         std::size_t queue, IcuControlInstruction instruction)
     {

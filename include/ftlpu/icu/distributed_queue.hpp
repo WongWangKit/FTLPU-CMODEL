@@ -38,6 +38,27 @@ struct IcuStreamNdInstruction {
 };
 
 template <typename FuncInstruction>
+struct IcuStreamProgramBodyEntry {
+    std::size_t cycle_offset{0};
+    std::array<std::int64_t, IcuStreamNdSchedule::kMaxRank>
+        operand_strides{0, 0, 0};
+    FuncInstruction instruction{};
+};
+
+// One queue-local launch domain shared by a short functional-unit program.
+// Each body entry has its own issue offset and affine operand induction.
+template <typename FuncInstruction>
+struct IcuStreamProgramInstruction {
+    static constexpr std::size_t kMaxBodyEntries = 16;
+
+    IcuStreamNdSchedule schedule{};
+    std::vector<IcuStreamProgramBodyEntry<FuncInstruction>> body{};
+};
+
+using IcuMemSliceProgramEntry = IcuStreamProgramBodyEntry<MemInstruction>;
+using IcuMemSliceProgram = IcuStreamProgramInstruction<MemInstruction>;
+
+template <typename FuncInstruction>
 struct IcuSynchronizedInstruction {
     std::size_t count{0};
     std::size_t synchronization_tag{0};
@@ -50,6 +71,7 @@ template <typename FuncInstruction>
 using IqEntry = std::variant<IcuControlInstruction, FuncInstruction,
     IcuMacroInstruction<FuncInstruction>,
     IcuStreamNdInstruction<FuncInstruction>,
+    IcuStreamProgramInstruction<FuncInstruction>,
     IcuSynchronizedInstruction<FuncInstruction>>;
 
 struct IcuProgramDescriptor {
@@ -73,6 +95,8 @@ enum class IcuQueueAction : std::uint8_t {
     MacroWait,
     MemStreamNdIssue,
     MemStreamNdWait,
+    MemSliceProgramIssue,
+    MemSliceProgramWait,
     MxmStreamNdIssue,
     MxmStreamNdWait,
     VxmStreamNdIssue,
@@ -432,6 +456,19 @@ public:
                 IcuStreamNdInstruction<FuncInstruction>>,
                 IcuStreamNdInstruction<FuncInstruction> {
                     schedule, std::move(instruction)}});
+        }
+    }
+
+    void push_mem_slice_program(IcuMemSliceProgram program)
+    {
+        if constexpr (!std::is_same_v<FuncInstruction, MemInstruction>) {
+            throw std::invalid_argument(
+                "MEM_SLICE_PROGRAM is valid only on a MEM ICU queue");
+        } else {
+            validate_stream_program(program);
+            append_program(Entry {std::in_place_type<
+                IcuStreamProgramInstruction<FuncInstruction>>,
+                std::move(program)});
         }
     }
 
@@ -814,7 +851,10 @@ private:
         }
         if (!active_stream_nd_.empty()
             || (!iq_.empty() && std::holds_alternative<
-                IcuStreamNdInstruction<FuncInstruction>>(iq_.front())))
+                IcuStreamNdInstruction<FuncInstruction>>(iq_.front()))
+            || (!iq_.empty() && std::holds_alternative<
+                IcuStreamProgramInstruction<FuncInstruction>>(
+                    iq_.front())))
             return tick_stream_nd();
         if (synchronized_instruction_.has_value()
             || (!iq_.empty() && std::holds_alternative<
@@ -1144,6 +1184,7 @@ private:
         std::size_t pc{0};
         std::array<std::size_t, IcuStreamNdSchedule::kMaxRank>
             indices{};
+        bool mem_slice_program{false};
 
         std::size_t issue_cycle() const noexcept
         {
@@ -1179,6 +1220,41 @@ private:
         }
     };
 
+    static void validate_stream_program(
+        const IcuStreamProgramInstruction<FuncInstruction>& program)
+    {
+        if constexpr (!std::is_same_v<FuncInstruction, MemInstruction>) {
+            throw std::invalid_argument(
+                "MEM_SLICE_PROGRAM is valid only on a MEM ICU queue");
+        } else {
+            if (program.body.empty()
+                || program.body.size()
+                    > IcuMemSliceProgram::kMaxBodyEntries)
+                throw std::invalid_argument(
+                    "MEM_SLICE_PROGRAM body must contain between one and sixteen entries");
+            if (program.schedule.induction_target
+                    != IcuInductionTarget::None
+                || std::any_of(program.schedule.operand_strides.begin(),
+                    program.schedule.operand_strides.end(),
+                    [](std::int64_t stride) { return stride != 0; }))
+                throw std::invalid_argument(
+                    "MEM_SLICE_PROGRAM launch domain cannot carry operand induction");
+            validate_stream_nd_schedule(program.schedule);
+            for (const auto& entry : program.body) {
+                if (entry.cycle_offset
+                    > std::numeric_limits<std::size_t>::max()
+                        - program.schedule.start_cycle)
+                    throw std::overflow_error(
+                        "MEM_SLICE_PROGRAM body start cycle overflows");
+                auto schedule = program.schedule;
+                schedule.start_cycle += entry.cycle_offset;
+                schedule.operand_strides = entry.operand_strides;
+                schedule.induction_target = IcuInductionTarget::MemAddress;
+                validate_stream_nd_schedule(schedule);
+            }
+        }
+    }
+
     struct LaterStreamNdIssue {
         bool operator()(const ActiveStreamNd& lhs,
             const ActiveStreamNd& rhs) const noexcept
@@ -1207,7 +1283,42 @@ private:
                     points *= stream->schedule.counts[dimension];
                 stream_nd_remaining_points_ += points;
                 active_stream_nd_.push(ActiveStreamNd {
-                    std::move(*stream), iq_pcs_.front(), {}});
+                    std::move(*stream), iq_pcs_.front(), {}, false});
+                iq_.pop_front();
+                iq_pcs_.pop_front();
+            } else if (auto* program = std::get_if<
+                           IcuStreamProgramInstruction<FuncInstruction>>(
+                           &iq_.front())) {
+                validate_stream_program(*program);
+                std::size_t firstIssue =
+                    std::numeric_limits<std::size_t>::max();
+                for (const auto& entry : program->body)
+                    firstIssue = std::min(firstIssue,
+                        program->schedule.start_cycle
+                            + entry.cycle_offset);
+                if (cycle_ > firstIssue) {
+                    std::ostringstream os;
+                    os << "MEM_SLICE_PROGRAM missed first issue cycle "
+                       << firstIssue << " at cycle " << cycle_;
+                    throw StaticScheduleError(os.str());
+                }
+                std::size_t points = 1;
+                for (std::size_t dimension = 0;
+                     dimension < program->schedule.rank; ++dimension)
+                    points *= program->schedule.counts[dimension];
+                const auto pc = iq_pcs_.front();
+                for (auto& entry : program->body) {
+                    auto schedule = program->schedule;
+                    schedule.start_cycle += entry.cycle_offset;
+                    schedule.operand_strides = entry.operand_strides;
+                    schedule.induction_target =
+                        IcuInductionTarget::MemAddress;
+                    stream_nd_remaining_points_ += points;
+                    active_stream_nd_.push(ActiveStreamNd {
+                        IcuStreamNdInstruction<FuncInstruction> {
+                            schedule, std::move(entry.instruction)},
+                        pc, {}, true});
+                }
                 iq_.pop_front();
                 iq_pcs_.pop_front();
             } else if (!active_stream_nd_.empty()) {
@@ -1225,7 +1336,10 @@ private:
         if (active_stream_nd_.empty()
             || active_stream_nd_.top().issue_cycle() > cycle_) {
             last_trace_.action = isMem
-                ? IcuQueueAction::MemStreamNdWait
+                ? (!active_stream_nd_.empty()
+                            && active_stream_nd_.top().mem_slice_program
+                        ? IcuQueueAction::MemSliceProgramWait
+                        : IcuQueueAction::MemStreamNdWait)
                 : isVxm ? IcuQueueAction::VxmStreamNdWait
                 : isSxm ? IcuQueueAction::SxmTileProgramWait
                         : IcuQueueAction::MxmStreamNdWait;
@@ -1248,7 +1362,9 @@ private:
         last_dispatched_pc_ = due.pc;
         last_trace_.issue_pc = due.pc;
         last_trace_.action = isMem
-            ? IcuQueueAction::MemStreamNdIssue
+            ? (due.mem_slice_program
+                    ? IcuQueueAction::MemSliceProgramIssue
+                    : IcuQueueAction::MemStreamNdIssue)
             : isVxm ? IcuQueueAction::VxmStreamNdIssue
             : isSxm ? IcuQueueAction::SxmTileProgramIssue
                     : IcuQueueAction::MxmStreamNdIssue;

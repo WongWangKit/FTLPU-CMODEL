@@ -10,6 +10,8 @@
   VXM packet and N-D launch domain.
 - `icu_sxm_tile_program.md` and `icu_sxm_tile_program.zh-CN.md` describe the
   coarse transpose/permute tile program.
+- `icu_mem_slice_program.md` and `icu_mem_slice_program.zh-CN.md` describe the
+  multi-operation program executed by one physical MEM slice ICU.
 
 Generated files keep stable names so they can be regenerated in place. For
 example, serve the repository and open:

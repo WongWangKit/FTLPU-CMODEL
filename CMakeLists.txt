@@ -103,6 +103,8 @@ ftlpu_add_test(icu_macro_schedule_test tests/unit/icu/macro_schedule_test.cpp
     unit.icu.macro_schedule unit icu fast)
 ftlpu_add_test(icu_mem_stream_nd_test tests/unit/icu/mem_stream_nd_test.cpp
     unit.icu.mem_stream_nd unit icu fast)
+ftlpu_add_test(icu_mem_slice_program_test tests/unit/icu/mem_slice_program_test.cpp
+    unit.icu.mem_slice_program unit icu fast)
 ftlpu_add_test(icu_mxm_stream_nd_test tests/unit/icu/mxm_stream_nd_test.cpp
     unit.icu.mxm_stream_nd unit icu mxm fast)
 ftlpu_add_test(icu_vxm_stream_nd_test tests/unit/icu/vxm_stream_nd_test.cpp
