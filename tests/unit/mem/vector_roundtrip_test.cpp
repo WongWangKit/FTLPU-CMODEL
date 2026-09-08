@@ -1,26 +1,16 @@
-#include "ftlpu/mem/tile_array.hpp"
 #include "ftlpu/core/topology.hpp"
+#include "ftlpu/core/stream_port.hpp"
+#include "ftlpu/mem/mem_array.hpp"
 
 #include <array>
 #include <cassert>
 #include <cstdint>
-#include <iomanip>
 #include <memory>
 #include <random>
 #include <sstream>
 #include <string>
 
 namespace {
-
-std::string hex_bytes(const std::array<std::uint8_t, ftlpu::hw::kLanesPerTile>& bytes)
-{
-    std::ostringstream os;
-    os << std::hex << std::setfill('0');
-    for (const auto byte : bytes) {
-        os << std::setw(2) << static_cast<unsigned>(byte);
-    }
-    return os.str();
-}
 
 std::array<std::uint8_t, ftlpu::hw::kLanesPerTile> tile_vector(std::size_t tile)
 {
@@ -50,7 +40,13 @@ int main()
     const auto read_cycle = store_cycle + kReadDelayCycles;
     const auto last_output_cycle = read_cycle + ftlpu::hw::kTileRows + ftlpu::hw::kStreamRegisterColumns - target_sreg;
 
-    auto model = std::make_unique<ftlpu::TileArrayModel>();
+    auto mem = std::make_unique<ftlpu::MemArrayModel>();
+    auto fabric = std::make_unique<ftlpu::StreamRegisterFabric>(
+        ftlpu::hw::kSystemStreamRegisterColumns);
+    ftlpu::StreamOutputPort input(
+        *fabric, 0, ftlpu::StreamDirection::East,
+        "vector roundtrip test input");
+    std::array<bool, ftlpu::hw::kTileRows> load_seen{};
     std::ostringstream log;
 
     log << "scenario seed=0x46544c50 stream=E" << stream
@@ -59,26 +55,41 @@ int main()
         << " read_delay=" << kReadDelayCycles << '\n';
 
     for (std::size_t cycle = 0; cycle <= last_output_cycle; ++cycle) {
+        fabric->begin_cycle();
         if (cycle < ftlpu::hw::kTileRows) {
             const auto bytes = tile_vector(cycle);
-            for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-                model->set_east_stream_input(cycle, lane, stream, {bytes[lane], lane == ftlpu::hw::kLanesPerTile - 1});
-            }
+            input.write_payload_segment(cycle, stream, bytes);
         }
 
         if (cycle == store_cycle) {
-            model->enqueue_instruction(mem_slice, ftlpu::MemInstruction::Write(kSramAddress, stream));
+            mem->enqueue_instruction(
+                mem_slice, ftlpu::MemInstruction::Write(kSramAddress, stream));
         }
 
         if (cycle == read_cycle) {
-            model->enqueue_instruction(mem_slice, ftlpu::MemInstruction::Read(kSramAddress, stream));
+            mem->enqueue_instruction(
+                mem_slice, ftlpu::MemInstruction::Read(kSramAddress, stream));
         }
 
-        model->tick(log);
+        mem->evaluate(*fabric);
+        for (const auto& transfer : mem->executed_transfers()) {
+            if (transfer.kind
+                != ftlpu::MemArrayModel::MemTransfer::Kind::LoadSramToStream) {
+                continue;
+            }
+            assert(transfer.mem_slice == mem_slice);
+            assert(transfer.bytes == tile_vector(transfer.tile));
+            load_seen[transfer.tile] = true;
+        }
+        fabric->stage_linear_links();
+        fabric->commit_cycle();
+        mem->log_cycle(log);
 
         if (cycle == store_cycle) {
             for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-                assert(!model->east_register(0, lane, target_sreg, stream).has_value());
+                assert(!fabric->cell(
+                    target_sreg, 0, lane,
+                    ftlpu::StreamId::East(stream)).has_value());
             }
         }
     }
@@ -86,21 +97,26 @@ int main()
     for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
         const auto bytes = tile_vector(tile);
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
-            assert(model->sram_byte(mem_slice, tile, kSramAddress + lane) == bytes[lane]);
+            assert(mem->sram_lane_byte(
+                       mem_slice, tile, kSramAddress, lane)
+                == bytes[lane]);
         }
+        assert(load_seen[tile]);
     }
 
-    const auto last_tile_bytes = tile_vector(ftlpu::hw::kTileRows - 1);
-    const auto last_tile_hex = hex_bytes(last_tile_bytes);
     const auto text = log.str();
 
     assert(text.find("scenario seed=0x46544c50") != std::string::npos);
-    assert(text.find("c" + std::to_string(mem_slice) + ".t0=Write(a=128,s=" + std::to_string(stream) + ")") != std::string::npos);
-    assert(text.find("c" + std::to_string(mem_slice) + ".t0=Read(a=128,s=" + std::to_string(stream) + ")") != std::string::npos);
-    assert(text.find("store E" + std::to_string(stream) + " addr=128 bytes=0x") != std::string::npos);
-    assert(text.find("load E" + std::to_string(stream) + " addr=128 bytes=0x") != std::string::npos);
-    assert(text.find("tile " + std::to_string(ftlpu::hw::kTileRows - 1) + ":") != std::string::npos);
-    assert(text.find("sreg 11: E" + std::to_string(stream) + "=0x" + last_tile_hex) != std::string::npos);
+    assert(text.find("c" + std::to_string(mem_slice)
+        + ".b0.t0=Write(a=128,s=" + std::to_string(stream) + ")")
+        != std::string::npos);
+    assert(text.find("c" + std::to_string(mem_slice)
+        + ".b0.t0=Read(a=128,s=" + std::to_string(stream) + ")")
+        != std::string::npos);
+    assert(text.find("store E" + std::to_string(stream)
+        + " addr=128 tag=") != std::string::npos);
+    assert(text.find("load E" + std::to_string(stream)
+        + " addr=128 tag=") != std::string::npos);
 
     return 0;
 }

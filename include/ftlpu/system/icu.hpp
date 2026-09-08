@@ -6,7 +6,7 @@
 #include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/icu/distributed_queue.hpp"
 #include "ftlpu/icu/location.hpp"
-#include "ftlpu/mem/tile_array.hpp"
+#include "ftlpu/mem/mem_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
 #include "ftlpu/sxm/slice.hpp"
 #include "ftlpu/vxm/compact_instruction.hpp"
@@ -847,7 +847,7 @@ public:
         ++cycle_;
     }
     void dispatch(
-        std::array<TileArrayModel, hw::kHemispheres>& mems,
+        std::array<MemArrayModel, hw::kHemispheres>& mems,
         VxmSlice& vxm,
         std::array<SxmSlice, hw::kHemispheres>& sxms,
         std::array<Mxm, kMxmQueues>& mxms,

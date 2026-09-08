@@ -56,8 +56,6 @@ ftlpu_add_test(mem_slice_test tests/unit/mem/slice_test.cpp
     unit.mem.slice unit mem fast)
 ftlpu_add_test(mem_array_separated_test tests/unit/mem/mem_array_test.cpp
     unit.mem.array unit mem fast)
-ftlpu_add_test(tile_array_test tests/unit/mem/tile_array_test.cpp
-    unit.mem.tile_array unit mem fast)
 ftlpu_add_test(vector_roundtrip_test tests/unit/mem/vector_roundtrip_test.cpp
     unit.mem.vector_roundtrip unit mem fast)
 
@@ -180,10 +178,6 @@ set_tests_properties(
     PROPERTIES RUN_SERIAL TRUE
 )
 
-ftlpu_add_demo(northbound_pipeline_demo examples/core/northbound_pipeline_demo.cpp)
-ftlpu_add_demo(tile_array_trace_demo examples/mem/tile_array_trace_demo.cpp)
-ftlpu_add_demo(vector_roundtrip_demo examples/mem/vector_roundtrip_demo.cpp)
 ftlpu_add_demo(mxm_control_trace_demo examples/mxm/control_trace_demo.cpp)
-ftlpu_add_demo(mem_mxm_trace_demo examples/mxm/mem_mxm_trace_demo.cpp)
 ftlpu_add_demo(sxm_chain_demo examples/sxm/chain_demo.cpp)
 ftlpu_add_demo(stream_topology_api_demo examples/system/stream_topology_api_demo.cpp)

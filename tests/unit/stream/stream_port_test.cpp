@@ -16,6 +16,8 @@ int main()
         fabric, 0, ftlpu::StreamDirection::East, "producer");
     constexpr auto kTile = ftlpu::hw::kTileRows - 1;
     producer.write_payload_segment(kTile, 7, payload, 123);
+    producer.write_cell(
+        0, 0, 9, ftlpu::StreamCell::Valid(0xa5, true, 456));
     fabric.commit_cycle();
 
     fabric.begin_cycle();
@@ -27,6 +29,12 @@ int main()
     const auto segment_a = consumer_a.consume_segment(kTile, 7);
     assert(consumer_b.segment_valid(kTile, 7));
     const auto segment_b = consumer_b.consume_segment(kTile, 7);
+    const auto cell_a = consumer_a.consume_cell(0, 0, 9);
+    const auto cell_b = consumer_b.consume_cell(0, 0, 9);
+    assert(cell_a.valid && cell_a.data == 0xa5);
+    assert(cell_a.last && cell_a.vector_tag == 456);
+    assert(cell_b.data == cell_a.data);
+    assert(cell_b.vector_tag == cell_a.vector_tag);
     for (std::size_t lane = 0; lane < segment_a.size(); ++lane) {
         assert(segment_a[lane].data == lane);
         assert(segment_a[lane].vector_tag == 123);
@@ -38,5 +46,6 @@ int main()
 
     // Broadcast consumption still suppresses passive forwarding once.
     assert(!fabric.cell(1, kTile, 0, ftlpu::StreamId::East(7)).valid);
+    assert(!fabric.cell(1, 0, 0, ftlpu::StreamId::East(9)).valid);
     return 0;
 }

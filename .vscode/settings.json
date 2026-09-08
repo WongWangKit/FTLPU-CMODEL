@@ -1,0 +1,6 @@
+{
+    "C_Cpp.default.compilerPath": "D:\\Visual Studio\\Visual Studio 2022\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\cl.exe",
+    "C_Cpp.default.cppStandard": "c++20",
+    "C_Cpp.default.intelliSenseMode": "windows-msvc-x64",
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
+}

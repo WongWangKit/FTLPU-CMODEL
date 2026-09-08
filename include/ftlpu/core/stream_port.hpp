@@ -48,6 +48,20 @@ public:
         return fabric_.cell(column_, tile, lane, stream_id(stream_index));
     }
 
+    StreamCell consume_cell(
+        std::size_t tile,
+        std::size_t lane,
+        std::size_t stream_index)
+    {
+        const auto id = stream_id(stream_index);
+        const auto result = fabric_.cell(column_, tile, lane, id);
+        if (result.valid) {
+            fabric_.consume(
+                column_, tile, lane, id, consumer_.c_str());
+        }
+        return result;
+    }
+
     StreamTileSegment peek_segment(
         std::size_t tile,
         std::size_t stream_index) const
@@ -111,6 +125,17 @@ public:
     StreamDirection direction() const noexcept
     {
         return direction_;
+    }
+
+    void write_cell(
+        std::size_t tile,
+        std::size_t lane,
+        std::size_t stream_index,
+        StreamCell value)
+    {
+        fabric_.stage_write(
+            column_, tile, lane, stream_id(stream_index), value,
+            producer_.c_str());
     }
 
     void write_segment(

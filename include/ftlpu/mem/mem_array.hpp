@@ -28,48 +28,17 @@ public:
     using BoundaryColumns =
         std::array<std::size_t, hw::kMemBoundaryStreamRegisterColumns>;
 
-    enum class OutputPlacement {
-        // A MEM group is located between boundary g (west) and g+1 (east).
-        // Incoming east streams are consumed at g and newly produced east
-        // streams appear at g+1; west streams use the mirrored mapping.
-        DownstreamBoundary,
-
-        // Compatibility with the original TileArrayModel, which injected a
-        // Read at the same upstream boundary used by Write.  Whole-system
-        // integration should not select this mode.
-        LegacyInputBoundary,
-    };
-
     static MemStreamPortMap BetweenBoundaries()
     {
         BoundaryColumns columns{};
         for (std::size_t i = 0; i < columns.size(); ++i) {
             columns[i] = i;
         }
-        return MemStreamPortMap(columns, OutputPlacement::DownstreamBoundary);
+        return MemStreamPortMap(columns);
     }
 
-    static MemStreamPortMap LegacyLocalLinear()
-    {
-        BoundaryColumns columns{};
-        for (std::size_t i = 0; i < columns.size(); ++i) {
-            columns[i] = i;
-        }
-        return MemStreamPortMap(columns, OutputPlacement::LegacyInputBoundary);
-    }
-
-    // Retained as a source-compatible alias.  New code should use the
-    // semantically explicit BetweenBoundaries() factory.
-    static MemStreamPortMap LocalLinear()
-    {
-        return BetweenBoundaries();
-    }
-
-    explicit MemStreamPortMap(
-        BoundaryColumns columns,
-        OutputPlacement output_placement = OutputPlacement::DownstreamBoundary)
+    explicit MemStreamPortMap(BoundaryColumns columns)
         : columns_(std::move(columns))
-        , output_placement_(output_placement)
     {
     }
 
@@ -92,23 +61,10 @@ public:
         std::size_t mem_slice,
         StreamDirection direction) const
     {
-        if (output_placement_ == OutputPlacement::LegacyInputBoundary) {
-            return input_column(mem_slice, direction);
-        }
-
         const auto group = group_for(mem_slice);
         return direction == StreamDirection::East
             ? columns_[group + 1]
             : columns_[group];
-    }
-
-    // Compatibility for code that treated every MEM access as an input-side
-    // attachment.  Prefer input_column()/output_column() in new code.
-    std::size_t attachment_column(
-        std::size_t mem_slice,
-        StreamDirection direction) const
-    {
-        return input_column(mem_slice, direction);
     }
 
     void validate_for(const StreamRegisterFabric& fabric) const
@@ -130,7 +86,6 @@ private:
     }
 
     BoundaryColumns columns_{};
-    OutputPlacement output_placement_{OutputPlacement::DownstreamBoundary};
 };
 
 class MemArrayModel {

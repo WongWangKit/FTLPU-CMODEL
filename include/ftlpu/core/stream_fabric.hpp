@@ -278,7 +278,7 @@ public:
         }
     }
 
-    // Convenience for the legacy MEM-only 12-column linear path.
+    // Stage the default adjacent-column links across the complete fabric.
     void stage_linear_links()
     {
         require_open_cycle();

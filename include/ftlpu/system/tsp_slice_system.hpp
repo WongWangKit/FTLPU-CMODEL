@@ -5,7 +5,8 @@
 #include "ftlpu/c2c/slice.hpp"
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/hemisphere.hpp"
-#include "ftlpu/mem/tile_array.hpp"
+#include "ftlpu/core/stream_port.hpp"
+#include "ftlpu/mem/mem_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
 #include "ftlpu/sxm/slice.hpp"
 #include "ftlpu/system/hardware_configuration.hpp"
@@ -16,6 +17,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <iomanip>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
@@ -47,8 +49,12 @@ public:
         SystemHardwareConfiguration hardware = {})
         : hardware_configuration_(hardware)
         , mems_ {
-            TileArrayModel(MemStreamPortMap::BetweenBoundaries()),
-            TileArrayModel(MemStreamPortMap::BetweenBoundaries()),
+            MemArrayModel(MemStreamPortMap::BetweenBoundaries()),
+            MemArrayModel(MemStreamPortMap::BetweenBoundaries()),
+        }
+        , streams_ {
+            StreamRegisterFabric(hw::kSystemStreamRegisterColumns),
+            StreamRegisterFabric(hw::kSystemStreamRegisterColumns),
         }
         , sxms_ {
             SxmSlice(make_sxm_port_map()),
@@ -275,7 +281,23 @@ public:
     const StreamRegisterFabric& stream_fabric(
         Hemisphere hemisphere) const noexcept
     {
-        return mems_[hemisphere_index(hemisphere)].stream_fabric();
+        return streams_[hemisphere_index(hemisphere)];
+    }
+
+    StreamRegisterFabric& stream_fabric(
+        Hemisphere hemisphere) noexcept
+    {
+        return streams_[hemisphere_index(hemisphere)];
+    }
+
+    const MemArrayModel& mem_array(Hemisphere hemisphere) const noexcept
+    {
+        return mems_[hemisphere_index(hemisphere)];
+    }
+
+    MemArrayModel& mem_array(Hemisphere hemisphere) noexcept
+    {
+        return mems_[hemisphere_index(hemisphere)];
     }
 
     Mxm& mxm_unit(std::size_t mxm)
@@ -335,6 +357,7 @@ public:
     {
         require_phase(CyclePhase::Idle, "resetting execution state");
         for (auto& mem : mems_) mem.reset_execution_state();
+        for (auto& streams : streams_) streams.reset();
         vxm_.reset();
         for (auto& sxm : sxms_) sxm.reset();
         for (auto& mxm : mxms_) mxm.reset();
@@ -383,6 +406,9 @@ private:
         if (sinks.system != nullptr) {
             *sinks.system << "system cycle " << cycle_ << '\n';
         }
+        for (auto& streams : streams_) {
+            streams.begin_cycle();
+        }
         phase_ = CyclePhase::Begun;
     }
 
@@ -429,31 +455,27 @@ private:
         require_phase(CyclePhase::VxmEvaluated, "committing MEM and SXM");
         for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
             try {
+                auto& fabric = streams_[hemisphere];
                 sxms_[hemisphere].set_trace_enabled(sinks.sxm != nullptr);
                 if (sinks.mem != nullptr) {
                     *sinks.mem << "mem." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
                                << " cycle " << cycle_ << '\n';
-                    if (c2cs_[hemisphere].has_value()) {
-                        const auto evaluate = [this, hemisphere](StreamRegisterFabric& fabric) {
-                            evaluate_c2c(hemisphere, fabric);
-                        };
-                        mems_[hemisphere].tick(
-                            sxms_[hemisphere], evaluate, *sinks.mem,
-                            sinks.mem_log_tile);
-                    } else {
-                        mems_[hemisphere].tick(
-                            sxms_[hemisphere], *sinks.mem,
-                            sinks.mem_log_tile);
-                    }
-                } else {
-                    if (c2cs_[hemisphere].has_value()) {
-                        const auto evaluate = [this, hemisphere](StreamRegisterFabric& fabric) {
-                            evaluate_c2c(hemisphere, fabric);
-                        };
-                        mems_[hemisphere].tick(sxms_[hemisphere], evaluate);
-                    } else {
-                        mems_[hemisphere].tick(sxms_[hemisphere]);
-                    }
+                }
+
+                mems_[hemisphere].evaluate(
+                    fabric, sinks.mem != nullptr);
+                sxms_[hemisphere].evaluate(fabric);
+                if (c2cs_[hemisphere].has_value()) {
+                    evaluate_c2c(hemisphere, fabric);
+                }
+                fabric.stage_linear_links();
+                fabric.commit_cycle();
+
+                if (sinks.mem != nullptr) {
+                    mems_[hemisphere].log_cycle(
+                        *sinks.mem, sinks.mem_log_tile);
+                    log_streams(
+                        *sinks.mem, fabric, sinks.mem_log_tile);
                 }
             } catch (const std::exception& error) {
                 throw std::logic_error(
@@ -554,18 +576,6 @@ private:
         return mxm % kMxmCountPerHemisphere;
     }
 
-    static const TileArrayModel::StreamSlot& mem_edge_stream(
-        const TileArrayModel& mem,
-        std::size_t tile,
-        std::size_t lane,
-        std::size_t stream)
-    {
-        if (stream < hw::kEastStreams) {
-            return mem.east_register(tile, lane, 0, stream);
-        }
-        return mem.west_register(tile, lane, 0, stream - hw::kEastStreams);
-    }
-
     void tick_mxm_controls(LogSinks sinks)
     {
         for (std::size_t mxm = 0; mxm < kMxmCount; ++mxm) {
@@ -599,16 +609,31 @@ private:
     {
         for (std::size_t mxm = 0; mxm < kMxmCount; ++mxm) {
             const auto hemisphere = hemisphere_index(mxm_hemisphere(mxm));
+            auto input = StreamInputPort(
+                streams_[hemisphere],
+                hw::kMxmBoundaryStreamRegisterColumn,
+                StreamDirection::East,
+                "MXM" + std::to_string(mxm) + " datapath");
+            auto output = StreamOutputPort(
+                streams_[hemisphere],
+                hw::kMxmBoundaryStreamRegisterColumn,
+                StreamDirection::West,
+                "MXM" + std::to_string(mxm) + " datapath");
             mxms_[mxm].tick_datapath(
-                mems_[hemisphere], local_mxm_index(mxm), sinks.mxm, sinks.mxm_log_tile);
+                input, output, local_mxm_index(mxm), sinks.mxm,
+                sinks.mxm_log_tile);
         }
     }
 
     MxmControlSlice::WeightInput collect_mxm_weight_input_from_streams(std::size_t mxm, std::size_t tile)
     {
-        constexpr auto kTargetSreg = hw::kMxmBoundaryStreamRegisterColumn;
         auto input = MxmControlSlice::WeightInput {};
         const auto hemisphere = hemisphere_index(mxm_hemisphere(mxm));
+        auto streams = StreamInputPort(
+            streams_[hemisphere],
+            hw::kMxmBoundaryStreamRegisterColumn,
+            StreamDirection::East,
+            "MXM" + std::to_string(mxm) + " weight input");
         const auto& instruction = mxms_[mxm].control().instruction_at(tile);
         if (!instruction.has_value()
             || instruction->opcode != MxmControlOpcode::IW) {
@@ -624,12 +649,8 @@ private:
                 for (std::size_t lane = 0;
                      lane < hw::kLanesPerTile;
                      ++lane) {
-                    const auto word =
-                        mems_[hemisphere].consume_east_register(
-                            tile,
-                            lane,
-                            kTargetSreg,
-                            stream_base);
+                    const auto word = streams.consume_cell(
+                        tile, lane, stream_base);
                     if (!word.has_value()) {
                         throw std::logic_error(
                             "MXM INT8 column IW reached tile before its weight stream arrived at the MXM boundary register");
@@ -649,12 +670,8 @@ private:
                 for (std::size_t column = 0;
                      column < hw::kMxmSupercellColumns;
                      ++column) {
-                    const auto word =
-                        mems_[hemisphere].consume_east_register(
-                            tile,
-                            lane,
-                            kTargetSreg,
-                            stream_base + column);
+                    const auto word = streams.consume_cell(
+                        tile, lane, stream_base + column);
                     if (!word.has_value()) {
                         throw std::logic_error(
                             "MXM INT8 IW reached tile before all eight weight streams arrived at the MXM boundary register"
@@ -685,10 +702,8 @@ private:
                 stream_base + hw::kMxmColumnLoadStreamsPerCycle - 1;
             const auto column = instruction->weight_inner_column;
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                const auto low_word = mems_[hemisphere].consume_east_register(
-                    tile, lane, kTargetSreg, low);
-                const auto high_word = mems_[hemisphere].consume_east_register(
-                    tile, lane, kTargetSreg, high);
+                const auto low_word = streams.consume_cell(tile, lane, low);
+                const auto high_word = streams.consume_cell(tile, lane, high);
                 if (!low_word.has_value() || !high_word.has_value()) {
                     throw std::logic_error(
                         "MXM column IW reached tile before both 16-bit weight streams arrived at the MXM boundary register");
@@ -707,8 +722,10 @@ private:
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             for (std::size_t column = 0; column < hw::kMxmSupercellColumns; ++column) {
                 const auto low_stream = stream_base + column * hw::kMxmWeightBytesPerValue;
-                const auto low = mems_[hemisphere].consume_east_register(tile, lane, kTargetSreg, low_stream);
-                const auto high = mems_[hemisphere].consume_east_register(tile, lane, kTargetSreg, low_stream + 1);
+                const auto low = streams.consume_cell(
+                    tile, lane, low_stream);
+                const auto high = streams.consume_cell(
+                    tile, lane, low_stream + 1);
                 if (!low.has_value() || !high.has_value()) {
                     throw std::logic_error(
                         "MXM IW reached tile before both 16-bit weight streams arrived at the MXM boundary register");
@@ -742,17 +759,16 @@ private:
             }
 
             const auto source = vxm_.input_group_source(group);
-            const auto& mem = mems_[hemisphere_index(source)];
+            const auto& fabric = streams_[hemisphere_index(source)];
             for (std::size_t lane = 0;
                  lane < hw::kLanesPerTile;
                  ++lane) {
                 for (std::size_t byte = 0;
                      byte < VxmLane::kStreamGroupBytes;
                      ++byte) {
-                    if (!mem.west_register(
-                            tile, lane,
+                    if (!fabric.cell(
                             hw::kMemWestBoundaryStreamRegisterColumn,
-                            base + byte)
+                            tile, lane, StreamId::West(base + byte))
                              .has_value()) {
                         return false;
                     }
@@ -803,7 +819,11 @@ private:
                 }
 
                 const auto source = vxm_.input_group_source(group);
-                auto& mem = mems_[hemisphere_index(source)];
+                auto input = StreamInputPort(
+                    streams_[hemisphere_index(source)],
+                    hw::kMemWestBoundaryStreamRegisterColumn,
+                    StreamDirection::West,
+                    "VXM input");
                 auto values = VxmSlice::InputBuffer::GroupVector {};
                 for (std::size_t lane = 0;
                      lane < hw::kLanesPerTile;
@@ -811,10 +831,8 @@ private:
                     for (std::size_t byte = 0;
                          byte < VxmLane::kStreamGroupBytes;
                          ++byte) {
-                        const auto cell = mem.consume_west_register(
-                            tile, lane,
-                            hw::kMemWestBoundaryStreamRegisterColumn,
-                            base + byte);
+                        const auto cell = input.consume_cell(
+                            tile, lane, base + byte);
                         if (!cell.has_value()) {
                             throw std::logic_error(
                                 "VXM input group became incomplete during MEM-edge capture");
@@ -839,8 +857,12 @@ private:
         for (std::size_t source_index = 0; source_index < hw::kHemispheres; ++source_index) {
             const auto source = static_cast<Hemisphere>(source_index);
             const auto destination_index = source_index ^ 1;
-            auto& destination = mems_[destination_index];
-            const auto& source_mem = mems_[source_index];
+            auto destination = StreamOutputPort(
+                streams_[destination_index],
+                hw::kMemWestBoundaryStreamRegisterColumn,
+                StreamDirection::East,
+                "passive VXM bridge");
+            const auto& source_fabric = streams_[source_index];
             for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
                 for (std::size_t stream = 0; stream < hw::kWestStreams; ++stream) {
                     if (vxm_requires_stream_from(source, tile, stream)) {
@@ -850,24 +872,18 @@ private:
                     auto complete = true;
                     for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                         complete = complete
-                            && source_mem.west_register(
-                                tile, lane,
+                            && source_fabric.cell(
                                 hw::kMemWestBoundaryStreamRegisterColumn,
-                                stream)
+                                tile, lane, StreamId::West(stream))
                                    .has_value();
                     }
                     if (!complete) continue;
 
                     for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                        const auto& cell = source_mem.west_register(
-                            tile, lane,
+                        const auto& cell = source_fabric.cell(
                             hw::kMemWestBoundaryStreamRegisterColumn,
-                            stream);
-                        destination.set_east_stream_input(
-                            tile,
-                            lane,
-                            stream,
-                            TileArrayModel::DataWord {cell->data, cell->last});
+                            tile, lane, StreamId::West(stream));
+                        destination.write_cell(tile, lane, stream, cell);
                     }
                     ++passive_bridge_transfer_counts_[source_index][stream];
                     last_passive_bridge_cycles_[source_index][stream] = cycle_ + 1;
@@ -895,15 +911,19 @@ private:
                 }
                 const auto destination =
                     vxm_.output_stream_destination(output.stream);
-                auto& mem = mems_[hemisphere_index(destination)];
+                auto stream_output = StreamOutputPort(
+                    streams_[hemisphere_index(destination)],
+                    hw::kMemWestBoundaryStreamRegisterColumn,
+                    StreamDirection::East,
+                    "VXM output");
                 for (std::size_t byte = 0; byte < output.byte_count; ++byte) {
                     const auto stream = output.stream + byte;
                     for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                        const auto word = TileArrayModel::DataWord {
-                            output.byte_values[lane][byte],
-                            lane + 1 == hw::kLanesPerTile,
-                        };
-                        mem.set_east_stream_input(tile, lane, stream, word);
+                        stream_output.write_cell(
+                            tile, lane, stream,
+                            StreamCell::Valid(
+                                output.byte_values[lane][byte],
+                                lane + 1 == hw::kLanesPerTile));
                     }
                 }
                 if (sinks.mem != nullptr && (!sinks.mem_log_tile.has_value() || tile == *sinks.mem_log_tile)) {
@@ -911,6 +931,86 @@ private:
                                << " tile " << tile << " stream " << output.stream
                                << " bytes=" << output.byte_count << '\n';
                 }
+            }
+        }
+    }
+
+    static void print_hex_bytes(
+        std::ostream& os,
+        const StreamPayloadTileSegment& bytes)
+    {
+        const auto old_flags = os.flags();
+        const auto old_fill = os.fill();
+        os << std::hex << std::setfill('0');
+        for (const auto byte : bytes) {
+            os << std::setw(2) << static_cast<unsigned>(byte);
+        }
+        os.flags(old_flags);
+        os.fill(old_fill);
+    }
+
+    static bool collect_stream_bytes(
+        const StreamRegisterFabric& fabric,
+        std::size_t tile,
+        std::size_t reg_column,
+        StreamId stream,
+        StreamPayloadTileSegment& bytes)
+    {
+        bool any = false;
+        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+            const auto& slot = fabric.cell(reg_column, tile, lane, stream);
+            bytes[lane] = slot.valid ? slot.data : 0;
+            any = any || slot.valid;
+        }
+        return any;
+    }
+
+    static void log_streams(
+        std::ostream& os,
+        const StreamRegisterFabric& fabric,
+        std::optional<std::size_t> log_tile)
+    {
+        os << "  stream_registers (E/W combined):\n";
+        const auto first_tile = log_tile.value_or(0);
+        const auto end_tile = log_tile.has_value()
+            ? first_tile + 1
+            : hw::kTileRows;
+        for (std::size_t tile = first_tile; tile < end_tile; ++tile) {
+            os << "    tile " << tile << ":\n";
+            for (std::size_t reg = 0; reg < fabric.column_count(); ++reg) {
+                os << "      sreg " << reg << ":";
+                bool any = false;
+
+                for (std::size_t stream = 0;
+                     stream < hw::kEastStreams;
+                     ++stream) {
+                    StreamPayloadTileSegment bytes{};
+                    if (collect_stream_bytes(
+                            fabric, tile, reg, StreamId::East(stream),
+                            bytes)) {
+                        any = true;
+                        os << " E" << stream << "=0x";
+                        print_hex_bytes(os, bytes);
+                    }
+                }
+
+                for (std::size_t stream = 0;
+                     stream < hw::kWestStreams;
+                     ++stream) {
+                    StreamPayloadTileSegment bytes{};
+                    if (collect_stream_bytes(
+                            fabric, tile, reg, StreamId::West(stream),
+                            bytes)) {
+                        any = true;
+                        os << " W" << stream << "=0x";
+                        print_hex_bytes(os, bytes);
+                    }
+                }
+
+                if (!any) {
+                    os << " empty";
+                }
+                os << '\n';
             }
         }
     }
@@ -936,7 +1036,8 @@ private:
     };
 
     SystemHardwareConfiguration hardware_configuration_{};
-    std::array<TileArrayModel, hw::kHemispheres> mems_{};
+    std::array<MemArrayModel, hw::kHemispheres> mems_;
+    std::array<StreamRegisterFabric, hw::kHemispheres> streams_;
     VxmSlice vxm_{};
     std::array<SxmSlice, hw::kHemispheres> sxms_;
     std::array<Mxm, kMxmCount> mxms_{};

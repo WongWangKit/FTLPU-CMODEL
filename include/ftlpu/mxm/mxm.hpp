@@ -3,7 +3,7 @@
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/bf16.hpp"
 #include "ftlpu/core/fp16.hpp"
-#include "ftlpu/mem/tile_array.hpp"
+#include "ftlpu/core/stream_port.hpp"
 #include "ftlpu/mxm/accumulator.hpp"
 #include "ftlpu/mxm/array.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
@@ -136,7 +136,8 @@ public:
     }
 
     void tick_datapath(
-        TileArrayModel& mem,
+        StreamInputPort& input,
+        StreamOutputPort& output,
         std::size_t mxm_id,
         std::ostream* os = nullptr,
         std::optional<std::size_t> log_tile = std::nullopt)
@@ -149,7 +150,7 @@ public:
             if (const auto load =
                     control_.decode_activation_load_pulse(tile);
                 load.has_value()) {
-                load_decode_activation(mem, tile, *load, mxm_id, os);
+                load_decode_activation(input, tile, *load, mxm_id, os);
             }
             if (const auto compute =
                     control_.decode_stream_compute_pulse(tile);
@@ -159,7 +160,7 @@ public:
                 }
             }
         }
-        advance_decode_pipeline(mem, mxm_id, os);
+        advance_decode_pipeline(input, output, mxm_id, os);
 
         if (!active_ && control_.compute_active(0)) {
             active_ = true;
@@ -190,7 +191,7 @@ public:
                 }
             }
             const auto data = collect_activation(
-                mem,
+                input,
                 tile,
                 stream_base,
                 compute.data_format);
@@ -234,7 +235,7 @@ public:
                     compute_column_block(event, column_block);
                     if (event.tile + 1 == hw::kMxmSupercellsPerPlane) {
                         emit_column_output(
-                            mem, column_block, event, mxm_id, os);
+                            output, column_block, event, mxm_id, os);
                     }
                     if (column_block + 1 < hw::kMxmSupercellsPerPlane) {
                         next_pipeline[column_block + 1][tile].push_back(event);
@@ -253,11 +254,11 @@ public:
                 if (read->output_format
                     == MxmAccumulatorOutputFormat::BFloat16) {
                     emit_bf16_stream_values(
-                        mem, tile, read->stream_base,
+                        output, tile, read->stream_base,
                         read->address, values);
                 } else {
                     emit_stream_values(
-                        mem, tile, read->stream_base,
+                        output, tile, read->stream_base,
                         read->address, values);
                 }
             }
@@ -375,12 +376,11 @@ private:
     }
 
     static ActivationBlock collect_activation(
-        TileArrayModel& mem,
+        StreamInputPort& input,
         std::size_t tile,
         std::size_t stream_base,
         MxmDataFormat format)
     {
-        constexpr auto kTargetSreg = hw::kMxmBoundaryStreamRegisterColumn;
         const auto row_count = compute_row_count();
         const auto stream_count = row_count * hw::kMxmWeightBytesPerValue;
         if (stream_base + stream_count > hw::kEastStreams) {
@@ -396,10 +396,10 @@ private:
             for (std::size_t lane = 0;
                  lane < hw::kLanesPerTile;
                  ++lane) {
-                const auto low = mem.consume_east_register(
-                    tile, lane, kTargetSreg, row_stream_base);
-                const auto high = mem.consume_east_register(
-                    tile, lane, kTargetSreg, row_stream_base + 1);
+                const auto low = input.consume_cell(
+                    tile, lane, row_stream_base);
+                const auto high = input.consume_cell(
+                    tile, lane, row_stream_base + 1);
                 if (!low.has_value() || !high.has_value()) {
                     throw std::logic_error(
                         "MXM Compute reached tile "
@@ -423,14 +423,12 @@ private:
     }
 
     void load_decode_activation(
-        TileArrayModel& mem,
+        StreamInputPort& input,
         std::size_t tile,
         const MxmControlSlice::DecodeActivationLoadPulse& pulse,
         std::size_t mxm_id,
         std::ostream* os)
     {
-        constexpr auto kTargetSreg =
-            hw::kMxmBoundaryStreamRegisterColumn;
         check_weight_buffer(pulse.activation_buffer);
         for (std::size_t column = 0;
              column < hw::kMxmSupercellsPerPlane;
@@ -442,10 +440,10 @@ private:
             for (std::size_t lane = 0;
                  lane < hw::kLanesPerTile;
                  ++lane) {
-                const auto low = mem.consume_east_register(
-                    tile, lane, kTargetSreg, stream_base);
-                const auto high = mem.consume_east_register(
-                    tile, lane, kTargetSreg, stream_base + 1);
+                const auto low = input.consume_cell(
+                    tile, lane, stream_base);
+                const auto high = input.consume_cell(
+                    tile, lane, stream_base + 1);
                 if (!low.has_value() || !high.has_value()) {
                     throw std::logic_error(
                         "MXM decode activation load reached tile "
@@ -515,13 +513,11 @@ private:
     }
 
     std::optional<DecodeWeightCell> consume_decode_weight_cell(
-        TileArrayModel& mem,
+        StreamInputPort& input,
         std::size_t tile,
         std::size_t column,
         std::optional<MxmDequantInstruction> dequant)
     {
-        constexpr auto kTargetSreg =
-            hw::kMxmBoundaryStreamRegisterColumn;
         const auto stream_base =
             column * hw::kMxmInt8LoadStreamsPerCycle;
         bool any = false;
@@ -532,10 +528,9 @@ private:
             for (std::size_t output_lane = 0;
                  output_lane < hw::kMxmSupercellColumns;
                  ++output_lane) {
-                const auto& word = mem.east_register(
+                const auto& word = input.cell(
                     tile,
                     lane,
-                    kTargetSreg,
                     stream_base + output_lane);
                 any = any || word.has_value();
                 all = all && word.has_value();
@@ -550,10 +545,9 @@ private:
                 for (std::size_t output_lane = 0;
                      output_lane < hw::kMxmSupercellColumns;
                      ++output_lane) {
-                    if (!mem.east_register(
+                    if (!input.cell(
                             tile,
                             lane,
-                            kTargetSreg,
                             stream_base + output_lane).has_value()) {
                         missing = " lane=" + std::to_string(lane)
                             + " stream="
@@ -578,10 +572,9 @@ private:
             for (std::size_t output_lane = 0;
                  output_lane < hw::kMxmSupercellColumns;
                  ++output_lane) {
-                const auto word = mem.consume_east_register(
+                const auto word = input.consume_cell(
                     tile,
                     lane,
-                    kTargetSreg,
                     stream_base + output_lane);
                 quantized[lane][output_lane] = MxmSupercell::InputWord {
                     word->data,
@@ -618,7 +611,7 @@ private:
     }
 
     void execute_decode_stage(
-        TileArrayModel& mem,
+        StreamInputPort& input,
         DecodeWaveState& state,
         std::size_t stage,
         std::ostream* os = nullptr)
@@ -627,7 +620,7 @@ private:
                                       std::size_t column,
                                       std::size_t partial_column) {
             const auto weights = consume_decode_weight_cell(
-                mem, tile, column, state.dequant);
+                input, tile, column, state.dequant);
             if (!weights.has_value()) {
                 throw std::logic_error(
                     "MXM decode partial sum reached a row before its streamed weight arrived");
@@ -683,7 +676,8 @@ private:
     }
 
     void advance_decode_pipeline(
-        TileArrayModel& mem,
+        StreamInputPort& input,
+        StreamOutputPort& output,
         std::size_t mxm_id,
         std::ostream* os)
     {
@@ -694,7 +688,7 @@ private:
 
         if (decode_launch_.has_value()) {
             auto state = *decode_launch_;
-            execute_decode_stage(mem, state, 0, os);
+            execute_decode_stage(input, state, 0, os);
             next[0] = std::move(state);
         }
         decode_launch_.reset();
@@ -706,7 +700,7 @@ private:
                 continue;
             }
             auto state = *decode_stages_[stage - 1];
-            execute_decode_stage(mem, state, stage, os);
+            execute_decode_stage(input, state, stage, os);
             const auto stage_count = state.layout
                     == MxmDecodeLayout::Native4x4
                 ? kNativeDecodeStages
@@ -775,11 +769,11 @@ private:
         if (!decode_streaming_active_) {
             decode_layout_ = MxmDecodeLayout::Linear1x16;
         }
-        advance_decode_output_pipeline(mem, std::move(completed));
+        advance_decode_output_pipeline(output, std::move(completed));
     }
 
     void advance_decode_output_pipeline(
-        TileArrayModel& mem,
+        StreamOutputPort& output_port,
         std::optional<DecodeCompletedOutput> completed)
     {
         auto next = std::array<
@@ -804,7 +798,7 @@ private:
                 for (std::size_t byte = 0;
                      byte < sizeof(std::uint16_t);
                      ++byte) {
-                    mem.set_west_stream_cell(
+                    output_port.write_cell(
                         tile,
                         lane,
                         output.output_stream_base + byte,
@@ -863,7 +857,7 @@ private:
     }
 
     void emit_column_output(
-        TileArrayModel& mem,
+        StreamOutputPort& output,
         std::size_t column_block,
         const ActivationEvent& event,
         std::size_t mxm_id,
@@ -879,19 +873,20 @@ private:
                 row,
                 column_block);
 
-            ColumnOutput output {row, column_block, {}};
+            ColumnOutput column_output {row, column_block, {}};
             const auto global_column_base =
                 column_block * hw::kMxmSupercellColumns;
             for (std::size_t lane = 0;
                  lane < hw::kLanesPerTile;
                  ++lane) {
-                output.values[lane] =
+                column_output.values[lane] =
                     accumulators_[event.weight_buffer][row]
                                  [global_column_base + lane];
             }
             const auto address = event.accumulator_address
                 + row * event.accumulator_row_stride;
-            accumulator_.accumulate(address, column_block, output.values);
+            accumulator_.accumulate(
+                address, column_block, column_output.values);
             if (event.accumulator_destination
                 == MxmAccumulatorDestination::Sram) {
                 continue;
@@ -916,18 +911,18 @@ private:
             if (event.accumulator_output_format
                 == MxmAccumulatorOutputFormat::BFloat16) {
                 emit_bf16_stream_values(
-                    mem, column_block, event.output_stream_base,
+                    output, column_block, event.output_stream_base,
                     row, accumulated);
             } else {
                 emit_stream_values(
-                    mem, column_block, event.output_stream_base,
+                    output, column_block, event.output_stream_base,
                     row, accumulated);
             }
             if (event.accumulator_clear) {
                 accumulator_.clear_segment(address, column_block);
             }
-            output.values = accumulated;
-            last_outputs_.push_back(output);
+            column_output.values = accumulated;
+            last_outputs_.push_back(column_output);
         }
     }
 
@@ -954,7 +949,7 @@ private:
     }
 
     static void emit_stream_values(
-        TileArrayModel& mem,
+        StreamOutputPort& output,
         std::size_t column_block,
         std::size_t stream_base,
         std::uint64_t vector_tag,
@@ -970,7 +965,7 @@ private:
                 static_cast<std::uint8_t>((raw >> 24) & 0xffu),
             };
             for (std::size_t byte = 0; byte < bytes.size(); ++byte) {
-                mem.set_west_stream_cell(
+                output.write_cell(
                     column_block,
                     lane,
                     stream_base + byte,
@@ -983,7 +978,7 @@ private:
     }
 
     static void emit_bf16_stream_values(
-        TileArrayModel& mem,
+        StreamOutputPort& output,
         std::size_t column_block,
         std::size_t stream_base,
         std::uint64_t vector_tag,
@@ -992,7 +987,7 @@ private:
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             const auto raw = Bf16::from_float(values[lane]).bits();
             for (std::size_t byte = 0; byte < sizeof(std::uint16_t); ++byte) {
-                mem.set_west_stream_cell(
+                output.write_cell(
                     column_block,
                     lane,
                     stream_base + byte,
