@@ -779,6 +779,38 @@ private:
     {
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
             if (!has_complete_vxm_input(tile)) {
+                const auto& required = vxm_.required_streams_at(tile);
+                if (sinks.vxm != nullptr && required.has_value()
+                    && (!sinks.vxm_log_tile.has_value()
+                        || tile == *sinks.vxm_log_tile)) {
+                    *sinks.vxm << "  MEM.edge -> VXM tile " << tile
+                               << " incomplete:";
+                    for (std::size_t group = 0;
+                         group < VxmLane::kStreamGroupCount; ++group) {
+                        const auto base = group * VxmLane::kStreamGroupBytes;
+                        if (!(*required)[base] && !(*required)[base + 1])
+                            continue;
+                        const auto source = vxm_.input_group_source(group);
+                        const auto& mem = mems_[hemisphere_index(source)];
+                        bool missing = false;
+                        for (std::size_t lane = 0;
+                             lane < hw::kLanesPerTile && !missing; ++lane) {
+                            for (std::size_t byte = 0;
+                                 byte < VxmLane::kStreamGroupBytes; ++byte) {
+                                missing = !mem.west_register(
+                                    tile, lane,
+                                    hw::kMemWestBoundaryStreamRegisterColumn,
+                                    base + byte).has_value();
+                                if (missing) break;
+                            }
+                        }
+                        if (missing)
+                            *sinks.vxm << " group=" << group
+                                       << " source="
+                                       << hemisphere_short_name(source);
+                    }
+                    *sinks.vxm << '\n';
+                }
                 continue;
             }
 
