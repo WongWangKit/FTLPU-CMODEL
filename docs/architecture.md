@@ -61,8 +61,13 @@ Both hemispheres use the same local orientation:
   its ICU queue so a following `Sync` releases only after the last beat.
 - One SR hop separates C2C from SXM: `sreg14` is the C2C/SXM boundary.
 - SXM connects `sreg14` to the MXM boundary `sreg15`.
-- East streams move from VXM toward MXM.
-- West streams move from MXM toward VXM.
+- Topology `forward` flow moves from VXM toward MXM; the runtime/ISA represents
+  that local flow with streams `E0..E31`.
+- Topology `reverse` flow moves from MXM toward VXM; the runtime/ISA represents
+  that local flow with streams `W0..W31`.
+- Fabric names `east` and `west` are global hemisphere locations. Flow is local:
+  East-fabric `forward` is physically eastward, while West-fabric `forward` is
+  physically westward.
 
 Global MEM queues `0..103` and MXMs `0..1` select East. MEM queues `104..207`
 and MXMs `2..3` select West.

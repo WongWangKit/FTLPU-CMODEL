@@ -49,20 +49,28 @@ CMake 配置阶段读取它并生成编译期常量，Software 编译器也可�
 
 - `replicas` 给出模板实例名，数量必须等于 `topology.hemispheres`。
 - `columns` 按稳定 ID 顺序声明物理 SR column；descriptor 中的端口和 route 都使用该 ID。
-- `paths` 是连续链路的简写。生成器把相邻 column 展开成单向逐跳 route；当
-  `bidirectional` 为 `true` 时同时生成反向 route。
+- `paths` 是连续链路的简写。生成器按 `columns` 顺序展开 `forward` 逐跳 route；当
+  `bidirectional` 为 `true` 时同时生成 `reverse` route。path 中的 column 必须遵循
+  `fabric_template.columns` 的顺序，因此不需要额外声明方向。
 - `routes` 声明无法用连续 path 表达的显式 route，例如 bypass。字段为 `name`、
-  `source`、`destination`、`direction`、`kind`、`enabled_by_default`、
+  `source`、`destination`、`flow`、`kind`、`enabled_by_default`、
   `multicast_allowed` 和 `latency_cycles`。
 
 `stream_topology.bindings` 把 MEM boundary、SXM、MXM、VXM 和 C2C 端口绑定到 column；
-端口由 `{"column": "...", "direction": "east|west"}` 表示。
+端口由 `{"column": "...", "flow": "forward|reverse"}` 表示。`forward` 表示沿
+column ID 递增方向传播，`reverse` 表示沿 column ID 递减方向传播；两者都是 fabric
+局部方向。
 `system_transfers` 描述 fabric 实例之间的传输，source/destination 还包含 `fabric`。
 数组中存在的 transfer 即被生成并执行；不需要传输时应从数组中删除对应项。当前支持的
 跨 fabric 类型为 `passive_bridge`。完整的 LPU32 实例见
 [`config/ftlpu-lpu32.json`](../config/ftlpu-lpu32.json)。
 
-CMake 在 configure 阶段校验名称、引用、数量、方向和 latency，并将 path 展开为
+`fabric` 名称 `east`/`west` 表示全局物理 hemisphere；`flow` 不使用 east/west，避免
+和全局位置混淆。对于默认的对称模板，East fabric 的 `forward` 是全局向东，West
+fabric 的 `forward` 是全局向西。跨 VXM 的全局方向由
+`source.fabric -> destination.fabric` 唯一确定。
+
+CMake 在 configure 阶段校验名称、引用、数量、flow 和 latency，并将 path 展开为
 `ftlpu::hw::config::kStreamTopology` constexpr descriptor。
 
 ## 字段含义

@@ -154,13 +154,13 @@ function(ftlpu_generate_hardware_config input_json output_header)
         endif()
     endmacro()
 
-    macro(ftlpu_stream_direction output value context)
-        if("${value}" STREQUAL "east")
-            set(${output} "::ftlpu::target::StreamDirection::East")
-        elseif("${value}" STREQUAL "west")
-            set(${output} "::ftlpu::target::StreamDirection::West")
+    macro(ftlpu_stream_flow output value context)
+        if("${value}" STREQUAL "forward")
+            set(${output} "::ftlpu::target::StreamFlow::Forward")
+        elseif("${value}" STREQUAL "reverse")
+            set(${output} "::ftlpu::target::StreamFlow::Reverse")
         else()
-            message(FATAL_ERROR "${context} has invalid direction '${value}'")
+            message(FATAL_ERROR "${context} has invalid flow '${value}'")
         endif()
     endmacro()
 
@@ -182,7 +182,7 @@ function(ftlpu_generate_hardware_config input_json output_header)
         endif()
     endmacro()
 
-    macro(ftlpu_stream_append_route name source destination direction kind enabled multicast latency context)
+    macro(ftlpu_stream_append_route name source destination flow kind enabled multicast latency context)
         ftlpu_stream_name_is_valid("${name}" "${context}.name")
         list(FIND FTLPU_STREAM_ROUTE_NAMES "${name}" FTLPU_STREAM_ROUTE_DUPLICATE)
         if(NOT FTLPU_STREAM_ROUTE_DUPLICATE EQUAL -1)
@@ -193,20 +193,20 @@ function(ftlpu_generate_hardware_config input_json output_header)
         endif()
         list(APPEND FTLPU_STREAM_ROUTE_NAMES "${name}")
         string(APPEND FTLPU_STREAM_ROUTE_INITIALIZERS
-            "    ::ftlpu::target::StreamRouteDescriptor{\"${name}\", ${source}, ${destination}, ${direction}, ${kind}, ${enabled}, ${multicast}, ${latency}},\n")
+            "    ::ftlpu::target::StreamRouteDescriptor{\"${name}\", ${source}, ${destination}, ${flow}, ${kind}, ${enabled}, ${multicast}, ${latency}},\n")
         math(EXPR FTLPU_STREAM_ROUTE_COUNT "${FTLPU_STREAM_ROUTE_COUNT} + 1")
     endmacro()
 
     macro(ftlpu_stream_read_port output)
         ftlpu_json_get(FTLPU_STREAM_PORT_COLUMN ${ARGN} column)
-        ftlpu_json_get(FTLPU_STREAM_PORT_DIRECTION ${ARGN} direction)
+        ftlpu_json_get(FTLPU_STREAM_PORT_FLOW ${ARGN} flow)
         string(JOIN "." FTLPU_STREAM_PORT_CONTEXT ${ARGN})
         ftlpu_stream_column_id(FTLPU_STREAM_PORT_COLUMN_ID
             "${FTLPU_STREAM_PORT_COLUMN}" "${FTLPU_STREAM_PORT_CONTEXT}")
-        ftlpu_stream_direction(FTLPU_STREAM_PORT_DIRECTION_ENUM
-            "${FTLPU_STREAM_PORT_DIRECTION}" "${FTLPU_STREAM_PORT_CONTEXT}")
+        ftlpu_stream_flow(FTLPU_STREAM_PORT_FLOW_ENUM
+            "${FTLPU_STREAM_PORT_FLOW}" "${FTLPU_STREAM_PORT_CONTEXT}")
         set(${output}
-            "::ftlpu::target::StreamPortDescriptor{${FTLPU_STREAM_PORT_COLUMN_ID}, ${FTLPU_STREAM_PORT_DIRECTION_ENUM}}")
+            "::ftlpu::target::StreamPortDescriptor{${FTLPU_STREAM_PORT_COLUMN_ID}, ${FTLPU_STREAM_PORT_FLOW_ENUM}}")
     endmacro()
 
     ftlpu_json_length(FTLPU_STREAM_FABRIC_COUNT
@@ -273,10 +273,6 @@ function(ftlpu_generate_hardware_config input_json output_header)
                 stream_topology fabric_template paths ${path_index} name)
             ftlpu_stream_name_is_valid("${FTLPU_STREAM_PATH_NAME}"
                 "${FTLPU_STREAM_PATH_CONTEXT}.name")
-            ftlpu_json_get(FTLPU_STREAM_PATH_FORWARD
-                stream_topology fabric_template paths ${path_index} forward_direction)
-            ftlpu_json_get(FTLPU_STREAM_PATH_REVERSE
-                stream_topology fabric_template paths ${path_index} reverse_direction)
             ftlpu_json_get(FTLPU_STREAM_PATH_BIDIRECTIONAL
                 stream_topology fabric_template paths ${path_index} bidirectional)
             ftlpu_json_get(FTLPU_STREAM_PATH_KIND
@@ -287,10 +283,6 @@ function(ftlpu_generate_hardware_config input_json output_header)
                 stream_topology fabric_template paths ${path_index} multicast_allowed)
             ftlpu_json_get(FTLPU_STREAM_PATH_LATENCY
                 stream_topology fabric_template paths ${path_index} hop_latency_cycles)
-            ftlpu_stream_direction(FTLPU_STREAM_PATH_FORWARD_ENUM
-                "${FTLPU_STREAM_PATH_FORWARD}" "${FTLPU_STREAM_PATH_CONTEXT}")
-            ftlpu_stream_direction(FTLPU_STREAM_PATH_REVERSE_ENUM
-                "${FTLPU_STREAM_PATH_REVERSE}" "${FTLPU_STREAM_PATH_CONTEXT}")
             ftlpu_stream_route_kind(FTLPU_STREAM_PATH_KIND_ENUM
                 "${FTLPU_STREAM_PATH_KIND}" "${FTLPU_STREAM_PATH_CONTEXT}")
             ftlpu_stream_cpp_bool(FTLPU_STREAM_PATH_BIDIRECTIONAL_CPP
@@ -316,12 +308,16 @@ function(ftlpu_generate_hardware_config input_json output_header)
                     "${FTLPU_STREAM_PATH_SOURCE_NAME}" "${FTLPU_STREAM_PATH_CONTEXT}")
                 ftlpu_stream_column_id(FTLPU_STREAM_PATH_DESTINATION
                     "${FTLPU_STREAM_PATH_DESTINATION_NAME}" "${FTLPU_STREAM_PATH_CONTEXT}")
+                if(NOT FTLPU_STREAM_PATH_SOURCE LESS FTLPU_STREAM_PATH_DESTINATION)
+                    message(FATAL_ERROR
+                        "${FTLPU_STREAM_PATH_CONTEXT}.columns must follow fabric_template.columns order")
+                endif()
                 set(FTLPU_STREAM_FORWARD_ROUTE_NAME
                     "${FTLPU_STREAM_PATH_NAME}.forward.${edge_index}")
                 ftlpu_stream_append_route(
                     "${FTLPU_STREAM_FORWARD_ROUTE_NAME}"
                     "${FTLPU_STREAM_PATH_SOURCE}" "${FTLPU_STREAM_PATH_DESTINATION}"
-                    "${FTLPU_STREAM_PATH_FORWARD_ENUM}" "${FTLPU_STREAM_PATH_KIND_ENUM}"
+                    "::ftlpu::target::StreamFlow::Forward" "${FTLPU_STREAM_PATH_KIND_ENUM}"
                     "${FTLPU_STREAM_PATH_ENABLED_CPP}" "${FTLPU_STREAM_PATH_MULTICAST_CPP}"
                     "${FTLPU_STREAM_PATH_LATENCY}" "${FTLPU_STREAM_PATH_CONTEXT}")
                 if(FTLPU_STREAM_PATH_BIDIRECTIONAL_CPP)
@@ -330,7 +326,7 @@ function(ftlpu_generate_hardware_config input_json output_header)
                     ftlpu_stream_append_route(
                         "${FTLPU_STREAM_REVERSE_ROUTE_NAME}"
                         "${FTLPU_STREAM_PATH_DESTINATION}" "${FTLPU_STREAM_PATH_SOURCE}"
-                        "${FTLPU_STREAM_PATH_REVERSE_ENUM}" "${FTLPU_STREAM_PATH_KIND_ENUM}"
+                        "::ftlpu::target::StreamFlow::Reverse" "${FTLPU_STREAM_PATH_KIND_ENUM}"
                         "${FTLPU_STREAM_PATH_ENABLED_CPP}" "${FTLPU_STREAM_PATH_MULTICAST_CPP}"
                         "${FTLPU_STREAM_PATH_LATENCY}" "${FTLPU_STREAM_PATH_CONTEXT}")
                 endif()
@@ -352,8 +348,8 @@ function(ftlpu_generate_hardware_config input_json output_header)
                 stream_topology fabric_template routes ${route_index} source)
             ftlpu_json_get(FTLPU_STREAM_ROUTE_DESTINATION_NAME
                 stream_topology fabric_template routes ${route_index} destination)
-            ftlpu_json_get(FTLPU_STREAM_ROUTE_DIRECTION
-                stream_topology fabric_template routes ${route_index} direction)
+            ftlpu_json_get(FTLPU_STREAM_ROUTE_FLOW
+                stream_topology fabric_template routes ${route_index} flow)
             ftlpu_json_get(FTLPU_STREAM_ROUTE_KIND
                 stream_topology fabric_template routes ${route_index} kind)
             ftlpu_json_get(FTLPU_STREAM_ROUTE_ENABLED
@@ -366,8 +362,17 @@ function(ftlpu_generate_hardware_config input_json output_header)
                 "${FTLPU_STREAM_ROUTE_SOURCE_NAME}" "${FTLPU_STREAM_ROUTE_CONTEXT}")
             ftlpu_stream_column_id(FTLPU_STREAM_ROUTE_DESTINATION
                 "${FTLPU_STREAM_ROUTE_DESTINATION_NAME}" "${FTLPU_STREAM_ROUTE_CONTEXT}")
-            ftlpu_stream_direction(FTLPU_STREAM_ROUTE_DIRECTION_ENUM
-                "${FTLPU_STREAM_ROUTE_DIRECTION}" "${FTLPU_STREAM_ROUTE_CONTEXT}")
+            ftlpu_stream_flow(FTLPU_STREAM_ROUTE_FLOW_ENUM
+                "${FTLPU_STREAM_ROUTE_FLOW}" "${FTLPU_STREAM_ROUTE_CONTEXT}")
+            if(FTLPU_STREAM_ROUTE_FLOW STREQUAL "forward"
+               AND NOT FTLPU_STREAM_ROUTE_SOURCE LESS FTLPU_STREAM_ROUTE_DESTINATION)
+                message(FATAL_ERROR
+                    "${FTLPU_STREAM_ROUTE_CONTEXT} forward flow must increase the column ID")
+            elseif(FTLPU_STREAM_ROUTE_FLOW STREQUAL "reverse"
+                   AND NOT FTLPU_STREAM_ROUTE_SOURCE GREATER FTLPU_STREAM_ROUTE_DESTINATION)
+                message(FATAL_ERROR
+                    "${FTLPU_STREAM_ROUTE_CONTEXT} reverse flow must decrease the column ID")
+            endif()
             ftlpu_stream_route_kind(FTLPU_STREAM_ROUTE_KIND_ENUM
                 "${FTLPU_STREAM_ROUTE_KIND}" "${FTLPU_STREAM_ROUTE_CONTEXT}")
             ftlpu_stream_cpp_bool(FTLPU_STREAM_ROUTE_ENABLED_CPP
@@ -377,7 +382,7 @@ function(ftlpu_generate_hardware_config input_json output_header)
             ftlpu_stream_append_route(
                 "${FTLPU_STREAM_ROUTE_NAME}"
                 "${FTLPU_STREAM_ROUTE_SOURCE}" "${FTLPU_STREAM_ROUTE_DESTINATION}"
-                "${FTLPU_STREAM_ROUTE_DIRECTION_ENUM}" "${FTLPU_STREAM_ROUTE_KIND_ENUM}"
+                "${FTLPU_STREAM_ROUTE_FLOW_ENUM}" "${FTLPU_STREAM_ROUTE_KIND_ENUM}"
                 "${FTLPU_STREAM_ROUTE_ENABLED_CPP}" "${FTLPU_STREAM_ROUTE_MULTICAST_CPP}"
                 "${FTLPU_STREAM_ROUTE_LATENCY}" "${FTLPU_STREAM_ROUTE_CONTEXT}")
         endforeach()
@@ -418,14 +423,14 @@ function(ftlpu_generate_hardware_config input_json output_header)
             "    std::size_t{${FTLPU_STREAM_MEM_BOUNDARY_ID}},\n")
     endforeach()
 
-    ftlpu_stream_read_port(FTLPU_STREAM_SXM_EAST_INPUT
-        stream_topology bindings sxm east_input)
-    ftlpu_stream_read_port(FTLPU_STREAM_SXM_EAST_OUTPUT
-        stream_topology bindings sxm east_output)
-    ftlpu_stream_read_port(FTLPU_STREAM_SXM_WEST_INPUT
-        stream_topology bindings sxm west_input)
-    ftlpu_stream_read_port(FTLPU_STREAM_SXM_WEST_OUTPUT
-        stream_topology bindings sxm west_output)
+    ftlpu_stream_read_port(FTLPU_STREAM_SXM_FORWARD_INPUT
+        stream_topology bindings sxm forward_input)
+    ftlpu_stream_read_port(FTLPU_STREAM_SXM_FORWARD_OUTPUT
+        stream_topology bindings sxm forward_output)
+    ftlpu_stream_read_port(FTLPU_STREAM_SXM_REVERSE_INPUT
+        stream_topology bindings sxm reverse_input)
+    ftlpu_stream_read_port(FTLPU_STREAM_SXM_REVERSE_OUTPUT
+        stream_topology bindings sxm reverse_output)
     ftlpu_stream_read_port(FTLPU_STREAM_MXM_WEIGHT_INPUT
         stream_topology bindings mxm weight_input)
     ftlpu_stream_read_port(FTLPU_STREAM_MXM_ACTIVATION_INPUT
@@ -469,14 +474,14 @@ function(ftlpu_generate_hardware_config input_json output_header)
                 stream_topology system_transfers ${index} source fabric)
             ftlpu_json_get(FTLPU_STREAM_TRANSFER_SOURCE_COLUMN_NAME
                 stream_topology system_transfers ${index} source column)
-            ftlpu_json_get(FTLPU_STREAM_TRANSFER_SOURCE_DIRECTION
-                stream_topology system_transfers ${index} source direction)
+            ftlpu_json_get(FTLPU_STREAM_TRANSFER_SOURCE_FLOW
+                stream_topology system_transfers ${index} source flow)
             ftlpu_json_get(FTLPU_STREAM_TRANSFER_DESTINATION_FABRIC_NAME
                 stream_topology system_transfers ${index} destination fabric)
             ftlpu_json_get(FTLPU_STREAM_TRANSFER_DESTINATION_COLUMN_NAME
                 stream_topology system_transfers ${index} destination column)
-            ftlpu_json_get(FTLPU_STREAM_TRANSFER_DESTINATION_DIRECTION
-                stream_topology system_transfers ${index} destination direction)
+            ftlpu_json_get(FTLPU_STREAM_TRANSFER_DESTINATION_FLOW
+                stream_topology system_transfers ${index} destination flow)
             ftlpu_json_get(FTLPU_STREAM_TRANSFER_LATENCY
                 stream_topology system_transfers ${index} latency_cycles)
             if(NOT FTLPU_STREAM_TRANSFER_LATENCY MATCHES "^[1-9][0-9]*$")
@@ -491,12 +496,12 @@ function(ftlpu_generate_hardware_config input_json output_header)
                 "${FTLPU_STREAM_TRANSFER_SOURCE_COLUMN_NAME}" "${FTLPU_STREAM_TRANSFER_CONTEXT}")
             ftlpu_stream_column_id(FTLPU_STREAM_TRANSFER_DESTINATION_COLUMN
                 "${FTLPU_STREAM_TRANSFER_DESTINATION_COLUMN_NAME}" "${FTLPU_STREAM_TRANSFER_CONTEXT}")
-            ftlpu_stream_direction(FTLPU_STREAM_TRANSFER_SOURCE_DIRECTION_ENUM
-                "${FTLPU_STREAM_TRANSFER_SOURCE_DIRECTION}" "${FTLPU_STREAM_TRANSFER_CONTEXT}")
-            ftlpu_stream_direction(FTLPU_STREAM_TRANSFER_DESTINATION_DIRECTION_ENUM
-                "${FTLPU_STREAM_TRANSFER_DESTINATION_DIRECTION}" "${FTLPU_STREAM_TRANSFER_CONTEXT}")
+            ftlpu_stream_flow(FTLPU_STREAM_TRANSFER_SOURCE_FLOW_ENUM
+                "${FTLPU_STREAM_TRANSFER_SOURCE_FLOW}" "${FTLPU_STREAM_TRANSFER_CONTEXT}")
+            ftlpu_stream_flow(FTLPU_STREAM_TRANSFER_DESTINATION_FLOW_ENUM
+                "${FTLPU_STREAM_TRANSFER_DESTINATION_FLOW}" "${FTLPU_STREAM_TRANSFER_CONTEXT}")
             string(APPEND FTLPU_STREAM_TRANSFER_INITIALIZERS
-                "    ::ftlpu::target::StreamSystemTransferDescriptor{\"${FTLPU_STREAM_TRANSFER_NAME}\", ::ftlpu::target::StreamSystemTransferKind::PassiveBridge, ${FTLPU_STREAM_TRANSFER_SOURCE_FABRIC}, {${FTLPU_STREAM_TRANSFER_SOURCE_COLUMN}, ${FTLPU_STREAM_TRANSFER_SOURCE_DIRECTION_ENUM}}, ${FTLPU_STREAM_TRANSFER_DESTINATION_FABRIC}, {${FTLPU_STREAM_TRANSFER_DESTINATION_COLUMN}, ${FTLPU_STREAM_TRANSFER_DESTINATION_DIRECTION_ENUM}}, ${FTLPU_STREAM_TRANSFER_LATENCY}},\n")
+                "    ::ftlpu::target::StreamSystemTransferDescriptor{\"${FTLPU_STREAM_TRANSFER_NAME}\", ::ftlpu::target::StreamSystemTransferKind::PassiveBridge, ${FTLPU_STREAM_TRANSFER_SOURCE_FABRIC}, {${FTLPU_STREAM_TRANSFER_SOURCE_COLUMN}, ${FTLPU_STREAM_TRANSFER_SOURCE_FLOW_ENUM}}, ${FTLPU_STREAM_TRANSFER_DESTINATION_FABRIC}, {${FTLPU_STREAM_TRANSFER_DESTINATION_COLUMN}, ${FTLPU_STREAM_TRANSFER_DESTINATION_FLOW_ENUM}}, ${FTLPU_STREAM_TRANSFER_LATENCY}},\n")
         endforeach()
     endif()
 

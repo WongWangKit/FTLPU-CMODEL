@@ -10,15 +10,15 @@
 namespace ftlpu {
 namespace {
 
-StreamDirection to_runtime_direction(target::StreamDirection direction)
+StreamDirection to_runtime_direction(target::StreamFlow flow)
 {
-    switch (direction) {
-    case target::StreamDirection::East:
+    switch (flow) {
+    case target::StreamFlow::Forward:
         return StreamDirection::East;
-    case target::StreamDirection::West:
+    case target::StreamFlow::Reverse:
         return StreamDirection::West;
     }
-    throw std::invalid_argument("unknown target stream direction");
+    throw std::invalid_argument("unknown target stream flow");
 }
 
 StreamTopology::RouteKind to_runtime_kind(target::StreamRouteKind kind)
@@ -49,17 +49,17 @@ StreamEndpoint make_endpoint(
     const char* context)
 {
     check_column(descriptor, port.column, context);
-    return StreamEndpoint {port.column, to_runtime_direction(port.direction)};
+    return StreamEndpoint {port.column, to_runtime_direction(port.flow)};
 }
 
-void require_direction(
+void require_flow(
     target::StreamPortDescriptor port,
-    target::StreamDirection expected,
+    target::StreamFlow expected,
     const char* context)
 {
-    if (port.direction != expected) {
+    if (port.flow != expected) {
         throw std::invalid_argument(
-            std::string(context) + " has an incompatible stream direction");
+            std::string(context) + " has an incompatible stream flow");
     }
 }
 
@@ -91,7 +91,7 @@ StreamLayout make_stream_layout(
             std::string(route.name),
             route.source_column,
             route.destination_column,
-            to_runtime_direction(route.direction),
+            to_runtime_direction(route.flow),
             to_runtime_kind(route.kind),
             route.enabled_by_default,
             route.multicast_allowed,
@@ -114,27 +114,31 @@ StreamLayout make_stream_layout(
         mem_boundaries[i] = descriptor.mem_boundary_columns[i];
     }
 
-    require_direction(
-        descriptor.sxm.east_input, target::StreamDirection::East,
-        "SXM east input");
-    require_direction(
-        descriptor.sxm.east_output, target::StreamDirection::East,
-        "SXM east output");
-    require_direction(
-        descriptor.sxm.west_input, target::StreamDirection::West,
-        "SXM west input");
-    require_direction(
-        descriptor.sxm.west_output, target::StreamDirection::West,
-        "SXM west output");
-    check_column(descriptor, descriptor.sxm.east_input.column, "SXM east input");
-    check_column(descriptor, descriptor.sxm.east_output.column, "SXM east output");
-    check_column(descriptor, descriptor.sxm.west_input.column, "SXM west input");
-    check_column(descriptor, descriptor.sxm.west_output.column, "SXM west output");
+    require_flow(
+        descriptor.sxm.forward_input, target::StreamFlow::Forward,
+        "SXM forward input");
+    require_flow(
+        descriptor.sxm.forward_output, target::StreamFlow::Forward,
+        "SXM forward output");
+    require_flow(
+        descriptor.sxm.reverse_input, target::StreamFlow::Reverse,
+        "SXM reverse input");
+    require_flow(
+        descriptor.sxm.reverse_output, target::StreamFlow::Reverse,
+        "SXM reverse output");
+    check_column(descriptor, descriptor.sxm.forward_input.column,
+        "SXM forward input");
+    check_column(descriptor, descriptor.sxm.forward_output.column,
+        "SXM forward output");
+    check_column(descriptor, descriptor.sxm.reverse_input.column,
+        "SXM reverse input");
+    check_column(descriptor, descriptor.sxm.reverse_output.column,
+        "SXM reverse output");
     auto sxm_ports = SxmStreamPortMap::BetweenColumns(
-        descriptor.sxm.east_input.column,
-        descriptor.sxm.east_output.column,
-        descriptor.sxm.west_input.column,
-        descriptor.sxm.west_output.column);
+        descriptor.sxm.forward_input.column,
+        descriptor.sxm.forward_output.column,
+        descriptor.sxm.reverse_input.column,
+        descriptor.sxm.reverse_output.column);
 
     const auto c2c_tx = make_endpoint(
         descriptor, descriptor.c2c.tx_input, "C2C TX input");

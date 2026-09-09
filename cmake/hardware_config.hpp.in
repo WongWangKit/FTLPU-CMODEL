@@ -48,10 +48,10 @@ inline constexpr std::array<std::size_t, @FTLPU_STREAM_MEM_BOUNDARY_COUNT@>
 
 inline constexpr ::ftlpu::target::SxmStreamBindingDescriptor
     kStreamSxmBinding{
-        @FTLPU_STREAM_SXM_EAST_INPUT@,
-        @FTLPU_STREAM_SXM_EAST_OUTPUT@,
-        @FTLPU_STREAM_SXM_WEST_INPUT@,
-        @FTLPU_STREAM_SXM_WEST_OUTPUT@,
+        @FTLPU_STREAM_SXM_FORWARD_INPUT@,
+        @FTLPU_STREAM_SXM_FORWARD_OUTPUT@,
+        @FTLPU_STREAM_SXM_REVERSE_INPUT@,
+        @FTLPU_STREAM_SXM_REVERSE_OUTPUT@,
     };
 
 inline constexpr ::ftlpu::target::MxmStreamBindingDescriptor

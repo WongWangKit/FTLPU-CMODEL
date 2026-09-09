@@ -46,8 +46,12 @@ MXM2/MXM3 <-> SXM.W <-> C2C.W <-> MEM.W(52) <-> VXM <-> MEM.E(52) <-> C2C.E <-> 
   普通 west stream，数据沿 SR 传播后由目标 MEM `Write` 写入 SRAM；
 - C2C 与 SXM 之间增加一拍 SR，`sreg14` 是 C2C/SXM 边界；
 - SXM 把 `sreg14` 连接到 MXM 边界 `sreg15`；
-- east stream 从 VXM 流向 MXM；
-- west stream 从 MXM 流向 VXM。
+- topology 的 `forward` flow 从 VXM 流向 MXM，runtime/ISA 使用 `E0..E31`
+  表示这组局部 stream；
+- topology 的 `reverse` flow 从 MXM 流向 VXM，runtime/ISA 使用 `W0..W31`
+  表示这组局部 stream；
+- fabric 名称 `east`/`west` 表示全局 hemisphere 位置，flow 则是局部方向：East
+  fabric 的 `forward` 在物理上向东，West fabric 的 `forward` 在物理上向西。
 
 全局 MEM queue `0..103`、MXM `0..1` 属于 East；MEM queue `104..207`、MXM
 `2..3` 属于 West。

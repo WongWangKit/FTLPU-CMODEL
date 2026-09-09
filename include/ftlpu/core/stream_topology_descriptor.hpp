@@ -7,9 +7,12 @@
 
 namespace ftlpu::target {
 
-enum class StreamDirection : std::uint8_t {
-    East,
-    West,
+// Replica-local flow. Forward follows increasing column IDs; Reverse follows
+// decreasing column IDs. Fabric names, rather than this enum, identify the
+// global East/West hemisphere.
+enum class StreamFlow : std::uint8_t {
+    Forward,
+    Reverse,
 };
 
 enum class StreamRouteKind : std::uint8_t {
@@ -29,7 +32,7 @@ struct StreamRouteDescriptor {
     std::string_view name{};
     std::size_t source_column{0};
     std::size_t destination_column{0};
-    StreamDirection direction{StreamDirection::East};
+    StreamFlow flow{StreamFlow::Forward};
     StreamRouteKind kind{StreamRouteKind::Normal};
     bool enabled_by_default{true};
     bool multicast_allowed{false};
@@ -38,14 +41,14 @@ struct StreamRouteDescriptor {
 
 struct StreamPortDescriptor {
     std::size_t column{0};
-    StreamDirection direction{StreamDirection::East};
+    StreamFlow flow{StreamFlow::Forward};
 };
 
 struct SxmStreamBindingDescriptor {
-    StreamPortDescriptor east_input{};
-    StreamPortDescriptor east_output{};
-    StreamPortDescriptor west_input{};
-    StreamPortDescriptor west_output{};
+    StreamPortDescriptor forward_input{};
+    StreamPortDescriptor forward_output{};
+    StreamPortDescriptor reverse_input{};
+    StreamPortDescriptor reverse_output{};
 };
 
 struct MxmStreamBindingDescriptor {

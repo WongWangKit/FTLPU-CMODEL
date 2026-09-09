@@ -1,3 +1,4 @@
+#include "ftlpu/core/hardware_config.hpp"
 #include "ftlpu/system/stream_topology.hpp"
 #include "ftlpu/system/stream_topology_builder.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
@@ -7,6 +8,18 @@
 
 int main()
 {
+    const auto& descriptor = ftlpu::hw::config::kStreamTopology;
+    assert(descriptor.routes[0].flow == ftlpu::target::StreamFlow::Forward);
+    assert(descriptor.routes[1].flow == ftlpu::target::StreamFlow::Reverse);
+    assert(descriptor.sxm.forward_input.flow
+        == ftlpu::target::StreamFlow::Forward);
+    assert(descriptor.sxm.reverse_input.flow
+        == ftlpu::target::StreamFlow::Reverse);
+    assert(descriptor.system_transfers[0].source.flow
+        == ftlpu::target::StreamFlow::Reverse);
+    assert(descriptor.system_transfers[0].destination.flow
+        == ftlpu::target::StreamFlow::Forward);
+
     const auto lpu32 = ftlpu::make_configured_stream_layout();
     assert(lpu32.fabric_names.size() == 2);
     assert(lpu32.fabric_names[0] == "east");

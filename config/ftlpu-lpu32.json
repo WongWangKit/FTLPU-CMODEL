@@ -65,8 +65,6 @@
             "c2c_sxm",
             "sxm_mxm"
           ],
-          "forward_direction": "east",
-          "reverse_direction": "west",
           "bidirectional": true,
           "kind": "normal",
           "enabled_by_default": true,
@@ -97,53 +95,53 @@
         ]
       },
       "sxm": {
-        "east_input": {"column": "c2c_sxm", "direction": "east"},
-        "east_output": {"column": "sxm_mxm", "direction": "east"},
-        "west_input": {"column": "sxm_mxm", "direction": "west"},
-        "west_output": {"column": "c2c_sxm", "direction": "west"}
+        "forward_input": {"column": "c2c_sxm", "flow": "forward"},
+        "forward_output": {"column": "sxm_mxm", "flow": "forward"},
+        "reverse_input": {"column": "sxm_mxm", "flow": "reverse"},
+        "reverse_output": {"column": "c2c_sxm", "flow": "reverse"}
       },
       "mxm": {
-        "weight_input": {"column": "sxm_mxm", "direction": "east"},
-        "activation_input": {"column": "sxm_mxm", "direction": "east"},
-        "result_output": {"column": "sxm_mxm", "direction": "west"}
+        "weight_input": {"column": "sxm_mxm", "flow": "forward"},
+        "activation_input": {"column": "sxm_mxm", "flow": "forward"},
+        "result_output": {"column": "sxm_mxm", "flow": "reverse"}
       },
       "vxm": {
-        "input": {"column": "mem.b0", "direction": "west"},
-        "output": {"column": "mem.b0", "direction": "east"}
+        "input": {"column": "mem.b0", "flow": "reverse"},
+        "output": {"column": "mem.b0", "flow": "forward"}
       },
       "c2c": {
-        "tx_input": {"column": "mem.b13", "direction": "east"},
-        "rx_output": {"column": "mem.b13", "direction": "west"}
+        "tx_input": {"column": "mem.b13", "flow": "forward"},
+        "rx_output": {"column": "mem.b13", "flow": "reverse"}
       }
     },
     "system_transfers": [
       {
-        "name": "vxm.passive.east_to_west",
+        "name": "vxm.passive.east_fabric_to_west_fabric",
         "kind": "passive_bridge",
         "source": {
           "fabric": "east",
           "column": "mem.b0",
-          "direction": "west"
+          "flow": "reverse"
         },
         "destination": {
           "fabric": "west",
           "column": "mem.b0",
-          "direction": "east"
+          "flow": "forward"
         },
         "latency_cycles": 1
       },
       {
-        "name": "vxm.passive.west_to_east",
+        "name": "vxm.passive.west_fabric_to_east_fabric",
         "kind": "passive_bridge",
         "source": {
           "fabric": "west",
           "column": "mem.b0",
-          "direction": "west"
+          "flow": "reverse"
         },
         "destination": {
           "fabric": "east",
           "column": "mem.b0",
-          "direction": "east"
+          "flow": "forward"
         },
         "latency_cycles": 1
       }
