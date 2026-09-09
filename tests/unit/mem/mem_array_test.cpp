@@ -64,7 +64,7 @@ int main()
             fabric.stage_linear_links();
 
             if (cycle < ftlpu::hw::kTileRows) {
-                ftlpu::StreamPayloadSegment16 bytes{};
+                ftlpu::StreamPayloadTileSegment bytes{};
                 for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
                     bytes[lane] = static_cast<std::uint8_t>(cycle * 16 + lane);
                 }
@@ -107,7 +107,7 @@ int main()
             mem.evaluate(fabric);
             fabric.stage_linear_links();
             if (cycle < ftlpu::hw::kTileRows) {
-                ftlpu::StreamPayloadSegment16 bytes{};
+                ftlpu::StreamPayloadTileSegment bytes{};
                 for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
                     bytes[lane] = static_cast<std::uint8_t>(0x60 + cycle * 8 + lane);
                 }
@@ -167,7 +167,7 @@ int main()
             mem.evaluate(fabric);
             fabric.stage_linear_links();
             if (cycle < ftlpu::hw::kTileRows) {
-                ftlpu::StreamPayloadSegment16 bytes{};
+                ftlpu::StreamPayloadTileSegment bytes{};
                 for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
                     bytes[lane] = static_cast<std::uint8_t>(0x40 + cycle * 8 + lane);
                 }
@@ -222,7 +222,7 @@ int main()
             mem.evaluate(fabric);
             fabric.stage_linear_links();
             if (cycle < ftlpu::hw::kTileRows) {
-                ftlpu::StreamPayloadSegment16 bytes{};
+                ftlpu::StreamPayloadTileSegment bytes{};
                 for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
                     bytes[lane] = static_cast<std::uint8_t>(
                         0x80 + cycle * 8 + lane);

@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
-#include <utility>
 
 namespace ftlpu {
 
@@ -117,37 +116,6 @@ struct StreamCell {
         return StreamCell {value, true, is_last, tag};
     }
 
-    constexpr bool has_value() const noexcept
-    {
-        return valid;
-    }
-
-    constexpr void reset() noexcept
-    {
-        data = 0;
-        valid = false;
-        last = false;
-        vector_tag = 0;
-    }
-
-    constexpr StreamCell* operator->() noexcept
-    {
-        return this;
-    }
-
-    constexpr const StreamCell* operator->() const noexcept
-    {
-        return this;
-    }
-
-    StreamCell& operator=(const StreamWord<std::uint8_t>& word) noexcept
-    {
-        data = word.data;
-        valid = true;
-        last = word.last;
-        vector_tag = 0;
-        return *this;
-    }
 };
 
 // Spatial views of one logical stream. A vector is a logical/debug aggregation,
@@ -158,47 +126,5 @@ using StreamSliceVector = std::array<StreamTileSegment, hw::kTileRows>;
 using StreamPayloadTileSegment = std::array<std::uint8_t, hw::kLanesPerTile>;
 using StreamPayloadSliceVector =
     std::array<StreamPayloadTileSegment, hw::kTileRows>;
-
-// Source compatibility for workloads outside this repository. New code should
-// use the topology-neutral names above.
-using StreamSegment16 = StreamTileSegment;
-using StreamVector320 = StreamSliceVector;
-using StreamPayloadSegment16 = StreamPayloadTileSegment;
-using StreamPayloadVector320 = StreamPayloadSliceVector;
-
-template <typename T>
-class StreamRegister {
-public:
-    void reset()
-    {
-        input_.reset();
-        output_.reset();
-    }
-
-    void set_input(StreamValue<T> input)
-    {
-        input_ = std::move(input);
-    }
-
-    void clear_input()
-    {
-        input_.reset();
-    }
-
-    const StreamValue<T>& output() const
-    {
-        return output_;
-    }
-
-    void tick()
-    {
-        output_ = input_;
-        input_.reset();
-    }
-
-private:
-    StreamValue<T> input_{};
-    StreamValue<T> output_{};
-};
 
 } // namespace ftlpu

@@ -1,10 +1,73 @@
 #include "ftlpu/system/stream_topology.hpp"
+#include "ftlpu/system/stream_topology_builder.hpp"
+#include "ftlpu/system/tsp_slice_system.hpp"
 
 #include <cassert>
 #include <stdexcept>
 
 int main()
 {
+    const auto lpu32 = ftlpu::make_configured_stream_layout();
+    assert(lpu32.fabric_names.size() == 2);
+    assert(lpu32.fabric_names[0] == "east");
+    assert(lpu32.fabric_names[1] == "west");
+    assert(lpu32.topology.column_count() == 16);
+    assert(lpu32.topology.routes().size() == 30);
+    assert(lpu32.topology.column_name(0) == "mem.b0");
+    assert(lpu32.topology.column_name(15) == "sxm_mxm");
+
+    assert(lpu32.mem_ports.input_column(
+        0, ftlpu::StreamDirection::East) == 0);
+    assert(lpu32.mem_ports.output_column(
+        51, ftlpu::StreamDirection::East) == 13);
+    assert(lpu32.sxm_ports.input_column(
+        ftlpu::StreamDirection::East) == 14);
+    assert(lpu32.sxm_ports.output_column(
+        ftlpu::StreamDirection::West) == 14);
+    assert(lpu32.mxm_weight_input.column == 15);
+    assert(lpu32.mxm_activation_input.column == 15);
+    assert(lpu32.mxm_result_output.direction
+        == ftlpu::StreamDirection::West);
+    assert(lpu32.vxm_input.column == 0);
+    assert(lpu32.vxm_output.direction == ftlpu::StreamDirection::East);
+    assert(lpu32.c2c_ports.tx_input.column == 13);
+    assert(lpu32.c2c_ports.tx_input.direction
+        == ftlpu::StreamDirection::East);
+    assert(lpu32.c2c_ports.rx_output.column == 13);
+    assert(lpu32.c2c_ports.rx_output.direction
+        == ftlpu::StreamDirection::West);
+
+    assert(lpu32.system_transfers.size() == 2);
+    assert(lpu32.system_transfers[0].source_fabric == 0);
+    assert(lpu32.system_transfers[0].destination_fabric == 1);
+    assert(lpu32.system_transfers[0].source.direction
+        == ftlpu::StreamDirection::West);
+    assert(lpu32.system_transfers[0].destination.direction
+        == ftlpu::StreamDirection::East);
+
+    // TspSliceSystem must stage the generated route selection, rather than
+    // silently falling back to the old implicit linear fabric.
+    ftlpu::TspSliceSystem system;
+    const auto system_stream = ftlpu::StreamId::East(7);
+    system.stream_fabric(ftlpu::Hemisphere::East).initialize_cell(
+        0, 0, 0, system_stream, ftlpu::StreamCell::Valid(61));
+    system.stream_route_selection(ftlpu::Hemisphere::East).disable(
+        "main.forward.0");
+    system.tick({});
+    assert(!system.stream_fabric(ftlpu::Hemisphere::East)
+                .cell(1, 0, 0, system_stream).valid);
+
+    system.reset_execution_state();
+    system.stream_route_selection(ftlpu::Hemisphere::East).enable(
+        "main.forward.0");
+    system.stream_fabric(ftlpu::Hemisphere::East).initialize_cell(
+        0, 0, 0, system_stream, ftlpu::StreamCell::Valid(62));
+    system.tick({});
+    const auto& forwarded = system.stream_fabric(ftlpu::Hemisphere::East)
+                                .cell(1, 0, 0, system_stream);
+    assert(forwarded.valid);
+    assert(forwarded.data == 62);
+
     ftlpu::StreamTopology topology;
     const auto tx_out = topology.add_column("tx.out");
     const auto dst_out = topology.add_column("dst.out");

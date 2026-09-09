@@ -169,7 +169,7 @@ constexpr std::size_t kReferenceMemSliceBytes =
 constexpr std::size_t kTotalSramBytes = kSramBlocks * kSramBlockBytes;
 constexpr std::size_t kPublicTotalSramBytes = kPublicSramBlocks * kSramBlockBytes;
 
-static_assert(kHardwareSchemaVersion == 1);
+static_assert(kHardwareSchemaVersion == 2);
 static_assert(!kTargetName.empty());
 static_assert(kHemispheres > 0);
 static_assert(kTileRows > 0);
@@ -178,6 +178,12 @@ static_assert(kStreams > 0 && kStreams <= 64 && kStreams % 2 == 0);
 static_assert(kStreamRegisterBytes == kMemBytesPerLane);
 static_assert(kReferenceVectorBytes % kPhysicalVectorBytes == 0);
 static_assert(kMemSliceColumns % kMemSlicesPerGroup == 0);
+static_assert(config::kStreamTopology.columns.size()
+    == kSystemStreamRegisterColumns);
+static_assert(config::kStreamTopology.mem_slices_per_group
+    == kMemSlicesPerGroup);
+static_assert(config::kStreamTopology.mem_boundary_columns.size()
+    == kMemBoundaryStreamRegisterColumns);
 static_assert(kModeledSramBlocks
     == kMemSliceColumns * kMemBanksPerSlice);
 static_assert(kEastStreams + kWestStreams == kStreams);

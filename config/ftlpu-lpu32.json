@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
 
   "target": {
     "name": "ftlpu-lpu32"
@@ -21,6 +21,133 @@
   "sr": {
     "registers_per_lane": 64,
     "bytes_per_stream_per_lane": 1
+  },
+
+  "stream_topology": {
+    "fabric_template": {
+      "replicas": ["east", "west"],
+      "columns": [
+        "mem.b0",
+        "mem.b1",
+        "mem.b2",
+        "mem.b3",
+        "mem.b4",
+        "mem.b5",
+        "mem.b6",
+        "mem.b7",
+        "mem.b8",
+        "mem.b9",
+        "mem.b10",
+        "mem.b11",
+        "mem.b12",
+        "mem.b13",
+        "c2c_sxm",
+        "sxm_mxm"
+      ],
+      "paths": [
+        {
+          "name": "main",
+          "columns": [
+            "mem.b0",
+            "mem.b1",
+            "mem.b2",
+            "mem.b3",
+            "mem.b4",
+            "mem.b5",
+            "mem.b6",
+            "mem.b7",
+            "mem.b8",
+            "mem.b9",
+            "mem.b10",
+            "mem.b11",
+            "mem.b12",
+            "mem.b13",
+            "c2c_sxm",
+            "sxm_mxm"
+          ],
+          "forward_direction": "east",
+          "reverse_direction": "west",
+          "bidirectional": true,
+          "kind": "normal",
+          "enabled_by_default": true,
+          "multicast_allowed": false,
+          "hop_latency_cycles": 1
+        }
+      ],
+      "routes": []
+    },
+    "bindings": {
+      "mem": {
+        "slices_per_group": 4,
+        "boundary_columns": [
+          "mem.b0",
+          "mem.b1",
+          "mem.b2",
+          "mem.b3",
+          "mem.b4",
+          "mem.b5",
+          "mem.b6",
+          "mem.b7",
+          "mem.b8",
+          "mem.b9",
+          "mem.b10",
+          "mem.b11",
+          "mem.b12",
+          "mem.b13"
+        ]
+      },
+      "sxm": {
+        "east_input": {"column": "c2c_sxm", "direction": "east"},
+        "east_output": {"column": "sxm_mxm", "direction": "east"},
+        "west_input": {"column": "sxm_mxm", "direction": "west"},
+        "west_output": {"column": "c2c_sxm", "direction": "west"}
+      },
+      "mxm": {
+        "weight_input": {"column": "sxm_mxm", "direction": "east"},
+        "activation_input": {"column": "sxm_mxm", "direction": "east"},
+        "result_output": {"column": "sxm_mxm", "direction": "west"}
+      },
+      "vxm": {
+        "input": {"column": "mem.b0", "direction": "west"},
+        "output": {"column": "mem.b0", "direction": "east"}
+      },
+      "c2c": {
+        "tx_input": {"column": "mem.b13", "direction": "east"},
+        "rx_output": {"column": "mem.b13", "direction": "west"}
+      }
+    },
+    "system_transfers": [
+      {
+        "name": "vxm.passive.east_to_west",
+        "kind": "passive_bridge",
+        "source": {
+          "fabric": "east",
+          "column": "mem.b0",
+          "direction": "west"
+        },
+        "destination": {
+          "fabric": "west",
+          "column": "mem.b0",
+          "direction": "east"
+        },
+        "latency_cycles": 1
+      },
+      {
+        "name": "vxm.passive.west_to_east",
+        "kind": "passive_bridge",
+        "source": {
+          "fabric": "west",
+          "column": "mem.b0",
+          "direction": "west"
+        },
+        "destination": {
+          "fabric": "east",
+          "column": "mem.b0",
+          "direction": "east"
+        },
+        "latency_cycles": 1
+      }
+    ]
   },
 
   "mxm": {

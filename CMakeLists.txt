@@ -20,6 +20,7 @@ ftlpu_generate_hardware_config(
 add_library(ftlpu_cmodel STATIC
     src/mem/sram.cpp
     src/mxm/accumulator.cpp
+    src/system/stream_topology_builder.cpp
 )
 target_include_directories(ftlpu_cmodel PUBLIC
     "${FTLPU_GENERATED_INCLUDE_DIR}"

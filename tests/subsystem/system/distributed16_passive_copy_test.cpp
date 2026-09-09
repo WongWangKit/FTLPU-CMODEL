@@ -24,7 +24,7 @@ constexpr std::size_t kBlockInterval =
 
 constexpr std::size_t west_read_latency(std::size_t slice)
 {
-    return slice / ftlpu::hw::kMemSlicesPerGroup + 2;
+    return slice / ftlpu::hw::kMemSlicesPerGroup + 1;
 }
 
 constexpr std::size_t east_write_latency(std::size_t slice)

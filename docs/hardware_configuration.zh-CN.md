@@ -11,7 +11,7 @@ CMake 配置阶段读取它并生成编译期常量，Software 编译器也可�
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "target": {
     "name": "ftlpu-lpu32"
   },
@@ -43,13 +43,35 @@ CMake 配置阶段读取它并生成编译期常量，Software 编译器也可�
 }
 ```
 
+### `stream_topology`（schema v2）
+
+`stream_topology.fabric_template` 描述每个 hemisphere 共用的物理 SR 网络模板：
+
+- `replicas` 给出模板实例名，数量必须等于 `topology.hemispheres`。
+- `columns` 按稳定 ID 顺序声明物理 SR column；descriptor 中的端口和 route 都使用该 ID。
+- `paths` 是连续链路的简写。生成器把相邻 column 展开成单向逐跳 route；当
+  `bidirectional` 为 `true` 时同时生成反向 route。
+- `routes` 声明无法用连续 path 表达的显式 route，例如 bypass。字段为 `name`、
+  `source`、`destination`、`direction`、`kind`、`enabled_by_default`、
+  `multicast_allowed` 和 `latency_cycles`。
+
+`stream_topology.bindings` 把 MEM boundary、SXM、MXM、VXM 和 C2C 端口绑定到 column；
+端口由 `{"column": "...", "direction": "east|west"}` 表示。
+`system_transfers` 描述 fabric 实例之间的传输，source/destination 还包含 `fabric`。
+数组中存在的 transfer 即被生成并执行；不需要传输时应从数组中删除对应项。当前支持的
+跨 fabric 类型为 `passive_bridge`。完整的 LPU32 实例见
+[`config/ftlpu-lpu32.json`](../config/ftlpu-lpu32.json)。
+
+CMake 在 configure 阶段校验名称、引用、数量、方向和 latency，并将 path 展开为
+`ftlpu::hw::config::kStreamTopology` constexpr descriptor。
+
 ## 字段含义
 
 ### 基本信息和拓扑
 
 | 字段 | 含义 | 默认值 |
 | --- | --- | ---: |
-| `schema_version` | JSON schema 版本，目前必须为 1 | 1 |
+| `schema_version` | JSON schema 版本，目前必须为 2 | 2 |
 | `target.name` | target 名称，进入 target ABI、MLIR 和诊断信息 | `ftlpu-lpu32` |
 | `topology.hemispheres` | 芯片的 hemisphere 数量 | 2 |
 | `topology.tiles_per_slice` | 一个数据 slice 覆盖的 tile 数 | 4 |
@@ -193,7 +215,7 @@ cmake --build build-custom --config Release
 
 ## 校验规则和注意事项
 
-- `schema_version` 必须为 1。
+- `schema_version` 必须为 2。
 - 所有数量和尺寸字段必须是正整数。
 - `target.name` 不能为空，只能包含字母、数字、`.`、`_` 和 `-`。
 - `sr.registers_per_lane` 必须为 64，以匹配当前 6-bit stream ISA。

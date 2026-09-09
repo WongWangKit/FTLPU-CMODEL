@@ -6,7 +6,7 @@
 int main()
 {
     ftlpu::StreamRegisterFabric fabric(2);
-    ftlpu::StreamPayloadSegment16 payload{};
+    ftlpu::StreamPayloadTileSegment payload{};
     for (std::size_t lane = 0; lane < payload.size(); ++lane) {
         payload[lane] = static_cast<std::uint8_t>(lane);
     }

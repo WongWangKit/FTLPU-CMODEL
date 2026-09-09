@@ -12,7 +12,7 @@ int main()
     // One StreamId denotes the same logical stream across all physical lanes.
     fabric.begin_cycle();
     for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
-        ftlpu::StreamPayloadSegment16 segment{};
+        ftlpu::StreamPayloadTileSegment segment{};
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
             segment[lane] = static_cast<std::uint8_t>(tile * 16 + lane);
         }

@@ -19,7 +19,7 @@ constexpr std::array<std::size_t, 16> kRhsSlices {
 
 constexpr std::size_t west_read_latency(std::size_t slice)
 {
-    return slice / ftlpu::hw::kMemSlicesPerGroup + 2;
+    return slice / ftlpu::hw::kMemSlicesPerGroup + 1;
 }
 
 void enqueue_mem_at(

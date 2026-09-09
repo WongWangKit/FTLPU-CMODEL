@@ -26,7 +26,9 @@ constexpr std::size_t opposite(std::size_t side)
 
 constexpr std::size_t west_read_latency(std::size_t slice)
 {
-    return slice / ftlpu::hw::kMemSlicesPerGroup + 2;
+    // The MEM producer commits at its boundary, followed by one hop per
+    // boundary column before the next cycle's passive bridge phase sees it.
+    return slice / ftlpu::hw::kMemSlicesPerGroup + 1;
 }
 
 constexpr std::size_t east_write_latency(std::size_t slice)

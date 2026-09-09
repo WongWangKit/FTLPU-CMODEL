@@ -400,7 +400,7 @@ private:
                     tile, lane, row_stream_base);
                 const auto high = input.consume_cell(
                     tile, lane, row_stream_base + 1);
-                if (!low.has_value() || !high.has_value()) {
+                if (!low.valid || !high.valid) {
                     throw std::logic_error(
                         "MXM Compute reached tile "
                         + std::to_string(tile)
@@ -409,13 +409,13 @@ private:
                         + std::to_string(row_stream_base)
                         + "/" + std::to_string(row_stream_base + 1)
                         + " arrived (low="
-                        + (low.has_value() ? "valid" : "missing")
+                        + (low.valid ? "valid" : "missing")
                         + ", high="
-                        + (high.has_value() ? "valid" : "missing")
+                        + (high.valid ? "valid" : "missing")
                         + ")");
                 }
-                const auto bits = static_cast<std::uint16_t>(low->data)
-                    | (static_cast<std::uint16_t>(high->data) << 8);
+                const auto bits = static_cast<std::uint16_t>(low.data)
+                    | (static_cast<std::uint16_t>(high.data) << 8);
                 data[output_row][lane] = decode_mxm_16bit(bits, format);
             }
         }
@@ -444,15 +444,15 @@ private:
                     tile, lane, stream_base);
                 const auto high = input.consume_cell(
                     tile, lane, stream_base + 1);
-                if (!low.has_value() || !high.has_value()) {
+                if (!low.valid || !high.valid) {
                     throw std::logic_error(
                         "MXM decode activation load reached tile "
                         + std::to_string(tile)
                         + " before its activation vector arrived");
                 }
                 const auto bits = static_cast<std::uint16_t>(
-                    static_cast<std::uint16_t>(low->data)
-                    | (static_cast<std::uint16_t>(high->data) << 8));
+                    static_cast<std::uint16_t>(low.data)
+                    | (static_cast<std::uint16_t>(high.data) << 8));
                 decode_activation_buffers_[pulse.activation_buffer]
                                           [tile][column][lane] =
                     decode_mxm_16bit(bits, pulse.data_format);
@@ -532,8 +532,8 @@ private:
                     tile,
                     lane,
                     stream_base + output_lane);
-                any = any || word.has_value();
-                all = all && word.has_value();
+                any = any || word.valid;
+                all = all && word.valid;
             }
         }
         if (!any) {
@@ -548,7 +548,7 @@ private:
                     if (!input.cell(
                             tile,
                             lane,
-                            stream_base + output_lane).has_value()) {
+                            stream_base + output_lane).valid) {
                         missing = " lane=" + std::to_string(lane)
                             + " stream="
                             + std::to_string(stream_base + output_lane);
@@ -577,7 +577,7 @@ private:
                     lane,
                     stream_base + output_lane);
                 quantized[lane][output_lane] = MxmSupercell::InputWord {
-                    word->data,
+                    word.data,
                     output_lane + 1 == hw::kMxmSupercellColumns};
             }
         }

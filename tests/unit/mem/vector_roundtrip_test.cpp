@@ -1,4 +1,3 @@
-#include "ftlpu/core/topology.hpp"
 #include "ftlpu/core/stream_port.hpp"
 #include "ftlpu/mem/mem_array.hpp"
 
@@ -31,16 +30,19 @@ int main()
 
     std::mt19937 rng(kSeed);
     std::uniform_int_distribution<std::size_t> stream_dist(0, ftlpu::hw::kEastStreams - 1);
-    std::uniform_int_distribution<std::size_t> slice_dist(0, ftlpu::hw::kSliceColumns - 1);
+    std::uniform_int_distribution<std::size_t> slice_dist(
+        0, ftlpu::hw::kMemSliceColumns - 1);
 
     const auto stream = stream_dist(rng);
     const auto mem_slice = slice_dist(rng);
-    const auto target_sreg = ftlpu::stream_register_before_slice(mem_slice);
+    auto mem = std::make_unique<ftlpu::MemArrayModel>();
+    const auto target_sreg = mem->ports().input_column(
+        mem_slice, ftlpu::StreamDirection::East);
     const auto store_cycle = target_sreg + 1;
     const auto read_cycle = store_cycle + kReadDelayCycles;
-    const auto last_output_cycle = read_cycle + ftlpu::hw::kTileRows + ftlpu::hw::kStreamRegisterColumns - target_sreg;
+    const auto last_output_cycle = read_cycle + ftlpu::hw::kTileRows
+        + ftlpu::hw::kSystemStreamRegisterColumns - target_sreg;
 
-    auto mem = std::make_unique<ftlpu::MemArrayModel>();
     auto fabric = std::make_unique<ftlpu::StreamRegisterFabric>(
         ftlpu::hw::kSystemStreamRegisterColumns);
     ftlpu::StreamOutputPort input(
@@ -89,7 +91,7 @@ int main()
             for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
                 assert(!fabric->cell(
                     target_sreg, 0, lane,
-                    ftlpu::StreamId::East(stream)).has_value());
+                    ftlpu::StreamId::East(stream)).valid);
             }
         }
     }

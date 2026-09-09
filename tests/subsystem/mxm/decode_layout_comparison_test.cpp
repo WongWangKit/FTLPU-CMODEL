@@ -45,7 +45,7 @@ std::int8_t weight_value(std::size_t k, std::size_t n)
 std::size_t east_latency(std::size_t slice)
 {
     return ftlpu::hw::kMemGroups
-        + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 2
+        + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 1
         - slice / ftlpu::hw::kMemSlicesPerGroup;
 }
 

@@ -11,6 +11,7 @@
 #include "ftlpu/sxm/slice.hpp"
 #include "ftlpu/system/hardware_configuration.hpp"
 #include "ftlpu/system/icu.hpp"
+#include "ftlpu/system/stream_topology_builder.hpp"
 #include "ftlpu/vxm/slice.hpp"
 #include <algorithm>
 
@@ -48,19 +49,41 @@ public:
     explicit TspSliceSystem(
         SystemHardwareConfiguration hardware = {})
         : hardware_configuration_(hardware)
+        , stream_layout_(make_configured_stream_layout())
+        , active_stream_routes_ {
+            stream_layout_.topology.default_route_selection(),
+            stream_layout_.topology.default_route_selection(),
+        }
         , mems_ {
-            MemArrayModel(MemStreamPortMap::BetweenBoundaries()),
-            MemArrayModel(MemStreamPortMap::BetweenBoundaries()),
+            MemArrayModel(stream_layout_.mem_ports),
+            MemArrayModel(stream_layout_.mem_ports),
         }
         , streams_ {
-            StreamRegisterFabric(hw::kSystemStreamRegisterColumns),
-            StreamRegisterFabric(hw::kSystemStreamRegisterColumns),
+            StreamRegisterFabric(stream_layout_.topology.column_count()),
+            StreamRegisterFabric(stream_layout_.topology.column_count()),
         }
         , sxms_ {
-            SxmSlice(make_sxm_port_map()),
-            SxmSlice(make_sxm_port_map()),
+            SxmSlice(stream_layout_.sxm_ports),
+            SxmSlice(stream_layout_.sxm_ports),
         }
     {
+        if (stream_layout_.fabric_names.size() != hw::kHemispheres) {
+            throw std::invalid_argument(
+                "stream layout fabric count does not match the CModel");
+        }
+        for (std::size_t index = 0; index < hw::kHemispheres; ++index) {
+            if (stream_layout_.fabric_names[index]
+                != hemisphere_name(static_cast<Hemisphere>(index))) {
+                throw std::invalid_argument(
+                    "stream layout fabric order does not match Hemisphere");
+            }
+        }
+        for (const auto& transfer : stream_layout_.system_transfers) {
+            if (transfer.latency_cycles != 1) {
+                throw std::invalid_argument(
+                    "TspSliceSystem supports one-cycle system stream transfers only");
+            }
+        }
         configure_hardware(hardware_configuration_);
     }
 
@@ -78,6 +101,23 @@ public:
         return hardware_configuration_;
     }
 
+    const StreamLayout& stream_layout() const noexcept
+    {
+        return stream_layout_;
+    }
+
+    StreamTopology::RouteSelection& stream_route_selection(
+        Hemisphere hemisphere) noexcept
+    {
+        return active_stream_routes_[hemisphere_index(hemisphere)];
+    }
+
+    const StreamTopology::RouteSelection& stream_route_selection(
+        Hemisphere hemisphere) const noexcept
+    {
+        return active_stream_routes_[hemisphere_index(hemisphere)];
+    }
+
     void attach_c2c(
         Hemisphere hemisphere,
         C2cLink& outbound_link,
@@ -85,8 +125,7 @@ public:
     {
         require_phase(CyclePhase::Idle, "attaching C2C");
         const auto index = hemisphere_index(hemisphere);
-        c2cs_[index].emplace(C2cStreamPortMap::EastEdge(
-            hw::kMemEastBoundaryStreamRegisterColumn));
+        c2cs_[index].emplace(stream_layout_.c2c_ports);
         c2c_outbound_links_[index] = &outbound_link;
         c2c_inbound_links_[index] = &inbound_link;
         c2c_dmas_[index] = nullptr;
@@ -98,8 +137,7 @@ public:
     {
         require_phase(CyclePhase::Idle, "attaching C2C DMA");
         const auto index = hemisphere_index(hemisphere);
-        c2cs_[index].emplace(C2cStreamPortMap::EastEdge(
-            hw::kMemEastBoundaryStreamRegisterColumn), "C2C DMA",
+        c2cs_[index].emplace(stream_layout_.c2c_ports, "C2C DMA",
             true);
         c2c_outbound_links_[index] = nullptr;
         c2c_inbound_links_[index] = nullptr;
@@ -468,7 +506,8 @@ private:
                 if (c2cs_[hemisphere].has_value()) {
                     evaluate_c2c(hemisphere, fabric);
                 }
-                fabric.stage_linear_links();
+                stream_layout_.topology.stage_active_routes(
+                    fabric, active_stream_routes_[hemisphere]);
                 fabric.commit_cycle();
 
                 if (sinks.mem != nullptr) {
@@ -557,15 +596,6 @@ private:
         }
     }
 
-    static SxmStreamPortMap make_sxm_port_map()
-    {
-        return SxmStreamPortMap::BetweenColumns(
-            hw::kC2cSxmBoundaryStreamRegisterColumn,
-            hw::kMxmBoundaryStreamRegisterColumn,
-            hw::kMxmBoundaryStreamRegisterColumn,
-            hw::kC2cSxmBoundaryStreamRegisterColumn);
-    }
-
     static Hemisphere mxm_hemisphere(std::size_t mxm)
     {
         return static_cast<Hemisphere>(mxm / kMxmCountPerHemisphere);
@@ -585,7 +615,7 @@ private:
             auto provider = [this, mxm, sinks](std::size_t tile) {
                 if (sinks.mxm != nullptr && (!sinks.mxm_log_tile.has_value() || tile == *sinks.mxm_log_tile)) {
                     *sinks.mxm << "  SXM.sreg"
-                               << hw::kMxmBoundaryStreamRegisterColumn
+                               << stream_layout_.mxm_weight_input.column
                                << " -> MXM" << mxm << " tile " << tile << '\n';
                 }
                 try {
@@ -611,13 +641,13 @@ private:
             const auto hemisphere = hemisphere_index(mxm_hemisphere(mxm));
             auto input = StreamInputPort(
                 streams_[hemisphere],
-                hw::kMxmBoundaryStreamRegisterColumn,
-                StreamDirection::East,
+                stream_layout_.mxm_activation_input.column,
+                stream_layout_.mxm_activation_input.direction,
                 "MXM" + std::to_string(mxm) + " datapath");
             auto output = StreamOutputPort(
                 streams_[hemisphere],
-                hw::kMxmBoundaryStreamRegisterColumn,
-                StreamDirection::West,
+                stream_layout_.mxm_result_output.column,
+                stream_layout_.mxm_result_output.direction,
                 "MXM" + std::to_string(mxm) + " datapath");
             mxms_[mxm].tick_datapath(
                 input, output, local_mxm_index(mxm), sinks.mxm,
@@ -631,8 +661,8 @@ private:
         const auto hemisphere = hemisphere_index(mxm_hemisphere(mxm));
         auto streams = StreamInputPort(
             streams_[hemisphere],
-            hw::kMxmBoundaryStreamRegisterColumn,
-            StreamDirection::East,
+            stream_layout_.mxm_weight_input.column,
+            stream_layout_.mxm_weight_input.direction,
             "MXM" + std::to_string(mxm) + " weight input");
         const auto& instruction = mxms_[mxm].control().instruction_at(tile);
         if (!instruction.has_value()
@@ -651,13 +681,13 @@ private:
                      ++lane) {
                     const auto word = streams.consume_cell(
                         tile, lane, stream_base);
-                    if (!word.has_value()) {
+                    if (!word.valid) {
                         throw std::logic_error(
                             "MXM INT8 column IW reached tile before its weight stream arrived at the MXM boundary register");
                     }
                     input[lane][column] =
                         MxmArray::Supercell::InputWord {
-                            word->data,
+                            word.data,
                             lane + 1 == hw::kLanesPerTile,
                         };
                 }
@@ -672,7 +702,7 @@ private:
                      ++column) {
                     const auto word = streams.consume_cell(
                         tile, lane, stream_base + column);
-                    if (!word.has_value()) {
+                    if (!word.valid) {
                         throw std::logic_error(
                             "MXM INT8 IW reached tile before all eight weight streams arrived at the MXM boundary register"
                             " (tile=" + std::to_string(tile)
@@ -682,7 +712,7 @@ private:
                     }
                     input[lane][column] =
                         MxmArray::Supercell::InputWord {
-                            word->data,
+                            word.data,
                             column + 1
                                 == hw::kMxmSupercellColumns,
                         };
@@ -704,13 +734,13 @@ private:
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                 const auto low_word = streams.consume_cell(tile, lane, low);
                 const auto high_word = streams.consume_cell(tile, lane, high);
-                if (!low_word.has_value() || !high_word.has_value()) {
+                if (!low_word.valid || !high_word.valid) {
                     throw std::logic_error(
                         "MXM column IW reached tile before both 16-bit weight streams arrived at the MXM boundary register");
                 }
                 const auto bits = static_cast<std::uint16_t>(
-                    static_cast<std::uint16_t>(low_word->data)
-                    | (static_cast<std::uint16_t>(high_word->data) << 8));
+                    static_cast<std::uint16_t>(low_word.data)
+                    | (static_cast<std::uint16_t>(high_word.data) << 8));
                 input[lane][column] = MxmArray::Supercell::InputWord {
                     bits,
                     lane + 1 == hw::kLanesPerTile,
@@ -726,13 +756,13 @@ private:
                     tile, lane, low_stream);
                 const auto high = streams.consume_cell(
                     tile, lane, low_stream + 1);
-                if (!low.has_value() || !high.has_value()) {
+                if (!low.valid || !high.valid) {
                     throw std::logic_error(
                         "MXM IW reached tile before both 16-bit weight streams arrived at the MXM boundary register");
                 }
                 const auto bits = static_cast<std::uint16_t>(
-                    static_cast<std::uint16_t>(low->data)
-                    | (static_cast<std::uint16_t>(high->data) << 8));
+                    static_cast<std::uint16_t>(low.data)
+                    | (static_cast<std::uint16_t>(high.data) << 8));
                 input[lane][column] = MxmArray::Supercell::InputWord {
                     bits,
                     column + 1 == hw::kMxmSupercellColumns,
@@ -767,9 +797,13 @@ private:
                      byte < VxmLane::kStreamGroupBytes;
                      ++byte) {
                     if (!fabric.cell(
-                            hw::kMemWestBoundaryStreamRegisterColumn,
-                            tile, lane, StreamId::West(base + byte))
-                             .has_value()) {
+                            stream_layout_.vxm_input.column,
+                            tile, lane,
+                            stream_layout_.vxm_input.direction
+                                == StreamDirection::East
+                                ? StreamId::East(base + byte)
+                                : StreamId::West(base + byte))
+                             .valid) {
                         return false;
                     }
                 }
@@ -807,16 +841,20 @@ private:
                         if (!(*required)[base] && !(*required)[base + 1])
                             continue;
                         const auto source = vxm_.input_group_source(group);
-                        const auto& mem = mems_[hemisphere_index(source)];
+                        const auto& fabric =
+                            streams_[hemisphere_index(source)];
                         bool missing = false;
                         for (std::size_t lane = 0;
                              lane < hw::kLanesPerTile && !missing; ++lane) {
                             for (std::size_t byte = 0;
                                  byte < VxmLane::kStreamGroupBytes; ++byte) {
-                                missing = !mem.west_register(
+                                missing = !fabric.cell(
+                                    stream_layout_.vxm_input.column,
                                     tile, lane,
-                                    hw::kMemWestBoundaryStreamRegisterColumn,
-                                    base + byte).has_value();
+                                    stream_layout_.vxm_input.direction
+                                        == StreamDirection::East
+                                        ? StreamId::East(base + byte)
+                                        : StreamId::West(base + byte)).valid;
                                 if (missing) break;
                             }
                         }
@@ -853,8 +891,8 @@ private:
                 const auto source = vxm_.input_group_source(group);
                 auto input = StreamInputPort(
                     streams_[hemisphere_index(source)],
-                    hw::kMemWestBoundaryStreamRegisterColumn,
-                    StreamDirection::West,
+                    stream_layout_.vxm_input.column,
+                    stream_layout_.vxm_input.direction,
                     "VXM input");
                 auto values = VxmSlice::InputBuffer::GroupVector {};
                 for (std::size_t lane = 0;
@@ -865,11 +903,11 @@ private:
                          ++byte) {
                         const auto cell = input.consume_cell(
                             tile, lane, base + byte);
-                        if (!cell.has_value()) {
+                        if (!cell.valid) {
                             throw std::logic_error(
                                 "VXM input group became incomplete during MEM-edge capture");
                         }
-                        values[lane][byte] = cell->data;
+                        values[lane][byte] = cell.data;
                     }
                 }
                 vxm_.capture_stream_group(tile, group, values);
@@ -886,18 +924,32 @@ private:
 
     void transfer_unconsumed_streams_across_vxm(LogSinks sinks)
     {
-        for (std::size_t source_index = 0; source_index < hw::kHemispheres; ++source_index) {
+        for (const auto& transfer : stream_layout_.system_transfers) {
+            if (transfer.kind
+                != target::StreamSystemTransferKind::PassiveBridge) {
+                throw std::logic_error(
+                    "unsupported stream system transfer kind");
+            }
+            const auto source_index = transfer.source_fabric;
+            const auto destination_index = transfer.destination_fabric;
             const auto source = static_cast<Hemisphere>(source_index);
-            const auto destination_index = source_index ^ 1;
             auto destination = StreamOutputPort(
                 streams_[destination_index],
-                hw::kMemWestBoundaryStreamRegisterColumn,
-                StreamDirection::East,
-                "passive VXM bridge");
+                transfer.destination.column,
+                transfer.destination.direction,
+                transfer.name);
             const auto& source_fabric = streams_[source_index];
             for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-                for (std::size_t stream = 0; stream < hw::kWestStreams; ++stream) {
-                    if (vxm_requires_stream_from(source, tile, stream)) {
+                for (std::size_t stream = 0;
+                     stream < hw::kStreamsPerDirection; ++stream) {
+                    const auto stream_id = transfer.source.direction
+                        == StreamDirection::East
+                        ? StreamId::East(stream)
+                        : StreamId::West(stream);
+                    if (transfer.source.column == stream_layout_.vxm_input.column
+                        && transfer.source.direction
+                            == stream_layout_.vxm_input.direction
+                        && vxm_requires_stream_from(source, tile, stream)) {
                         continue;
                     }
 
@@ -905,27 +957,33 @@ private:
                     for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                         complete = complete
                             && source_fabric.cell(
-                                hw::kMemWestBoundaryStreamRegisterColumn,
-                                tile, lane, StreamId::West(stream))
-                                   .has_value();
+                                transfer.source.column,
+                                tile, lane, stream_id)
+                              .valid;
                     }
                     if (!complete) continue;
 
                     for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                         const auto& cell = source_fabric.cell(
-                            hw::kMemWestBoundaryStreamRegisterColumn,
-                            tile, lane, StreamId::West(stream));
+                            transfer.source.column,
+                            tile, lane, stream_id);
                         destination.write_cell(tile, lane, stream, cell);
                     }
                     ++passive_bridge_transfer_counts_[source_index][stream];
                     last_passive_bridge_cycles_[source_index][stream] = cycle_ + 1;
                     if (sinks.system != nullptr) {
                         *sinks.system << "  passive VXM bridge "
-                                      << hemisphere_short_name(source) << ".W" << stream
+                                      << stream_layout_.fabric_names[source_index]
+                                      << '.'
+                                      << (transfer.source.direction
+                                              == StreamDirection::East ? 'E' : 'W')
+                                      << stream
                                       << " -> "
-                                      << hemisphere_short_name(
-                                             static_cast<Hemisphere>(destination_index))
-                                      << ".E" << stream << " tile " << tile << '\n';
+                                      << stream_layout_.fabric_names[destination_index]
+                                      << '.'
+                                      << (transfer.destination.direction
+                                              == StreamDirection::East ? 'E' : 'W')
+                                      << stream << " tile " << tile << '\n';
                     }
                 }
             }
@@ -945,8 +1003,8 @@ private:
                     vxm_.output_stream_destination(output.stream);
                 auto stream_output = StreamOutputPort(
                     streams_[hemisphere_index(destination)],
-                    hw::kMemWestBoundaryStreamRegisterColumn,
-                    StreamDirection::East,
+                    stream_layout_.vxm_output.column,
+                    stream_layout_.vxm_output.direction,
                     "VXM output");
                 for (std::size_t byte = 0; byte < output.byte_count; ++byte) {
                     const auto stream = output.stream + byte;
@@ -1068,6 +1126,9 @@ private:
     };
 
     SystemHardwareConfiguration hardware_configuration_{};
+    StreamLayout stream_layout_;
+    std::array<StreamTopology::RouteSelection, hw::kHemispheres>
+        active_stream_routes_;
     std::array<MemArrayModel, hw::kHemispheres> mems_;
     std::array<StreamRegisterFabric, hw::kHemispheres> streams_;
     VxmSlice vxm_{};

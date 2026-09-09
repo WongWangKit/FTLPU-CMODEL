@@ -42,11 +42,6 @@ public:
     {
     }
 
-    std::size_t boundary_column(std::size_t boundary) const
-    {
-        return columns_.at(boundary);
-    }
-
     std::size_t input_column(
         std::size_t mem_slice,
         StreamDirection direction) const

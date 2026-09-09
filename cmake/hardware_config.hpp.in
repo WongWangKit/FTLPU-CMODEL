@@ -1,5 +1,8 @@
 #pragma once
 
+#include "ftlpu/core/stream_topology_descriptor.hpp"
+
+#include <array>
 #include <cstddef>
 #include <string_view>
 
@@ -26,5 +29,65 @@ inline constexpr bool kMxmSupportsLinear1x16 = @FTLPU_HW_MXM_SUPPORTS_LINEAR1X16
 
 // JSON `vxm.alus` is the number of stages in each mirrored direction chain.
 inline constexpr std::size_t kVxmAlusPerDirection = @FTLPU_HW_VXM_ALUS_PER_DIRECTION@;
+
+inline constexpr std::array<std::string_view, @FTLPU_STREAM_FABRIC_COUNT@>
+    kStreamFabricNames{{
+@FTLPU_STREAM_FABRIC_INITIALIZERS@}};
+
+inline constexpr std::array<::ftlpu::target::StreamColumnDescriptor,
+    @FTLPU_STREAM_COLUMN_COUNT@> kStreamColumns{{
+@FTLPU_STREAM_COLUMN_INITIALIZERS@}};
+
+inline constexpr std::array<::ftlpu::target::StreamRouteDescriptor,
+    @FTLPU_STREAM_ROUTE_COUNT@> kStreamRoutes{{
+@FTLPU_STREAM_ROUTE_INITIALIZERS@}};
+
+inline constexpr std::array<std::size_t, @FTLPU_STREAM_MEM_BOUNDARY_COUNT@>
+    kStreamMemBoundaryColumns{{
+@FTLPU_STREAM_MEM_BOUNDARY_INITIALIZERS@}};
+
+inline constexpr ::ftlpu::target::SxmStreamBindingDescriptor
+    kStreamSxmBinding{
+        @FTLPU_STREAM_SXM_EAST_INPUT@,
+        @FTLPU_STREAM_SXM_EAST_OUTPUT@,
+        @FTLPU_STREAM_SXM_WEST_INPUT@,
+        @FTLPU_STREAM_SXM_WEST_OUTPUT@,
+    };
+
+inline constexpr ::ftlpu::target::MxmStreamBindingDescriptor
+    kStreamMxmBinding{
+        @FTLPU_STREAM_MXM_WEIGHT_INPUT@,
+        @FTLPU_STREAM_MXM_ACTIVATION_INPUT@,
+        @FTLPU_STREAM_MXM_RESULT_OUTPUT@,
+    };
+
+inline constexpr ::ftlpu::target::VxmStreamBindingDescriptor
+    kStreamVxmBinding{
+        @FTLPU_STREAM_VXM_INPUT@,
+        @FTLPU_STREAM_VXM_OUTPUT@,
+    };
+
+inline constexpr ::ftlpu::target::C2cStreamBindingDescriptor
+    kStreamC2cBinding{
+        @FTLPU_STREAM_C2C_TX_INPUT@,
+        @FTLPU_STREAM_C2C_RX_OUTPUT@,
+    };
+
+inline constexpr std::array<::ftlpu::target::StreamSystemTransferDescriptor,
+    @FTLPU_STREAM_TRANSFER_COUNT@> kStreamSystemTransfers{{
+@FTLPU_STREAM_TRANSFER_INITIALIZERS@}};
+
+inline constexpr ::ftlpu::target::StreamTopologyDescriptor kStreamTopology{
+    kStreamFabricNames,
+    kStreamColumns,
+    kStreamRoutes,
+    @FTLPU_STREAM_MEM_SLICES_PER_GROUP@,
+    kStreamMemBoundaryColumns,
+    kStreamSxmBinding,
+    kStreamMxmBinding,
+    kStreamVxmBinding,
+    kStreamC2cBinding,
+    kStreamSystemTransfers,
+};
 
 } // namespace ftlpu::hw::config
