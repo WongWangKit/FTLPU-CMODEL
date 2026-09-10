@@ -1,4 +1,5 @@
 #include "ftlpu/icu/distributed_queue.hpp"
+#include "ftlpu/system/icu.hpp"
 
 #include <iostream>
 #include <stdexcept>
@@ -77,6 +78,29 @@ try {
     }
     require(contextOverflow,
         "finite ICU Macro context capacity was not enforced");
+
+    InstructionControlUnit icu;
+    icu.enqueue_mem_macro(0, IcuMacroSchedule {
+        3, 3, 4, 1, 1, 1, 0,
+        IcuInductionTarget::MemAddress,
+    }, MemInstruction::Read(100, 0));
+    icu.enqueue_mem_macro(0, IcuMacroSchedule {
+        4, 3, 4, 1, 1, 1, 0,
+        IcuInductionTarget::MemAddress,
+    }, MemInstruction::Read(200, 1));
+    for (std::size_t cycle = 0; cycle < 13; ++cycle)
+        static_cast<void>(icu.mem_iq(0).tick());
+    const auto statistics = icu.frontend_statistics();
+    require(statistics.imem_entries == 2,
+        "Macro frontend statistics reported incorrect i-MEM entries");
+    require(statistics.fetched_entries == 2,
+        "Macro frontend statistics reported incorrect fetched entries");
+    require(statistics.issued_instructions == 6,
+        "Macro frontend statistics reported incorrect dynamic issues");
+    require(statistics.macro_queues == 1,
+        "Macro frontend statistics did not identify the Macro queue");
+    require(statistics.peak_macro_contexts_per_queue == 2,
+        "Macro frontend statistics reported incorrect context pressure");
 
     std::cout << "icu_macro_schedule_test passed\n";
     return 0;

@@ -26,6 +26,14 @@
 
 namespace ftlpu {
 
+struct IcuFrontendStatistics {
+    std::size_t imem_entries{0};
+    std::size_t fetched_entries{0};
+    std::size_t issued_instructions{0};
+    std::size_t macro_queues{0};
+    std::size_t peak_macro_contexts_per_queue{0};
+};
+
 class InstructionControlUnit {
 public:
     static constexpr std::size_t kVxmQueues = VxmSlice::kAluQueues;
@@ -1106,6 +1114,37 @@ public:
     std::size_t cycle() const
     {
         return cycle_;
+    }
+
+    IcuFrontendStatistics frontend_statistics() const noexcept
+    {
+        IcuFrontendStatistics statistics;
+        const auto collect_queue = [&](const auto& queue) {
+            statistics.imem_entries += queue.imem_occupancy();
+            statistics.fetched_entries += queue.fetched_count();
+            statistics.issued_instructions += queue.issued_count();
+            const auto peak = queue.peak_active_macros();
+            statistics.macro_queues += peak != 0 ? 1 : 0;
+            if (peak > statistics.peak_macro_contexts_per_queue)
+                statistics.peak_macro_contexts_per_queue = peak;
+        };
+        const auto collect_queues = [&](const auto& queues) {
+            for (const auto& queue : queues) collect_queue(queue);
+        };
+
+        collect_queues(vxm_queues_);
+        collect_queues(mem_queues_);
+        for (const auto& queue : c2c_mem_queues_)
+            if (queue) collect_queue(*queue);
+        collect_queues(mxm_load_queues_);
+        collect_queues(mxm_dequant_queues_);
+        collect_queues(mxm_compute_queues_);
+        collect_queues(sxm_transpose_queues_);
+        collect_queues(sxm_permute_queues_);
+        collect_queues(c2c_tx_queues_);
+        collect_queues(c2c_dma_queues_);
+        collect_queues(c2c_rx_queues_);
+        return statistics;
     }
 
 private:
