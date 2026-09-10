@@ -308,6 +308,17 @@ public:
             schedule, std::move(instruction));
     }
 
+    void enqueue_mem_stream_nd_packet(
+        std::size_t column, IcuStreamNdPacket packet)
+    {
+        check_mem_queue(column);
+        if (decode_icu_stream_nd_packet(packet).unit
+            != IcuStreamNdUnit::Mem)
+            throw std::invalid_argument(
+                "MEM ICU requires a MEM STREAM_ND packet");
+        mem_queues_[column].push_stream_nd_packet(std::move(packet));
+    }
+
     void enqueue_mem_slice_program(
         std::size_t column, IcuMemSliceProgram program)
     {
@@ -422,6 +433,17 @@ public:
             schedule, std::move(instruction));
     }
 
+    void enqueue_mxm_load_stream_nd_packet(
+        std::size_t mxm, IcuStreamNdPacket packet)
+    {
+        check_mxm_queue(mxm);
+        if (decode_icu_stream_nd_packet(packet).unit
+            != IcuStreamNdUnit::MxmLoad)
+            throw std::invalid_argument(
+                "MXM load ICU requires an MXM-load STREAM_ND packet");
+        mxm_load_queues_[mxm].push_stream_nd_packet(std::move(packet));
+    }
+
     void enqueue_mxm_dequant_macro(std::size_t mxm,
         IcuMacroSchedule schedule, MxmDequantInstruction instruction)
     {
@@ -437,6 +459,17 @@ public:
         check_mxm_queue(mxm);
         mxm_dequant_queues_[mxm].push_mxm_stream_nd(
             schedule, std::move(instruction));
+    }
+
+    void enqueue_mxm_dequant_stream_nd_packet(
+        std::size_t mxm, IcuStreamNdPacket packet)
+    {
+        check_mxm_queue(mxm);
+        if (decode_icu_stream_nd_packet(packet).unit
+            != IcuStreamNdUnit::MxmDequant)
+            throw std::invalid_argument(
+                "MXM dequant ICU requires an MXM-dequant STREAM_ND packet");
+        mxm_dequant_queues_[mxm].push_stream_nd_packet(std::move(packet));
     }
 
     void enqueue_mxm_compute_macro(std::size_t mxm,
@@ -466,6 +499,17 @@ public:
                 "MXM compute STREAM_ND cannot carry a load instruction");
         mxm_compute_queues_[mxm].push_mxm_stream_nd(
             schedule, std::move(instruction));
+    }
+
+    void enqueue_mxm_compute_stream_nd_packet(
+        std::size_t mxm, IcuStreamNdPacket packet)
+    {
+        check_mxm_queue(mxm);
+        if (decode_icu_stream_nd_packet(packet).unit
+            != IcuStreamNdUnit::MxmCompute)
+            throw std::invalid_argument(
+                "MXM compute ICU requires an MXM-compute STREAM_ND packet");
+        mxm_compute_queues_[mxm].push_stream_nd_packet(std::move(packet));
     }
 
     void enqueue_mxm_compute_nop(std::size_t mxm, std::size_t cycles)

@@ -1,6 +1,8 @@
 #pragma once
 
+#include "ftlpu/core/instruction_codec.hpp"
 #include "ftlpu/icu/instruction.hpp"
+#include "ftlpu/icu/stream_nd_packet.hpp"
 #include "ftlpu/mem/slice.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
 #include "ftlpu/sxm/instruction.hpp"
@@ -71,6 +73,7 @@ template <typename FuncInstruction>
 using IqEntry = std::variant<IcuControlInstruction, FuncInstruction,
     IcuMacroInstruction<FuncInstruction>,
     IcuStreamNdInstruction<FuncInstruction>,
+    IcuStreamNdPacket,
     IcuStreamProgramInstruction<FuncInstruction>,
     IcuSynchronizedInstruction<FuncInstruction>>;
 
@@ -515,6 +518,18 @@ public:
         }
     }
 
+    // Append the exact fixed-width packet that a hardware loader writes into
+    // this ICU's local i-MEM.  It remains encoded through fetch and IQ fill;
+    // tick_stream_nd performs the local decode when the entry reaches issue.
+    void push_stream_nd_packet(IcuStreamNdPacket packet)
+    {
+        // Fail at load time for a packet meant for a different queue type,
+        // while retaining the encoded instruction in i-MEM.
+        static_cast<void>(decode_stream_nd_packet(packet));
+        append_program(Entry {std::in_place_type<IcuStreamNdPacket>,
+            std::move(packet)});
+    }
+
     void push_vxm_stream_nd(IcuVxmStreamNdSchedule schedule,
         FuncInstruction instruction)
     {
@@ -852,6 +867,8 @@ private:
         if (!active_stream_nd_.empty()
             || (!iq_.empty() && std::holds_alternative<
                 IcuStreamNdInstruction<FuncInstruction>>(iq_.front()))
+            || (!iq_.empty() && std::holds_alternative<
+                IcuStreamNdPacket>(iq_.front()))
             || (!iq_.empty() && std::holds_alternative<
                 IcuStreamProgramInstruction<FuncInstruction>>(
                     iq_.front())))
@@ -1220,6 +1237,52 @@ private:
         }
     };
 
+    static IcuStreamNdInstruction<FuncInstruction> decode_stream_nd_packet(
+        const IcuStreamNdPacket& packet)
+    {
+        const auto decoded = decode_icu_stream_nd_packet(packet);
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            if (decoded.unit != IcuStreamNdUnit::Mem)
+                throw std::invalid_argument(
+                    "STREAM_ND packet targets a non-MEM ICU");
+            return {decoded.schedule,
+                isa::decode_mem_instruction(decoded.native_instruction)};
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmControlInstruction>) {
+            if (decoded.unit != IcuStreamNdUnit::MxmLoad
+                && decoded.unit != IcuStreamNdUnit::MxmCompute)
+                throw std::invalid_argument(
+                    "STREAM_ND packet targets a non-MXM-control ICU");
+            auto instruction =
+                isa::decode_mxm_instruction(decoded.native_instruction);
+            const bool load = instruction.opcode == MxmControlOpcode::IW
+                || (instruction.opcode == MxmControlOpcode::Decode
+                    && instruction.decode_operation
+                        == MxmDecodeOperation::LoadActivation);
+            if ((decoded.unit == IcuStreamNdUnit::MxmLoad) != load)
+                throw std::invalid_argument(
+                    "STREAM_ND packet unit does not match its MXM opcode");
+            return {decoded.schedule, std::move(instruction)};
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmDequantInstruction>) {
+            if (decoded.unit != IcuStreamNdUnit::MxmDequant)
+                throw std::invalid_argument(
+                    "STREAM_ND packet targets a non-dequant ICU");
+            if (decoded.native_instruction
+                > std::numeric_limits<
+                    isa::EncodedMxmDequantInstruction>::max())
+                throw std::invalid_argument(
+                    "STREAM_ND dequant packet has non-zero upper payload bits");
+            return {decoded.schedule,
+                isa::decode_mxm_dequant_instruction(
+                    static_cast<isa::EncodedMxmDequantInstruction>(
+                        decoded.native_instruction))};
+        } else {
+            throw std::invalid_argument(
+                "fixed STREAM_ND packets are defined only for MEM and MXM ICUs");
+        }
+    }
+
     static void validate_stream_program(
         const IcuStreamProgramInstruction<FuncInstruction>& program)
     {
@@ -1266,7 +1329,27 @@ private:
     std::optional<FuncInstruction> tick_stream_nd()
     {
         if (!iq_.empty()) {
-            if (auto* stream = std::get_if<
+            if (auto* packet = std::get_if<IcuStreamNdPacket>(
+                    &iq_.front())) {
+                auto stream = decode_stream_nd_packet(*packet);
+                validate_stream_nd_schedule(stream.schedule);
+                if (cycle_ > stream.schedule.start_cycle) {
+                    std::ostringstream os;
+                    os << "STREAM_ND packet missed start cycle "
+                       << stream.schedule.start_cycle << " at cycle "
+                       << cycle_;
+                    throw StaticScheduleError(os.str());
+                }
+                std::size_t points = 1;
+                for (std::size_t dimension = 0;
+                     dimension < stream.schedule.rank; ++dimension)
+                    points *= stream.schedule.counts[dimension];
+                stream_nd_remaining_points_ += points;
+                active_stream_nd_.push(ActiveStreamNd {
+                    std::move(stream), iq_pcs_.front(), {}, false});
+                iq_.pop_front();
+                iq_pcs_.pop_front();
+            } else if (auto* stream = std::get_if<
                     IcuStreamNdInstruction<FuncInstruction>>(
                         &iq_.front())) {
                 validate_stream_nd_schedule(stream->schedule);

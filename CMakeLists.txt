@@ -106,6 +106,9 @@ ftlpu_add_test(icu_mem_slice_program_test tests/unit/icu/mem_slice_program_test.
     unit.icu.mem_slice_program unit icu fast)
 ftlpu_add_test(icu_mxm_stream_nd_test tests/unit/icu/mxm_stream_nd_test.cpp
     unit.icu.mxm_stream_nd unit icu mxm fast)
+ftlpu_add_test(icu_qwen2_5_up_projection_packet_test
+    tests/unit/icu/qwen2_5_up_projection_packet_test.cpp
+    unit.icu.qwen2_5_up_projection_packet unit icu mxm fast)
 ftlpu_add_test(icu_vxm_stream_nd_test tests/unit/icu/vxm_stream_nd_test.cpp
     unit.icu.vxm_stream_nd unit icu vxm fast)
 ftlpu_add_test(icu_sxm_tile_program_test tests/unit/icu/sxm_tile_program_test.cpp
