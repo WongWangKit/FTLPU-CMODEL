@@ -100,6 +100,8 @@ ftlpu_add_test(icu_repeat_2d_test tests/unit/icu/repeat_2d_test.cpp
     unit.icu.repeat_2d unit icu fast)
 ftlpu_add_test(icu_macro_schedule_test tests/unit/icu/macro_schedule_test.cpp
     unit.icu.macro_schedule unit icu fast)
+ftlpu_add_test(icu_raw_macro_decoder_test tests/unit/icu/raw_macro_decoder_test.cpp
+    unit.icu.raw_macro_decoder unit icu fast)
 ftlpu_add_test(icu_mem_stream_nd_test tests/unit/icu/mem_stream_nd_test.cpp
     unit.icu.mem_stream_nd unit icu fast)
 ftlpu_add_test(icu_mem_slice_program_test tests/unit/icu/mem_slice_program_test.cpp

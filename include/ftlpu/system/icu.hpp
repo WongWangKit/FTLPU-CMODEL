@@ -12,6 +12,7 @@
 #include "ftlpu/vxm/compact_instruction.hpp"
 #include "ftlpu/vxm/slice.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +33,10 @@ struct IcuFrontendStatistics {
     std::size_t issued_instructions{0};
     std::size_t macro_queues{0};
     std::size_t peak_macro_contexts_per_queue{0};
+    std::size_t decoded_macro_contexts{0};
+    std::size_t macro_decoder_bit_wait_cycles{0};
+    std::size_t macro_decoder_context_stall_cycles{0};
+    std::size_t peak_macro_reservoir_bits{0};
 };
 
 class InstructionControlUnit {
@@ -117,11 +122,87 @@ public:
         hw::kIcuC2cIqDepth,
         hw::kIcuFetchLatencyCycles,
         hw::kIcuC2cMacroContextDepth>;
+    using MemRawImemWord = MemIcu::RawImemWord;
+    using MxmRawImemWord = MxmIcu::RawImemWord;
 
     explicit InstructionControlUnit(
         std::size_t barrier_latency_cycles = hw::kIcuBarrierLatencyCycles)
         : barrier_latency_cycles_(barrier_latency_cycles)
     {
+    }
+
+    void write_mem_raw_macro_imem(
+        std::size_t queue, std::size_t address, MemRawImemWord word)
+    {
+        mem_iq(queue).write_raw_imem(address, std::move(word));
+    }
+
+    void configure_mem_raw_macro_imem(
+        std::size_t queue, std::size_t word_count)
+    {
+        mem_iq(queue).configure_raw_macro(
+            IcuMacroQueueKind::Mem, word_count);
+    }
+
+    void write_mxm_load_raw_macro_imem(
+        std::size_t mxm, std::size_t address, MxmRawImemWord word)
+    {
+        mxm_load_iq(mxm).write_raw_imem(address, std::move(word));
+    }
+
+    void configure_mxm_load_raw_macro_imem(
+        std::size_t mxm, std::size_t word_count)
+    {
+        mxm_load_iq(mxm).configure_raw_macro(
+            IcuMacroQueueKind::MxmLoad, word_count);
+    }
+
+    void write_mxm_compute_raw_macro_imem(
+        std::size_t mxm, std::size_t address, MxmRawImemWord word)
+    {
+        mxm_compute_iq(mxm).write_raw_imem(address, std::move(word));
+    }
+
+    void configure_mxm_compute_raw_macro_imem(
+        std::size_t mxm, std::size_t word_count)
+    {
+        mxm_compute_iq(mxm).configure_raw_macro(
+            IcuMacroQueueKind::MxmCompute, word_count);
+    }
+
+    void write_mxm_dequant_raw_macro_imem(
+        std::size_t mxm, std::size_t address, MxmRawImemWord word)
+    {
+        mxm_dequant_iq(mxm).write_raw_imem(address, std::move(word));
+    }
+
+    void configure_mxm_dequant_raw_macro_imem(
+        std::size_t mxm, std::size_t word_count)
+    {
+        mxm_dequant_iq(mxm).configure_raw_macro(
+            IcuMacroQueueKind::MxmDequant, word_count);
+    }
+
+    // Runs all raw Macro frontends in parallel while the program cycle remains
+    // stopped. Runtime can call this after writing/committing all raw images
+    // and before enabling the global program issue clock.
+    std::size_t prime_raw_macro_frontends()
+    {
+        std::size_t cycles = 0;
+        for (;;) {
+            bool pending = false;
+            const auto prime_queue = [&](auto& queue) {
+                if (!queue.raw_macro_mode() || queue.raw_macro_ready()) return;
+                queue.prefetch_raw_macro();
+                pending = true;
+            };
+            for (auto& queue : mem_queues_) prime_queue(queue);
+            for (auto& queue : mxm_load_queues_) prime_queue(queue);
+            for (auto& queue : mxm_dequant_queues_) prime_queue(queue);
+            for (auto& queue : mxm_compute_queues_) prime_queue(queue);
+            if (!pending) return cycles;
+            ++cycles;
+        }
     }
     void reset()
     {
@@ -1123,6 +1204,15 @@ public:
             statistics.imem_entries += queue.imem_occupancy();
             statistics.fetched_entries += queue.fetched_count();
             statistics.issued_instructions += queue.issued_count();
+            const auto& decoder = queue.macro_decoder_statistics();
+            statistics.decoded_macro_contexts += decoder.decoded_contexts;
+            statistics.macro_decoder_bit_wait_cycles +=
+                decoder.bit_wait_cycles;
+            statistics.macro_decoder_context_stall_cycles +=
+                decoder.context_stall_cycles;
+            statistics.peak_macro_reservoir_bits = std::max(
+                statistics.peak_macro_reservoir_bits,
+                decoder.peak_reservoir_bits);
             const auto peak = queue.peak_active_macros();
             statistics.macro_queues += peak != 0 ? 1 : 0;
             if (peak > statistics.peak_macro_contexts_per_queue)

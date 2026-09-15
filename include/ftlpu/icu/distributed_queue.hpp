@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ftlpu/icu/instruction.hpp"
+#include "ftlpu/icu/macro_bitstream_decoder.hpp"
 #include "ftlpu/mem/slice.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
 #include "ftlpu/sxm/instruction.hpp"
@@ -273,6 +274,9 @@ class DistributedIcuQueue {
 public:
     using FunctionalInstruction = FuncInstruction;
     using Entry = IqEntry<FuncInstruction>;
+    using RawImemWord = IcuRawImemWord<InstructionBits>;
+    using MacroDecoder = IcuMacroV1Decoder<
+        FuncInstruction, InstructionBits, FetchLatency>;
 
     static_assert(
         InstructionBits >= 32,
@@ -291,6 +295,10 @@ public:
     void reset()
     {
         imem_.clear();
+        raw_imem_.clear();
+        raw_macro_mode_ = false;
+        raw_macro_word_count_ = 0;
+        macro_decoder_.reset();
         reset_execution();
         configured_ = false;
         cycle_ = 0;
@@ -335,6 +343,7 @@ public:
         issued_count_ = 0;
         launched_ = false;
         underflowed_ = false;
+        if (raw_macro_mode_) rebuild_macro_decoder();
     }
 
     void write_imem(std::size_t address, Entry entry)
@@ -350,10 +359,95 @@ public:
                << " for " << InstructionBits << "-bit instructions";
             throw StaticScheduleError(os.str());
         }
+        if (!raw_imem_.empty())
+            throw StaticScheduleError(
+                "ICU queue cannot mix semantic and raw i-MEM storage");
         if (imem_.size() <= address) {
             imem_.resize(address + 1);
         }
         imem_[address] = std::move(entry);
+    }
+
+    // Hardware-facing write path. Lane 0 carries word bits [31:0], and every
+    // field is consumed low-bit first. Raw Macro words and semantic Entry
+    // objects are intentionally mutually exclusive within one queue image.
+    void write_raw_imem(std::size_t address, RawImemWord word)
+    {
+        if (launched_)
+            throw StaticScheduleError(
+                "ICU raw i-MEM cannot be modified after program launch");
+        if (address >= ImemDepth)
+            throw StaticScheduleError(
+                "ICU raw i-MEM address exceeds configured depth");
+        if (!imem_.empty())
+            throw StaticScheduleError(
+                "ICU queue cannot mix raw and semantic i-MEM storage");
+        if (raw_imem_.size() <= address)
+            raw_imem_.resize(address + 1);
+        raw_imem_[address] = std::move(word);
+    }
+
+    void configure_raw_macro(
+        IcuMacroQueueKind kind, std::size_t word_count)
+    {
+        if (word_count == 0 || word_count > ImemDepth
+            || word_count > raw_imem_.size())
+            throw StaticScheduleError(
+                "ICU raw Macro image has an invalid word count");
+        std::vector<RawImemWord> image;
+        image.reserve(word_count);
+        for (std::size_t address = 0; address < word_count; ++address) {
+            if (!raw_imem_[address].has_value())
+                throw StaticScheduleError(
+                    "ICU raw Macro image contains an unwritten word");
+            image.push_back(*raw_imem_[address]);
+        }
+
+        raw_macro_mode_ = false;
+        reset_execution();
+        raw_macro_kind_ = kind;
+        raw_macro_word_count_ = word_count;
+        raw_macro_mode_ = true;
+        macro_decoder_.emplace(kind, std::move(image));
+        configured_ = true;
+        launched_ = true;
+    }
+
+    void load_raw_macro(
+        IcuMacroQueueKind kind, const std::vector<RawImemWord>& image)
+    {
+        if (launched_)
+            throw StaticScheduleError(
+                "ICU raw i-MEM cannot be replaced after program launch");
+        raw_imem_.clear();
+        for (std::size_t address = 0; address < image.size(); ++address)
+            write_raw_imem(address, image[address]);
+        configure_raw_macro(kind, image.size());
+    }
+
+    bool raw_macro_mode() const noexcept { return raw_macro_mode_; }
+
+    bool raw_macro_ready() const noexcept
+    {
+        return raw_macro_mode_ && macro_decoder_.has_value()
+            && (macro_decoder_->done()
+                || active_macros_.size() == MacroContextDepth);
+    }
+
+    void prefetch_raw_macro()
+    {
+        if (!raw_macro_mode_ || !macro_decoder_.has_value())
+            throw StaticScheduleError(
+                "ICU queue is not configured for a raw Macro image");
+        accept_decoded_macro(macro_decoder_->tick(
+            active_macros_.size() < MacroContextDepth), false);
+    }
+
+    const IcuMacroDecoderStatistics& macro_decoder_statistics() const noexcept
+    {
+        static const IcuMacroDecoderStatistics empty{};
+        return macro_decoder_.has_value()
+            ? macro_decoder_->statistics() : empty;
     }
 
     void write_imem(std::size_t address, FuncInstruction instruction)
@@ -620,6 +714,7 @@ public:
     std::optional<FuncInstruction> tick()
     {
         ensure_configured();
+        if (raw_macro_mode_) return tick_raw_macro();
         notify_emitted_ = false;
         begin_trace(
             cycle_ < start_cycle_
@@ -687,8 +782,11 @@ public:
     bool done() const
     {
         if (!configured_) {
-            return imem_.empty();
+            return imem_.empty() && raw_imem_.empty();
         }
+        if (raw_macro_mode_)
+            return macro_decoder_.has_value() && macro_decoder_->done()
+                && active_macros_.empty();
         return fetch_pc_ == program_end_pc_
             && pending_fetches_.empty()
             && iq_.empty()
@@ -702,14 +800,21 @@ public:
     bool running() const { return !done(); }
     bool underflowed() const noexcept { return underflowed_; }
     std::size_t cycle() const noexcept { return cycle_; }
-    std::size_t imem_occupancy() const noexcept { return imem_.size(); }
+    std::size_t imem_occupancy() const noexcept
+    {
+        return raw_macro_mode_ ? raw_macro_word_count_ : imem_.size();
+    }
     std::size_t iq_occupancy() const noexcept { return iq_.size(); }
     std::size_t pending_fetch_count() const noexcept
     {
         return pending_fetches_.size();
     }
     std::size_t fetch_pc() const noexcept { return fetch_pc_; }
-    std::size_t fetched_count() const noexcept { return fetched_count_; }
+    std::size_t fetched_count() const noexcept
+    {
+        return raw_macro_mode_ && macro_decoder_.has_value()
+            ? macro_decoder_->statistics().fetched_words : fetched_count_;
+    }
     std::size_t issued_count() const noexcept { return issued_count_; }
     std::size_t peak_active_macros() const noexcept
     {
@@ -744,6 +849,11 @@ public:
         if (!configured_) {
             return imem_.size();
         }
+        if (raw_macro_mode_ && macro_decoder_.has_value())
+            return (macro_decoder_->done() ? 0
+                    : macro_decoder_->command_count()
+                        - macro_decoder_->decoded_count())
+                + macro_remaining_points();
         return iq_.size() + pending_fetches_.size()
             + (program_end_pc_ - fetch_pc_)
             + repeat_remaining_ + nop_remaining_
@@ -753,6 +863,67 @@ public:
     }
 
 private:
+    void rebuild_macro_decoder()
+    {
+        if (!raw_macro_mode_) {
+            macro_decoder_.reset();
+            return;
+        }
+        std::vector<RawImemWord> image;
+        image.reserve(raw_macro_word_count_);
+        for (std::size_t address = 0;
+             address < raw_macro_word_count_; ++address) {
+            if (address >= raw_imem_.size()
+                || !raw_imem_[address].has_value())
+                throw StaticScheduleError(
+                    "ICU raw Macro image contains an unwritten word");
+            image.push_back(*raw_imem_[address]);
+        }
+        macro_decoder_.emplace(raw_macro_kind_, std::move(image));
+    }
+
+    void accept_decoded_macro(
+        std::optional<DecodedIcuMacroContext<FuncInstruction>> decoded,
+        bool execution_started)
+    {
+        if (!decoded.has_value()) return;
+        if (active_macros_.size() >= MacroContextDepth)
+            throw std::logic_error(
+                "Macro decoder produced a context while the context RAM was full");
+        validate_macro_schedule(decoded->schedule);
+        if (execution_started && decoded->schedule.start_cycle <= cycle_) {
+            std::ostringstream os;
+            os << "ICU Macro decoder missed start cycle "
+               << decoded->schedule.start_cycle << " at cycle " << cycle_;
+            throw StaticScheduleError(os.str());
+        }
+        macro_remaining_points_ += decoded->schedule.inner_count
+            * decoded->schedule.outer_count;
+        active_macros_.push(ActiveMacro{
+            IcuMacroInstruction<FuncInstruction>{
+                decoded->schedule, std::move(decoded->instruction)},
+            decoded->record_index, 0, 0});
+        peak_active_macros_ = std::max(
+            peak_active_macros_, active_macros_.size());
+    }
+
+    std::optional<FuncInstruction> tick_raw_macro()
+    {
+        notify_emitted_ = false;
+        begin_trace(IcuQueueAction::MacroWait);
+
+        // Contexts visible at the beginning of the cycle may issue. A context
+        // decoded in this cycle is written afterwards and becomes visible on
+        // the next cycle, matching a one-write-port context RAM without bypass.
+        auto result = issue_active_macro();
+        accept_decoded_macro(macro_decoder_->tick(
+            active_macros_.size() < MacroContextDepth), true);
+
+        finish_trace();
+        ++cycle_;
+        return result;
+    }
+
     struct TaggedNotification {
         std::size_t tag{0};
         std::size_t cycle{0};
@@ -780,6 +951,9 @@ private:
     void ensure_configured()
     {
         if (!configured_) {
+            if (!raw_imem_.empty())
+                throw StaticScheduleError(
+                    "ICU raw i-MEM image must be configured before launch");
             configure_all(0);
             // Direct CModel enqueue calls represent a program already loaded
             // before cycle zero. Prime the finite IQ; all subsequent refills
@@ -1437,12 +1611,7 @@ private:
                         throw StaticScheduleError(os.str());
                     }
                 } else {
-                    macro_remaining_points_ += macro->schedule.inner_count
-                        * macro->schedule.outer_count;
-                    active_macros_.push(ActiveMacro {
-                        std::move(*macro), iq_pcs_.front(), 0, 0});
-                    peak_active_macros_ = std::max(
-                        peak_active_macros_, active_macros_.size());
+                    activate_macro(std::move(*macro), iq_pcs_.front());
                     iq_.pop_front();
                     iq_pcs_.pop_front();
                 }
@@ -1452,6 +1621,22 @@ private:
             }
         }
 
+        return issue_active_macro();
+    }
+
+    void activate_macro(
+        IcuMacroInstruction<FuncInstruction> macro, std::size_t pc)
+    {
+        macro_remaining_points_ += macro.schedule.inner_count
+            * macro.schedule.outer_count;
+        active_macros_.push(ActiveMacro{
+            std::move(macro), pc, 0, 0});
+        peak_active_macros_ = std::max(
+            peak_active_macros_, active_macros_.size());
+    }
+
+    std::optional<FuncInstruction> issue_active_macro()
+    {
         if (active_macros_.empty()
             || active_macros_.top().issue_cycle() > cycle_) {
             last_trace_.action = IcuQueueAction::MacroWait;
@@ -1497,6 +1682,11 @@ private:
     }
 
     std::vector<std::optional<Entry>> imem_{};
+    std::vector<std::optional<RawImemWord>> raw_imem_{};
+    IcuMacroQueueKind raw_macro_kind_{IcuMacroQueueKind::Mem};
+    std::size_t raw_macro_word_count_{0};
+    bool raw_macro_mode_{false};
+    std::optional<MacroDecoder> macro_decoder_{};
     std::deque<Entry> iq_{};
     std::deque<std::size_t> iq_pcs_{};
     std::deque<PendingFetch> pending_fetches_{};
