@@ -1,10 +1,12 @@
 #pragma once
 
 #include "ftlpu/c2c/dma.hpp"
+#include "ftlpu/c2c/icu_instruction.hpp"
 #include "ftlpu/c2c/slice.hpp"
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/icu/distributed_queue.hpp"
+#include "ftlpu/icu/fu_3d_instruction.hpp"
 #include "ftlpu/icu/location.hpp"
 #include "ftlpu/mem/mem_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
@@ -17,7 +19,6 @@
 #include <cstdint>
 #include <deque>
 #include <limits>
-#include <memory>
 #include <ostream>
 #include <optional>
 #include <sstream>
@@ -66,49 +67,72 @@ public:
         hw::kIcuVxmImemDepth,
         hw::kIcuVxmIqDepth,
         hw::kIcuFetchLatencyCycles,
-        hw::kIcuVxmMacroContextDepth>;
+        hw::kIcuVxmMacroContextDepth,
+        IcuQueueRole::Vxm>;
     using MemIcu = DistributedIcuQueue<
         MemInstruction,
         hw::kIcuMemInstructionBits,
         hw::kIcuMemImemDepth,
         hw::kIcuMemIqDepth,
         hw::kIcuFetchLatencyCycles,
-        hw::kIcuMemMacroContextDepth>;
-    using MxmIcu = DistributedIcuQueue<
+        hw::kIcuMemMacroContextDepth,
+        IcuQueueRole::Mem>;
+    using MxmLoadIcu = DistributedIcuQueue<
         MxmControlInstruction,
         hw::kIcuMxmInstructionBits,
         hw::kIcuMxmImemDepth,
         hw::kIcuMxmIqDepth,
         hw::kIcuFetchLatencyCycles,
-        hw::kIcuMxmMacroContextDepth>;
+        hw::kIcuMxmMacroContextDepth,
+        IcuQueueRole::MxmLoad>;
     using MxmDequantIcu = DistributedIcuQueue<
         MxmDequantInstruction,
         hw::kIcuMxmInstructionBits,
         hw::kIcuMxmImemDepth,
         hw::kIcuMxmIqDepth,
         hw::kIcuFetchLatencyCycles,
-        hw::kIcuMxmMacroContextDepth>;
+        hw::kIcuMxmMacroContextDepth,
+        IcuQueueRole::MxmDequant>;
+    using MxmComputeIcu = DistributedIcuQueue<
+        MxmControlInstruction,
+        hw::kIcuMxmInstructionBits,
+        hw::kIcuMxmImemDepth,
+        hw::kIcuMxmIqDepth,
+        hw::kIcuFetchLatencyCycles,
+        hw::kIcuMxmMacroContextDepth,
+        IcuQueueRole::MxmCompute>;
     using SxmIcu = DistributedIcuQueue<
         SxmInstruction,
         hw::kIcuSxmInstructionBits,
         hw::kIcuSxmImemDepth,
         hw::kIcuSxmIqDepth,
         hw::kIcuFetchLatencyCycles,
-        hw::kIcuSxmMacroContextDepth>;
-    using C2cIcu = DistributedIcuQueue<
+        hw::kIcuSxmMacroContextDepth,
+        IcuQueueRole::Sxm>;
+    using C2cTxIcu = DistributedIcuQueue<
         C2cInstruction,
         hw::kIcuC2cInstructionBits,
         hw::kIcuC2cImemDepth,
         hw::kIcuC2cIqDepth,
         hw::kIcuFetchLatencyCycles,
-        hw::kIcuC2cMacroContextDepth>;
-    using C2cDmaIcu = DistributedIcuQueue<
-        C2cDmaInstruction,
-        hw::kIcuC2cDmaInstructionBits,
+        hw::kIcuC2cMacroContextDepth,
+        IcuQueueRole::C2cTx>;
+    using C2cRxIcu = DistributedIcuQueue<
+        C2cInstruction,
+        hw::kIcuC2cInstructionBits,
         hw::kIcuC2cImemDepth,
         hw::kIcuC2cIqDepth,
         hw::kIcuFetchLatencyCycles,
-        hw::kIcuC2cMacroContextDepth>;
+        hw::kIcuC2cMacroContextDepth,
+        IcuQueueRole::C2cRx>;
+    using C2cDmaIcu = DistributedIcuQueue<
+        C2cDmaInstruction,
+        hw::kIcuC2cInstructionBits,
+        hw::kIcuC2cImemDepth,
+        hw::kIcuC2cIqDepth,
+        hw::kIcuFetchLatencyCycles,
+        hw::kIcuC2cMacroContextDepth,
+        IcuQueueRole::C2cDma>;
 
     explicit InstructionControlUnit(
         std::size_t barrier_latency_cycles = hw::kIcuBarrierLatencyCycles)
@@ -121,7 +145,6 @@ public:
         for (auto& queue : mem_queues_) {
             queue.reset();
         }
-        for (auto& queue : c2c_mem_queues_) queue.reset();
         for (auto& queue : mxm_load_queues_) {
             queue.reset();
         }
@@ -136,6 +159,7 @@ public:
         for (auto& queue : c2c_tx_queues_) queue.reset();
         for (auto& queue : c2c_dma_queues_) queue.reset();
         for (auto& queue : c2c_rx_queues_) queue.reset();
+        pending_c2c_dma_raw_words_.fill(std::nullopt);
         barrier_events_.clear();
         program_issue_enabled_ = true;
         cycle_ = 0;
@@ -169,6 +193,7 @@ public:
     {
         switch (location.kind) {
         case IcuLocationKind::Mem:
+            check_mem_location(location);
             mem_queues_[mem_queue(
                 static_cast<Hemisphere>(location.unit),
                 location.index,
@@ -236,7 +261,17 @@ public:
         VxmCompactInstruction instruction)
     {
         check_vxm_queue(alu);
-        vxm_queues_[alu].push_instruction(std::move(instruction));
+        vxm_queues_[alu].push_vxm_run_2d(
+            VxmIcuRun2DInstruction::Run2D(
+                0,
+                {1, 1}, {1, 1}, std::move(instruction)));
+    }
+
+    void enqueue_vxm_run_2d(
+        std::size_t alu, VxmIcuRun2DInstruction instruction)
+    {
+        check_vxm_queue(alu);
+        vxm_queues_[alu].push_vxm_run_2d(std::move(instruction));
     }
 
     void enqueue_vxm(
@@ -277,6 +312,23 @@ public:
         mem_queues_[column].push_instruction(instruction);
     }
 
+    void enqueue_mem_3d(
+        std::size_t column,
+        MemIcuInstruction instruction)
+    {
+        check_mem_queue(column);
+        mem_queues_[column].push_mem_3d(std::move(instruction));
+    }
+
+    void enqueue_mem_write_read_2d(
+        std::size_t column,
+        MemIcuWriteRead2DInstruction instruction)
+    {
+        check_mem_queue(column);
+        mem_queues_[column].push_mem_write_read_2d(
+            std::move(instruction));
+    }
+
     void enqueue_mem_nop(std::size_t column, std::size_t cycles)
     {
         check_mem_queue(column);
@@ -308,17 +360,6 @@ public:
             schedule, std::move(instruction));
     }
 
-    void enqueue_mem_stream_nd_packet(
-        std::size_t column, IcuStreamNdPacket packet)
-    {
-        check_mem_queue(column);
-        if (decode_icu_stream_nd_packet(packet).unit
-            != IcuStreamNdUnit::Mem)
-            throw std::invalid_argument(
-                "MEM ICU requires a MEM STREAM_ND packet");
-        mem_queues_[column].push_stream_nd_packet(std::move(packet));
-    }
-
     void enqueue_mem_slice_program(
         std::size_t column, IcuMemSliceProgram program)
     {
@@ -326,41 +367,50 @@ public:
         mem_queues_[column].push_mem_slice_program(std::move(program));
     }
 
-    void enqueue_c2c_mem_control(
-        std::size_t queue, IcuControlInstruction instruction)
-    {
-        check_mem_queue(queue);
-        c2c_mem_iq(queue).append_control(instruction);
-    }
-
-    void enqueue_c2c_mem(std::size_t queue, MemInstruction instruction)
-    {
-        check_mem_queue(queue);
-        c2c_mem_iq(queue).push_instruction(std::move(instruction));
-    }
-
-    void enqueue_c2c_mem_nop(std::size_t queue, std::size_t cycles)
-    {
-        check_mem_queue(queue);
-        c2c_mem_iq(queue).push_nop(cycles);
-    }
-
-    void enqueue_c2c_mem_repeat(std::size_t queue, std::size_t count,
-        std::size_t interval = 1, std::int64_t address_stride = 0)
-    {
-        check_mem_queue(queue);
-        c2c_mem_iq(queue).push_repeat(
-            Repeat {count, interval, address_stride});
-    }
-
-    void enqueue_c2c_mem_stream_write(std::size_t queue,
+    void enqueue_mem_synchronized_write(std::size_t queue,
         MemInstruction instruction, std::size_t count,
-        std::size_t transport_delay, std::int64_t address_stride = 1)
+        std::size_t transport_delay, std::int64_t address_stride = 1,
+        std::size_t reservation_cycles = 1)
     {
         check_mem_queue(queue);
-        c2c_mem_iq(queue).push_synchronized(count,
+        check_mem_synchronized_write(queue, instruction);
+        mem_queues_[queue].push_synchronized(count,
             instruction.stream_id().index(), transport_delay,
-            address_stride, std::move(instruction));
+            address_stride, std::move(instruction), reservation_cycles);
+    }
+
+    static EncodedMemIcuSynchronizedPacket
+    encode_mem_synchronized_packet(std::size_t count,
+        std::size_t synchronization_tag, std::size_t transport_delay,
+        std::int64_t address_stride, const MemInstruction& instruction,
+        std::size_t reservation_cycles = 1)
+    {
+        if (instruction.opcode != MemOpcode::Write)
+            throw std::invalid_argument(
+                "MEM synchronized instruction must carry a write template");
+        const auto encoded = MemIcu::encode_synchronized_raw_packet(
+            count, synchronization_tag, transport_delay, address_stride,
+            instruction, reservation_cycles);
+        return EncodedMemIcuSynchronizedPacket {{encoded[0], encoded[1]}};
+    }
+
+    void push_mem_synchronized_raw(std::size_t queue,
+        const EncodedMemIcuSynchronizedPacket& packet)
+    {
+        check_mem_queue(queue);
+        mem_queues_[queue].push_encoded_synchronized_packet(
+            MemIcu::EncodedSynchronizedPacket {
+                packet.words[0], packet.words[1]});
+    }
+
+    void insert_mem_synchronized_raw(std::size_t queue,
+        std::size_t address,
+        const EncodedMemIcuSynchronizedPacket& packet)
+    {
+        check_mem_queue(queue);
+        mem_queues_[queue].insert_encoded_synchronized_packet(address,
+            MemIcu::EncodedSynchronizedPacket {
+                packet.words[0], packet.words[1]});
     }
 
     void enqueue_mxm(std::size_t mxm, MxmControlInstruction instruction)
@@ -390,12 +440,30 @@ public:
         mxm_load_queues_[mxm].push_nop(cycles);
     }
 
+    void enqueue_mxm_load_3d(
+        std::size_t mxm,
+        MxmLoadIcuInstruction instruction)
+    {
+        check_mxm_queue(mxm);
+        mxm_load_queues_[mxm].push_mxm_load_3d(
+            std::move(instruction));
+    }
+
     void enqueue_mxm_dequant(
         std::size_t mxm,
         MxmDequantInstruction instruction)
     {
         check_mxm_queue(mxm);
         mxm_dequant_queues_[mxm].push_instruction(instruction);
+    }
+
+    void enqueue_mxm_dequant_3d(
+        std::size_t mxm,
+        MxmDequantIcuInstruction instruction)
+    {
+        check_mxm_queue(mxm);
+        mxm_dequant_queues_[mxm].push_mxm_dequant_3d(
+            std::move(instruction));
     }
 
     void enqueue_mxm_dequant_nop(std::size_t mxm, std::size_t cycles)
@@ -433,17 +501,6 @@ public:
             schedule, std::move(instruction));
     }
 
-    void enqueue_mxm_load_stream_nd_packet(
-        std::size_t mxm, IcuStreamNdPacket packet)
-    {
-        check_mxm_queue(mxm);
-        if (decode_icu_stream_nd_packet(packet).unit
-            != IcuStreamNdUnit::MxmLoad)
-            throw std::invalid_argument(
-                "MXM load ICU requires an MXM-load STREAM_ND packet");
-        mxm_load_queues_[mxm].push_stream_nd_packet(std::move(packet));
-    }
-
     void enqueue_mxm_dequant_macro(std::size_t mxm,
         IcuMacroSchedule schedule, MxmDequantInstruction instruction)
     {
@@ -459,17 +516,6 @@ public:
         check_mxm_queue(mxm);
         mxm_dequant_queues_[mxm].push_mxm_stream_nd(
             schedule, std::move(instruction));
-    }
-
-    void enqueue_mxm_dequant_stream_nd_packet(
-        std::size_t mxm, IcuStreamNdPacket packet)
-    {
-        check_mxm_queue(mxm);
-        if (decode_icu_stream_nd_packet(packet).unit
-            != IcuStreamNdUnit::MxmDequant)
-            throw std::invalid_argument(
-                "MXM dequant ICU requires an MXM-dequant STREAM_ND packet");
-        mxm_dequant_queues_[mxm].push_stream_nd_packet(std::move(packet));
     }
 
     void enqueue_mxm_compute_macro(std::size_t mxm,
@@ -501,15 +547,13 @@ public:
             schedule, std::move(instruction));
     }
 
-    void enqueue_mxm_compute_stream_nd_packet(
-        std::size_t mxm, IcuStreamNdPacket packet)
+    void enqueue_mxm_compute_3d(
+        std::size_t mxm,
+        MxmComputeIcuInstruction instruction)
     {
         check_mxm_queue(mxm);
-        if (decode_icu_stream_nd_packet(packet).unit
-            != IcuStreamNdUnit::MxmCompute)
-            throw std::invalid_argument(
-                "MXM compute ICU requires an MXM-compute STREAM_ND packet");
-        mxm_compute_queues_[mxm].push_stream_nd_packet(std::move(packet));
+        mxm_compute_queues_[mxm].push_mxm_compute_3d(
+            std::move(instruction));
     }
 
     void enqueue_mxm_compute_nop(std::size_t mxm, std::size_t cycles)
@@ -556,7 +600,11 @@ public:
         if (instruction.opcode != SxmOpcode::Transpose) {
             throw std::invalid_argument("ICU SXM transpose queue requires a Transpose instruction");
         }
-        sxm_transpose_queues_[hemisphere_index(hemisphere)].push_instruction(std::move(instruction));
+        const auto side = hemisphere_index(hemisphere);
+        sxm_transpose_queues_[side].push_sxm_run_2d(
+            SxmIcuRun2DInstruction::Run2D(
+                0,
+                {1, 1}, {1, 1}, std::move(instruction)));
     }
 
     void enqueue_sxm_transpose_tile_program(Hemisphere hemisphere,
@@ -565,8 +613,9 @@ public:
         if (instruction.opcode != SxmOpcode::Transpose)
             throw std::invalid_argument(
                 "ICU SXM transpose tile program requires Transpose");
-        sxm_transpose_queues_[hemisphere_index(hemisphere)]
-            .push_sxm_tile_program(schedule, std::move(instruction));
+        const auto side = hemisphere_index(hemisphere);
+        sxm_transpose_queues_[side].push_sxm_tile_program(
+            schedule, std::move(instruction));
     }
 
     void enqueue_sxm_permute(SxmInstruction instruction)
@@ -579,7 +628,11 @@ public:
         if (instruction.opcode != SxmOpcode::Permute) {
             throw std::invalid_argument("ICU SXM permute queue requires a Permute instruction");
         }
-        sxm_permute_queues_[hemisphere_index(hemisphere)].push_instruction(std::move(instruction));
+        const auto side = hemisphere_index(hemisphere);
+        sxm_permute_queues_[side].push_sxm_run_2d(
+            SxmIcuRun2DInstruction::Run2D(
+                0,
+                {1, 1}, {1, 1}, std::move(instruction)));
     }
 
     void enqueue_sxm_permute_tile_program(Hemisphere hemisphere,
@@ -588,8 +641,9 @@ public:
         if (instruction.opcode != SxmOpcode::Permute)
             throw std::invalid_argument(
                 "ICU SXM permute tile program requires Permute");
-        sxm_permute_queues_[hemisphere_index(hemisphere)]
-            .push_sxm_tile_program(schedule, std::move(instruction));
+        const auto side = hemisphere_index(hemisphere);
+        sxm_permute_queues_[side].push_sxm_tile_program(
+            schedule, std::move(instruction));
     }
 
     void enqueue_sxm_transpose_nop(std::size_t cycles)
@@ -599,7 +653,8 @@ public:
 
     void enqueue_sxm_transpose_nop(Hemisphere hemisphere, std::size_t cycles)
     {
-        sxm_transpose_queues_[hemisphere_index(hemisphere)].push_nop(cycles);
+        const auto side = hemisphere_index(hemisphere);
+        sxm_transpose_queues_[side].push_nop(cycles);
     }
 
     void enqueue_sxm_permute_nop(std::size_t cycles)
@@ -609,7 +664,8 @@ public:
 
     void enqueue_sxm_permute_nop(Hemisphere hemisphere, std::size_t cycles)
     {
-        sxm_permute_queues_[hemisphere_index(hemisphere)].push_nop(cycles);
+        const auto side = hemisphere_index(hemisphere);
+        sxm_permute_queues_[side].push_nop(cycles);
     }
 
     void enqueue_sxm_transpose_repeat(std::size_t count, std::size_t interval = 1)
@@ -619,7 +675,8 @@ public:
 
     void enqueue_sxm_transpose_repeat(Hemisphere hemisphere, std::size_t count, std::size_t interval = 1)
     {
-        sxm_transpose_queues_[hemisphere_index(hemisphere)].push_repeat(Repeat {count, interval, 0});
+        const auto side = hemisphere_index(hemisphere);
+        sxm_transpose_queues_[side].push_repeat(Repeat {count, interval, 0});
     }
 
     void enqueue_sxm_permute_repeat(std::size_t count, std::size_t interval = 1)
@@ -629,7 +686,8 @@ public:
 
     void enqueue_sxm_permute_repeat(Hemisphere hemisphere, std::size_t count, std::size_t interval = 1)
     {
-        sxm_permute_queues_[hemisphere_index(hemisphere)].push_repeat(Repeat {count, interval, 0});
+        const auto side = hemisphere_index(hemisphere);
+        sxm_permute_queues_[side].push_repeat(Repeat {count, interval, 0});
     }
 
     void enqueue_c2c(
@@ -638,9 +696,15 @@ public:
     {
         const auto endpoint = hemisphere_index(endpoint_hemisphere);
         if (instruction.opcode == C2cOpcode::Send) {
-            c2c_tx_queues_[endpoint].push_instruction(std::move(instruction));
+            c2c_tx_queues_[endpoint].push_encoded_c2c_endpoint_packet(
+                C2cIcuPacketCodec::encode(
+                    C2cTxIcuInstruction::FromLegacy(
+                        endpoint_hemisphere, instruction)));
         } else {
-            c2c_rx_queues_[endpoint].push_instruction(std::move(instruction));
+            c2c_rx_queues_[endpoint].push_encoded_c2c_endpoint_packet(
+                C2cIcuPacketCodec::encode(
+                    C2cRxIcuInstruction::FromLegacy(
+                        endpoint_hemisphere, instruction)));
         }
     }
 
@@ -695,7 +759,102 @@ public:
         C2cDmaInstruction instruction)
     {
         c2c_dma_queues_[hemisphere_index(endpoint_hemisphere)]
-            .push_instruction(std::move(instruction));
+            .push_encoded_c2c_dma_packet(C2cIcuPacketCodec::encode(
+                C2cDmaIcuInstruction::FromLegacy(
+                    endpoint_hemisphere, instruction)));
+    }
+
+    // Raw local-iMEM ingress used by software paging. Packets are decoded at
+    // the queue boundary; the C2C engines only ever observe engine commands.
+    void enqueue_c2c_tx_raw(Hemisphere endpoint_hemisphere,
+        const C2cEndpointIcuPacket& packet)
+    {
+        const auto instruction = C2cIcuPacketCodec::decode_tx(packet);
+        require_c2c_packet_hemisphere(endpoint_hemisphere,
+            instruction.endpoint_hemisphere);
+        c2c_tx_queues_[hemisphere_index(endpoint_hemisphere)]
+            .push_encoded_c2c_endpoint_packet(packet);
+    }
+
+    void enqueue_c2c_rx_raw(Hemisphere endpoint_hemisphere,
+        const C2cEndpointIcuPacket& packet)
+    {
+        const auto instruction = C2cIcuPacketCodec::decode_rx(packet);
+        require_c2c_packet_hemisphere(endpoint_hemisphere,
+            instruction.endpoint_hemisphere);
+        c2c_rx_queues_[hemisphere_index(endpoint_hemisphere)]
+            .push_encoded_c2c_endpoint_packet(packet);
+    }
+
+    void enqueue_c2c_dma_raw(Hemisphere endpoint_hemisphere,
+        const C2cDmaIcuPacket& packet)
+    {
+        const auto instruction = C2cIcuPacketCodec::decode_dma(packet);
+        require_c2c_packet_hemisphere(endpoint_hemisphere,
+            instruction.endpoint_hemisphere);
+        c2c_dma_queues_[hemisphere_index(endpoint_hemisphere)]
+            .push_encoded_c2c_dma_packet(packet);
+    }
+
+    // Short aliases keep raw queue loading ergonomic for pager clients.
+    void push_c2c_tx_raw(Hemisphere endpoint_hemisphere,
+        const C2cEndpointIcuPacket& packet)
+    {
+        enqueue_c2c_tx_raw(endpoint_hemisphere, packet);
+    }
+
+    void push_c2c_rx_raw(Hemisphere endpoint_hemisphere,
+        const C2cEndpointIcuPacket& packet)
+    {
+        enqueue_c2c_rx_raw(endpoint_hemisphere, packet);
+    }
+
+    void push_c2c_dma_raw(Hemisphere endpoint_hemisphere,
+        const C2cDmaIcuPacket& packet)
+    {
+        enqueue_c2c_dma_raw(endpoint_hemisphere, packet);
+    }
+
+    static constexpr std::size_t c2c_endpoint_raw_word_count = 1;
+    static constexpr std::size_t c2c_dma_raw_word_count = 2;
+
+    void append_c2c_tx_raw_word(Hemisphere endpoint_hemisphere,
+        const C2cEndpointIcuPacket& word)
+    {
+        enqueue_c2c_tx_raw(endpoint_hemisphere, word);
+    }
+
+    void append_c2c_rx_raw_word(Hemisphere endpoint_hemisphere,
+        const C2cEndpointIcuPacket& word)
+    {
+        enqueue_c2c_rx_raw(endpoint_hemisphere, word);
+    }
+
+    // DMA words are assembled exactly as they appear in i-MEM. A dangling
+    // first word is discarded by reset and can be queried by pager software.
+    void append_c2c_dma_raw_word(Hemisphere endpoint_hemisphere,
+        const C2cEndpointIcuPacket& word)
+    {
+        const auto endpoint = hemisphere_index(endpoint_hemisphere);
+        if (!pending_c2c_dma_raw_words_[endpoint].has_value()) {
+            c2c_dma_queues_[endpoint].push_encoded_c2c_dma_word(word);
+            pending_c2c_dma_raw_words_[endpoint] = word;
+            return;
+        }
+        auto packet = C2cDmaIcuPacket {};
+        packet.words[0] = *pending_c2c_dma_raw_words_[endpoint];
+        packet.words[1] = word;
+        const auto instruction = C2cIcuPacketCodec::decode_dma(packet);
+        require_c2c_packet_hemisphere(endpoint_hemisphere,
+            instruction.endpoint_hemisphere);
+        c2c_dma_queues_[endpoint].push_encoded_c2c_dma_word(word);
+        pending_c2c_dma_raw_words_[endpoint].reset();
+    }
+
+    bool c2c_dma_raw_word_pending(Hemisphere endpoint_hemisphere) const noexcept
+    {
+        return pending_c2c_dma_raw_words_[hemisphere_index(endpoint_hemisphere)]
+            .has_value();
     }
 
     void enqueue_c2c_dma_nop(
@@ -710,6 +869,7 @@ public:
     {
         switch (location.kind) {
         case IcuLocationKind::Mem:
+            check_mem_location(location);
             mem_iq(mem_queue(
                 static_cast<Hemisphere>(location.unit),
                 location.index,
@@ -771,6 +931,7 @@ public:
     {
         switch (location.kind) {
         case IcuLocationKind::Mem:
+            check_mem_location(location);
             mem_iq(mem_queue(static_cast<Hemisphere>(location.unit),
                 location.index, location.bank)).notify(event_tag);
             return;
@@ -818,13 +979,16 @@ public:
         return program_issue_enabled_;
     }
 
-    void notify_c2c_mem(IcuLocation location, std::size_t stream)
+    void notify_mem_synchronized(IcuLocation location,
+        std::size_t synchronization_tag)
     {
         if (location.kind != IcuLocationKind::Mem)
             throw std::invalid_argument(
                 "C2C RX can only notify a target MEM ICU");
-        c2c_mem_iq(mem_queue(static_cast<Hemisphere>(location.unit),
-            location.index, location.bank)).notify(stream);
+        check_mem_location(location);
+        mem_iq(mem_queue(
+            static_cast<Hemisphere>(location.unit),
+            location.index, location.bank)).notify(synchronization_tag);
     }
 
     void advance_barrier_events()
@@ -980,32 +1144,23 @@ public:
         for (std::size_t queue = 0; queue < kMemQueues; ++queue) {
             const auto instruction = program_issue_enabled_
                 ? mem_queues_[queue].dispatch_next()
-                : std::optional<MemInstruction> {};
-            const auto c2c_instruction = c2c_mem_queues_[queue]
-                ? c2c_mem_queues_[queue]->dispatch_next()
-                : std::optional<MemInstruction> {};
-            if (instruction.has_value() && c2c_instruction.has_value()) {
-                throw StaticScheduleError(
-                    "MEM ICU compute and C2C write conflict on queue "
-                    + std::to_string(queue) + " at cycle "
-                    + std::to_string(cycle_));
-            }
-            const auto& selected = instruction.has_value()
-                ? instruction : c2c_instruction;
-            if (!selected.has_value()) {
+                : mem_queues_[queue].tick_transport_only();
+            if (!instruction.has_value()) {
                 continue;
             }
             const auto hemisphere = queue / kMemQueuesPerHemisphere;
             const auto local_queue = queue % kMemQueuesPerHemisphere;
             const auto mem_slice = local_queue / hw::kMemBanksPerSlice;
             const auto bank = local_queue % hw::kMemBanksPerSlice;
-            mems[hemisphere].enqueue_instruction(mem_slice, bank, *selected);
+            mems[hemisphere].enqueue_instruction(mem_slice, bank, *instruction);
             any = true;
             if (os != nullptr) {
                 *os << "  ICU -> MEM." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
                     << ".c" << mem_slice << ".b" << bank << ' '
-                    << describe_mem(*selected)
-                    << (c2c_instruction.has_value() ? " source=c2c" : "")
+                    << describe_mem(*instruction)
+                    << (mem_queues_[queue].last_trace().action
+                                == IcuQueueAction::SynchronizedIssue
+                            ? " source=synchronized" : "")
                     << '\n';
             }
         }
@@ -1090,22 +1245,13 @@ public:
         return mem_queues_[queue];
     }
 
-    MemIcu& c2c_mem_iq(std::size_t queue)
+    const MemIcu& mem_iq(std::size_t queue) const
     {
         check_mem_queue(queue);
-        if (!c2c_mem_queues_[queue])
-            c2c_mem_queues_[queue] = std::make_unique<MemIcu>();
-        return *c2c_mem_queues_[queue];
+        return mem_queues_[queue];
     }
 
-    const MemIcu& c2c_mem_iq(std::size_t queue) const
-    {
-        check_mem_queue(queue);
-        return c2c_mem_queues_[queue]
-            ? *c2c_mem_queues_[queue] : empty_c2c_mem_queue_;
-    }
-
-    MxmIcu& mxm_load_iq(std::size_t mxm)
+    MxmLoadIcu& mxm_load_iq(std::size_t mxm)
     {
         check_mxm_queue(mxm);
         return mxm_load_queues_[mxm];
@@ -1117,7 +1263,7 @@ public:
         return mxm_dequant_queues_[mxm];
     }
 
-    MxmIcu& mxm_compute_iq(std::size_t mxm)
+    MxmComputeIcu& mxm_compute_iq(std::size_t mxm)
     {
         check_mxm_queue(mxm);
         return mxm_compute_queues_[mxm];
@@ -1133,11 +1279,11 @@ public:
         return sxm_permute_queues_[hemisphere_index(hemisphere)];
     }
 
-    C2cIcu& c2c_tx_iq(Hemisphere hemisphere) noexcept
+    C2cTxIcu& c2c_tx_iq(Hemisphere hemisphere) noexcept
     {
         return c2c_tx_queues_[hemisphere_index(hemisphere)];
     }
-    C2cIcu& c2c_rx_iq(Hemisphere hemisphere) noexcept
+    C2cRxIcu& c2c_rx_iq(Hemisphere hemisphere) noexcept
     {
         return c2c_rx_queues_[hemisphere_index(hemisphere)];
     }
@@ -1181,6 +1327,23 @@ private:
         }
     }
 
+    static void check_mem_location(const IcuLocation& location)
+    {
+        if (location.unit >= hw::kHemispheres
+            || location.index >= hw::kMemSliceColumns
+            || location.bank >= hw::kMemBanksPerSlice)
+            throw std::out_of_range(
+                "ICU MEM location is outside the configured chip topology");
+    }
+
+    static void check_mem_synchronized_write(
+        std::size_t, const MemInstruction& instruction)
+    {
+        if (instruction.opcode != MemOpcode::Write)
+            throw std::invalid_argument(
+                "MEM synchronized instruction must carry a write template");
+    }
+
     static void check_mxm_queue(std::size_t mxm)
     {
         if (mxm >= kMxmQueues) {
@@ -1194,6 +1357,13 @@ private:
             throw std::out_of_range(
                 "ICU VXM queue is outside the 8 compact control queues");
         }
+    }
+    static void require_c2c_packet_hemisphere(Hemisphere queue_hemisphere,
+        Hemisphere packet_hemisphere)
+    {
+        if (queue_hemisphere != packet_hemisphere)
+            throw std::invalid_argument(
+                "C2C raw packet endpoint does not match its ICU queue");
     }
     template <typename QueueArray>
     static std::size_t queued_instruction_count(const QueueArray& queues)
@@ -1345,18 +1515,22 @@ private:
     }
 
     std::array<VxmIcu, kVxmQueues> vxm_queues_{};
+    // Legacy VXM/SXM builders still describe positions in a compiler-side
+    // program timeline. These cursors exist only while translating that API:
+    // gaps become local-iMEM NOPs and every hardware RUN_2D packet starts at
+    // relative cycle zero. They are never consulted by the runtime ICU.
     std::array<MemIcu, kMemQueues> mem_queues_{};
-    std::array<std::unique_ptr<MemIcu>, kMemQueues> c2c_mem_queues_{};
-    MemIcu empty_c2c_mem_queue_{};
-    std::array<MxmIcu, kMxmQueues> mxm_load_queues_{};
+    std::array<MxmLoadIcu, kMxmQueues> mxm_load_queues_{};
     std::array<MxmDequantIcu, kMxmQueues>
         mxm_dequant_queues_{};
-    std::array<MxmIcu, kMxmQueues> mxm_compute_queues_{};
+    std::array<MxmComputeIcu, kMxmQueues> mxm_compute_queues_{};
     std::array<SxmIcu, hw::kHemispheres> sxm_transpose_queues_{};
     std::array<SxmIcu, hw::kHemispheres> sxm_permute_queues_{};
-    std::array<C2cIcu, hw::kHemispheres> c2c_tx_queues_{};
+    std::array<C2cTxIcu, hw::kHemispheres> c2c_tx_queues_{};
     std::array<C2cDmaIcu, hw::kHemispheres> c2c_dma_queues_{};
-    std::array<C2cIcu, hw::kHemispheres> c2c_rx_queues_{};
+    std::array<C2cRxIcu, hw::kHemispheres> c2c_rx_queues_{};
+    std::array<std::optional<C2cEndpointIcuPacket>, hw::kHemispheres>
+        pending_c2c_dma_raw_words_{};
     std::size_t barrier_latency_cycles_{hw::kIcuBarrierLatencyCycles};
     std::deque<std::size_t> barrier_events_{};
     bool program_issue_enabled_{true};

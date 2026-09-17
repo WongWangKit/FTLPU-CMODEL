@@ -132,19 +132,40 @@ constexpr std::size_t kIcuMemIqDepth = 16;
 constexpr std::size_t kIcuMxmIqDepth = 16;
 constexpr std::size_t kIcuSxmIqDepth = 16;
 constexpr std::size_t kIcuC2cIqDepth = 16;
-// Macro descriptors expand independently of the fetch IQ. These finite
-// context files are sized from the maximum simultaneous live descriptors in
-// the seq128 reference schedule (MEM=32, MXM compute=136).
-constexpr std::size_t kIcuMemMacroContextDepth = 32;
-constexpr std::size_t kIcuMxmMacroContextDepth = 136;
-constexpr std::size_t kIcuVxmMacroContextDepth = 4;
-constexpr std::size_t kIcuSxmMacroContextDepth = 4;
-constexpr std::size_t kIcuC2cMacroContextDepth = 4;
+// Legacy macro descriptors use the same single active loop state as the raw
+// packets. They remain readable for compatibility, but may not interleave.
+constexpr std::size_t kIcuMemMacroContextDepth = 1;
+constexpr std::size_t kIcuMxmMacroContextDepth = 1;
+constexpr std::size_t kIcuVxmMacroContextDepth = 1;
+constexpr std::size_t kIcuSxmMacroContextDepth = 1;
+constexpr std::size_t kIcuC2cMacroContextDepth = 1;
 // Five 32-bit words hold the decoded template, loop state, next issue cycle,
 // and base induction value. The bitstream remains packed in i-MEM; contexts
 // are the independently addressable expansion state.
 constexpr std::size_t kIcuMemMacroContextBits = 160;
 constexpr std::size_t kIcuMxmMacroContextBits = 160;
+
+// Each physical FU ICU owns one decoded loop state. Each context retains the
+// decoded static fields, loop counters, and packet PC.
+// A physical ICU executes one coarse instruction to completion. The IQ may
+// prefetch following packets, but they never become simultaneously active.
+constexpr std::size_t kIcuMem3DContextDepth = 1;
+constexpr std::size_t kIcuMxmLoad3DContextDepth = 1;
+constexpr std::size_t kIcuMxmDequant3DContextDepth = 1;
+constexpr std::size_t kIcuMxmCompute3DContextDepth = 1;
+constexpr std::size_t kIcuVxmRun2DContextDepth = 1;
+constexpr std::size_t kIcuSxmRun2DContextDepth = 1;
+// WRITE_READ_2D shares the single MEM context slot but needs two independent
+// 2-D event cursors while its write and read sweeps overlap in time.
+constexpr std::size_t kIcuMem3DContextBits = 384;
+constexpr std::size_t kIcuMxmLoad3DContextBits = 288;
+constexpr std::size_t kIcuMxmDequant3DContextBits = 224;
+constexpr std::size_t kIcuMxmCompute3DContextBits = 320;
+// Compact VXM config (96), two-counter launch fields/state, and local i-MEM
+// PC. The third counter used by MEM/MXM does not exist in this context.
+constexpr std::size_t kIcuVxmRun2DContextBits = 256;
+// Encoded SXM tile-local instruction (416), two-counter launch state, and PC.
+constexpr std::size_t kIcuSxmRun2DContextBits = 512;
 
 constexpr std::size_t kMxmsPerHemisphere = 2;
 constexpr std::size_t kMxmCount = kHemispheres * kMxmsPerHemisphere;

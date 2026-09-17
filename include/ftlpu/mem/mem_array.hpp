@@ -134,11 +134,13 @@ public:
     {
         cycle_ = 0;
         for (auto& slice : instruction_queues_) {
-            for (auto& queue : slice) queue.clear();
+            for (auto& bank : slice)
+                for (auto& queue : bank) queue.clear();
         }
         for (auto& slice : instruction_rows_) {
             for (auto& bank : slice) {
-                for (auto& slot : bank) slot.reset();
+                for (auto& port : bank)
+                    for (auto& slot : port) slot.reset();
             }
         }
         executed_mem_.clear();
@@ -172,7 +174,9 @@ public:
     {
         check_mem_slice(mem_slice);
         check_bank(bank);
-        instruction_queues_[mem_slice][bank].push_back(
+        const std::size_t port = instruction.opcode == MemOpcode::Write
+            || instruction.opcode == MemOpcode::Scatter ? 1 : 0;
+        instruction_queues_[mem_slice][bank][port].push_back(
             std::move(instruction));
     }
 
@@ -277,7 +281,9 @@ public:
         check_mem_slice(mem_slice);
         check_bank(bank);
         check_tile(tile);
-        return instruction_rows_[mem_slice][bank][tile];
+        const auto& read = instruction_rows_[mem_slice][bank][0][tile];
+        return read.has_value()
+            ? read : instruction_rows_[mem_slice][bank][1][tile];
     }
 
     const std::vector<MemTransfer>& executed_transfers() const noexcept
@@ -388,13 +394,14 @@ private:
     {
         for (std::size_t mem_slice = 0; mem_slice < hw::kMemSliceColumns; ++mem_slice) {
             for (std::size_t bank = 0; bank < hw::kMemBanksPerSlice; ++bank) {
-                if (instruction_rows_[mem_slice][bank][0].has_value()
-                    || instruction_queues_[mem_slice][bank].empty()) {
-                    continue;
+                for (std::size_t port = 0; port < 2; ++port) {
+                    if (instruction_rows_[mem_slice][bank][port][0].has_value()
+                        || instruction_queues_[mem_slice][bank][port].empty())
+                        continue;
+                    instruction_rows_[mem_slice][bank][port][0] =
+                        instruction_queues_[mem_slice][bank][port].front();
+                    instruction_queues_[mem_slice][bank][port].pop_front();
                 }
-                instruction_rows_[mem_slice][bank][0] =
-                    instruction_queues_[mem_slice][bank].front();
-                instruction_queues_[mem_slice][bank].pop_front();
             }
         }
     }
@@ -403,30 +410,34 @@ private:
     {
         for (std::size_t mem_slice = 0; mem_slice < hw::kMemSliceColumns; ++mem_slice) {
             for (std::size_t bank = 0; bank < hw::kMemBanksPerSlice; ++bank) {
-                for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-                    const auto& instruction =
-                        instruction_rows_[mem_slice][bank][tile];
-                    if (!instruction.has_value()) continue;
+                // Read executes before write when both ports target one SRAM
+                // row in the same cycle, matching synchronous read-before-
+                // write behavior.
+                for (std::size_t port = 0; port < 2; ++port)
+                    for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+                        const auto& instruction =
+                            instruction_rows_[mem_slice][bank][port][tile];
+                        if (!instruction.has_value()) continue;
 
-                    if (capture_trace_) {
-                        executed_instructions_.push_back(
-                            InstructionTrace {
-                                mem_slice, bank, tile, *instruction});
+                        if (capture_trace_) {
+                            executed_instructions_.push_back(
+                                InstructionTrace {
+                                    mem_slice, bank, tile, *instruction});
+                        }
+                        switch (instruction->opcode) {
+                        case MemOpcode::Read:
+                            execute_read(fabric, mem_slice, bank, tile,
+                                *instruction);
+                            break;
+                        case MemOpcode::Write:
+                            execute_write(fabric, mem_slice, bank, tile,
+                                *instruction);
+                            break;
+                        case MemOpcode::Gather:
+                        case MemOpcode::Scatter:
+                            throw std::logic_error("Gather/Scatter require a separate address-stream datapath model");
+                        }
                     }
-                    switch (instruction->opcode) {
-                    case MemOpcode::Read:
-                        execute_read(
-                            fabric, mem_slice, bank, tile, *instruction);
-                        break;
-                    case MemOpcode::Write:
-                        execute_write(
-                            fabric, mem_slice, bank, tile, *instruction);
-                        break;
-                    case MemOpcode::Gather:
-                    case MemOpcode::Scatter:
-                        throw std::logic_error("Gather/Scatter require a separate address-stream datapath model");
-                    }
-                }
             }
         }
     }
@@ -533,10 +544,12 @@ private:
     {
         for (auto& mem_slice : instruction_rows_) {
             for (auto& bank : mem_slice) {
-                for (std::size_t tile = hw::kTileRows - 1; tile > 0; --tile) {
-                    bank[tile] = bank[tile - 1];
+                for (auto& port : bank) {
+                    for (std::size_t tile = hw::kTileRows - 1;
+                         tile > 0; --tile)
+                        port[tile] = port[tile - 1];
+                    port[0].reset();
                 }
-                bank[0].reset();
             }
         }
     }
@@ -615,11 +628,12 @@ private:
     MissingStreamPolicy missing_stream_policy_{MissingStreamPolicy::Error};
     SramArray sram_{};
     std::array<
-        std::array<std::deque<MemInstruction>, hw::kMemBanksPerSlice>,
+        std::array<std::array<std::deque<MemInstruction>, 2>,
+            hw::kMemBanksPerSlice>,
         hw::kMemSliceColumns> instruction_queues_{};
     std::array<
         std::array<
-            std::array<InstructionSlot, hw::kTileRows>,
+            std::array<std::array<InstructionSlot, hw::kTileRows>, 2>,
             hw::kMemBanksPerSlice>,
         hw::kMemSliceColumns> instruction_rows_{};
     std::vector<MemTransfer> executed_mem_{};

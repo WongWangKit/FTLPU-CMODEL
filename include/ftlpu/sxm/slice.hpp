@@ -325,7 +325,11 @@ private:
 
             auto& bank = transpose_bank_;
             if (bank.tile_ready[tile]) {
-                throw std::logic_error("SXM transpose buffer is full");
+                throw std::logic_error(
+                    "SXM transpose buffer is full at tile "
+                    + std::to_string(tile)
+                    + " (ready_cycle="
+                    + std::to_string(bank.ready_cycle[tile]) + ")");
             }
             if (bank.input_row_mask[tile] == 0)
                 bank.dst_streams[tile] = instruction.dst_streams;

@@ -130,6 +130,8 @@ void test_program_issue_hold_keeps_transport_running()
     for (std::size_t cycle = 0; cycle < 3; ++cycle)
         system.tick(ftlpu::TspSliceSystem::LogSinks{});
     assert(system.icu().mem_iq(0).cycle() == 0);
+    assert(system.icu().mem_iq(0).last_trace().action
+           == IcuQueueAction::ProgramPaused);
     assert(system.icu().c2c_dma_iq(ftlpu::Hemisphere::East).cycle() == 3);
 
     system.icu().set_program_issue_enabled(true);

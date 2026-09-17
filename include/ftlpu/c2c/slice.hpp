@@ -50,6 +50,7 @@ struct C2cStreamPortMap {
 struct C2cReceiveNotification {
     C2cConsumer consumer{};
     std::size_t stream_index{0};
+    std::uint32_t sync_tag{0};
     std::uint64_t vector_tag{0};
     C2cVector vector{};
 };
@@ -391,6 +392,7 @@ public:
                 notify(C2cReceiveNotification {
                     consumer,
                     active->instruction.fabric_stream_index,
+                    active->instruction.sync_tag,
                     vector.vector_tag,
                     {}});
                 shared_ingress_[stream] = ActiveReceive {
@@ -453,6 +455,7 @@ public:
             notification = C2cReceiveNotification {
                 queue_.front().consumer,
                 queue_.front().stream_index,
+                queue_.front().sync_tag,
                 vector.vector_tag,
             };
             pipeline_[0] = ActiveReceive {

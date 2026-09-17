@@ -44,6 +44,9 @@ public:
         std::optional<std::size_t> mxm_log_tile{};
         std::optional<std::size_t> vxm_log_tile{};
         std::ostream* sxm{nullptr};
+        // Preserve the per-cycle MEM pipeline/transfer records without
+        // requiring the verbose human-readable MEM log stream.
+        bool capture_mem_trace{false};
     };
 
     explicit TspSliceSystem(
@@ -501,7 +504,8 @@ private:
                 }
 
                 mems_[hemisphere].evaluate(
-                    fabric, sinks.mem != nullptr);
+                    fabric,
+                    sinks.mem != nullptr || sinks.capture_mem_trace);
                 sxms_[hemisphere].evaluate(fabric);
                 if (c2cs_[hemisphere].has_value()) {
                     evaluate_c2c(hemisphere, fabric);
@@ -542,6 +546,10 @@ private:
             auto* dma = c2c_dmas_[hemisphere];
             if (dma == nullptr) continue;
             dma->tick();
+            if (const auto tag = dma->take_completion_sync_tag()) {
+                icu_.notify_tagged(IcuLocation::C2cDma(
+                    static_cast<Hemisphere>(hemisphere)), *tag);
+            }
             if (dma->take_completion_notification()) {
                 icu_.notify(IcuLocation::C2cDma(
                     static_cast<Hemisphere>(hemisphere)));
@@ -567,10 +575,17 @@ private:
             const auto notify = [this](C2cReceiveNotification received) {
                 const auto& consumer = received.consumer;
                 if (consumer.notify_mem) {
-                    icu_.notify_c2c_mem(IcuLocation::Mem(
+                    const auto location = IcuLocation::Mem(
                         consumer.hemisphere,
                         consumer.mem_slice,
-                        consumer.mem_bank), received.stream_index);
+                        consumer.mem_bank);
+                    if (received.sync_tag == 0) {
+                        icu_.notify(location);
+                        icu_.notify_mem_synchronized(
+                            location, received.stream_index);
+                    } else
+                        icu_.notify_mem_synchronized(
+                            location, received.sync_tag);
                 }
             };
             endpoint->rx().evaluate_shared(
@@ -589,10 +604,17 @@ private:
         }
         if (notification.has_value()
             && notification->consumer.notify_mem) {
-            icu_.notify(IcuLocation::Mem(
+            const auto location = IcuLocation::Mem(
                 notification->consumer.hemisphere,
                 notification->consumer.mem_slice,
-                notification->consumer.mem_bank));
+                notification->consumer.mem_bank);
+            if (notification->sync_tag == 0) {
+                icu_.notify(location);
+                icu_.notify_mem_synchronized(
+                    location, notification->stream_index);
+            } else
+                icu_.notify_mem_synchronized(
+                    location, notification->sync_tag);
         }
     }
 

@@ -98,6 +98,11 @@ ftlpu_add_test(icu_barrier_test tests/unit/icu/barrier_test.cpp
     unit.icu.barrier unit icu fast)
 ftlpu_add_test(icu_repeat_2d_test tests/unit/icu/repeat_2d_test.cpp
     unit.icu.repeat_2d unit icu fast)
+ftlpu_add_test(icu_fu_3d_codec_test tests/unit/icu/fu_3d_codec_test.cpp
+    unit.icu.fu_3d_codec unit icu fast)
+ftlpu_add_test(icu_legacy_fu_3d_adapter_test
+    tests/unit/icu/legacy_fu_3d_adapter_test.cpp
+    unit.icu.legacy_fu_3d_adapter unit icu fast)
 ftlpu_add_test(icu_macro_schedule_test tests/unit/icu/macro_schedule_test.cpp
     unit.icu.macro_schedule unit icu fast)
 ftlpu_add_test(icu_mem_stream_nd_test tests/unit/icu/mem_stream_nd_test.cpp
@@ -106,13 +111,28 @@ ftlpu_add_test(icu_mem_slice_program_test tests/unit/icu/mem_slice_program_test.
     unit.icu.mem_slice_program unit icu fast)
 ftlpu_add_test(icu_mxm_stream_nd_test tests/unit/icu/mxm_stream_nd_test.cpp
     unit.icu.mxm_stream_nd unit icu mxm fast)
-ftlpu_add_test(icu_qwen2_5_up_projection_packet_test
-    tests/unit/icu/qwen2_5_up_projection_packet_test.cpp
-    unit.icu.qwen2_5_up_projection_packet unit icu mxm fast)
+ftlpu_add_test(icu_qwen2_5_up_3d_instruction_test
+    tests/unit/icu/qwen2_5_up_3d_instruction_test.cpp
+    unit.icu.qwen2_5_up_3d_instruction unit icu mxm fast)
+ftlpu_add_test(icu_mem_single_icu_3d_test
+    tests/unit/icu/mem_single_icu_3d_test.cpp
+    unit.icu.mem_single_icu_3d unit icu mem fast)
+ftlpu_add_test(icu_mem_write_read_2d_test
+    tests/unit/icu/mem_write_read_2d_test.cpp
+    unit.icu.mem_write_read_2d unit icu mem fast)
+ftlpu_add_test(icu_vxm_run_2d_instruction_test
+    tests/unit/icu/vxm_run_2d_instruction_test.cpp
+    unit.icu.vxm_run_2d unit icu fast)
 ftlpu_add_test(icu_vxm_stream_nd_test tests/unit/icu/vxm_stream_nd_test.cpp
     unit.icu.vxm_stream_nd unit icu vxm fast)
 ftlpu_add_test(icu_sxm_tile_program_test tests/unit/icu/sxm_tile_program_test.cpp
     unit.icu.sxm_tile_program unit icu sxm fast)
+ftlpu_add_test(icu_sxm_run_2d_instruction_test
+    tests/unit/icu/sxm_run_2d_instruction_test.cpp
+    unit.icu.sxm_run_2d unit icu sxm fast)
+ftlpu_add_test(icu_c2c_packet_codec_test
+    tests/unit/icu/c2c_packet_codec_test.cpp
+    unit.icu.c2c_packet_codec unit icu c2c fast)
 
 # Subsystem tests: multiple hardware blocks connected by physical SR routes.
 ftlpu_add_test(c2c_test tests/subsystem/c2c/dual_chip_test.cpp

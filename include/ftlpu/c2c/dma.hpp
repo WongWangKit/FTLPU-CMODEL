@@ -25,6 +25,7 @@ public:
         C2cDmaDirection direction{C2cDmaDirection::Ddr4ToC2c};
         std::uint64_t ddr4_address{0};
         std::size_t vector_count{0};
+        std::uint32_t sync_tag{0};
     };
 
     explicit C2cDmaEngine(
@@ -56,6 +57,7 @@ public:
         last_beat_.reset();
         completions_.clear();
         pending_completion_notifications_ = 0;
+        pending_completion_sync_tags_.clear();
         cycle_ = 0;
     }
 
@@ -102,6 +104,14 @@ public:
         }
         --pending_completion_notifications_;
         return true;
+    }
+
+    std::optional<std::uint32_t> take_completion_sync_tag() noexcept
+    {
+        if (pending_completion_sync_tags_.empty()) return std::nullopt;
+        const auto tag = pending_completion_sync_tags_.front();
+        pending_completion_sync_tags_.pop_front();
+        return tag;
     }
 
     // C2C TX-facing FIFO.
@@ -261,9 +271,12 @@ private:
             active->instruction.direction,
             active->instruction.ddr4_address,
             active->instruction.vector_count,
+            active->instruction.sync_tag,
         });
         active.reset();
         ++pending_completion_notifications_;
+        pending_completion_sync_tags_.push_back(
+            completions_.back().sync_tag);
     }
 
     void require_stream(std::size_t stream) const
@@ -285,6 +298,7 @@ private:
     std::optional<BeatTrace> last_beat_{};
     std::vector<Completion> completions_{};
     std::size_t pending_completion_notifications_{0};
+    std::deque<std::uint32_t> pending_completion_sync_tags_{};
     std::size_t cycle_{0};
 };
 

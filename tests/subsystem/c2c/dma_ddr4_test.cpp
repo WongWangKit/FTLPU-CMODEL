@@ -205,6 +205,195 @@ void test_c2c_stream_count_is_runtime_selectable()
         "C2C DMA accepted a stream disabled by hardware configuration");
 }
 
+void test_unified_mem_icu_insertion_and_transport_only_tick()
+{
+    using MemIcu = InstructionControlUnit::MemIcu;
+    constexpr std::size_t kSyncTag = 77;
+    constexpr std::size_t kTransportDelay = 2;
+    constexpr std::size_t kReservationCycles = 8;
+    const auto packet = MemIcu::encode_synchronized_raw_packet(
+        2, kSyncTag, kTransportDelay, 3,
+        MemInstruction::Write(40, StreamId::West(29)),
+        kReservationCycles);
+
+    MemIcu queue;
+    queue.push_instruction(
+        MemInstruction::Write(10, StreamId::West(28)));
+    queue.push_instruction(
+        MemInstruction::Write(90, StreamId::West(30)));
+    queue.insert_encoded_synchronized_packet(1, packet);
+    require(queue.imem_occupancy() == 4,
+        "MEM_WRITE_SYNC insertion did not occupy two words in the one MEM i-MEM");
+
+    const auto early = queue.tick();
+    require(early.has_value() && early->address == 10,
+        "unified MEM ICU did not issue the instruction before MEM_WRITE_SYNC");
+    require(queue.cycle() == 1,
+        "normal MEM tick did not advance queue-local logical time");
+
+    queue.notify(kSyncTag + 1);
+    require(!queue.tick_transport_only().has_value()
+            && queue.last_trace().action
+                == IcuQueueAction::SynchronizedWait,
+        "MEM_WRITE_SYNC accepted a notification with the wrong tag");
+    require(queue.cycle() == 1,
+        "transport-only wait advanced queue-local logical time");
+
+    queue.notify(kSyncTag);
+    queue.notify(kSyncTag);
+    for (std::size_t delay = 0; delay < kTransportDelay + 1; ++delay) {
+        require(!queue.tick_transport_only().has_value(),
+            "MEM_WRITE_SYNC issued before its physical transport delay");
+    }
+    const auto firstWrite = queue.tick_transport_only();
+    require(firstWrite.has_value() && firstWrite->address == 40,
+        "MEM_WRITE_SYNC did not issue its first delayed FU write");
+    const auto secondWrite = queue.tick_transport_only();
+    require(secondWrite.has_value() && secondWrite->address == 43,
+        "MEM_WRITE_SYNC did not apply its address stride");
+    require(queue.synchronized_issued_count() == 2,
+        "unified MEM ICU did not count synchronized FU writes separately");
+
+    for (std::size_t hold = 0; hold < 2; ++hold) {
+        require(!queue.tick_transport_only().has_value()
+                && queue.last_trace().action
+                    == IcuQueueAction::SynchronizedDelay,
+            "MEM_WRITE_SYNC did not hold its reserved single-ICU window");
+    }
+
+    require(!queue.tick_transport_only().has_value()
+            && queue.last_trace().action == IcuQueueAction::ProgramPaused,
+        "transport-only mode issued an ordinary MEM command after the transfer");
+    require(queue.cycle() == 1,
+        "transport-only execution advanced the ordinary MEM logical cycle");
+    const auto late = queue.tick();
+    require(late.has_value() && late->address == 90,
+        "unified MEM ICU did not preserve the instruction after MEM_WRITE_SYNC");
+
+    const auto encodedWait = MemIcu::encode_control_raw_word(
+        IcuControlInstruction::WaitEvent(0x1234));
+    const auto decodedWait = MemIcu::decode_control_raw_word(encodedWait);
+    require(decodedWait.opcode == IcuControlOpcode::WaitEvent
+            && decodedWait.event_tag == 0x1234,
+        "public raw control codec did not preserve WAIT_EVENT");
+
+    MemIcu boundaryQueue;
+    boundaryQueue.push_mem_3d(MemIcuInstruction::Write3D(
+        IcuLoop3D {0, {1, 1, 1}, {1, 1, 1}},
+        MemIcuAddress3D::Affine(0, {0, 0, 0}),
+        StreamId::West(0)));
+    const auto occupancy = boundaryQueue.imem_occupancy();
+    bool splitRejected = false;
+    try {
+        boundaryQueue.insert_encoded_synchronized_packet(1, packet);
+    } catch (const StaticScheduleError&) {
+        splitRejected = true;
+    }
+    require(splitRejected && boundaryQueue.imem_occupancy() == occupancy,
+        "MEM_WRITE_SYNC insertion split a 3-D packet or changed i-MEM on failure");
+
+    bool launchedRejected = false;
+    try {
+        queue.insert_encoded_synchronized_packet(
+            queue.imem_occupancy(), packet);
+    } catch (const StaticScheduleError&) {
+        launchedRejected = true;
+    }
+    require(launchedRejected,
+        "MEM_WRITE_SYNC insertion modified i-MEM after launch");
+
+    // When data arrives early during normal execution, the synchronized
+    // command must still consume its compiler-reserved queue window. The next
+    // ordinary command therefore starts at the same logical cycle regardless
+    // of DDR response time.
+    constexpr std::size_t kEarlyTag = 91;
+    constexpr std::size_t kEarlyWindow = 6;
+    const auto earlyPacket = MemIcu::encode_synchronized_raw_packet(
+        2, kEarlyTag, 0, 1,
+        MemInstruction::Write(120, StreamId::West(27)), kEarlyWindow);
+    MemIcu reservedQueue;
+    reservedQueue.push_encoded_synchronized_packet(earlyPacket);
+    reservedQueue.push_instruction(
+        MemInstruction::Read(150, StreamId::East(1)));
+    reservedQueue.configure_all();
+    for (std::size_t cycle = 0;
+         cycle < MemIcu::fetch_latency
+                 + MemIcu::synchronized_packet_word_count;
+         ++cycle)
+        reservedQueue.prefetch_only();
+    reservedQueue.notify(kEarlyTag);
+    reservedQueue.notify(kEarlyTag);
+    std::size_t activeSyncCycles = 0;
+    std::optional<MemInstruction> afterReservation;
+    for (std::size_t cycle = 0; cycle < 32; ++cycle) {
+        const auto issue = reservedQueue.tick();
+        const auto action = reservedQueue.last_trace().action;
+        if (action == IcuQueueAction::SynchronizedWait
+            || action == IcuQueueAction::SynchronizedDelay
+            || action == IcuQueueAction::SynchronizedIssue)
+            ++activeSyncCycles;
+        if (issue.has_value() && issue->opcode == MemOpcode::Read) {
+            afterReservation = issue;
+            break;
+        }
+        require(!issue.has_value() || issue->opcode == MemOpcode::Write,
+            "ordinary MEM command escaped the MEM_WRITE_SYNC reservation");
+    }
+    if (activeSyncCycles != kEarlyWindow)
+        throw std::runtime_error(
+            "MEM_WRITE_SYNC reserved-window cycles: expected "
+            + std::to_string(kEarlyWindow) + ", got "
+            + std::to_string(activeSyncCycles));
+    require(afterReservation.has_value()
+            && afterReservation->address == 150,
+        "early MEM_WRITE_SYNC completion shifted the following MEM command");
+
+    // A notification may arrive while an earlier local command still owns the
+    // queue. Its transport delay must age relative to that arrival, without a
+    // free-running absolute-cycle comparison inside the ICU.
+    constexpr std::size_t kAgedTag = 92;
+    const auto agedPacket = MemIcu::encode_synchronized_raw_packet(
+        1, kAgedTag, kTransportDelay, 1,
+        MemInstruction::Write(180, StreamId::West(26)), 1);
+    MemIcu agedQueue;
+    agedQueue.push_nop(kTransportDelay + 2);
+    agedQueue.push_encoded_synchronized_packet(agedPacket);
+    agedQueue.prefetch_only();
+    agedQueue.notify(kAgedTag);
+    for (std::size_t delay = 0; delay < kTransportDelay + 2; ++delay) {
+        require(!agedQueue.tick().has_value(),
+            "an early synchronized token bypassed the preceding local NOP");
+    }
+    const auto agedWrite = agedQueue.tick();
+    require(agedWrite.has_value() && agedWrite->address == 180,
+        "an early synchronized token did not age while waiting behind a NOP");
+
+    // Same-tag tokens can arrive on different cycles. Each token carries its
+    // own relative age so the second vector's transport delay overlaps the
+    // first vector's delay and issue instead of being restarted serially.
+    constexpr std::size_t kStaggeredTag = 93;
+    const auto staggeredPacket = MemIcu::encode_synchronized_raw_packet(
+        2, kStaggeredTag, kTransportDelay, 5,
+        MemInstruction::Write(200, StreamId::West(25)), 8);
+    MemIcu staggeredQueue;
+    staggeredQueue.push_encoded_synchronized_packet(staggeredPacket);
+    staggeredQueue.prefetch_only();
+    staggeredQueue.notify(kStaggeredTag);
+    require(!staggeredQueue.tick().has_value(),
+        "first staggered token ignored its relative transport delay");
+    staggeredQueue.notify(kStaggeredTag);
+    require(!staggeredQueue.tick().has_value(),
+        "first staggered token matured before D+1 relative cycles");
+    require(!staggeredQueue.tick().has_value(),
+        "first staggered token matured before D+1 relative cycles");
+    const auto staggeredFirst = staggeredQueue.tick();
+    const auto staggeredSecond = staggeredQueue.tick();
+    require(staggeredFirst.has_value() && staggeredFirst->address == 200
+            && staggeredSecond.has_value()
+            && staggeredSecond->address == 205,
+        "staggered synchronized tokens did not retain independent relative ages");
+}
+
 void test_ddr4_dma_rx_sr_mem()
 {
     constexpr auto kHemisphere = Hemisphere::West;
@@ -234,10 +423,11 @@ void test_ddr4_dma_rx_sr_mem()
         kTargetSlice / hw::kMemSlicesPerGroup;
     constexpr auto kTransportNops =
         hw::kMemEastBoundaryStreamRegisterColumn - (kTargetGroup + 1);
-    chip.icu().enqueue_c2c_mem_stream_write(target_queue,
+    chip.icu().enqueue_mem_synchronized_write(target_queue,
         MemInstruction::Write(
             kTargetRow, StreamId::West(kFabricStream)),
         1, kTransportNops);
+    chip.icu().set_program_issue_enabled(false);
 
     bool observed_dma_sync_wait = false;
     bool observed_dma_sync_release = false;
@@ -251,7 +441,7 @@ void test_ddr4_dma_rx_sr_mem()
         observed_dma_sync_release = observed_dma_sync_release
             || dma_action == IcuQueueAction::SyncRelease;
         observed_mem_synchronized_issue = observed_mem_synchronized_issue
-            || chip.icu().c2c_mem_iq(target_queue).last_trace().action
+            || chip.icu().mem_iq(target_queue).last_trace().action
                 == IcuQueueAction::SynchronizedIssue;
     }
 
@@ -261,6 +451,14 @@ void test_ddr4_dma_rx_sr_mem()
         "DDR4 read completion did not release the DMA ICU");
     require(observed_mem_synchronized_issue,
         "shared C2C RX did not notify the target MEM ICU");
+    require(chip.icu().mem_iq(target_queue).cycle() == 0,
+        "transport-only MEM execution advanced logical program time");
+    require(chip.icu().mem_iq(target_queue).last_trace().action
+            == IcuQueueAction::ProgramPaused,
+        "paused MEM ICU did not remain in transport-only mode");
+    require(chip.icu().mem_iq(target_queue).synchronized_issued_count() == 1,
+        "unified MEM ICU did not count its synchronized write");
+    chip.icu().set_program_issue_enabled(true);
     require(system.dma(kHemisphere).idle(),
         "DDR4-to-C2C DMA did not become idle");
 
@@ -308,7 +506,7 @@ void test_eight_shared_c2c_lanes_write_through_mem()
         const auto group = targetSlice / hw::kMemSlicesPerGroup;
         const auto transportNops =
             hw::kMemEastBoundaryStreamRegisterColumn - (group + 1);
-        chip.icu().enqueue_c2c_mem_stream_write(queue,
+        chip.icu().enqueue_mem_synchronized_write(queue,
             MemInstruction::Write(
                 kTargetRow, StreamId::West(kFabricBase + lane)),
             1, transportNops);
@@ -483,7 +681,7 @@ void test_sixteen_lane_shared_ingress_sustains_qwen_page()
             const auto group = slice / hw::kMemSlicesPerGroup;
             const auto transport =
                 hw::kMemEastBoundaryStreamRegisterColumn - (group + 1);
-            chip.icu().enqueue_c2c_mem_stream_write(queue,
+            chip.icu().enqueue_mem_synchronized_write(queue,
                 MemInstruction::Write(
                     0, StreamId::West(kFabricBase + lane)),
                 kVectorsPerLane, transport, 1);
@@ -499,7 +697,7 @@ void test_sixteen_lane_shared_ingress_sustains_qwen_page()
             done = done && system.dma(hemisphere).idle()
                 && chip.c2c_endpoint(hemisphere).rx().idle();
             for (std::size_t lane = 0; lane < kLaneCount; ++lane)
-                done = done && chip.icu().c2c_mem_iq(
+                done = done && chip.icu().mem_iq(
                     InstructionControlUnit::mem_queue(
                         hemisphere, 20 + lane, 1)).done();
         }
@@ -526,6 +724,7 @@ try {
     test_ddr4_exposes_eight_vector_channels();
     test_default_ddr4_bandwidth_and_latency_jitter();
     test_c2c_stream_count_is_runtime_selectable();
+    test_unified_mem_icu_insertion_and_transport_only_tick();
     test_ddr4_dma_rx_sr_mem();
     test_eight_shared_c2c_lanes_write_through_mem();
     test_mem_sr_tx_dma_ddr4();

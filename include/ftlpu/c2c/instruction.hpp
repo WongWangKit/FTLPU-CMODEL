@@ -31,6 +31,9 @@ struct C2cInstruction {
     std::size_t stream_index{0};
     std::size_t fabric_stream_index{0};
     std::size_t vector_count{1};
+    // Synchronization is separate from the ordinary SR selected below.  The
+    // SR carries payload only; an RX completion delivers this tag to MEM ICU.
+    std::uint32_t sync_tag{0};
     C2cConsumer consumer{};
 
     static C2cInstruction Send(
@@ -52,7 +55,7 @@ struct C2cInstruction {
         }
         return C2cInstruction {
             C2cOpcode::Send, stream_index, fabric_stream_index,
-            vector_count, {}};
+            vector_count, 0, {}};
     }
 
     static C2cInstruction Receive(
@@ -97,6 +100,7 @@ struct C2cInstruction {
             stream_index,
             fabric_stream_index,
             1,
+            0,
             C2cConsumer {
                 consumer_hemisphere, consumer_mem_slice, consumer_mem_bank,
                 base_row, vector_count, row_stride, notify_mem},

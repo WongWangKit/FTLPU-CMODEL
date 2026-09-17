@@ -21,6 +21,9 @@ struct C2cDmaInstruction {
     std::size_t address_stride_bytes{hw::kPhysicalVectorBytes};
     std::uint64_t vector_tag_base{0};
     std::size_t stream_index{0};
+    // CModel diagnostic vector tags are deliberately distinct from the
+    // hardware synchronization tag carried by the fixed DMA ICU packet.
+    std::uint32_t sync_tag{0};
 
     static C2cDmaInstruction Load(
         std::uint64_t ddr4_address,
