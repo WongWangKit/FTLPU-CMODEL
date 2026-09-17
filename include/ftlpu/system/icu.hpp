@@ -37,6 +37,34 @@ struct IcuFrontendStatistics {
     std::size_t macro_decoder_bit_wait_cycles{0};
     std::size_t macro_decoder_context_stall_cycles{0};
     std::size_t peak_macro_reservoir_bits{0};
+    std::size_t macro_frontend_cycles{0};
+    std::size_t macro_payload_bits_consumed{0};
+    std::size_t macro_reservoir_empty_cycles{0};
+    std::size_t macro_reservoir_full_cycles{0};
+    std::size_t macro_reservoir_occupancy_bit_samples{0};
+    std::size_t macro_descriptor_count{0};
+    std::size_t macro_mem_descriptor_count{0};
+    std::size_t macro_mxm_descriptor_count{0};
+    std::size_t macro_descriptor_decode_cycles{0};
+    std::size_t macro_max_descriptor_decode_cycles{0};
+    std::size_t macro_decoder_starvation_cycles{0};
+    std::size_t macro_decoder_ddb_stall_cycles{0};
+    std::size_t macro_ddb_entries{0};
+    std::size_t peak_macro_ddb_occupancy{0};
+    std::size_t macro_ddb_full_cycles{0};
+    std::size_t macro_ddb_residency_cycles{0};
+    std::size_t macro_ddb_occupancy_samples{0};
+    std::size_t macro_max_ddb_residency_cycles{0};
+    std::size_t macro_contexts_generated{0};
+    std::size_t macro_timing_window_block_cycles{0};
+    std::size_t macro_active_ram_full_cycles{0};
+    std::size_t macro_admission_count{0};
+    std::size_t macro_admission_stall_cycles{0};
+    std::size_t macro_admission_to_start_cycles{0};
+    std::size_t macro_max_admission_to_start_cycles{0};
+    std::size_t macro_active_occupancy_samples{0};
+    std::size_t macro_context_active_lifetime_cycles{0};
+    std::size_t macro_max_context_active_lifetime_cycles{0};
 };
 
 class InstructionControlUnit {
@@ -1213,6 +1241,62 @@ public:
             statistics.peak_macro_reservoir_bits = std::max(
                 statistics.peak_macro_reservoir_bits,
                 decoder.peak_reservoir_bits);
+            statistics.macro_frontend_cycles += decoder.cycles;
+            statistics.macro_payload_bits_consumed +=
+                decoder.payload_bits_consumed;
+            statistics.macro_reservoir_empty_cycles +=
+                decoder.reservoir_empty_cycles;
+            statistics.macro_reservoir_full_cycles +=
+                decoder.reservoir_full_cycles;
+            statistics.macro_reservoir_occupancy_bit_samples +=
+                decoder.reservoir_occupancy_bit_samples;
+            statistics.macro_descriptor_count += decoder.descriptor_count;
+            statistics.macro_mem_descriptor_count +=
+                decoder.mem_descriptor_count;
+            statistics.macro_mxm_descriptor_count +=
+                decoder.mxm_descriptor_count;
+            statistics.macro_descriptor_decode_cycles +=
+                decoder.descriptor_decode_cycles;
+            statistics.macro_max_descriptor_decode_cycles = std::max(
+                statistics.macro_max_descriptor_decode_cycles,
+                decoder.max_descriptor_decode_cycles);
+            statistics.macro_decoder_starvation_cycles +=
+                decoder.decoder_starvation_cycles;
+            statistics.macro_decoder_ddb_stall_cycles +=
+                decoder.decoder_ddb_stall_cycles;
+            statistics.macro_ddb_entries += decoder.ddb_entries_committed;
+            statistics.peak_macro_ddb_occupancy = std::max(
+                statistics.peak_macro_ddb_occupancy,
+                decoder.peak_ddb_occupancy);
+            statistics.macro_ddb_full_cycles += decoder.ddb_full_cycles;
+            statistics.macro_ddb_residency_cycles +=
+                decoder.ddb_residency_cycles;
+            statistics.macro_ddb_occupancy_samples +=
+                decoder.ddb_occupancy_samples;
+            statistics.macro_max_ddb_residency_cycles = std::max(
+                statistics.macro_max_ddb_residency_cycles,
+                decoder.max_ddb_residency_cycles);
+            statistics.macro_contexts_generated +=
+                decoder.contexts_generated;
+            statistics.macro_timing_window_block_cycles +=
+                decoder.timing_window_block_cycles;
+            statistics.macro_active_ram_full_cycles +=
+                decoder.active_ram_full_cycles;
+            statistics.macro_admission_count += decoder.admission_count;
+            statistics.macro_admission_stall_cycles +=
+                decoder.admission_stall_cycles;
+            statistics.macro_admission_to_start_cycles +=
+                decoder.admission_to_start_cycles;
+            statistics.macro_max_admission_to_start_cycles = std::max(
+                statistics.macro_max_admission_to_start_cycles,
+                decoder.max_admission_to_start_cycles);
+            statistics.macro_active_occupancy_samples +=
+                decoder.active_occupancy_samples;
+            statistics.macro_context_active_lifetime_cycles +=
+                decoder.context_active_lifetime_cycles;
+            statistics.macro_max_context_active_lifetime_cycles = std::max(
+                statistics.macro_max_context_active_lifetime_cycles,
+                decoder.max_context_active_lifetime_cycles);
             const auto peak = queue.peak_active_macros();
             statistics.macro_queues += peak != 0 ? 1 : 0;
             if (peak > statistics.peak_macro_contexts_per_queue)

@@ -269,14 +269,21 @@ template <
     std::size_t ImemDepth,
     std::size_t IqDepth,
     std::size_t FetchLatency = 1,
-    std::size_t MacroContextDepth = IqDepth>
+    std::size_t MacroContextDepth = IqDepth,
+    std::size_t MacroReservoirWords = 3,
+    std::size_t MacroDecodeWindowBits = 64,
+    std::size_t MacroDdbDepth = 8,
+    std::size_t MacroAdmissionLookahead = 8,
+    std::size_t MacroDdbRunCapacity = 8>
 class DistributedIcuQueue {
 public:
     using FunctionalInstruction = FuncInstruction;
     using Entry = IqEntry<FuncInstruction>;
     using RawImemWord = IcuRawImemWord<InstructionBits>;
     using MacroDecoder = IcuMacroV1Decoder<
-        FuncInstruction, InstructionBits, FetchLatency>;
+        FuncInstruction, InstructionBits, FetchLatency,
+        MacroReservoirWords, MacroDecodeWindowBits, MacroDdbDepth,
+        MacroAdmissionLookahead, MacroDdbRunCapacity>;
 
     static_assert(
         InstructionBits >= 32,
@@ -285,12 +292,25 @@ public:
     static_assert(IqDepth > 0);
     static_assert(FetchLatency > 0);
     static_assert(MacroContextDepth > 0);
+    static_assert(MacroReservoirWords >= 3);
+    static_assert(MacroDecodeWindowBits > 0
+        && MacroDecodeWindowBits <= InstructionBits);
+    static_assert(MacroDdbDepth > 0);
+    static_assert(MacroDdbRunCapacity > 0);
 
     static constexpr std::size_t instruction_bits = InstructionBits;
     static constexpr std::size_t imem_depth = ImemDepth;
     static constexpr std::size_t iq_depth = IqDepth;
     static constexpr std::size_t fetch_latency = FetchLatency;
     static constexpr std::size_t macro_context_depth = MacroContextDepth;
+    static constexpr std::size_t macro_reservoir_words =
+        MacroReservoirWords;
+    static constexpr std::size_t macro_decode_window_bits =
+        MacroDecodeWindowBits;
+    static constexpr std::size_t macro_ddb_depth = MacroDdbDepth;
+    static constexpr std::size_t macro_admission_lookahead =
+        MacroAdmissionLookahead;
+    static constexpr std::size_t macro_context_expand_width = 1;
 
     void reset()
     {
@@ -430,8 +450,7 @@ public:
     bool raw_macro_ready() const noexcept
     {
         return raw_macro_mode_ && macro_decoder_.has_value()
-            && (macro_decoder_->done()
-                || active_macros_.size() == MacroContextDepth);
+            && macro_decoder_->primed();
     }
 
     void prefetch_raw_macro()
@@ -440,7 +459,7 @@ public:
             throw StaticScheduleError(
                 "ICU queue is not configured for a raw Macro image");
         accept_decoded_macro(macro_decoder_->tick(
-            active_macros_.size() < MacroContextDepth), false);
+            0, active_macros_.size(), MacroContextDepth), false);
     }
 
     const IcuMacroDecoderStatistics& macro_decoder_statistics() const noexcept
@@ -852,7 +871,8 @@ public:
         if (raw_macro_mode_ && macro_decoder_.has_value())
             return (macro_decoder_->done() ? 0
                     : macro_decoder_->command_count()
-                        - macro_decoder_->decoded_count())
+                        - macro_decoder_->decoded_count()
+                        + macro_decoder_->pending_decoded_contexts())
                 + macro_remaining_points();
         return iq_.size() + pending_fetches_.size()
             + (program_end_pc_ - fetch_pc_)
@@ -902,7 +922,7 @@ private:
         active_macros_.push(ActiveMacro{
             IcuMacroInstruction<FuncInstruction>{
                 decoded->schedule, std::move(decoded->instruction)},
-            decoded->record_index, 0, 0});
+            decoded->record_index, 0, 0, decoded->admission_cycle});
         peak_active_macros_ = std::max(
             peak_active_macros_, active_macros_.size());
     }
@@ -917,7 +937,7 @@ private:
         // the next cycle, matching a one-write-port context RAM without bypass.
         auto result = issue_active_macro();
         accept_decoded_macro(macro_decoder_->tick(
-            active_macros_.size() < MacroContextDepth), true);
+            cycle_, active_macros_.size(), MacroContextDepth), true);
 
         finish_trace();
         ++cycle_;
@@ -1572,6 +1592,7 @@ private:
         std::size_t pc{0};
         std::size_t inner{0};
         std::size_t outer{0};
+        std::size_t admission_cycle{0};
 
         std::size_t issue_cycle() const noexcept
         {
@@ -1630,7 +1651,7 @@ private:
         macro_remaining_points_ += macro.schedule.inner_count
             * macro.schedule.outer_count;
         active_macros_.push(ActiveMacro{
-            std::move(macro), pc, 0, 0});
+            std::move(macro), pc, 0, 0, cycle_});
         peak_active_macros_ = std::max(
             peak_active_macros_, active_macros_.size());
     }
@@ -1671,8 +1692,12 @@ private:
             due.inner = 0;
             ++due.outer;
         }
-        if (due.outer != due.macro.schedule.outer_count)
+        if (due.outer != due.macro.schedule.outer_count) {
             active_macros_.push(std::move(due));
+        } else if (raw_macro_mode_ && macro_decoder_.has_value()) {
+            macro_decoder_->record_context_completion(
+                due.admission_cycle, cycle_);
+        }
         return result;
     }
 

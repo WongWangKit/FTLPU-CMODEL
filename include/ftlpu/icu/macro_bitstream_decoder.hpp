@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -41,7 +42,8 @@ struct IcuRawImemWord {
     bool bit(std::size_t index) const
     {
         if (index >= Bits)
-            throw std::out_of_range("ICU raw i-MEM bit index is outside the word");
+            throw std::out_of_range(
+                "ICU raw i-MEM bit index is outside the word");
         return ((lanes[index / 32] >> (index % 32)) & 1u) != 0;
     }
 };
@@ -49,12 +51,45 @@ struct IcuRawImemWord {
 using IcuRawImemWord96 = IcuRawImemWord<96>;
 using IcuRawImemWord128 = IcuRawImemWord<128>;
 
+// All counters are cycle-accurate frontend counters. The legacy fields remain
+// at the top so existing performance consumers keep source compatibility.
 struct IcuMacroDecoderStatistics {
     std::size_t fetched_words{0};
     std::size_t decoded_contexts{0};
     std::size_t bit_wait_cycles{0};
     std::size_t context_stall_cycles{0};
     std::size_t peak_reservoir_bits{0};
+
+    std::size_t cycles{0};
+    std::size_t payload_bits_consumed{0};
+    std::size_t reservoir_empty_cycles{0};
+    std::size_t reservoir_full_cycles{0};
+    std::size_t reservoir_occupancy_bit_samples{0};
+    std::size_t decoder_active_cycles{0};
+    std::size_t decoder_starvation_cycles{0};
+    std::size_t decoder_ddb_stall_cycles{0};
+    std::size_t descriptor_count{0};
+    std::size_t mem_descriptor_count{0};
+    std::size_t mxm_descriptor_count{0};
+    std::size_t descriptor_decode_cycles{0};
+    std::size_t max_descriptor_decode_cycles{0};
+    std::size_t ddb_entries_committed{0};
+    std::size_t peak_ddb_occupancy{0};
+    std::size_t ddb_full_cycles{0};
+    std::size_t ddb_occupancy_samples{0};
+    std::size_t ddb_residency_cycles{0};
+    std::size_t max_ddb_residency_cycles{0};
+    std::size_t contexts_generated{0};
+    std::size_t timing_window_block_cycles{0};
+    std::size_t active_ram_full_cycles{0};
+    std::size_t admission_count{0};
+    std::size_t admission_stall_cycles{0};
+    std::size_t admission_to_start_cycles{0};
+    std::size_t max_admission_to_start_cycles{0};
+    std::size_t active_occupancy_samples{0};
+    std::size_t peak_active_occupancy{0};
+    std::size_t context_active_lifetime_cycles{0};
+    std::size_t max_context_active_lifetime_cycles{0};
 };
 
 template <typename FuncInstruction>
@@ -62,78 +97,140 @@ struct DecodedIcuMacroContext {
     std::size_t record_index{0};
     IcuMacroSchedule schedule{};
     FuncInstruction instruction{};
+    std::size_t admission_cycle{0};
 };
 
-// Cycle-stepped decoder for the independent QueueMode Macro packed-v1 image.
-// It owns a finite raw i-MEM image, starts at word 0, fetches at most one fixed
-// width word per tick, and emits at most one decoded Macro context per tick.
-// Integer fields and words are consumed low-bit first.
+// Physical packed-v1 Macro frontend. The stages are advanced concurrently,
+// once per tick:
+//
+//   fixed-width i-MEM -> word reservoir -> parser FSM -> finite DDB
+//       -> one-context lazy expander / admission interface
+//
+// The reservoir never shifts all remaining bits. It retains complete words
+// and advances only head_bit_offset; an aligned window reads at most the
+// current and next word because DecodeWindowBits <= WordBits.
 template <typename FuncInstruction,
           std::size_t WordBits,
           std::size_t FetchLatency = 1,
-          std::size_t ReservoirWords = 4>
+          std::size_t ReservoirWords = 3,
+          std::size_t DecodeWindowBits = 64,
+          std::size_t DdbDepth = 8,
+          std::size_t AdmissionLookahead = 8,
+          std::size_t DdbRunCapacity = 8>
 class IcuMacroV1Decoder {
-  public:
+public:
     using RawWord = IcuRawImemWord<WordBits>;
     using DecodedContext = DecodedIcuMacroContext<FuncInstruction>;
 
     static_assert(FetchLatency > 0);
     static_assert(ReservoirWords >= 3);
+    static_assert(DecodeWindowBits > 0 && DecodeWindowBits <= WordBits);
+    static_assert(DecodeWindowBits <= 64);
+    static_assert(DdbDepth > 0);
+    static_assert(DdbRunCapacity > 0);
+
+    static constexpr std::size_t word_bits = WordBits;
+    static constexpr std::size_t reservoir_words = ReservoirWords;
+    static constexpr std::size_t decode_window_bits = DecodeWindowBits;
+    static constexpr std::size_t ddb_depth = DdbDepth;
+    static constexpr std::size_t admission_lookahead = AdmissionLookahead;
+    static constexpr std::size_t context_expand_width = 1;
 
     IcuMacroV1Decoder(IcuMacroQueueKind kind, std::vector<RawWord> image)
         : kind_(kind), image_(std::move(image))
     {
         validate_kind();
         if (image_.empty())
-            throw StaticScheduleError("Macro raw i-MEM image has no control word");
+            throw StaticScheduleError(
+                "Macro raw i-MEM image has no control word");
     }
 
+    // Compatibility path for decoder unit tests: an unbounded current cycle
+    // disables the timing gate while retaining one-context-per-cycle output.
     std::optional<DecodedContext> tick(bool context_available)
     {
-        waiting_for_bits_ = false;
-        commit_ready_fetch();
-        auto decoded = process(context_available);
-        begin_fetch_if_possible();
-        age_pending_fetch();
+        return tick_impl(std::numeric_limits<std::size_t>::max(),
+            context_available ? 0 : 1, 1);
+    }
 
-        if (waiting_for_bits_) {
-            ++statistics_.bit_wait_cycles;
-            if (!pending_fetch_.has_value()
-                && next_fetch_address_ == image_.size())
-                throw StaticScheduleError("truncated Macro v1 raw i-MEM image");
-        }
-        return decoded;
+    // Runtime path. active_occupancy/active_capacity are the credit interface
+    // to the finite Active Context RAM; no scheduler implementation leaks into
+    // this frontend boundary.
+    std::optional<DecodedContext> tick(std::size_t current_cycle,
+        std::size_t active_occupancy, std::size_t active_capacity)
+    {
+        if (active_capacity == 0 || active_occupancy > active_capacity)
+            throw std::invalid_argument("invalid Active Context RAM credit");
+        return tick_impl(
+            current_cycle, active_occupancy, active_capacity);
     }
 
     bool done() const noexcept
     {
-        return disabled_ || state_ == State::Done;
+        return disabled_ || (state_ == State::Done && ddb_.empty());
+    }
+
+    // Priming stops only at an actual decode-ahead boundary: the parser has
+    // consumed the image or the finite DDB is full.
+    bool primed() const noexcept
+    {
+        return control_latched_
+            && (disabled_ || state_ == State::Done
+                || ddb_.size() == DdbDepth);
     }
 
     bool control_latched() const noexcept { return control_latched_; }
     bool enabled() const noexcept { return control_latched_ && !disabled_; }
     std::uint32_t command_count() const noexcept { return command_count_; }
     std::size_t decoded_count() const noexcept { return decoded_count_; }
+    std::size_t ddb_occupancy() const noexcept { return ddb_.size(); }
+    std::size_t pending_decoded_contexts() const noexcept
+    {
+        std::size_t result = 0;
+        for (const auto& descriptor : ddb_)
+            result += descriptor.run_count
+                - descriptor.next_context_index;
+        return result;
+    }
+    std::size_t reservoir_occupancy_bits() const noexcept
+    {
+        return reservoir_.available_bits();
+    }
+
+    void record_context_completion(
+        std::size_t admitted_cycle, std::size_t completed_cycle)
+    {
+        if (completed_cycle < admitted_cycle)
+            throw std::logic_error(
+                "Macro context completed before it was admitted");
+        const auto lifetime = completed_cycle - admitted_cycle + 1;
+        statistics_.context_active_lifetime_cycles += lifetime;
+        statistics_.max_context_active_lifetime_cycles = std::max(
+            statistics_.max_context_active_lifetime_cycles, lifetime);
+    }
+
     const IcuMacroDecoderStatistics& statistics() const noexcept
     {
         return statistics_;
     }
 
-  private:
-    static constexpr std::size_t kReservoirCapacity =
-        ReservoirWords * WordBits;
+private:
     static constexpr unsigned kCompactStartDeltaBits = 22;
     static constexpr unsigned kCompactOperandDeltaBits = 14;
-    static constexpr unsigned kMemAddressBits = 13;
+    static constexpr unsigned kMemAddressBits = static_cast<unsigned>(
+        std::bit_width(hw::kSramDepthRows - 1));
 
     enum class State {
         WaitingForControl,
         DictionaryCount,
         DictionaryEntry,
         InitialState,
-        RunHeader,
+        RunPrefix,
+        RunLength,
         Template,
         Record,
+        Delta,
+        CommitDescriptor,
         Done,
     };
 
@@ -154,14 +251,87 @@ class IcuMacroV1Decoder {
         FuncInstruction instruction{};
     };
 
+    struct DecodedDescriptor {
+        std::size_t first_record_index{0};
+        Template descriptor_template{};
+        std::uint64_t next_start_cycle{0};
+        std::int64_t next_operand{0};
+        std::array<Delta, DdbRunCapacity - 1> deltas{};
+        std::size_t run_count{0};
+        std::size_t next_context_index{0};
+        std::size_t decode_start_cycle{0};
+        std::size_t commit_cycle{0};
+    };
+
+    class Reservoir {
+    public:
+        std::size_t available_bits() const noexcept { return valid_bits_; }
+        std::size_t valid_words() const noexcept { return words_.size(); }
+        std::size_t head_bit_offset() const noexcept
+        {
+            return head_bit_offset_;
+        }
+
+        bool can_refill(std::size_t reserved_words = 0) const noexcept
+        {
+            return words_.size() + reserved_words < ReservoirWords;
+        }
+
+        void refill(RawWord word)
+        {
+            if (!can_refill())
+                throw std::logic_error("Macro reservoir overflow");
+            words_.push_back(std::move(word));
+            valid_bits_ += WordBits;
+        }
+
+        std::optional<std::uint64_t> peek(
+            std::size_t width, std::size_t offset = 0) const
+        {
+            if (width > DecodeWindowBits || width > 64)
+                throw std::invalid_argument(
+                    "Macro decode request exceeds the aligned window");
+            if (offset + width > valid_bits_) return std::nullopt;
+            std::uint64_t result = 0;
+            for (std::size_t bit = 0; bit < width; ++bit) {
+                const auto absolute = head_bit_offset_ + offset + bit;
+                const auto word = absolute / WordBits;
+                const auto word_bit = absolute % WordBits;
+                if (words_[word].bit(word_bit))
+                    result |= std::uint64_t{1} << bit;
+            }
+            return result;
+        }
+
+        void consume(std::size_t width)
+        {
+            if (width > valid_bits_)
+                throw std::logic_error(
+                    "Macro decoder consumed beyond its reservoir");
+            valid_bits_ -= width;
+            head_bit_offset_ += width;
+            while (head_bit_offset_ >= WordBits) {
+                head_bit_offset_ -= WordBits;
+                words_.pop_front();
+            }
+            if (words_.empty()) head_bit_offset_ = 0;
+        }
+
+    private:
+        std::deque<RawWord> words_{};
+        std::size_t head_bit_offset_{0};
+        std::size_t valid_bits_{0};
+    };
+
     class Cursor {
-      public:
+    public:
         explicit Cursor(const std::deque<std::uint8_t>& bits) : bits_(bits) {}
 
         std::optional<std::uint64_t> read(unsigned width)
         {
             if (width > 64)
-                throw std::invalid_argument("Macro decoder field is wider than 64 bits");
+                throw std::invalid_argument(
+                    "Macro decoder field is wider than 64 bits");
             if (position_ + width > bits_.size()) return std::nullopt;
             std::uint64_t result = 0;
             for (unsigned bit = 0; bit < width; ++bit)
@@ -173,7 +343,7 @@ class IcuMacroV1Decoder {
 
         std::size_t consumed() const noexcept { return position_; }
 
-      private:
+    private:
         const std::deque<std::uint8_t>& bits_;
         std::size_t position_{0};
     };
@@ -190,7 +360,8 @@ class IcuMacroV1Decoder {
         if (width == 64) return static_cast<std::int64_t>(raw);
         const auto sign = std::uint64_t{1} << (width - 1);
         if ((raw & sign) == 0) return static_cast<std::int64_t>(raw);
-        return static_cast<std::int64_t>(raw | (~std::uint64_t{0} << width));
+        return static_cast<std::int64_t>(
+            raw | (~std::uint64_t{0} << width));
     }
 
     static bool read(Cursor& cursor, unsigned width, std::uint64_t& value)
@@ -201,29 +372,26 @@ class IcuMacroV1Decoder {
         return true;
     }
 
-    void consume(std::size_t count)
-    {
-        if (count > reservoir_.size())
-            throw std::logic_error("Macro decoder consumed beyond its reservoir");
-        while (count-- != 0) reservoir_.pop_front();
-    }
-
     void validate_kind() const
     {
         if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
             if (kind_ != IcuMacroQueueKind::Mem)
-                throw std::invalid_argument("MEM Macro decoder has a non-MEM queue kind");
+                throw std::invalid_argument(
+                    "MEM Macro decoder has a non-MEM queue kind");
         } else if constexpr (std::is_same_v<FuncInstruction,
                                  MxmControlInstruction>) {
             if (kind_ != IcuMacroQueueKind::MxmLoad
                 && kind_ != IcuMacroQueueKind::MxmCompute)
-                throw std::invalid_argument("MXM control Macro decoder has an invalid queue kind");
+                throw std::invalid_argument(
+                    "MXM control Macro decoder has an invalid queue kind");
         } else if constexpr (std::is_same_v<FuncInstruction,
                                  MxmDequantInstruction>) {
             if (kind_ != IcuMacroQueueKind::MxmDequant)
-                throw std::invalid_argument("MXM dequant Macro decoder has an invalid queue kind");
+                throw std::invalid_argument(
+                    "MXM dequant Macro decoder has an invalid queue kind");
         } else {
-            throw std::invalid_argument("Macro v1 is unsupported for this ICU instruction type");
+            throw std::invalid_argument(
+                "Macro v1 is unsupported for this ICU instruction type");
         }
     }
 
@@ -249,6 +417,45 @@ class IcuMacroV1Decoder {
         throw std::logic_error("unknown Macro queue kind");
     }
 
+    std::optional<DecodedContext> tick_impl(std::size_t current_cycle,
+        std::size_t active_occupancy, std::size_t active_capacity)
+    {
+        ++statistics_.cycles;
+        waiting_for_bits_ = false;
+        commit_ready_fetch();
+
+        auto admitted = expand_and_admit(
+            current_cycle, active_occupancy, active_capacity);
+        parser_step();
+        begin_fetch_if_possible();
+        age_pending_fetch();
+
+        if (waiting_for_bits_) {
+            ++statistics_.bit_wait_cycles;
+            ++statistics_.decoder_starvation_cycles;
+            if (!pending_fetch_.has_value()
+                && next_fetch_address_ == image_.size())
+                throw StaticScheduleError(
+                    "truncated Macro v1 raw i-MEM image");
+        }
+        if (reservoir_.available_bits() == 0)
+            ++statistics_.reservoir_empty_cycles;
+        statistics_.reservoir_occupancy_bit_samples +=
+            reservoir_.available_bits();
+        if (!reservoir_.can_refill(pending_fetch_.has_value() ? 1 : 0))
+            ++statistics_.reservoir_full_cycles;
+        if (ddb_.size() == DdbDepth) ++statistics_.ddb_full_cycles;
+        statistics_.ddb_occupancy_samples += ddb_.size();
+        statistics_.peak_ddb_occupancy = std::max(
+            statistics_.peak_ddb_occupancy, ddb_.size());
+        const auto visible_occupancy = active_occupancy
+            + (admitted.has_value() ? 1 : 0);
+        statistics_.active_occupancy_samples += visible_occupancy;
+        statistics_.peak_active_occupancy = std::max(
+            statistics_.peak_active_occupancy, visible_occupancy);
+        return admitted;
+    }
+
     void commit_ready_fetch()
     {
         if (!pending_fetch_.has_value()
@@ -260,20 +467,24 @@ class IcuMacroV1Decoder {
         ++statistics_.fetched_words;
 
         if (address == 0) {
-            std::uint32_t low = word.lanes[0];
+            const std::uint32_t low = word.lanes[0];
             if ((low & 0xf0000000u) != 0)
                 throw StaticScheduleError(
                     "Macro control word has non-zero reserved bits");
             for (std::size_t lane = 1; lane < word.lanes.size(); ++lane)
                 if (word.lanes[lane] != 0)
-                    throw StaticScheduleError("Macro control word has non-zero reserved bits");
+                    throw StaticScheduleError(
+                        "Macro control word has non-zero reserved bits");
             const bool valid = (low & 1u) != 0;
             const bool enable = (low & 2u) != 0;
-            const auto mode = static_cast<IcuQueueMode>((low >> 2) & 3u);
+            const auto mode =
+                static_cast<IcuQueueMode>((low >> 2) & 3u);
             if (!valid)
-                throw StaticScheduleError("Macro raw i-MEM queue is not valid");
+                throw StaticScheduleError(
+                    "Macro raw i-MEM queue is not valid");
             if (mode != IcuQueueMode::Macro)
-                throw StaticScheduleError("Macro raw i-MEM queue has a non-Macro QueueMode");
+                throw StaticScheduleError(
+                    "Macro raw i-MEM queue has a non-Macro QueueMode");
             command_count_ = (low >> 4) & 0x00ffffffu;
             control_latched_ = true;
             disabled_ = !enable;
@@ -282,19 +493,19 @@ class IcuMacroV1Decoder {
             return;
         }
 
-        for (std::size_t bit = 0; bit < WordBits; ++bit)
-            reservoir_.push_back(word.bit(bit) ? 1u : 0u);
+        reservoir_.refill(word);
         statistics_.peak_reservoir_bits = std::max(
-            statistics_.peak_reservoir_bits, reservoir_.size());
+            statistics_.peak_reservoir_bits,
+            reservoir_.available_bits());
     }
 
     void begin_fetch_if_possible()
     {
-        if (pending_fetch_.has_value() || done()
+        if (pending_fetch_.has_value() || disabled_
+            || state_ == State::Done
             || next_fetch_address_ == image_.size())
             return;
-        if (next_fetch_address_ != 0
-            && reservoir_.size() + WordBits > kReservoirCapacity)
+        if (next_fetch_address_ != 0 && !reservoir_.can_refill())
             return;
         pending_fetch_ = PendingFetch{next_fetch_address_, FetchLatency};
         ++next_fetch_address_;
@@ -307,129 +518,208 @@ class IcuMacroV1Decoder {
             --pending_fetch_->remaining_cycles;
     }
 
-    std::optional<DecodedContext> process(bool context_available)
+    std::optional<std::uint64_t> peek_bits(
+        std::size_t width, std::size_t offset = 0)
     {
-        if (state_ == State::WaitingForControl) {
-            waiting_for_bits_ = true;
-            return std::nullopt;
-        }
+        const auto result = reservoir_.peek(width, offset);
+        if (!result.has_value()) waiting_for_bits_ = true;
+        return result;
+    }
 
-        for (;;) {
-            switch (state_) {
-            case State::WaitingForControl:
-                waiting_for_bits_ = true;
-                return std::nullopt;
-            case State::DictionaryCount:
-                if (!read_dictionary_count()) return wait_for_bits();
-                break;
-            case State::DictionaryEntry:
-                if (!read_dictionary_entry()) return wait_for_bits();
-                break;
-            case State::InitialState:
-                if (!read_initial_state()) return wait_for_bits();
-                break;
-            case State::RunHeader:
-                if (!read_run_header()) return wait_for_bits();
-                break;
-            case State::Template:
-                if (!read_template()) return wait_for_bits();
-                break;
-            case State::Record:
-                if (!context_available) {
-                    ++statistics_.context_stall_cycles;
-                    return std::nullopt;
-                }
-                return read_record();
-            case State::Done:
-                return std::nullopt;
-            }
+    void consume_bits(std::size_t width)
+    {
+        reservoir_.consume(width);
+        statistics_.payload_bits_consumed += width;
+    }
+
+    bool assemble_bits(std::size_t total_width)
+    {
+        if (assembly_target_bits_ == 0)
+            assembly_target_bits_ = total_width;
+        if (assembly_target_bits_ != total_width)
+            throw std::logic_error("Macro parser assembly target changed");
+        const auto remaining = total_width - assembly_bits_.size();
+        const auto width = std::min(remaining, DecodeWindowBits);
+        const auto value = peek_bits(width);
+        if (!value.has_value()) return false;
+        for (std::size_t bit = 0; bit < width; ++bit)
+            assembly_bits_.push_back(
+                ((*value >> bit) & std::uint64_t{1}) != 0 ? 1u : 0u);
+        consume_bits(width);
+        return assembly_bits_.size() == total_width;
+    }
+
+    void clear_assembly()
+    {
+        assembly_bits_.clear();
+        assembly_target_bits_ = 0;
+    }
+
+    void parser_step()
+    {
+        if (state_ == State::WaitingForControl || state_ == State::Done)
+            return;
+        if (ddb_.size() == DdbDepth) {
+            ++statistics_.decoder_ddb_stall_cycles;
+            return;
+        }
+        ++statistics_.decoder_active_cycles;
+
+        switch (state_) {
+        case State::WaitingForControl:
+        case State::Done: return;
+        case State::DictionaryCount: read_dictionary_count(); return;
+        case State::DictionaryEntry: read_dictionary_entry(); return;
+        case State::InitialState: read_initial_state(); return;
+        case State::RunPrefix: read_run_prefix(); return;
+        case State::RunLength: read_run_length(); return;
+        case State::Template: read_template_step(); return;
+        case State::Record: read_record_without_delta(); return;
+        case State::Delta: read_delta_step(); return;
+        case State::CommitDescriptor: commit_descriptor(); return;
         }
     }
 
-    std::optional<DecodedContext> wait_for_bits()
+    void read_dictionary_count()
     {
-        waiting_for_bits_ = true;
-        return std::nullopt;
-    }
-
-    bool read_dictionary_count()
-    {
-        Cursor cursor(reservoir_);
-        std::uint64_t count = 0;
-        if (!read(cursor, 3, count)) return false;
-        if (count > dictionary_.size())
-            throw StaticScheduleError("Macro dictionary count exceeds seven entries");
-        dictionary_count_ = static_cast<std::size_t>(count);
-        consume(cursor.consumed());
+        const auto count = peek_bits(3);
+        if (!count.has_value()) return;
+        if (*count > dictionary_.size())
+            throw StaticScheduleError(
+                "Macro dictionary count exceeds seven entries");
+        dictionary_count_ = static_cast<std::size_t>(*count);
+        consume_bits(3);
         state_ = dictionary_count_ == 0
             ? State::InitialState : State::DictionaryEntry;
-        return true;
     }
 
-    bool read_dictionary_entry()
+    void read_dictionary_entry()
     {
-        Cursor cursor(reservoir_);
+        constexpr std::size_t width =
+            kCompactStartDeltaBits + kCompactOperandDeltaBits;
+        if (!assemble_bits(width)) return;
+        Cursor cursor(assembly_bits_);
         std::uint64_t start = 0;
         std::uint64_t operand = 0;
         if (!read(cursor, kCompactStartDeltaBits, start)
             || !read(cursor, kCompactOperandDeltaBits, operand))
-            return false;
+            throw std::logic_error(
+                "Macro dictionary assembler produced an incomplete field");
         dictionary_[dictionary_index_++] = Delta{
             static_cast<std::uint32_t>(start),
             static_cast<std::int32_t>(signed_value(
                 operand, kCompactOperandDeltaBits))};
-        consume(cursor.consumed());
+        clear_assembly();
         if (dictionary_index_ == dictionary_count_)
             state_ = State::InitialState;
-        return true;
     }
 
-    bool read_initial_state()
+    void read_initial_state()
     {
-        Cursor cursor(reservoir_);
+        const auto width = 32u + operand_bits();
+        if (!assemble_bits(width)) return;
+        Cursor cursor(assembly_bits_);
         std::uint64_t start = 0;
         std::uint64_t operand = 0;
         if (!read(cursor, 32, start)
             || (operand_bits() != 0
                 && !read(cursor, operand_bits(), operand)))
-            return false;
+            throw std::logic_error(
+                "Macro initial-state assembler produced an incomplete field");
         current_start_cycle_ = start;
         current_operand_ = static_cast<std::int64_t>(operand);
-        consume(cursor.consumed());
-        state_ = State::RunHeader;
-        return true;
+        clear_assembly();
+        state_ = State::RunPrefix;
     }
 
-    bool read_run_header()
+    void read_run_prefix()
     {
-        Cursor cursor(reservoir_);
-        std::uint64_t long_run = 0;
-        std::uint64_t encoded_length = 0;
-        if (!read(cursor, 1, long_run)
-            || (long_run != 0 && !read(cursor, 16, encoded_length)))
-            return false;
-        run_remaining_ = long_run != 0
-            ? static_cast<std::size_t>(encoded_length + 1) : 1;
-        if (run_remaining_ > command_count_ - decoded_count_)
-            throw StaticScheduleError("Macro run exceeds declared command count");
-        consume(cursor.consumed());
-        state_ = State::Template;
-        return true;
-    }
-
-    bool read_template()
-    {
-        Cursor cursor(reservoir_);
-        Template result;
-        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
-            if (!read_mem_template(cursor, result)) return false;
+        const auto long_run = peek_bits(1);
+        if (!long_run.has_value()) return;
+        consume_bits(1);
+        ++statistics_.descriptor_count;
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            ++statistics_.mem_descriptor_count;
+        else
+            ++statistics_.mxm_descriptor_count;
+        run_decode_start_cycle_ = statistics_.cycles;
+        if (*long_run == 0) {
+            run_remaining_ = 1;
+            state_ = State::Template;
         } else {
-            if (!read_mxm_template(cursor, result)) return false;
+            state_ = State::RunLength;
         }
+    }
+
+    void read_run_length()
+    {
+        const auto encoded = peek_bits(16);
+        if (!encoded.has_value()) return;
+        run_remaining_ = static_cast<std::size_t>(*encoded + 1);
+        if (run_remaining_ > command_count_ - decoded_count_)
+            throw StaticScheduleError(
+                "Macro run exceeds declared command count");
+        consume_bits(16);
+        state_ = State::Template;
+    }
+
+    std::size_t compact_schedule_bits(Shape shape) const noexcept
+    {
+        std::size_t result = 0;
+        if (shape == Shape::Inner1D || shape == Shape::Full2D)
+            result += 29;
+        if (shape == Shape::Outer1D || shape == Shape::Full2D)
+            result += 36;
+        return result;
+    }
+
+    std::optional<std::size_t> template_width()
+    {
+        const auto extended = peek_bits(1);
+        if (!extended.has_value()) return std::nullopt;
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            if (*extended != 0) return 1 + 32 + 6 * 32 + 2;
+            const auto header = peek_bits(3);
+            if (!header.has_value()) return std::nullopt;
+            const auto shape = static_cast<Shape>((*header >> 1) & 3u);
+            return 1 + 2 + 1 + 6 + 1 + compact_schedule_bits(shape);
+        } else {
+            const auto native_bits = native_instruction_bits();
+            if (*extended != 0)
+                return 1 + native_bits + 6 * 32 + 2;
+            const auto header = peek_bits(1 + native_bits + 2);
+            if (!header.has_value()) return std::nullopt;
+            const auto shape = static_cast<Shape>(
+                (*header >> (1 + native_bits)) & 3u);
+            return 1 + native_bits + 2 + 2
+                + compact_schedule_bits(shape);
+        }
+    }
+
+    void read_template_step()
+    {
+        if (assembly_target_bits_ == 0) {
+            const auto width = template_width();
+            if (!width.has_value()) return;
+            assembly_target_bits_ = *width;
+        }
+        if (!assemble_bits(assembly_target_bits_)) return;
+
+        Cursor cursor(assembly_bits_);
+        Template result;
+        const bool decoded = [&] {
+            if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+                return read_mem_template(cursor, result);
+            else
+                return read_mxm_template(cursor, result);
+        }();
+        if (!decoded || cursor.consumed() != assembly_target_bits_)
+            throw std::logic_error(
+                "Macro template assembler produced an incomplete field");
         current_template_ = std::move(result);
-        consume(cursor.consumed());
-        state_ = State::Record;
-        return true;
+        clear_assembly();
+        begin_descriptor_chunk();
+        state_ = decoded_count_ == 0 ? State::Record : State::Delta;
     }
 
     bool read_mem_template(Cursor& cursor, Template& result)
@@ -563,98 +853,245 @@ class IcuMacroV1Decoder {
         }
     }
 
-    std::optional<Delta> read_delta()
+    std::optional<std::pair<std::size_t, std::size_t>> delta_layout()
     {
-        Cursor cursor(reservoir_);
-        std::uint64_t bit = 0;
+        std::size_t prefix = 0;
         std::size_t symbol = 0;
-        if (!read(cursor, 1, bit)) return std::nullopt;
-        if (bit == 0) {
+        const auto bit0 = peek_bits(1);
+        if (!bit0.has_value()) return std::nullopt;
+        if (*bit0 == 0) {
+            prefix = 1;
             symbol = 0;
         } else {
-            if (!read(cursor, 1, bit)) return std::nullopt;
-            if (bit == 0) {
+            const auto bit1 = peek_bits(1, 1);
+            if (!bit1.has_value()) return std::nullopt;
+            if (*bit1 == 0) {
+                prefix = 2;
                 symbol = 1;
             } else {
-                if (!read(cursor, 1, bit)) return std::nullopt;
-                if (bit == 0) {
-                    if (!read(cursor, 1, bit)) return std::nullopt;
-                    symbol = bit != 0 ? 3 : 2;
+                const auto bit2 = peek_bits(1, 2);
+                if (!bit2.has_value()) return std::nullopt;
+                if (*bit2 == 0) {
+                    const auto select = peek_bits(1, 3);
+                    if (!select.has_value()) return std::nullopt;
+                    prefix = 4;
+                    symbol = *select != 0 ? 3 : 2;
                 } else {
-                    if (!read(cursor, 1, bit)) return std::nullopt;
-                    if (bit == 0) {
-                        if (!read(cursor, 1, bit)) return std::nullopt;
-                        symbol = bit != 0 ? 5 : 4;
-                    } else {
-                        if (!read(cursor, 1, bit)) return std::nullopt;
-                        symbol = bit != 0 ? 7 : 6;
-                    }
+                    const auto bit3 = peek_bits(1, 3);
+                    const auto select = peek_bits(1, 4);
+                    if (!bit3.has_value() || !select.has_value())
+                        return std::nullopt;
+                    prefix = 5;
+                    symbol = *bit3 == 0
+                        ? (*select != 0 ? 5 : 4)
+                        : (*select != 0 ? 7 : 6);
                 }
             }
         }
 
-        Delta result;
-        if (symbol < dictionary_count_) {
-            result = dictionary_[symbol];
-        } else {
-            if (symbol != 7)
-                throw StaticScheduleError("Macro delta references a missing dictionary entry");
-            std::uint64_t wide = 0, start = 0, operand = 0;
-            if (!read(cursor, 1, wide)) return std::nullopt;
-            if (wide == 0) {
-                if (!read(cursor, kCompactStartDeltaBits, start)
-                    || !read(cursor, kCompactOperandDeltaBits, operand))
-                    return std::nullopt;
-                result = Delta{
-                    static_cast<std::uint32_t>(start),
-                    static_cast<std::int32_t>(signed_value(
-                        operand, kCompactOperandDeltaBits))};
-            } else {
-                if (!read(cursor, 32, start) || !read(cursor, 32, operand))
-                    return std::nullopt;
-                result = Delta{
-                    static_cast<std::uint32_t>(start),
-                    static_cast<std::int32_t>(operand)};
-            }
-        }
-        consume(cursor.consumed());
-        return result;
+        if (symbol < dictionary_count_) return {{prefix, symbol}};
+        if (symbol != 7)
+            throw StaticScheduleError(
+                "Macro delta references a missing dictionary entry");
+        const auto wide = peek_bits(1, prefix);
+        if (!wide.has_value()) return std::nullopt;
+        return {{prefix + 1 + (*wide != 0 ? 64 : 36), symbol}};
     }
 
-    std::optional<DecodedContext> read_record()
+    Delta decode_delta_assembly(std::size_t symbol) const
     {
-        if (decoded_count_ != 0) {
-            const auto delta = read_delta();
-            if (!delta.has_value()) return wait_for_bits();
-            current_start_cycle_ += delta->start_cycle;
-            current_operand_ += delta->operand;
+        if (symbol < dictionary_count_) return dictionary_[symbol];
+        Cursor cursor(assembly_bits_);
+        std::uint64_t bit = 0;
+        // Consume the prefix using the same prefix tree as delta_layout().
+        if (!read(cursor, 1, bit))
+            throw std::logic_error("empty Macro delta assembly");
+        if (bit != 0) {
+            if (!read(cursor, 1, bit)) throw std::logic_error("bad delta");
+            if (bit != 0) {
+                if (!read(cursor, 1, bit))
+                    throw std::logic_error("bad delta");
+                if (bit == 0) {
+                    if (!read(cursor, 1, bit))
+                        throw std::logic_error("bad delta");
+                } else {
+                    if (!read(cursor, 1, bit)
+                        || !read(cursor, 1, bit))
+                        throw std::logic_error("bad delta");
+                }
+            }
         }
+        std::uint64_t wide = 0, start = 0, operand = 0;
+        if (!read(cursor, 1, wide)) throw std::logic_error("bad delta");
+        if (wide == 0) {
+            if (!read(cursor, kCompactStartDeltaBits, start)
+                || !read(cursor, kCompactOperandDeltaBits, operand))
+                throw std::logic_error("bad compact delta");
+            return Delta{static_cast<std::uint32_t>(start),
+                static_cast<std::int32_t>(signed_value(
+                    operand, kCompactOperandDeltaBits))};
+        }
+        if (!read(cursor, 32, start) || !read(cursor, 32, operand))
+            throw std::logic_error("bad wide delta");
+        return Delta{static_cast<std::uint32_t>(start),
+            static_cast<std::int32_t>(operand)};
+    }
 
+    void read_record_without_delta()
+    {
+        finish_record(Delta{}, false);
+    }
+
+    void read_delta_step()
+    {
+        if (assembly_target_bits_ == 0) {
+            const auto layout = delta_layout();
+            if (!layout.has_value()) return;
+            assembly_target_bits_ = layout->first;
+            delta_symbol_ = layout->second;
+        }
+        if (!assemble_bits(assembly_target_bits_)) return;
+        const auto delta = delta_symbol_ < dictionary_count_
+            ? dictionary_[delta_symbol_]
+            : decode_delta_assembly(delta_symbol_);
+        clear_assembly();
+        finish_record(delta, true);
+    }
+
+    void begin_descriptor_chunk()
+    {
+        building_descriptor_ = DecodedDescriptor{};
+        building_descriptor_.first_record_index = decoded_count_;
+        building_descriptor_.descriptor_template = current_template_;
+        building_descriptor_.decode_start_cycle =
+            run_decode_start_cycle_;
+    }
+
+    void finish_record(const Delta& delta, bool has_delta)
+    {
+        if (has_delta) {
+            current_start_cycle_ += delta.start_cycle;
+            current_operand_ += delta.operand;
+        }
+        validate_current_state();
+
+        auto& descriptor = building_descriptor_;
+        if (descriptor.run_count == 0) {
+            descriptor.next_start_cycle = current_start_cycle_;
+            descriptor.next_operand = current_operand_;
+        } else {
+            descriptor.deltas[descriptor.run_count - 1] = delta;
+        }
+        ++descriptor.run_count;
+        ++decoded_count_;
+        --run_remaining_;
+
+        if (descriptor.run_count == DdbRunCapacity
+            || run_remaining_ == 0) {
+            state_ = State::CommitDescriptor;
+            return;
+        }
+        state_ = State::Delta;
+    }
+
+    void validate_current_state() const
+    {
         if (current_start_cycle_ > std::numeric_limits<std::uint32_t>::max())
-            throw StaticScheduleError("decoded Macro start cycle is out of range");
+            throw StaticScheduleError(
+                "decoded Macro start cycle is out of range");
         const auto width = operand_bits();
         if (current_operand_ < 0
             || (width != 0
                 && static_cast<std::uint64_t>(current_operand_)
                     >= (std::uint64_t{1} << width)))
-            throw StaticScheduleError("decoded Macro operand is out of range");
+            throw StaticScheduleError(
+                "decoded Macro operand is out of range");
+    }
+
+    void commit_descriptor()
+    {
+        if (ddb_.size() == DdbDepth) {
+            return;
+        }
+        building_descriptor_.commit_cycle = statistics_.cycles;
+        if (run_remaining_ == 0) {
+            const auto latency = statistics_.cycles
+                - building_descriptor_.decode_start_cycle + 1;
+            statistics_.descriptor_decode_cycles += latency;
+            statistics_.max_descriptor_decode_cycles = std::max(
+                statistics_.max_descriptor_decode_cycles, latency);
+        }
+        ddb_.push_back(std::move(building_descriptor_));
+        ++statistics_.ddb_entries_committed;
+
+        if (run_remaining_ != 0) {
+            begin_descriptor_chunk();
+            state_ = State::Delta;
+        } else if (decoded_count_ == command_count_) {
+            state_ = State::Done;
+        } else {
+            state_ = State::RunPrefix;
+        }
+    }
+
+    std::optional<DecodedContext> expand_and_admit(
+        std::size_t current_cycle, std::size_t active_occupancy,
+        std::size_t active_capacity)
+    {
+        if (ddb_.empty()) return std::nullopt;
+        auto& descriptor = ddb_.front();
+        const bool ignore_timing =
+            current_cycle == std::numeric_limits<std::size_t>::max();
+        const auto start_cycle = static_cast<std::size_t>(
+            descriptor.next_start_cycle);
+        const auto admit_cycle = start_cycle > AdmissionLookahead
+            ? start_cycle - AdmissionLookahead : 0;
+        if (!ignore_timing && current_cycle < admit_cycle) {
+            ++statistics_.timing_window_block_cycles;
+            return std::nullopt;
+        }
+        if (active_occupancy >= active_capacity) {
+            ++statistics_.active_ram_full_cycles;
+            ++statistics_.admission_stall_cycles;
+            ++statistics_.context_stall_cycles;
+            return std::nullopt;
+        }
 
         auto result = DecodedContext{
-            decoded_count_, current_template_.schedule,
-            current_template_.instruction};
-        result.schedule.start_cycle =
-            static_cast<std::size_t>(current_start_cycle_);
+            descriptor.first_record_index
+                + descriptor.next_context_index,
+            descriptor.descriptor_template.schedule,
+            descriptor.descriptor_template.instruction,
+            ignore_timing ? 0 : current_cycle};
+        result.schedule.start_cycle = start_cycle;
         set_operand(result.instruction,
-            static_cast<std::size_t>(current_operand_));
+            static_cast<std::size_t>(descriptor.next_operand));
         validate_context(result);
 
-        ++decoded_count_;
         ++statistics_.decoded_contexts;
-        if (--run_remaining_ == 0)
-            state_ = decoded_count_ == command_count_
-                ? State::Done : State::RunHeader;
-        else if (decoded_count_ == command_count_)
-            throw StaticScheduleError("Macro command count ends inside a run");
+        ++statistics_.contexts_generated;
+        ++statistics_.admission_count;
+        if (!ignore_timing && start_cycle >= current_cycle) {
+            const auto latency = start_cycle - current_cycle;
+            statistics_.admission_to_start_cycles += latency;
+            statistics_.max_admission_to_start_cycles = std::max(
+                statistics_.max_admission_to_start_cycles, latency);
+        }
+
+        ++descriptor.next_context_index;
+        if (descriptor.next_context_index == descriptor.run_count) {
+            const auto residency = statistics_.cycles
+                - descriptor.commit_cycle + 1;
+            statistics_.ddb_residency_cycles += residency;
+            statistics_.max_ddb_residency_cycles = std::max(
+                statistics_.max_ddb_residency_cycles, residency);
+            ddb_.pop_front();
+        } else {
+            const auto& delta =
+                descriptor.deltas[descriptor.next_context_index - 1];
+            descriptor.next_start_cycle += delta.start_cycle;
+            descriptor.next_operand += delta.operand;
+        }
         return result;
     }
 
@@ -670,7 +1107,8 @@ class IcuMacroV1Decoder {
                 instruction.accumulator_address = operand;
         } else {
             if (operand != 0)
-                throw StaticScheduleError("MXM dequant Macro has an operand");
+                throw StaticScheduleError(
+                    "MXM dequant Macro has an operand");
         }
     }
 
@@ -678,34 +1116,44 @@ class IcuMacroV1Decoder {
     {
         const auto& schedule = context.schedule;
         if (schedule.inner_count == 0 || schedule.outer_count == 0
-            || schedule.inner_interval == 0 || schedule.outer_interval == 0
+            || schedule.inner_interval == 0
+            || schedule.outer_interval == 0
             || (schedule.outer_count > 1
                 && schedule.outer_interval
                     <= (schedule.inner_count - 1)
                         * schedule.inner_interval))
-            throw StaticScheduleError("decoded Macro has an invalid iteration space");
+            throw StaticScheduleError(
+                "decoded Macro has an invalid iteration space");
 
         if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
-            if (schedule.induction_target != IcuInductionTarget::MemAddress)
-                throw StaticScheduleError("decoded MEM Macro has an invalid induction target");
+            if (schedule.induction_target
+                != IcuInductionTarget::MemAddress)
+                throw StaticScheduleError(
+                    "decoded MEM Macro has an invalid induction target");
         } else if constexpr (std::is_same_v<FuncInstruction,
                                  MxmControlInstruction>) {
             if (kind_ == IcuMacroQueueKind::MxmLoad) {
                 if (context.instruction.opcode != MxmControlOpcode::IW
-                    || (schedule.induction_target != IcuInductionTarget::None
+                    || (schedule.induction_target
+                            != IcuInductionTarget::None
                         && schedule.induction_target
                             != IcuInductionTarget::MxmWeightColumn))
-                    throw StaticScheduleError("decoded MXM load Macro is invalid");
+                    throw StaticScheduleError(
+                        "decoded MXM load Macro is invalid");
             } else if (context.instruction.opcode == MxmControlOpcode::IW
-                || (schedule.induction_target != IcuInductionTarget::None
+                || (schedule.induction_target
+                        != IcuInductionTarget::None
                     && schedule.induction_target
                         != IcuInductionTarget::MxmAccumulatorAddress)) {
-                throw StaticScheduleError("decoded MXM compute Macro is invalid");
+                throw StaticScheduleError(
+                    "decoded MXM compute Macro is invalid");
             }
         } else {
             if (schedule.induction_target != IcuInductionTarget::None
-                || schedule.inner_stride != 0 || schedule.outer_stride != 0)
-                throw StaticScheduleError("decoded MXM dequant Macro is invalid");
+                || schedule.inner_stride != 0
+                || schedule.outer_stride != 0)
+                throw StaticScheduleError(
+                    "decoded MXM dequant Macro is invalid");
         }
     }
 
@@ -713,7 +1161,7 @@ class IcuMacroV1Decoder {
     std::vector<RawWord> image_;
     std::optional<PendingFetch> pending_fetch_{};
     std::size_t next_fetch_address_{0};
-    std::deque<std::uint8_t> reservoir_{};
+    Reservoir reservoir_{};
     State state_{State::WaitingForControl};
     bool control_latched_{false};
     bool disabled_{false};
@@ -727,6 +1175,12 @@ class IcuMacroV1Decoder {
     Template current_template_{};
     std::size_t run_remaining_{0};
     std::size_t decoded_count_{0};
+    std::size_t run_decode_start_cycle_{0};
+    DecodedDescriptor building_descriptor_{};
+    std::deque<DecodedDescriptor> ddb_{};
+    std::deque<std::uint8_t> assembly_bits_{};
+    std::size_t assembly_target_bits_{0};
+    std::size_t delta_symbol_{0};
     IcuMacroDecoderStatistics statistics_{};
 };
 

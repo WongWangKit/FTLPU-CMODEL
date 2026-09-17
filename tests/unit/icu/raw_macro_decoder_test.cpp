@@ -165,8 +165,15 @@ try {
         "raw MEM decoder fetched the wrong number of physical words");
     require(constrained.macro_decoder_statistics().decoded_contexts == 2,
         "raw MEM decoder produced the wrong number of contexts");
-    require(constrained.macro_decoder_statistics().context_stall_cycles >= 3,
-        "raw MEM decoder did not model context-full backpressure");
+    require(constrained.macro_decoder_statistics().context_stall_cycles >= 2,
+        "raw MEM admission did not model context-full backpressure");
+    require(constrained.macro_decoder_statistics().ddb_entries_committed != 0
+            && constrained.macro_decoder_statistics().descriptor_count != 0,
+        "raw MEM frontend bypassed the decoded descriptor buffer");
+    require(constrained.macro_decoder_statistics().payload_bits_consumed != 0
+            && constrained.macro_decoder_statistics().decoder_active_cycles
+                != 0,
+        "raw MEM frontend did not expose cycle-accurate parser work");
     require(constrained.peak_active_macros() == 1,
         "raw MEM decoder exceeded the finite context RAM");
 
