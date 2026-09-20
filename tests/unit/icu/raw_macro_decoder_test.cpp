@@ -171,6 +171,8 @@ try {
             && compactEscape[0].instruction.address == 10
             && compactEscape[1].instruction.address == 11,
         "compact delta escape decoded incorrectly");
+    const auto compactEscapeTiming = decode_statistics<MemInstruction, 96>(
+        IcuMacroQueueKind::Mem, kMemCompactEscapeImage);
 
     const auto wideEscape = decode_mem_image(kMemWideEscapeImage);
     require(wideEscape.size() == 2
@@ -179,6 +181,15 @@ try {
             && wideEscape[0].instruction.address == 10
             && wideEscape[1].instruction.address == 11,
         "wide delta escape decoded incorrectly");
+    const auto wideEscapeTiming = decode_statistics<MemInstruction, 96>(
+        IcuMacroQueueKind::Mem, kMemWideEscapeImage);
+    const auto compactEscapeService =
+        compactEscapeTiming.decoder_active_cycles
+        - compactEscapeTiming.decoder_starvation_cycles;
+    const auto wideEscapeService = wideEscapeTiming.decoder_active_cycles
+        - wideEscapeTiming.decoder_starvation_cycles;
+    require(wideEscapeService == compactEscapeService + 1,
+        "wide Delta payload did not use one extra stream-decode cycle");
 
     require(kMemImage[0].bit(0) && kMemImage[0].bit(1)
             && kMemImage[0].bit(2) && !kMemImage[0].bit(3)

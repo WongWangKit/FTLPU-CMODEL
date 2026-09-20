@@ -251,6 +251,8 @@ private:
         TemplateDecode,
         Record,
         Delta,
+        DeltaPayload,
+        DeltaWait,
         Done,
     };
 
@@ -297,6 +299,11 @@ private:
 
     class Reservoir {
     public:
+        struct AlignedWindow {
+            std::uint64_t bits{0};
+            std::size_t valid_bits{0};
+        };
+
         std::size_t available_bits() const noexcept { return valid_bits_; }
         std::size_t valid_words() const noexcept { return words_.size(); }
         std::size_t head_bit_offset() const noexcept
@@ -331,6 +338,21 @@ private:
                 const auto word_bit = absolute % WordBits;
                 if (words_[word].bit(word_bit))
                     result |= std::uint64_t{1} << bit;
+            }
+            return result;
+        }
+
+        AlignedWindow aligned_window() const
+        {
+            AlignedWindow result;
+            result.valid_bits = std::min(
+                {valid_bits_, DecodeWindowBits, std::size_t{64}});
+            for (std::size_t bit = 0; bit < result.valid_bits; ++bit) {
+                const auto absolute = head_bit_offset_ + bit;
+                const auto word = absolute / WordBits;
+                const auto word_bit = absolute % WordBits;
+                if (words_[word].bit(word_bit))
+                    result.bits |= std::uint64_t{1} << bit;
             }
             return result;
         }
@@ -493,6 +515,7 @@ private:
     {
         ++statistics_.cycles;
         waiting_for_bits_ = false;
+        decoder_active_this_cycle_ = false;
         commit_ready_fetch();
 
         auto admitted = expand_and_admit(
@@ -501,6 +524,9 @@ private:
         // The DDB may pop above and accept the buffered descriptor in the same
         // cycle. The parser then sees the released commit credit immediately.
         drain_commit_buffer();
+        // Delta apply (D1) runs before stream decode (D0), allowing delta_q to
+        // pop and refill in one cycle without a bypass into the apply datapath.
+        apply_delta_queue();
         parser_step();
         begin_fetch_if_possible();
         age_pending_fetch();
@@ -632,18 +658,18 @@ private:
 
     void parser_step()
     {
-        if (state_ == State::WaitingForControl || state_ == State::Done)
+        if (state_ == State::WaitingForControl || state_ == State::DeltaWait
+            || state_ == State::Done)
             return;
-        const bool next_record_completes_descriptor =
-            (state_ == State::Record || state_ == State::Delta)
+        const bool record_completes_descriptor = state_ == State::Record
             && (building_descriptor_.run_count + 1 == DdbRunCapacity
                 || run_remaining_ == 1);
-        if (next_record_completes_descriptor
-            && commit_buffer_) {
+        if (record_completes_descriptor && commit_buffer_) {
             ++statistics_.decoder_ddb_stall_cycles;
             return;
         }
-        ++statistics_.decoder_active_cycles;
+        if (state_ == State::Delta && delta_queue_.has_value()) return;
+        record_decoder_activity();
 
         switch (state_) {
         case State::WaitingForControl:
@@ -657,8 +683,17 @@ private:
         case State::TemplatePayload: read_template_payload(); return;
         case State::TemplateDecode: decode_template(); return;
         case State::Record: read_record_without_delta(); return;
-        case State::Delta: read_delta_step(); return;
+        case State::Delta: read_delta_stream(); return;
+        case State::DeltaPayload: read_delta_payload(); return;
+        case State::DeltaWait: return;
         }
+    }
+
+    void record_decoder_activity()
+    {
+        if (decoder_active_this_cycle_) return;
+        decoder_active_this_cycle_ = true;
+        ++statistics_.decoder_active_cycles;
     }
 
     void read_dictionary_count()
@@ -882,7 +917,12 @@ private:
                 "Macro template payload decoder consumed the wrong width");
         current_template_ = std::move(result);
         begin_descriptor_chunk();
-        state_ = decoded_count_ == 0 ? State::Record : State::Delta;
+        if (decoded_count_ == 0) {
+            state_ = State::Record;
+        } else {
+            delta_parse_remaining_ = run_remaining_;
+            state_ = State::Delta;
+        }
     }
 
     template <typename BitCursor>
@@ -955,109 +995,142 @@ private:
         }
     }
 
-    std::optional<std::pair<std::size_t, std::size_t>> delta_layout()
-    {
-        std::size_t prefix = 0;
-        std::size_t symbol = 0;
-        const auto bit0 = peek_bits(1);
-        if (!bit0.has_value()) return std::nullopt;
-        if (*bit0 == 0) {
-            prefix = 1;
-            symbol = 0;
-        } else {
-            const auto bit1 = peek_bits(1, 1);
-            if (!bit1.has_value()) return std::nullopt;
-            if (*bit1 == 0) {
-                prefix = 2;
-                symbol = 1;
-            } else {
-                const auto bit2 = peek_bits(1, 2);
-                if (!bit2.has_value()) return std::nullopt;
-                if (*bit2 == 0) {
-                    const auto select = peek_bits(1, 3);
-                    if (!select.has_value()) return std::nullopt;
-                    prefix = 4;
-                    symbol = *select != 0 ? 3 : 2;
-                } else {
-                    const auto bit3 = peek_bits(1, 3);
-                    const auto select = peek_bits(1, 4);
-                    if (!bit3.has_value() || !select.has_value())
-                        return std::nullopt;
-                    prefix = 5;
-                    symbol = *bit3 == 0
-                        ? (*select != 0 ? 5 : 4)
-                        : (*select != 0 ? 7 : 6);
-                }
-            }
-        }
+    struct DeltaPrefix {
+        std::size_t width{0};
+        std::size_t symbol{0};
+    };
 
-        if (symbol < dictionary_count_) return {{prefix, symbol}};
-        if (symbol != 7)
-            throw StaticScheduleError(
-                "Macro delta references a missing dictionary entry");
-        const auto wide = peek_bits(1, prefix);
-        if (!wide.has_value()) return std::nullopt;
-        return {{prefix + 1 + (*wide != 0 ? 64 : 36), symbol}};
+    std::optional<DeltaPrefix> decode_delta_prefix(
+        const typename Reservoir::AlignedWindow& window)
+    {
+        const auto require = [&](std::size_t width) {
+            if (window.valid_bits >= width) return true;
+            waiting_for_bits_ = true;
+            return false;
+        };
+        if (!require(1)) return std::nullopt;
+        if ((window.bits & 1u) == 0) return DeltaPrefix{1, 0};
+        if (!require(2)) return std::nullopt;
+        if (((window.bits >> 1) & 1u) == 0) return DeltaPrefix{2, 1};
+        if (!require(3)) return std::nullopt;
+        if (((window.bits >> 2) & 1u) == 0) {
+            if (!require(4)) return std::nullopt;
+            return DeltaPrefix{4,
+                ((window.bits >> 3) & 1u) != 0 ? 3u : 2u};
+        }
+        if (!require(5)) return std::nullopt;
+        const auto bit3 = (window.bits >> 3) & 1u;
+        const auto select = (window.bits >> 4) & 1u;
+        return DeltaPrefix{5, bit3 == 0
+                ? (select != 0 ? 5u : 4u)
+                : (select != 0 ? 7u : 6u)};
     }
 
-    Delta decode_delta_assembly(std::size_t symbol) const
+    void enqueue_delta(Delta delta)
     {
-        if (symbol < dictionary_count_) return dictionary_[symbol];
-        Cursor cursor(assembly_bits_);
-        std::uint64_t bit = 0;
-        // Consume the prefix using the same prefix tree as delta_layout().
-        if (!read(cursor, 1, bit))
-            throw std::logic_error("empty Macro delta assembly");
-        if (bit != 0) {
-            if (!read(cursor, 1, bit)) throw std::logic_error("bad delta");
-            if (bit != 0) {
-                if (!read(cursor, 1, bit))
-                    throw std::logic_error("bad delta");
-                if (bit == 0) {
-                    if (!read(cursor, 1, bit))
-                        throw std::logic_error("bad delta");
-                } else {
-                    if (!read(cursor, 1, bit)
-                        || !read(cursor, 1, bit))
-                        throw std::logic_error("bad delta");
+        if (delta_queue_.has_value() || delta_parse_remaining_ == 0)
+            throw std::logic_error("Macro Delta stream queue overflow");
+        delta_queue_ = delta;
+        --delta_parse_remaining_;
+        state_ = delta_parse_remaining_ == 0
+            ? State::DeltaWait : State::Delta;
+    }
+
+    void read_delta_stream()
+    {
+        // D0 uses one aligned window for all prefix decisions. Dictionary and
+        // W64 compact escapes produce delta_q directly; wide/smaller-window
+        // escapes continue through the fixed payload assembler below.
+        const auto window = reservoir_.aligned_window();
+        const auto prefix = decode_delta_prefix(window);
+        if (!prefix.has_value()) return;
+
+        if (prefix->symbol < dictionary_count_) {
+            consume_bits(prefix->width);
+            enqueue_delta(dictionary_[prefix->symbol]);
+            return;
+        }
+        if (prefix->symbol != 7)
+            throw StaticScheduleError(
+                "Macro delta references a missing dictionary entry");
+        if (window.valid_bits < 6) {
+            waiting_for_bits_ = true;
+            return;
+        }
+        const bool wide = ((window.bits >> 5) & 1u) != 0;
+
+        if constexpr (DecodeWindowBits >= 42) {
+            if (!wide) {
+                if (window.valid_bits < 42) {
+                    waiting_for_bits_ = true;
+                    return;
                 }
+                const auto payload = window.bits >> 6;
+                const auto start = bit_field(
+                    payload, 0, kCompactStartDeltaBits);
+                const auto operand = bit_field(
+                    payload, kCompactStartDeltaBits,
+                    kCompactOperandDeltaBits);
+                consume_bits(42);
+                enqueue_delta(Delta{
+                    static_cast<std::uint32_t>(start),
+                    static_cast<std::int32_t>(signed_value(
+                        operand, kCompactOperandDeltaBits))});
+                return;
             }
         }
-        std::uint64_t wide = 0, start = 0, operand = 0;
-        if (!read(cursor, 1, wide)) throw std::logic_error("bad delta");
-        if (wide == 0) {
-            if (!read(cursor, kCompactStartDeltaBits, start)
-                || !read(cursor, kCompactOperandDeltaBits, operand))
-                throw std::logic_error("bad compact delta");
-            return Delta{static_cast<std::uint32_t>(start),
-                static_cast<std::int32_t>(signed_value(
-                    operand, kCompactOperandDeltaBits))};
+
+        consume_bits(6);
+        delta_payload_bits_ = 0;
+        delta_payload_count_ = 0;
+        delta_payload_target_ = wide ? 64 : 36;
+        delta_payload_wide_ = wide;
+        state_ = State::DeltaPayload;
+    }
+
+    void read_delta_payload()
+    {
+        const auto remaining =
+            delta_payload_target_ - delta_payload_count_;
+        const auto width = std::min(remaining, DecodeWindowBits);
+        const auto value = peek_bits(width);
+        if (!value.has_value()) return;
+        for (std::size_t bit = 0; bit < width; ++bit) {
+            const auto destination = delta_payload_count_ + bit;
+            const auto mask = std::uint64_t{1} << destination;
+            if (((*value >> bit) & std::uint64_t{1}) != 0)
+                delta_payload_bits_ |= mask;
+            else
+                delta_payload_bits_ &= ~mask;
         }
-        if (!read(cursor, 32, start) || !read(cursor, 32, operand))
-            throw std::logic_error("bad wide delta");
-        return Delta{static_cast<std::uint32_t>(start),
-            static_cast<std::int32_t>(operand)};
+        consume_bits(width);
+        delta_payload_count_ += width;
+        if (delta_payload_count_ != delta_payload_target_) return;
+
+        if (delta_payload_wide_) {
+            enqueue_delta(Delta{
+                static_cast<std::uint32_t>(delta_payload_bits_),
+                static_cast<std::int32_t>(delta_payload_bits_ >> 32)});
+        } else {
+            const auto start = bit_field(
+                delta_payload_bits_, 0, kCompactStartDeltaBits);
+            const auto operand = bit_field(delta_payload_bits_,
+                kCompactStartDeltaBits, kCompactOperandDeltaBits);
+            enqueue_delta(Delta{
+                static_cast<std::uint32_t>(start),
+                static_cast<std::int32_t>(signed_value(
+                    operand, kCompactOperandDeltaBits))});
+        }
     }
 
     void read_record_without_delta()
     {
-        finish_record(Delta{}, false);
-    }
-
-    void read_delta_step()
-    {
-        if (assembly_target_bits_ == 0) {
-            const auto layout = delta_layout();
-            if (!layout.has_value()) return;
-            assembly_target_bits_ = layout->first;
-            delta_symbol_ = layout->second;
+        if (finish_record(Delta{}, false)) {
+            advance_after_run();
+        } else {
+            delta_parse_remaining_ = run_remaining_;
+            state_ = State::Delta;
         }
-        if (!assemble_bits(assembly_target_bits_)) return;
-        const auto delta = delta_symbol_ < dictionary_count_
-            ? dictionary_[delta_symbol_]
-            : decode_delta_assembly(delta_symbol_);
-        clear_assembly();
-        finish_record(delta, true);
     }
 
     void begin_descriptor_chunk()
@@ -1069,7 +1142,7 @@ private:
             run_decode_start_cycle_;
     }
 
-    void finish_record(const Delta& delta, bool has_delta)
+    bool finish_record(const Delta& delta, bool has_delta)
     {
         if (has_delta) {
             current_start_cycle_ += delta.start_cycle;
@@ -1098,15 +1171,41 @@ private:
                 std::move(building_descriptor_));
             if (run_remaining_ != 0) {
                 begin_descriptor_chunk();
-                state_ = State::Delta;
-            } else if (decoded_count_ == command_count_) {
-                state_ = State::Done;
-            } else {
-                state_ = State::RunPrefix;
             }
+            return run_remaining_ == 0;
+        }
+        return false;
+    }
+
+    void advance_after_run()
+    {
+        if (decoded_count_ == command_count_)
+            state_ = State::Done;
+        else
+            state_ = State::RunPrefix;
+    }
+
+    void apply_delta_queue()
+    {
+        if (!delta_queue_.has_value()) return;
+        const bool completes_descriptor =
+            building_descriptor_.run_count + 1 == DdbRunCapacity
+            || run_remaining_ == 1;
+        if (completes_descriptor && commit_buffer_) {
+            ++statistics_.decoder_ddb_stall_cycles;
             return;
         }
-        state_ = State::Delta;
+
+        record_decoder_activity();
+        const auto delta = *delta_queue_;
+        delta_queue_.reset();
+        if (finish_record(delta, true)) {
+            if (delta_parse_remaining_ != 0
+                || state_ != State::DeltaWait)
+                throw std::logic_error(
+                    "Macro Delta apply outran the stream decoder");
+            advance_after_run();
+        }
     }
 
     void validate_current_state() const
@@ -1286,6 +1385,7 @@ private:
     bool control_latched_{false};
     bool disabled_{false};
     bool waiting_for_bits_{false};
+    bool decoder_active_this_cycle_{false};
     std::uint32_t command_count_{0};
     std::array<Delta, 7> dictionary_{};
     std::size_t dictionary_count_{0};
@@ -1305,7 +1405,12 @@ private:
     std::deque<DecodedDescriptor> ddb_{};
     std::deque<std::uint8_t> assembly_bits_{};
     std::size_t assembly_target_bits_{0};
-    std::size_t delta_symbol_{0};
+    std::optional<Delta> delta_queue_{};
+    std::size_t delta_parse_remaining_{0};
+    std::uint64_t delta_payload_bits_{0};
+    std::size_t delta_payload_count_{0};
+    std::size_t delta_payload_target_{0};
+    bool delta_payload_wide_{false};
     IcuMacroDecoderStatistics statistics_{};
 };
 
