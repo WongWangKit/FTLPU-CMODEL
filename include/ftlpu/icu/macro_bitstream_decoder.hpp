@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <deque>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>
@@ -82,6 +83,7 @@ struct IcuMacroDecoderStatistics {
     std::size_t contexts_generated{0};
     std::size_t timing_window_block_cycles{0};
     std::size_t active_ram_full_cycles{0};
+    std::size_t capacity_feasible_wait_cycles{0};
     std::size_t admission_count{0};
     std::size_t admission_stall_cycles{0};
     std::size_t admission_to_start_cycles{0};
@@ -150,7 +152,7 @@ public:
     std::optional<DecodedContext> tick(bool context_available)
     {
         return tick_impl(std::numeric_limits<std::size_t>::max(),
-            context_available ? 0 : 1, 1);
+            context_available ? 0 : 1, 1, std::nullopt);
     }
 
     // Runtime path. active_occupancy/active_capacity are the credit interface
@@ -159,15 +161,25 @@ public:
     std::optional<DecodedContext> tick(std::size_t current_cycle,
         std::size_t active_occupancy, std::size_t active_capacity)
     {
+        return tick(current_cycle, active_occupancy, active_capacity,
+            std::nullopt);
+    }
+
+    std::optional<DecodedContext> tick(std::size_t current_cycle,
+        std::size_t active_occupancy, std::size_t active_capacity,
+        std::optional<std::size_t> earliest_active_release_cycle)
+    {
         if (active_capacity == 0 || active_occupancy > active_capacity)
             throw std::invalid_argument("invalid Active Context RAM credit");
         return tick_impl(
-            current_cycle, active_occupancy, active_capacity);
+            current_cycle, active_occupancy, active_capacity,
+            earliest_active_release_cycle);
     }
 
     bool done() const noexcept
     {
-        return disabled_ || (state_ == State::Done && ddb_.empty());
+        return disabled_ || (state_ == State::Done
+            && !commit_buffer_ && ddb_.empty());
     }
 
     // Priming stops only at an actual decode-ahead boundary: the parser has
@@ -175,7 +187,8 @@ public:
     bool primed() const noexcept
     {
         return control_latched_
-            && (disabled_ || state_ == State::Done
+            && (disabled_
+                || (state_ == State::Done && !commit_buffer_)
                 || ddb_.size() == DdbDepth);
     }
 
@@ -190,6 +203,9 @@ public:
         for (const auto& descriptor : ddb_)
             result += descriptor.run_count
                 - descriptor.next_context_index;
+        if (commit_buffer_)
+            result += commit_buffer_->run_count
+                - commit_buffer_->next_context_index;
         return result;
     }
     std::size_t reservoir_occupancy_bits() const noexcept
@@ -235,7 +251,6 @@ private:
         TemplateDecode,
         Record,
         Delta,
-        CommitDescriptor,
         Done,
     };
 
@@ -277,6 +292,7 @@ private:
         std::size_t next_context_index{0};
         std::size_t decode_start_cycle{0};
         std::size_t commit_cycle{0};
+        bool completes_run{false};
     };
 
     class Reservoir {
@@ -472,14 +488,19 @@ private:
     }
 
     std::optional<DecodedContext> tick_impl(std::size_t current_cycle,
-        std::size_t active_occupancy, std::size_t active_capacity)
+        std::size_t active_occupancy, std::size_t active_capacity,
+        std::optional<std::size_t> earliest_active_release_cycle)
     {
         ++statistics_.cycles;
         waiting_for_bits_ = false;
         commit_ready_fetch();
 
         auto admitted = expand_and_admit(
-            current_cycle, active_occupancy, active_capacity);
+            current_cycle, active_occupancy, active_capacity,
+            earliest_active_release_cycle);
+        // The DDB may pop above and accept the buffered descriptor in the same
+        // cycle. The parser then sees the released commit credit immediately.
+        drain_commit_buffer();
         parser_step();
         begin_fetch_if_possible();
         age_pending_fetch();
@@ -613,7 +634,12 @@ private:
     {
         if (state_ == State::WaitingForControl || state_ == State::Done)
             return;
-        if (ddb_.size() == DdbDepth) {
+        const bool next_record_completes_descriptor =
+            (state_ == State::Record || state_ == State::Delta)
+            && (building_descriptor_.run_count + 1 == DdbRunCapacity
+                || run_remaining_ == 1);
+        if (next_record_completes_descriptor
+            && commit_buffer_) {
             ++statistics_.decoder_ddb_stall_cycles;
             return;
         }
@@ -632,7 +658,6 @@ private:
         case State::TemplateDecode: decode_template(); return;
         case State::Record: read_record_without_delta(); return;
         case State::Delta: read_delta_step(); return;
-        case State::CommitDescriptor: commit_descriptor(); return;
         }
     }
 
@@ -1065,7 +1090,20 @@ private:
 
         if (descriptor.run_count == DdbRunCapacity
             || run_remaining_ == 0) {
-            state_ = State::CommitDescriptor;
+            if (commit_buffer_)
+                throw std::logic_error(
+                    "Macro parser completed a descriptor without commit credit");
+            descriptor.completes_run = run_remaining_ == 0;
+            commit_buffer_ = std::make_unique<DecodedDescriptor>(
+                std::move(building_descriptor_));
+            if (run_remaining_ != 0) {
+                begin_descriptor_chunk();
+                state_ = State::Delta;
+            } else if (decoded_count_ == command_count_) {
+                state_ = State::Done;
+            } else {
+                state_ = State::RunPrefix;
+            }
             return;
         }
         state_ = State::Delta;
@@ -1085,35 +1123,28 @@ private:
                 "decoded Macro operand is out of range");
     }
 
-    void commit_descriptor()
+    void drain_commit_buffer()
     {
-        if (ddb_.size() == DdbDepth) {
+        if (!commit_buffer_ || ddb_.size() == DdbDepth)
             return;
-        }
-        building_descriptor_.commit_cycle = statistics_.cycles;
-        if (run_remaining_ == 0) {
+        auto descriptor = std::move(*commit_buffer_);
+        commit_buffer_.reset();
+        descriptor.commit_cycle = statistics_.cycles;
+        if (descriptor.completes_run) {
             const auto latency = statistics_.cycles
-                - building_descriptor_.decode_start_cycle + 1;
+                - descriptor.decode_start_cycle + 1;
             statistics_.descriptor_decode_cycles += latency;
             statistics_.max_descriptor_decode_cycles = std::max(
                 statistics_.max_descriptor_decode_cycles, latency);
         }
-        ddb_.push_back(std::move(building_descriptor_));
+        ddb_.push_back(std::move(descriptor));
         ++statistics_.ddb_entries_committed;
-
-        if (run_remaining_ != 0) {
-            begin_descriptor_chunk();
-            state_ = State::Delta;
-        } else if (decoded_count_ == command_count_) {
-            state_ = State::Done;
-        } else {
-            state_ = State::RunPrefix;
-        }
     }
 
     std::optional<DecodedContext> expand_and_admit(
         std::size_t current_cycle, std::size_t active_occupancy,
-        std::size_t active_capacity)
+        std::size_t active_capacity,
+        std::optional<std::size_t> earliest_active_release_cycle)
     {
         if (ddb_.empty()) return std::nullopt;
         auto& descriptor = ddb_.front();
@@ -1128,6 +1159,18 @@ private:
             return std::nullopt;
         }
         if (active_occupancy >= active_capacity) {
+            if (!ignore_timing
+                && earliest_active_release_cycle.has_value()) {
+                // Admission writes after issue and becomes visible on the next
+                // cycle, so the last safe admission cycle is start_cycle - 1.
+                const auto latest_admit_cycle = start_cycle == 0
+                    ? 0 : start_cycle - 1;
+                if (*earliest_active_release_cycle > latest_admit_cycle) {
+                    throw StaticScheduleError(
+                        "Active Context RAM has no release before the Macro admission deadline");
+                }
+                ++statistics_.capacity_feasible_wait_cycles;
+            }
             ++statistics_.active_ram_full_cycles;
             ++statistics_.admission_stall_cycles;
             ++statistics_.context_stall_cycles;
@@ -1258,6 +1301,7 @@ private:
     std::size_t decoded_count_{0};
     std::size_t run_decode_start_cycle_{0};
     DecodedDescriptor building_descriptor_{};
+    std::unique_ptr<DecodedDescriptor> commit_buffer_{};
     std::deque<DecodedDescriptor> ddb_{};
     std::deque<std::uint8_t> assembly_bits_{};
     std::size_t assembly_target_bits_{0};

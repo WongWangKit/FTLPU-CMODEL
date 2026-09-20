@@ -459,7 +459,8 @@ public:
             throw StaticScheduleError(
                 "ICU queue is not configured for a raw Macro image");
         accept_decoded_macro(macro_decoder_->tick(
-            0, active_macros_.size(), MacroContextDepth), false);
+            0, active_macros_.size(), MacroContextDepth,
+            earliest_active_macro_release_cycle()), false);
     }
 
     const IcuMacroDecoderStatistics& macro_decoder_statistics() const noexcept
@@ -937,7 +938,8 @@ private:
         // the next cycle, matching a one-write-port context RAM without bypass.
         auto result = issue_active_macro();
         accept_decoded_macro(macro_decoder_->tick(
-            cycle_, active_macros_.size(), MacroContextDepth), true);
+            cycle_, active_macros_.size(), MacroContextDepth,
+            earliest_active_macro_release_cycle()), true);
 
         finish_trace();
         ++cycle_;
@@ -1600,6 +1602,15 @@ private:
                 + outer * macro.schedule.outer_interval
                 + inner * macro.schedule.inner_interval;
         }
+
+        std::size_t release_cycle() const noexcept
+        {
+            return macro.schedule.start_cycle
+                + (macro.schedule.outer_count - 1)
+                    * macro.schedule.outer_interval
+                + (macro.schedule.inner_count - 1)
+                    * macro.schedule.inner_interval;
+        }
     };
 
     struct LaterMacroIssue {
@@ -1697,6 +1708,22 @@ private:
         } else if (raw_macro_mode_ && macro_decoder_.has_value()) {
             macro_decoder_->record_context_completion(
                 due.admission_cycle, cycle_);
+        }
+        return result;
+    }
+
+    std::optional<std::size_t> earliest_active_macro_release_cycle() const
+    {
+        // Active Context RAM is shallow in hardware; this models the parallel
+        // minimum reduction across its statically known release-cycle fields.
+        std::optional<std::size_t> result;
+        auto active = active_macros_;
+        while (!active.empty()) {
+            const auto release = active.top().release_cycle();
+            result = result.has_value()
+                ? std::min(*result, release)
+                : std::optional<std::size_t>{release};
+            active.pop();
         }
         return result;
     }

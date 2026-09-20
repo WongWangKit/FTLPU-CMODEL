@@ -122,7 +122,7 @@ try {
         IcuMacroQueueKind::Mem, kMemExtendedImage);
     require(extendedTiming.decoder_active_cycles
                 - extendedTiming.decoder_starvation_cycles
-            == 11,
+            == 10,
         "extended MEM template did not use prefix/payload/decode stages");
 
     const auto compactMxmTiming =
@@ -130,8 +130,39 @@ try {
             IcuMacroQueueKind::MxmCompute, kMxmComputeImage);
     require(compactMxmTiming.decoder_active_cycles
                 - compactMxmTiming.decoder_starvation_cycles
-            == 7,
+            == 6,
         "compact MXM template did not use prefix/decode stages");
+
+    using BufferedCommitDecoder = IcuMacroV1Decoder<
+        MemInstruction, 96, 1, 3, 64, 1, 8, 1>;
+    BufferedCommitDecoder bufferedCommit(
+        IcuMacroQueueKind::Mem, kMemImage);
+    std::size_t bufferedContexts = 0;
+    for (std::size_t cycle = 0; !bufferedCommit.done(); ++cycle) {
+        if (cycle > 64)
+            throw std::runtime_error(
+                "buffered-commit Macro decoder did not finish");
+        if (bufferedCommit.tick(true).has_value()) ++bufferedContexts;
+    }
+    require(bufferedContexts == 2
+            && bufferedCommit.statistics().ddb_entries_committed == 2
+            && bufferedCommit.statistics().decoder_ddb_stall_cycles == 0,
+        "ready/valid DDB commit did not sustain pop/push progress");
+
+    bool rejectedInfeasibleCapacity = false;
+    try {
+        IcuMacroV1Decoder<MemInstruction, 96> infeasible(
+            IcuMacroQueueKind::Mem, kMemExtendedImage);
+        for (std::size_t cycle = 0; cycle < 64 && !infeasible.done();
+             ++cycle) {
+            static_cast<void>(infeasible.tick(
+                cycle, 1, 1, std::optional<std::size_t>{20}));
+        }
+    } catch (const StaticScheduleError&) {
+        rejectedInfeasibleCapacity = true;
+    }
+    require(rejectedInfeasibleCapacity,
+        "release-aware admission accepted an infeasible context lifetime");
 
     const auto compactEscape = decode_mem_image(kMemCompactEscapeImage);
     require(compactEscape.size() == 2
@@ -196,6 +227,10 @@ try {
         "raw MEM decoder produced the wrong number of contexts");
     require(constrained.macro_decoder_statistics().context_stall_cycles >= 2,
         "raw MEM admission did not model context-full backpressure");
+    require(constrained.macro_decoder_statistics()
+                .capacity_feasible_wait_cycles
+            >= 2,
+        "raw MEM admission did not identify a safe release-aware wait");
     require(constrained.macro_decoder_statistics().ddb_entries_committed != 0
             && constrained.macro_decoder_statistics().descriptor_count != 0,
         "raw MEM frontend bypassed the decoded descriptor buffer");
