@@ -82,6 +82,21 @@ decode_mem_image(const std::vector<ftlpu::IcuRawImemWord96>& image)
     return result;
 }
 
+template <typename Instruction, std::size_t WordBits>
+ftlpu::IcuMacroDecoderStatistics decode_statistics(
+    ftlpu::IcuMacroQueueKind kind,
+    const std::vector<ftlpu::IcuRawImemWord<WordBits>>& image)
+{
+    ftlpu::IcuMacroV1Decoder<Instruction, WordBits> decoder(kind, image);
+    for (std::size_t cycle = 0; !decoder.done(); ++cycle) {
+        if (cycle > 128)
+            throw std::runtime_error(
+                "raw Macro image did not finish timing decode");
+        static_cast<void>(decoder.tick(true));
+    }
+    return decoder.statistics();
+}
+
 } // namespace
 
 int main()
@@ -103,6 +118,20 @@ try {
             && extended[0].schedule.outer_interval == 20000
             && extended[0].schedule.outer_stride == 64,
         "extended MEM template reconstructed the wrong schedule");
+    const auto extendedTiming = decode_statistics<MemInstruction, 96>(
+        IcuMacroQueueKind::Mem, kMemExtendedImage);
+    require(extendedTiming.decoder_active_cycles
+                - extendedTiming.decoder_starvation_cycles
+            == 11,
+        "extended MEM template did not use prefix/payload/decode stages");
+
+    const auto compactMxmTiming =
+        decode_statistics<MxmControlInstruction, 128>(
+            IcuMacroQueueKind::MxmCompute, kMxmComputeImage);
+    require(compactMxmTiming.decoder_active_cycles
+                - compactMxmTiming.decoder_starvation_cycles
+            == 7,
+        "compact MXM template did not use prefix/decode stages");
 
     const auto compactEscape = decode_mem_image(kMemCompactEscapeImage);
     require(compactEscape.size() == 2

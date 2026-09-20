@@ -217,6 +217,9 @@ public:
 private:
     static constexpr unsigned kCompactStartDeltaBits = 22;
     static constexpr unsigned kCompactOperandDeltaBits = 14;
+    static constexpr std::size_t kExtendedTemplatePayloadBits = 6 * 32 + 2;
+    static constexpr std::size_t kTemplatePayloadWords =
+        (kExtendedTemplatePayloadBits + 63) / 64;
     static constexpr unsigned kMemAddressBits = static_cast<unsigned>(
         std::bit_width(hw::kSramDepthRows - 1));
 
@@ -227,7 +230,9 @@ private:
         InitialState,
         RunPrefix,
         RunLength,
-        Template,
+        TemplatePrefix,
+        TemplatePayload,
+        TemplateDecode,
         Record,
         Delta,
         CommitDescriptor,
@@ -249,6 +254,17 @@ private:
     struct Template {
         IcuMacroSchedule schedule{};
         FuncInstruction instruction{};
+    };
+
+    struct TemplatePlan {
+        bool extended{false};
+        std::uint64_t native{0};
+        Shape shape{Shape::Single};
+        std::uint8_t target{0};
+        bool mem_write{false};
+        std::uint8_t mem_stream{0};
+        bool mem_preserve{false};
+        std::size_t payload_bits{0};
     };
 
     struct DecodedDescriptor {
@@ -348,6 +364,42 @@ private:
         std::size_t position_{0};
     };
 
+    class TemplatePayloadCursor {
+    public:
+        TemplatePayloadCursor(
+            const std::array<std::uint64_t,
+                kTemplatePayloadWords>& bits,
+            std::size_t size)
+            : bits_(bits), size_(size)
+        {
+        }
+
+        std::optional<std::uint64_t> read(unsigned width)
+        {
+            if (width > 64)
+                throw std::invalid_argument(
+                    "Macro decoder field is wider than 64 bits");
+            if (position_ + width > size_) return std::nullopt;
+            std::uint64_t result = 0;
+            for (unsigned bit = 0; bit < width; ++bit)
+                if (((bits_[(position_ + bit) / 64]
+                          >> ((position_ + bit) % 64))
+                        & std::uint64_t{1})
+                    != 0)
+                    result |= std::uint64_t{1} << bit;
+            position_ += width;
+            return result;
+        }
+
+        std::size_t consumed() const noexcept { return position_; }
+
+    private:
+        const std::array<std::uint64_t,
+            kTemplatePayloadWords>& bits_;
+        std::size_t size_{0};
+        std::size_t position_{0};
+    };
+
     struct PendingFetch {
         std::size_t address{0};
         std::size_t remaining_cycles{FetchLatency};
@@ -364,7 +416,9 @@ private:
             raw | (~std::uint64_t{0} << width));
     }
 
-    static bool read(Cursor& cursor, unsigned width, std::uint64_t& value)
+    template <typename BitCursor>
+    static bool read(
+        BitCursor& cursor, unsigned width, std::uint64_t& value)
     {
         const auto result = cursor.read(width);
         if (!result.has_value()) return false;
@@ -573,7 +627,9 @@ private:
         case State::InitialState: read_initial_state(); return;
         case State::RunPrefix: read_run_prefix(); return;
         case State::RunLength: read_run_length(); return;
-        case State::Template: read_template_step(); return;
+        case State::TemplatePrefix: read_template_prefix(); return;
+        case State::TemplatePayload: read_template_payload(); return;
+        case State::TemplateDecode: decode_template(); return;
         case State::Record: read_record_without_delta(); return;
         case State::Delta: read_delta_step(); return;
         case State::CommitDescriptor: commit_descriptor(); return;
@@ -645,7 +701,7 @@ private:
         run_decode_start_cycle_ = statistics_.cycles;
         if (*long_run == 0) {
             run_remaining_ = 1;
-            state_ = State::Template;
+            state_ = State::TemplatePrefix;
         } else {
             state_ = State::RunLength;
         }
@@ -660,7 +716,7 @@ private:
             throw StaticScheduleError(
                 "Macro run exceeds declared command count");
         consume_bits(16);
-        state_ = State::Template;
+        state_ = State::TemplatePrefix;
     }
 
     std::size_t compact_schedule_bits(Shape shape) const noexcept
@@ -673,146 +729,167 @@ private:
         return result;
     }
 
-    std::optional<std::size_t> template_width()
+    static std::uint64_t bit_field(
+        std::uint64_t value, unsigned offset, unsigned width)
     {
-        const auto extended = peek_bits(1);
-        if (!extended.has_value()) return std::nullopt;
-        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
-            if (*extended != 0) return 1 + 32 + 6 * 32 + 2;
-            const auto header = peek_bits(3);
-            if (!header.has_value()) return std::nullopt;
-            const auto shape = static_cast<Shape>((*header >> 1) & 3u);
-            return 1 + 2 + 1 + 6 + 1 + compact_schedule_bits(shape);
-        } else {
-            const auto native_bits = native_instruction_bits();
-            if (*extended != 0)
-                return 1 + native_bits + 6 * 32 + 2;
-            const auto header = peek_bits(1 + native_bits + 2);
-            if (!header.has_value()) return std::nullopt;
-            const auto shape = static_cast<Shape>(
-                (*header >> (1 + native_bits)) & 3u);
-            return 1 + native_bits + 2 + 2
-                + compact_schedule_bits(shape);
-        }
+        if (width == 0 || width > 64 || offset + width > 64)
+            throw std::invalid_argument("invalid Macro bit field");
+        const auto mask = width == 64
+            ? ~std::uint64_t{0}
+            : (std::uint64_t{1} << width) - 1;
+        return (value >> offset) & mask;
     }
 
-    void read_template_step()
+    void read_template_prefix()
     {
-        if (assembly_target_bits_ == 0) {
-            const auto width = template_width();
-            if (!width.has_value()) return;
-            assembly_target_bits_ = *width;
-        }
-        if (!assemble_bits(assembly_target_bits_)) return;
+        const auto extended = peek_bits(1);
+        if (!extended.has_value()) return;
 
-        Cursor cursor(assembly_bits_);
-        Template result;
-        const bool decoded = [&] {
-            if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
-                return read_mem_template(cursor, result);
+        TemplatePlan plan;
+        plan.extended = *extended != 0;
+        std::size_t header_bits = 0;
+
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            header_bits = plan.extended ? 1 + 32 : 1 + 2 + 1 + 6 + 1;
+            const auto header = peek_bits(header_bits);
+            if (!header.has_value()) return;
+            if (plan.extended) {
+                plan.native = bit_field(*header, 1, 32);
+                plan.payload_bits = kExtendedTemplatePayloadBits;
+            } else {
+                plan.shape = static_cast<Shape>(bit_field(*header, 1, 2));
+                plan.mem_write = bit_field(*header, 3, 1) != 0;
+                plan.mem_stream = static_cast<std::uint8_t>(
+                    bit_field(*header, 4, 6));
+                plan.mem_preserve = bit_field(*header, 10, 1) != 0;
+                plan.payload_bits = compact_schedule_bits(plan.shape);
+            }
+        } else {
+            const auto native_bits = native_instruction_bits();
+            header_bits = 1 + native_bits + (plan.extended ? 0 : 4);
+            const auto header = peek_bits(header_bits);
+            if (!header.has_value()) return;
+            plan.native = bit_field(*header, 1, native_bits);
+            if (plan.extended) {
+                plan.payload_bits = kExtendedTemplatePayloadBits;
+            } else {
+                plan.shape = static_cast<Shape>(
+                    bit_field(*header, 1 + native_bits, 2));
+                plan.target = static_cast<std::uint8_t>(
+                    bit_field(*header, 1 + native_bits + 2, 2));
+                plan.payload_bits = compact_schedule_bits(plan.shape);
+            }
+        }
+
+        template_plan_ = plan;
+        template_payload_count_ = 0;
+        consume_bits(header_bits);
+        state_ = plan.payload_bits == 0
+            ? State::TemplateDecode : State::TemplatePayload;
+    }
+
+    void read_template_payload()
+    {
+        if (template_payload_count_ >= template_plan_.payload_bits)
+            throw std::logic_error("Macro template payload is already complete");
+        const auto remaining =
+            template_plan_.payload_bits - template_payload_count_;
+        const auto width = std::min(remaining, DecodeWindowBits);
+        const auto value = peek_bits(width);
+        if (!value.has_value()) return;
+        for (std::size_t bit = 0; bit < width; ++bit) {
+            const auto destination = template_payload_count_ + bit;
+            const auto mask = std::uint64_t{1} << (destination % 64);
+            auto& word = template_payload_words_[destination / 64];
+            if (((*value >> bit) & std::uint64_t{1}) != 0)
+                word |= mask;
             else
-                return read_mxm_template(cursor, result);
-        }();
-        if (!decoded || cursor.consumed() != assembly_target_bits_)
+                word &= ~mask;
+        }
+        consume_bits(width);
+        template_payload_count_ += width;
+        if (template_payload_count_ == template_plan_.payload_bits)
+            state_ = State::TemplateDecode;
+    }
+
+    void decode_template()
+    {
+        TemplatePayloadCursor cursor(
+            template_payload_words_, template_plan_.payload_bits);
+        Template result;
+        bool decoded = false;
+
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            if (template_plan_.extended) {
+                result.instruction =
+                    isa::decode_mem_instruction(template_plan_.native);
+                decoded = read_extended_schedule(cursor, result.schedule);
+            } else {
+                result.instruction = template_plan_.mem_write
+                    ? (template_plan_.mem_preserve
+                        ? MemInstruction::WriteTap(
+                            0, template_plan_.mem_stream)
+                        : MemInstruction::Write(
+                            0, template_plan_.mem_stream))
+                    : MemInstruction::Read(0, template_plan_.mem_stream);
+                result.schedule = IcuMacroSchedule{
+                    0, 1, 1, 0, 1, 1, 0,
+                    IcuInductionTarget::MemAddress};
+                decoded = read_compact_schedule(
+                    cursor, template_plan_.shape, result.schedule);
+            }
+        } else {
+            result.instruction = decode_native(template_plan_.native);
+            if (template_plan_.extended) {
+                decoded = read_extended_schedule(cursor, result.schedule);
+            } else {
+                result.schedule = IcuMacroSchedule{
+                    0, 1, 1, 0, 1, 1, 0,
+                    static_cast<IcuInductionTarget>(template_plan_.target)};
+                decoded = read_compact_schedule(
+                    cursor, template_plan_.shape, result.schedule);
+            }
+        }
+
+        if (!decoded
+            || cursor.consumed() != template_plan_.payload_bits)
             throw std::logic_error(
-                "Macro template assembler produced an incomplete field");
+                "Macro template payload decoder consumed the wrong width");
         current_template_ = std::move(result);
-        clear_assembly();
         begin_descriptor_chunk();
         state_ = decoded_count_ == 0 ? State::Record : State::Delta;
     }
 
-    bool read_mem_template(Cursor& cursor, Template& result)
+    template <typename BitCursor>
+    static bool read_extended_schedule(
+        BitCursor& cursor, IcuMacroSchedule& schedule)
     {
-        std::uint64_t extended = 0;
-        if (!read(cursor, 1, extended)) return false;
-        if (extended != 0) {
-            std::uint64_t native = 0, inner_count = 0, inner_interval = 0;
-            std::uint64_t inner_stride = 0, outer_count = 0;
-            std::uint64_t outer_interval = 0, outer_stride = 0, target = 0;
-            if (!read(cursor, 32, native)
-                || !read(cursor, 32, inner_count)
-                || !read(cursor, 32, inner_interval)
-                || !read(cursor, 32, inner_stride)
-                || !read(cursor, 32, outer_count)
-                || !read(cursor, 32, outer_interval)
-                || !read(cursor, 32, outer_stride)
-                || !read(cursor, 2, target))
-                return false;
-            result.instruction = isa::decode_mem_instruction(native);
-            result.schedule = IcuMacroSchedule{
-                0,
-                static_cast<std::size_t>(inner_count),
-                static_cast<std::size_t>(inner_interval),
-                static_cast<std::int32_t>(inner_stride),
-                static_cast<std::size_t>(outer_count),
-                static_cast<std::size_t>(outer_interval),
-                static_cast<std::int32_t>(outer_stride),
-                static_cast<IcuInductionTarget>(target)};
-            return true;
-        }
-
-        std::uint64_t shape_value = 0, write = 0, stream = 0, preserve = 0;
-        if (!read(cursor, 2, shape_value)
-            || !read(cursor, 1, write)
-            || !read(cursor, 6, stream)
-            || !read(cursor, 1, preserve))
+        std::uint64_t inner_count = 0, inner_interval = 0;
+        std::uint64_t inner_stride = 0, outer_count = 0;
+        std::uint64_t outer_interval = 0, outer_stride = 0, target = 0;
+        if (!read(cursor, 32, inner_count)
+            || !read(cursor, 32, inner_interval)
+            || !read(cursor, 32, inner_stride)
+            || !read(cursor, 32, outer_count)
+            || !read(cursor, 32, outer_interval)
+            || !read(cursor, 32, outer_stride)
+            || !read(cursor, 2, target))
             return false;
-        const auto shape = static_cast<Shape>(shape_value);
-        result.instruction = write != 0
-            ? (preserve != 0
-                ? MemInstruction::WriteTap(0, stream)
-                : MemInstruction::Write(0, stream))
-            : MemInstruction::Read(0, stream);
-        result.schedule = IcuMacroSchedule{
-            0, 1, 1, 0, 1, 1, 0, IcuInductionTarget::MemAddress};
-        return read_compact_schedule(cursor, shape, result.schedule);
-    }
-
-    bool read_mxm_template(Cursor& cursor, Template& result)
-    {
-        std::uint64_t extended = 0;
-        std::uint64_t native = 0;
-        if (!read(cursor, 1, extended)
-            || !read(cursor, native_instruction_bits(), native))
-            return false;
-        result.instruction = decode_native(native);
-        if (extended != 0) {
-            std::uint64_t inner_count = 0, inner_interval = 0;
-            std::uint64_t inner_stride = 0, outer_count = 0;
-            std::uint64_t outer_interval = 0, outer_stride = 0, target = 0;
-            if (!read(cursor, 32, inner_count)
-                || !read(cursor, 32, inner_interval)
-                || !read(cursor, 32, inner_stride)
-                || !read(cursor, 32, outer_count)
-                || !read(cursor, 32, outer_interval)
-                || !read(cursor, 32, outer_stride)
-                || !read(cursor, 2, target))
-                return false;
-            result.schedule = IcuMacroSchedule{
-                0,
-                static_cast<std::size_t>(inner_count),
-                static_cast<std::size_t>(inner_interval),
-                static_cast<std::int32_t>(inner_stride),
-                static_cast<std::size_t>(outer_count),
-                static_cast<std::size_t>(outer_interval),
-                static_cast<std::int32_t>(outer_stride),
-                static_cast<IcuInductionTarget>(target)};
-            return true;
-        }
-
-        std::uint64_t shape_value = 0, target = 0;
-        if (!read(cursor, 2, shape_value) || !read(cursor, 2, target))
-            return false;
-        result.schedule = IcuMacroSchedule{
-            0, 1, 1, 0, 1, 1, 0,
+        schedule = IcuMacroSchedule{
+            0,
+            static_cast<std::size_t>(inner_count),
+            static_cast<std::size_t>(inner_interval),
+            static_cast<std::int32_t>(inner_stride),
+            static_cast<std::size_t>(outer_count),
+            static_cast<std::size_t>(outer_interval),
+            static_cast<std::int32_t>(outer_stride),
             static_cast<IcuInductionTarget>(target)};
-        return read_compact_schedule(
-            cursor, static_cast<Shape>(shape_value), result.schedule);
+        return true;
     }
 
+    template <typename BitCursor>
     static bool read_compact_schedule(
-        Cursor& cursor, Shape shape, IcuMacroSchedule& schedule)
+        BitCursor& cursor, Shape shape, IcuMacroSchedule& schedule)
     {
         if (shape == Shape::Inner1D || shape == Shape::Full2D) {
             std::uint64_t count = 0, interval = 0, stride = 0;
@@ -1173,6 +1250,10 @@ private:
     std::uint64_t current_start_cycle_{0};
     std::int64_t current_operand_{0};
     Template current_template_{};
+    TemplatePlan template_plan_{};
+    std::array<std::uint64_t, kTemplatePayloadWords>
+        template_payload_words_{};
+    std::size_t template_payload_count_{0};
     std::size_t run_remaining_{0};
     std::size_t decoded_count_{0};
     std::size_t run_decode_start_cycle_{0};
