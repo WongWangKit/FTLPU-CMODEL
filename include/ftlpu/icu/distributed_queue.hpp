@@ -274,7 +274,9 @@ template <
     std::size_t MacroDecodeWindowBits = 64,
     std::size_t MacroDdbDepth = 8,
     std::size_t MacroAdmissionLookahead = 8,
-    std::size_t MacroDdbRunCapacity = 8>
+    std::size_t MacroDdbRunCapacity = 8,
+    std::size_t MacroImemRequestInitiationInterval =
+        hw::kIcuMacroImemRequestInitiationIntervalCycles>
 class DistributedIcuQueue {
 public:
     using FunctionalInstruction = FuncInstruction;
@@ -283,7 +285,8 @@ public:
     using MacroDecoder = IcuMacroV1Decoder<
         FuncInstruction, InstructionBits, FetchLatency,
         MacroReservoirWords, MacroDecodeWindowBits, MacroDdbDepth,
-        MacroAdmissionLookahead, MacroDdbRunCapacity>;
+        MacroAdmissionLookahead, MacroDdbRunCapacity,
+        MacroImemRequestInitiationInterval>;
 
     static_assert(
         InstructionBits >= 32,
@@ -297,6 +300,7 @@ public:
         && MacroDecodeWindowBits <= InstructionBits);
     static_assert(MacroDdbDepth > 0);
     static_assert(MacroDdbRunCapacity > 0);
+    static_assert(MacroImemRequestInitiationInterval > 0);
 
     static constexpr std::size_t instruction_bits = InstructionBits;
     static constexpr std::size_t imem_depth = ImemDepth;
@@ -310,6 +314,9 @@ public:
     static constexpr std::size_t macro_ddb_depth = MacroDdbDepth;
     static constexpr std::size_t macro_admission_lookahead =
         MacroAdmissionLookahead;
+    static constexpr std::size_t macro_imem_read_latency = FetchLatency;
+    static constexpr std::size_t macro_imem_request_initiation_interval =
+        MacroImemRequestInitiationInterval;
     static constexpr std::size_t macro_context_expand_width = 1;
 
     void reset()

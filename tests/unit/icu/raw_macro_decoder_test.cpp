@@ -128,6 +128,42 @@ try {
             && dequantDdbLayout.entry_bits == 630,
         "MXM DDB physical layouts have the wrong bit widths");
 
+    using PipelinedFetchDecoder = IcuMacroV1Decoder<
+        MemInstruction, 96, 2, 3, 64, 8, 8, 8, 1>;
+    using NonPipelinedFetchDecoder = IcuMacroV1Decoder<
+        MemInstruction, 96, 2, 3, 64, 8, 8, 8, 2>;
+    static_assert(PipelinedFetchDecoder::imem_read_latency == 2);
+    static_assert(
+        PipelinedFetchDecoder::imem_request_initiation_interval == 1);
+    PipelinedFetchDecoder pipelinedFetch(
+        IcuMacroQueueKind::Mem, kMemImage);
+    NonPipelinedFetchDecoder nonPipelinedFetch(
+        IcuMacroQueueKind::Mem, kMemImage);
+    std::size_t pipelinedContexts = 0;
+    std::size_t nonPipelinedContexts = 0;
+    for (std::size_t cycle = 0; cycle < 6; ++cycle) {
+        if (pipelinedFetch.tick(true).has_value()) ++pipelinedContexts;
+        if (nonPipelinedFetch.tick(true).has_value())
+            ++nonPipelinedContexts;
+    }
+    require(pipelinedFetch.statistics().fetched_words == 3
+            && nonPipelinedFetch.statistics().fetched_words == 2,
+        "Macro i-MEM read latency is still coupled to request II");
+    for (std::size_t cycle = 6;
+         (!pipelinedFetch.done() || !nonPipelinedFetch.done()); ++cycle) {
+        if (cycle > 128)
+            throw std::runtime_error(
+                "parameterized Macro fetch pipelines did not drain");
+        if (!pipelinedFetch.done()
+            && pipelinedFetch.tick(true).has_value())
+            ++pipelinedContexts;
+        if (!nonPipelinedFetch.done()
+            && nonPipelinedFetch.tick(true).has_value())
+            ++nonPipelinedContexts;
+    }
+    require(pipelinedContexts == 2 && nonPipelinedContexts == 2,
+        "Macro fetch II changed decoded context semantics");
+
     const auto extended = decode_mem_image(kMemExtendedImage);
     require(extended.size() == 1,
         "extended MEM image produced the wrong context count");

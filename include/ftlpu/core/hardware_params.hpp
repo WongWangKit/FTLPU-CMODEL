@@ -109,7 +109,10 @@ constexpr std::size_t kSxmConcurrentStreamOps = 2 * kLanesPerTile;
 // Distributed ICU geometry. Every functional queue owns local instruction
 // memory and a finite prefetch IQ; instruction fetch never consumes MEM/SR
 // bandwidth.
+// Initial physical baseline. Keep response latency and request initiation
+// interval independent so post-RTL simulation can tune either parameter.
 constexpr std::size_t kIcuFetchLatencyCycles = 1;
+constexpr std::size_t kIcuMacroImemRequestInitiationIntervalCycles = 1;
 constexpr std::size_t kIcuBarrierLatencyCycles = 35;
 constexpr std::size_t kIcuVxmInstructionBits = 96;
 constexpr std::size_t kIcuMemInstructionBits = 96;

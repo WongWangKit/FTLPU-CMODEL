@@ -126,18 +126,20 @@ struct IcuMacroDdbLayout {
 // current and next word because DecodeWindowBits <= WordBits.
 template <typename FuncInstruction,
           std::size_t WordBits,
-          std::size_t FetchLatency = 1,
+          std::size_t ImemReadLatency = 1,
           std::size_t ReservoirWords = 3,
           std::size_t DecodeWindowBits = 64,
           std::size_t DdbDepth = 8,
           std::size_t AdmissionLookahead = 8,
-          std::size_t DdbRunCapacity = 8>
+          std::size_t DdbRunCapacity = 8,
+          std::size_t ImemRequestInitiationInterval = 1>
 class IcuMacroV1Decoder {
 public:
     using RawWord = IcuRawImemWord<WordBits>;
     using DecodedContext = DecodedIcuMacroContext<FuncInstruction>;
 
-    static_assert(FetchLatency > 0);
+    static_assert(ImemReadLatency > 0);
+    static_assert(ImemRequestInitiationInterval > 0);
     static_assert(ReservoirWords >= 3);
     static_assert(DecodeWindowBits > 0 && DecodeWindowBits <= WordBits);
     static_assert(DecodeWindowBits <= 64);
@@ -145,6 +147,9 @@ public:
     static_assert(DdbRunCapacity > 0);
 
     static constexpr std::size_t word_bits = WordBits;
+    static constexpr std::size_t imem_read_latency = ImemReadLatency;
+    static constexpr std::size_t imem_request_initiation_interval =
+        ImemRequestInitiationInterval;
     static constexpr std::size_t reservoir_words = ReservoirWords;
     static constexpr std::size_t decode_window_bits = DecodeWindowBits;
     static constexpr std::size_t ddb_depth = DdbDepth;
@@ -544,7 +549,7 @@ private:
 
     struct PendingFetch {
         std::size_t address{0};
-        std::size_t remaining_cycles{FetchLatency};
+        std::size_t remaining_cycles{ImemReadLatency};
     };
 
     static std::int64_t signed_value(std::uint64_t raw, unsigned width)
@@ -843,12 +848,12 @@ private:
         apply_delta_queue();
         parser_step();
         begin_fetch_if_possible();
-        age_pending_fetch();
+        age_pending_fetches();
 
         if (waiting_for_bits_) {
             ++statistics_.bit_wait_cycles;
             ++statistics_.decoder_starvation_cycles;
-            if (!pending_fetch_.has_value()
+            if (pending_fetches_.empty()
                 && next_fetch_address_ == image_.size())
                 throw StaticScheduleError(
                     "truncated Macro v1 raw i-MEM image");
@@ -857,7 +862,7 @@ private:
             ++statistics_.reservoir_empty_cycles;
         statistics_.reservoir_occupancy_bit_samples +=
             reservoir_.available_bits();
-        if (!reservoir_.can_refill(pending_fetch_.has_value() ? 1 : 0))
+        if (!reservoir_.can_refill(pending_payload_fetch_count()))
             ++statistics_.reservoir_full_cycles;
         if (ddb_size_ == DdbDepth) ++statistics_.ddb_full_cycles;
         statistics_.ddb_occupancy_samples += ddb_size_;
@@ -873,12 +878,12 @@ private:
 
     void commit_ready_fetch()
     {
-        if (!pending_fetch_.has_value()
-            || pending_fetch_->remaining_cycles != 0)
+        if (pending_fetches_.empty()
+            || pending_fetches_.front().remaining_cycles != 0)
             return;
-        const auto address = pending_fetch_->address;
+        const auto address = pending_fetches_.front().address;
         const auto& word = image_[address];
-        pending_fetch_.reset();
+        pending_fetches_.pop_front();
         ++statistics_.fetched_words;
 
         if (address == 0) {
@@ -908,29 +913,51 @@ private:
             return;
         }
 
+        if (outstanding_payload_fetches_ == 0)
+            throw std::logic_error(
+                "Macro payload response has no reserved reservoir slot");
+        --outstanding_payload_fetches_;
         reservoir_.refill(word);
         statistics_.peak_reservoir_bits = std::max(
             statistics_.peak_reservoir_bits,
             reservoir_.available_bits());
     }
 
+    std::size_t pending_payload_fetch_count() const noexcept
+    {
+        return outstanding_payload_fetches_;
+    }
+
     void begin_fetch_if_possible()
     {
-        if (pending_fetch_.has_value() || disabled_
+        if (fetch_issue_cooldown_ != 0 || disabled_
             || state_ == State::Done
             || next_fetch_address_ == image_.size())
             return;
-        if (next_fetch_address_ != 0 && !reservoir_.can_refill())
-            return;
-        pending_fetch_ = PendingFetch{next_fetch_address_, FetchLatency};
+        if (next_fetch_address_ != 0) {
+            // The control word is deliberately non-speculative. Once it has
+            // enabled Macro mode, every payload request reserves one future
+            // reservoir word because the i-MEM response cannot backpressure.
+            if (!control_latched_
+                || !reservoir_.can_refill(
+                    pending_payload_fetch_count()))
+                return;
+        }
+        pending_fetches_.push_back(PendingFetch{
+            next_fetch_address_, ImemReadLatency});
+        if (next_fetch_address_ != 0)
+            ++outstanding_payload_fetches_;
         ++next_fetch_address_;
+        fetch_issue_cooldown_ = ImemRequestInitiationInterval;
     }
 
-    void age_pending_fetch()
+    void age_pending_fetches()
     {
-        if (pending_fetch_.has_value()
-            && pending_fetch_->remaining_cycles != 0)
-            --pending_fetch_->remaining_cycles;
+        for (auto& fetch : pending_fetches_)
+            if (fetch.remaining_cycles != 0)
+                --fetch.remaining_cycles;
+        if (fetch_issue_cooldown_ != 0)
+            --fetch_issue_cooldown_;
     }
 
     std::optional<std::uint64_t> peek_bits(
@@ -1718,7 +1745,9 @@ private:
 
     IcuMacroQueueKind kind_;
     std::vector<RawWord> image_;
-    std::optional<PendingFetch> pending_fetch_{};
+    std::deque<PendingFetch> pending_fetches_{};
+    std::size_t outstanding_payload_fetches_{0};
+    std::size_t fetch_issue_cooldown_{0};
     std::size_t next_fetch_address_{0};
     Reservoir reservoir_{};
     State state_{State::WaitingForControl};
