@@ -102,6 +102,19 @@ struct DecodedIcuMacroContext {
     std::size_t admission_cycle{0};
 };
 
+// Bit-level payload stored by one physical DDB entry. Queue identity is
+// structural and therefore is not repeated in every entry. CModel-only
+// tracing fields (record/decode/commit cycles) are deliberately excluded.
+struct IcuMacroDdbLayout {
+    std::size_t instruction_bits{0};
+    std::size_t schedule_bits{0};
+    std::size_t next_start_cycle_bits{0};
+    std::size_t next_operand_bits{0};
+    std::size_t expansion_state_bits{0};
+    std::size_t delta_bits{0};
+    std::size_t entry_bits{0};
+};
+
 // Physical packed-v1 Macro frontend. The stages are advanced concurrently,
 // once per tick:
 //
@@ -139,7 +152,9 @@ public:
     static constexpr std::size_t context_expand_width = 1;
 
     IcuMacroV1Decoder(IcuMacroQueueKind kind, std::vector<RawWord> image)
-        : kind_(kind), image_(std::move(image))
+        : kind_(kind), image_(std::move(image)),
+          ddb_storage_(std::make_unique<
+              std::array<DdbSlot, DdbDepth>>())
     {
         validate_kind();
         if (image_.empty())
@@ -179,7 +194,7 @@ public:
     bool done() const noexcept
     {
         return disabled_ || (state_ == State::Done
-            && !commit_buffer_ && ddb_.empty());
+            && !commit_buffer_ && ddb_size_ == 0);
     }
 
     // Priming stops only at an actual decode-ahead boundary: the parser has
@@ -189,23 +204,30 @@ public:
         return control_latched_
             && (disabled_
                 || (state_ == State::Done && !commit_buffer_)
-                || ddb_.size() == DdbDepth);
+                || ddb_size_ == DdbDepth);
     }
 
     bool control_latched() const noexcept { return control_latched_; }
     bool enabled() const noexcept { return control_latched_ && !disabled_; }
     std::uint32_t command_count() const noexcept { return command_count_; }
     std::size_t decoded_count() const noexcept { return decoded_count_; }
-    std::size_t ddb_occupancy() const noexcept { return ddb_.size(); }
+    std::size_t ddb_occupancy() const noexcept { return ddb_size_; }
+    IcuMacroDdbLayout ddb_layout() const noexcept
+    {
+        return physical_ddb_layout();
+    }
     std::size_t pending_decoded_contexts() const noexcept
     {
         std::size_t result = 0;
-        for (const auto& descriptor : ddb_)
-            result += descriptor.run_count
-                - descriptor.next_context_index;
+        for (std::size_t index = 0; index < ddb_size_; ++index) {
+            const auto slot = (ddb_read_pointer_ + index) % DdbDepth;
+            const auto& payload = (*ddb_storage_)[slot].payload;
+            result += ddb_run_count(payload)
+                - ddb_next_context_index(payload);
+        }
         if (commit_buffer_)
-            result += commit_buffer_->run_count
-                - commit_buffer_->next_context_index;
+            result += ddb_run_count(commit_buffer_->payload)
+                - ddb_next_context_index(commit_buffer_->payload);
         return result;
     }
     std::size_t reservoir_occupancy_bits() const noexcept
@@ -284,6 +306,17 @@ private:
         std::size_t payload_bits{0};
     };
 
+    static constexpr std::size_t kDdbIndexBits =
+        std::bit_width(DdbRunCapacity - 1);
+    static constexpr std::size_t kMaxDdbScheduleBits = 193;
+    static constexpr std::size_t kMaxDdbPayloadBits =
+        49 + kMaxDdbScheduleBits + 32 + 13 + 2 * kDdbIndexBits
+        + 64 * (DdbRunCapacity - 1);
+    static constexpr std::size_t kMaxDdbPayloadWords =
+        (kMaxDdbPayloadBits + 63) / 64;
+
+    // Parser-local construction state. It is packed exactly once at the
+    // ready/valid DDB commit boundary.
     struct DecodedDescriptor {
         std::size_t first_record_index{0};
         Template descriptor_template{};
@@ -295,6 +328,77 @@ private:
         std::size_t decode_start_cycle{0};
         std::size_t commit_cycle{0};
         bool completes_run{false};
+    };
+
+    struct DdbFieldLayout {
+        static constexpr std::size_t absent =
+            std::numeric_limits<std::size_t>::max();
+
+        std::size_t instruction{0};
+        std::size_t inner_count{0};
+        std::size_t inner_interval{0};
+        std::size_t outer_count{0};
+        std::size_t outer_interval{0};
+        std::size_t inner_stride{absent};
+        std::size_t outer_stride{absent};
+        std::size_t induction_enable{absent};
+        std::size_t next_start_cycle{0};
+        std::size_t next_operand{0};
+        std::size_t run_count_minus_one{0};
+        std::size_t next_context_index{0};
+        std::size_t deltas{0};
+        IcuMacroDdbLayout summary{};
+    };
+
+    // The physical DDB RAM payload. The C++ carrier uses the maximum supported
+    // width; each concrete queue implements only summary.entry_bits.
+    struct PackedDdbEntry {
+        std::array<std::uint64_t, kMaxDdbPayloadWords> words{};
+
+        std::uint64_t read(
+            std::size_t offset, std::size_t width) const
+        {
+            if (width > 64 || offset + width > kMaxDdbPayloadBits)
+                throw std::logic_error("invalid packed DDB read");
+            std::uint64_t result = 0;
+            for (std::size_t bit = 0; bit < width; ++bit) {
+                const auto position = offset + bit;
+                if (((words[position / 64] >> (position % 64)) & 1u)
+                    != 0)
+                    result |= std::uint64_t{1} << bit;
+            }
+            return result;
+        }
+
+        void write(std::size_t offset, std::size_t width,
+            std::uint64_t value)
+        {
+            if (width > 64 || offset + width > kMaxDdbPayloadBits
+                || (width < 64 && width != 0
+                    && value >= (std::uint64_t{1} << width)))
+                throw std::logic_error("invalid packed DDB write");
+            for (std::size_t bit = 0; bit < width; ++bit) {
+                const auto position = offset + bit;
+                const auto mask = std::uint64_t{1} << (position % 64);
+                if (((value >> bit) & 1u) != 0)
+                    words[position / 64] |= mask;
+                else
+                    words[position / 64] &= ~mask;
+            }
+        }
+    };
+
+    // CModel observability only; these fields are not part of the RTL DDB RAM.
+    struct DdbSidecar {
+        std::size_t first_record_index{0};
+        std::size_t decode_start_cycle{0};
+        std::size_t commit_cycle{0};
+        bool completes_run{false};
+    };
+
+    struct DdbSlot {
+        PackedDdbEntry payload{};
+        DdbSidecar sidecar{};
     };
 
     class Reservoir {
@@ -509,6 +613,216 @@ private:
         throw std::logic_error("unknown Macro queue kind");
     }
 
+    DdbFieldLayout ddb_field_layout() const noexcept
+    {
+        DdbFieldLayout result;
+        std::size_t cursor = 0;
+        result.instruction = cursor;
+        result.summary.instruction_bits = native_instruction_bits();
+        cursor += result.summary.instruction_bits;
+
+        const auto schedule_begin = cursor;
+        result.inner_count = cursor; cursor += 32;
+        result.inner_interval = cursor; cursor += 32;
+        result.outer_count = cursor; cursor += 32;
+        result.outer_interval = cursor; cursor += 32;
+        if (kind_ != IcuMacroQueueKind::MxmDequant) {
+            result.inner_stride = cursor; cursor += 32;
+            result.outer_stride = cursor; cursor += 32;
+        }
+        if (kind_ == IcuMacroQueueKind::MxmLoad
+            || kind_ == IcuMacroQueueKind::MxmCompute) {
+            // Queue kind fixes which non-None induction target this bit means.
+            result.induction_enable = cursor++;
+        }
+        result.summary.schedule_bits = cursor - schedule_begin;
+
+        result.next_start_cycle = cursor;
+        result.summary.next_start_cycle_bits = 32;
+        cursor += 32;
+        result.next_operand = cursor;
+        result.summary.next_operand_bits = operand_bits();
+        cursor += result.summary.next_operand_bits;
+        result.run_count_minus_one = cursor;
+        cursor += kDdbIndexBits;
+        result.next_context_index = cursor;
+        cursor += kDdbIndexBits;
+        result.summary.expansion_state_bits = 2 * kDdbIndexBits;
+        result.deltas = cursor;
+        result.summary.delta_bits = 64 * (DdbRunCapacity - 1);
+        cursor += result.summary.delta_bits;
+        result.summary.entry_bits = cursor;
+        return result;
+    }
+
+    IcuMacroDdbLayout physical_ddb_layout() const noexcept
+    {
+        return ddb_field_layout().summary;
+    }
+
+    std::uint64_t encode_native(const FuncInstruction& instruction) const
+    {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            return isa::encode_mem_instruction(instruction);
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmControlInstruction>) {
+            return isa::encode_mxm_instruction(instruction);
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmDequantInstruction>) {
+            return isa::encode_mxm_dequant_instruction(instruction);
+        }
+        throw std::logic_error(
+            "Macro v1 native encode is unsupported for this instruction type");
+    }
+
+    DdbSlot pack_ddb_slot(const DecodedDescriptor& descriptor) const
+    {
+        if (descriptor.run_count == 0
+            || descriptor.run_count > DdbRunCapacity
+            || descriptor.next_context_index != 0
+            || descriptor.next_start_cycle
+                > std::numeric_limits<std::uint32_t>::max())
+            throw std::logic_error("invalid descriptor at DDB commit");
+
+        const auto layout = ddb_field_layout();
+        DdbSlot result;
+        result.payload.write(layout.instruction,
+            layout.summary.instruction_bits,
+            encode_native(descriptor.descriptor_template.instruction));
+
+        const auto& schedule = descriptor.descriptor_template.schedule;
+        const auto write32 = [&](std::size_t offset, std::uint64_t value) {
+            if (value > std::numeric_limits<std::uint32_t>::max())
+                throw std::logic_error("decoded schedule exceeds DDB width");
+            result.payload.write(offset, 32, value);
+        };
+        write32(layout.inner_count, schedule.inner_count);
+        write32(layout.inner_interval, schedule.inner_interval);
+        write32(layout.outer_count, schedule.outer_count);
+        write32(layout.outer_interval, schedule.outer_interval);
+        if (layout.inner_stride != DdbFieldLayout::absent) {
+            result.payload.write(layout.inner_stride, 32,
+                static_cast<std::uint32_t>(schedule.inner_stride));
+            result.payload.write(layout.outer_stride, 32,
+                static_cast<std::uint32_t>(schedule.outer_stride));
+        } else if (schedule.inner_stride != 0
+            || schedule.outer_stride != 0) {
+            throw std::logic_error(
+                "zero-width DDB stride fields received a non-zero stride");
+        }
+        if (layout.induction_enable != DdbFieldLayout::absent) {
+            result.payload.write(layout.induction_enable, 1,
+                schedule.induction_target != IcuInductionTarget::None);
+        }
+        result.payload.write(layout.next_start_cycle, 32,
+            descriptor.next_start_cycle);
+        result.payload.write(layout.next_operand,
+            layout.summary.next_operand_bits,
+            static_cast<std::uint64_t>(descriptor.next_operand));
+        result.payload.write(layout.run_count_minus_one, kDdbIndexBits,
+            descriptor.run_count - 1);
+        result.payload.write(layout.next_context_index, kDdbIndexBits, 0);
+        for (std::size_t index = 0;
+             index + 1 < descriptor.run_count; ++index) {
+            const auto offset = layout.deltas + 64 * index;
+            result.payload.write(offset, 32,
+                descriptor.deltas[index].start_cycle);
+            result.payload.write(offset + 32, 32,
+                static_cast<std::uint32_t>(
+                    descriptor.deltas[index].operand));
+        }
+
+        result.sidecar = DdbSidecar{descriptor.first_record_index,
+            descriptor.decode_start_cycle, 0, descriptor.completes_run};
+
+        auto validation_instruction =
+            descriptor.descriptor_template.instruction;
+        set_operand(validation_instruction,
+            static_cast<std::size_t>(descriptor.next_operand));
+        auto validation_schedule = schedule;
+        validation_schedule.start_cycle = descriptor.next_start_cycle;
+        validate_context(DecodedContext{descriptor.first_record_index,
+            validation_schedule, validation_instruction, 0});
+        return result;
+    }
+
+    IcuMacroSchedule unpack_ddb_schedule(
+        const PackedDdbEntry& payload, std::size_t start_cycle) const
+    {
+        const auto layout = ddb_field_layout();
+        IcuMacroSchedule result;
+        result.start_cycle = start_cycle;
+        result.inner_count = payload.read(layout.inner_count, 32);
+        result.inner_interval = payload.read(layout.inner_interval, 32);
+        result.outer_count = payload.read(layout.outer_count, 32);
+        result.outer_interval = payload.read(layout.outer_interval, 32);
+        if (layout.inner_stride != DdbFieldLayout::absent) {
+            result.inner_stride = static_cast<std::int32_t>(
+                payload.read(layout.inner_stride, 32));
+            result.outer_stride = static_cast<std::int32_t>(
+                payload.read(layout.outer_stride, 32));
+        }
+        switch (kind_) {
+        case IcuMacroQueueKind::Mem:
+            result.induction_target = IcuInductionTarget::MemAddress;
+            break;
+        case IcuMacroQueueKind::MxmLoad:
+            result.induction_target = payload.read(
+                layout.induction_enable, 1) != 0
+                ? IcuInductionTarget::MxmWeightColumn
+                : IcuInductionTarget::None;
+            break;
+        case IcuMacroQueueKind::MxmCompute:
+            result.induction_target = payload.read(
+                layout.induction_enable, 1) != 0
+                ? IcuInductionTarget::MxmAccumulatorAddress
+                : IcuInductionTarget::None;
+            break;
+        case IcuMacroQueueKind::MxmDequant:
+            result.induction_target = IcuInductionTarget::None;
+            break;
+        }
+        return result;
+    }
+
+    std::size_t ddb_run_count(const PackedDdbEntry& payload) const
+    {
+        const auto layout = ddb_field_layout();
+        return payload.read(
+            layout.run_count_minus_one, kDdbIndexBits) + 1;
+    }
+
+    std::size_t ddb_next_context_index(
+        const PackedDdbEntry& payload) const
+    {
+        const auto layout = ddb_field_layout();
+        return payload.read(layout.next_context_index, kDdbIndexBits);
+    }
+
+    DdbSlot& ddb_head()
+    {
+        if (ddb_size_ == 0)
+            throw std::logic_error("read from empty DDB");
+        return (*ddb_storage_)[ddb_read_pointer_];
+    }
+
+    void ddb_push(DdbSlot slot)
+    {
+        if (ddb_size_ == DdbDepth)
+            throw std::logic_error("write to full DDB");
+        (*ddb_storage_)[ddb_write_pointer_] = std::move(slot);
+        ddb_write_pointer_ = (ddb_write_pointer_ + 1) % DdbDepth;
+        ++ddb_size_;
+    }
+
+    void ddb_pop()
+    {
+        if (ddb_size_ == 0)
+            throw std::logic_error("pop from empty DDB");
+        ddb_read_pointer_ = (ddb_read_pointer_ + 1) % DdbDepth;
+        --ddb_size_;
+    }
+
     std::optional<DecodedContext> tick_impl(std::size_t current_cycle,
         std::size_t active_occupancy, std::size_t active_capacity,
         std::optional<std::size_t> earliest_active_release_cycle)
@@ -545,10 +859,10 @@ private:
             reservoir_.available_bits();
         if (!reservoir_.can_refill(pending_fetch_.has_value() ? 1 : 0))
             ++statistics_.reservoir_full_cycles;
-        if (ddb_.size() == DdbDepth) ++statistics_.ddb_full_cycles;
-        statistics_.ddb_occupancy_samples += ddb_.size();
+        if (ddb_size_ == DdbDepth) ++statistics_.ddb_full_cycles;
+        statistics_.ddb_occupancy_samples += ddb_size_;
         statistics_.peak_ddb_occupancy = std::max(
-            statistics_.peak_ddb_occupancy, ddb_.size());
+            statistics_.peak_ddb_occupancy, ddb_size_);
         const auto visible_occupancy = active_occupancy
             + (admitted.has_value() ? 1 : 0);
         statistics_.active_occupancy_samples += visible_occupancy;
@@ -982,7 +1296,9 @@ private:
 
     FuncInstruction decode_native(std::uint64_t native) const
     {
-        if constexpr (std::is_same_v<FuncInstruction,
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            return isa::decode_mem_instruction(native);
+        } else if constexpr (std::is_same_v<FuncInstruction,
                           MxmControlInstruction>) {
             return isa::decode_mxm_instruction(native);
         } else if constexpr (std::is_same_v<FuncInstruction,
@@ -1167,8 +1483,8 @@ private:
                 throw std::logic_error(
                     "Macro parser completed a descriptor without commit credit");
             descriptor.completes_run = run_remaining_ == 0;
-            commit_buffer_ = std::make_unique<DecodedDescriptor>(
-                std::move(building_descriptor_));
+            commit_buffer_ = std::make_unique<DdbSlot>(
+                pack_ddb_slot(building_descriptor_));
             if (run_remaining_ != 0) {
                 begin_descriptor_chunk();
             }
@@ -1224,19 +1540,19 @@ private:
 
     void drain_commit_buffer()
     {
-        if (!commit_buffer_ || ddb_.size() == DdbDepth)
+        if (!commit_buffer_ || ddb_size_ == DdbDepth)
             return;
-        auto descriptor = std::move(*commit_buffer_);
+        auto slot = std::move(*commit_buffer_);
         commit_buffer_.reset();
-        descriptor.commit_cycle = statistics_.cycles;
-        if (descriptor.completes_run) {
+        slot.sidecar.commit_cycle = statistics_.cycles;
+        if (slot.sidecar.completes_run) {
             const auto latency = statistics_.cycles
-                - descriptor.decode_start_cycle + 1;
+                - slot.sidecar.decode_start_cycle + 1;
             statistics_.descriptor_decode_cycles += latency;
             statistics_.max_descriptor_decode_cycles = std::max(
                 statistics_.max_descriptor_decode_cycles, latency);
         }
-        ddb_.push_back(std::move(descriptor));
+        ddb_push(std::move(slot));
         ++statistics_.ddb_entries_committed;
     }
 
@@ -1245,12 +1561,16 @@ private:
         std::size_t active_capacity,
         std::optional<std::size_t> earliest_active_release_cycle)
     {
-        if (ddb_.empty()) return std::nullopt;
-        auto& descriptor = ddb_.front();
+        if (ddb_size_ == 0) return std::nullopt;
+        auto& slot = ddb_head();
+        auto& payload = slot.payload;
+        const auto layout = ddb_field_layout();
+        const auto next_context_index = ddb_next_context_index(payload);
+        const auto run_count = ddb_run_count(payload);
         const bool ignore_timing =
             current_cycle == std::numeric_limits<std::size_t>::max();
-        const auto start_cycle = static_cast<std::size_t>(
-            descriptor.next_start_cycle);
+        const auto start_cycle = static_cast<std::size_t>(payload.read(
+            layout.next_start_cycle, 32));
         const auto admit_cycle = start_cycle > AdmissionLookahead
             ? start_cycle - AdmissionLookahead : 0;
         if (!ignore_timing && current_cycle < admit_cycle) {
@@ -1277,14 +1597,14 @@ private:
         }
 
         auto result = DecodedContext{
-            descriptor.first_record_index
-                + descriptor.next_context_index,
-            descriptor.descriptor_template.schedule,
-            descriptor.descriptor_template.instruction,
+            slot.sidecar.first_record_index + next_context_index,
+            unpack_ddb_schedule(payload, start_cycle),
+            decode_native(payload.read(layout.instruction,
+                layout.summary.instruction_bits)),
             ignore_timing ? 0 : current_cycle};
-        result.schedule.start_cycle = start_cycle;
-        set_operand(result.instruction,
-            static_cast<std::size_t>(descriptor.next_operand));
+        set_operand(result.instruction, static_cast<std::size_t>(
+            payload.read(layout.next_operand,
+                layout.summary.next_operand_bits)));
         validate_context(result);
 
         ++statistics_.decoded_contexts;
@@ -1297,19 +1617,39 @@ private:
                 statistics_.max_admission_to_start_cycles, latency);
         }
 
-        ++descriptor.next_context_index;
-        if (descriptor.next_context_index == descriptor.run_count) {
+        if (next_context_index + 1 == run_count) {
             const auto residency = statistics_.cycles
-                - descriptor.commit_cycle + 1;
+                - slot.sidecar.commit_cycle + 1;
             statistics_.ddb_residency_cycles += residency;
             statistics_.max_ddb_residency_cycles = std::max(
                 statistics_.max_ddb_residency_cycles, residency);
-            ddb_.pop_front();
+            ddb_pop();
         } else {
-            const auto& delta =
-                descriptor.deltas[descriptor.next_context_index - 1];
-            descriptor.next_start_cycle += delta.start_cycle;
-            descriptor.next_operand += delta.operand;
+            const auto delta_offset = layout.deltas
+                + 64 * next_context_index;
+            const auto start_delta = static_cast<std::uint32_t>(
+                payload.read(delta_offset, 32));
+            const auto operand_delta = static_cast<std::int32_t>(
+                payload.read(delta_offset + 32, 32));
+            const auto next_start = start_cycle + start_delta;
+            if (next_start > std::numeric_limits<std::uint32_t>::max())
+                throw std::logic_error("DDB start-cycle update overflow");
+
+            const auto next_operand = static_cast<std::int64_t>(
+                payload.read(layout.next_operand,
+                    layout.summary.next_operand_bits)) + operand_delta;
+            const auto width = operand_bits();
+            if (next_operand < 0
+                || (width != 0
+                    && static_cast<std::uint64_t>(next_operand)
+                        >= (std::uint64_t{1} << width)))
+                throw std::logic_error("DDB operand update overflow");
+            payload.write(layout.next_start_cycle, 32, next_start);
+            payload.write(layout.next_operand,
+                layout.summary.next_operand_bits,
+                static_cast<std::uint64_t>(next_operand));
+            payload.write(layout.next_context_index, kDdbIndexBits,
+                next_context_index + 1);
         }
         return result;
     }
@@ -1401,8 +1741,13 @@ private:
     std::size_t decoded_count_{0};
     std::size_t run_decode_start_cycle_{0};
     DecodedDescriptor building_descriptor_{};
-    std::unique_ptr<DecodedDescriptor> commit_buffer_{};
-    std::deque<DecodedDescriptor> ddb_{};
+    std::unique_ptr<DdbSlot> commit_buffer_{};
+    // Heap allocation is a host-model detail that keeps thousands of dormant
+    // ICU queue objects small; the modeled hardware remains a fixed DDB RAM.
+    std::unique_ptr<std::array<DdbSlot, DdbDepth>> ddb_storage_{};
+    std::size_t ddb_read_pointer_{0};
+    std::size_t ddb_write_pointer_{0};
+    std::size_t ddb_size_{0};
     std::deque<std::uint8_t> assembly_bits_{};
     std::size_t assembly_target_bits_{0};
     std::optional<Delta> delta_queue_{};

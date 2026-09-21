@@ -103,6 +103,31 @@ int main()
 try {
     using namespace ftlpu;
 
+    const auto memDdbLayout =
+        IcuMacroV1Decoder<MemInstruction, 96>(
+            IcuMacroQueueKind::Mem, kMemImage).ddb_layout();
+    const auto loadDdbLayout =
+        IcuMacroV1Decoder<MxmControlInstruction, 128>(
+            IcuMacroQueueKind::MxmLoad, kMxmLoadImage).ddb_layout();
+    const auto computeDdbLayout =
+        IcuMacroV1Decoder<MxmControlInstruction, 128>(
+            IcuMacroQueueKind::MxmCompute, kMxmComputeImage).ddb_layout();
+    const auto dequantDdbLayout =
+        IcuMacroV1Decoder<MxmDequantInstruction, 128>(
+            IcuMacroQueueKind::MxmDequant, kMxmDequantImage).ddb_layout();
+    require(memDdbLayout.instruction_bits == 32
+            && memDdbLayout.schedule_bits == 192
+            && memDdbLayout.next_start_cycle_bits == 32
+            && memDdbLayout.next_operand_bits == 13
+            && memDdbLayout.expansion_state_bits == 6
+            && memDdbLayout.delta_bits == 448
+            && memDdbLayout.entry_bits == 723,
+        "MEM DDB physical layout has the wrong bit width");
+    require(loadDdbLayout.entry_bits == 697
+            && computeDdbLayout.entry_bits == 741
+            && dequantDdbLayout.entry_bits == 630,
+        "MXM DDB physical layouts have the wrong bit widths");
+
     const auto extended = decode_mem_image(kMemExtendedImage);
     require(extended.size() == 1,
         "extended MEM image produced the wrong context count");
