@@ -611,11 +611,20 @@ private:
     {
         switch (kind_) {
         case IcuMacroQueueKind::Mem: return 32;
-        case IcuMacroQueueKind::MxmLoad:
+        case IcuMacroQueueKind::MxmLoad: return 29;
         case IcuMacroQueueKind::MxmDequant: return 16;
         case IcuMacroQueueKind::MxmCompute: return 49;
         }
         throw std::logic_error("unknown Macro queue kind");
+    }
+
+    unsigned packed_native_instruction_bits(std::uint64_t opcode) const
+    {
+        if (kind_ == IcuMacroQueueKind::MxmLoad)
+            return static_cast<MxmControlOpcode>(opcode & 0x3u)
+                    == MxmControlOpcode::Decode
+                ? 29 : 16;
+        return native_instruction_bits();
     }
 
     DdbFieldLayout ddb_field_layout() const noexcept
@@ -1166,7 +1175,10 @@ private:
                 plan.payload_bits = compact_schedule_bits(plan.shape);
             }
         } else {
-            const auto native_bits = native_instruction_bits();
+            const auto opcode_header = peek_bits(3);
+            if (!opcode_header.has_value()) return;
+            const auto native_bits = packed_native_instruction_bits(
+                bit_field(*opcode_header, 1, 2));
             header_bits = 1 + native_bits + (plan.extended ? 0 : 4);
             const auto header = peek_bits(header_bits);
             if (!header.has_value()) return;
@@ -1687,9 +1699,13 @@ private:
             instruction.address = operand;
         } else if constexpr (std::is_same_v<FuncInstruction,
                                  MxmControlInstruction>) {
-            if (kind_ == IcuMacroQueueKind::MxmLoad)
+            const bool decode_load =
+                instruction.opcode == MxmControlOpcode::Decode
+                && instruction.decode_operation
+                    == MxmDecodeOperation::LoadActivation;
+            if (kind_ == IcuMacroQueueKind::MxmLoad && !decode_load)
                 instruction.weight_column = operand;
-            else
+            else if (kind_ == IcuMacroQueueKind::MxmCompute)
                 instruction.accumulator_address = operand;
         } else {
             if (operand != 0)
@@ -1719,14 +1735,31 @@ private:
         } else if constexpr (std::is_same_v<FuncInstruction,
                                  MxmControlInstruction>) {
             if (kind_ == IcuMacroQueueKind::MxmLoad) {
-                if (context.instruction.opcode != MxmControlOpcode::IW
-                    || (schedule.induction_target
-                            != IcuInductionTarget::None
-                        && schedule.induction_target
-                            != IcuInductionTarget::MxmWeightColumn))
+                const bool decode_load = context.instruction.opcode
+                        == MxmControlOpcode::Decode
+                    && context.instruction.decode_operation
+                        == MxmDecodeOperation::LoadActivation;
+                if ((context.instruction.opcode != MxmControlOpcode::IW
+                        && !decode_load)
+                    || (decode_load
+                            ? schedule.induction_target
+                                    != IcuInductionTarget::None
+                                || schedule.inner_stride != 0
+                                || schedule.outer_stride != 0
+                            : schedule.induction_target
+                                      != IcuInductionTarget::None
+                                && schedule.induction_target
+                                      != IcuInductionTarget::MxmWeightColumn))
                     throw StaticScheduleError(
                         "decoded MXM load Macro is invalid");
-            } else if (context.instruction.opcode == MxmControlOpcode::IW
+            } else if ((context.instruction.opcode
+                            != MxmControlOpcode::Compute
+                        && context.instruction.opcode
+                            != MxmControlOpcode::AccumulatorRead
+                        && !(context.instruction.opcode
+                                == MxmControlOpcode::Decode
+                            && context.instruction.decode_operation
+                                == MxmDecodeOperation::StreamCompute))
                 || (schedule.induction_target
                         != IcuInductionTarget::None
                     && schedule.induction_target

@@ -159,7 +159,10 @@ inline MxmControlInstruction apply_icu_repeat_stride(
     const auto delta = address_stride
         * static_cast<std::int64_t>(repeat_index);
     if (instruction.opcode == MxmControlOpcode::Compute
-        || instruction.opcode == MxmControlOpcode::AccumulatorRead) {
+        || instruction.opcode == MxmControlOpcode::AccumulatorRead
+        || (instruction.opcode == MxmControlOpcode::Decode
+            && instruction.decode_operation
+                == MxmDecodeOperation::StreamCompute)) {
         const auto address = static_cast<std::int64_t>(
             instruction.accumulator_address) + delta;
         if (address < 0)
@@ -239,7 +242,10 @@ inline MxmControlInstruction apply_icu_repeat_2d_stride(
     }
     if (target == IcuInductionTarget::MxmAccumulatorAddress) {
         if (instruction.opcode != MxmControlOpcode::Compute
-            && instruction.opcode != MxmControlOpcode::AccumulatorRead)
+            && instruction.opcode != MxmControlOpcode::AccumulatorRead
+            && !(instruction.opcode == MxmControlOpcode::Decode
+                && instruction.decode_operation
+                    == MxmDecodeOperation::StreamCompute))
             throw std::invalid_argument(
                 "ICU Repeat2D accumulator induction requires an MXM compute or accumulator-read instruction");
         const auto address =
@@ -625,7 +631,10 @@ public:
                         == IcuInductionTarget::MxmAccumulatorAddress
                     && instruction.opcode != MxmControlOpcode::Compute
                     && instruction.opcode
-                        != MxmControlOpcode::AccumulatorRead)
+                        != MxmControlOpcode::AccumulatorRead
+                    && !(instruction.opcode == MxmControlOpcode::Decode
+                        && instruction.decode_operation
+                            == MxmDecodeOperation::StreamCompute))
                     throw std::invalid_argument(
                         "MXM compute STREAM_ND induction requires compute or accumulator-read");
             }
