@@ -14,6 +14,7 @@
 #include <deque>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <queue>
 #include <sstream>
@@ -324,6 +325,10 @@ public:
     static constexpr std::size_t macro_imem_request_initiation_interval =
         MacroImemRequestInitiationInterval;
     static constexpr std::size_t macro_context_expand_width = 1;
+    static constexpr std::size_t macro_issue_compare_width =
+        MacroContextDepth;
+    static constexpr std::size_t macro_issue_cycle_bits =
+        std::numeric_limits<std::uint32_t>::digits;
 
     void reset()
     {
@@ -355,7 +360,9 @@ public:
         repeat_2d_inner_ = 0;
         repeat_2d_outer_ = 0;
         repeat_2d_cooldown_ = 0;
-        active_macros_ = {};
+        if (active_macro_storage_)
+            for (auto& context : *active_macro_storage_) context.reset();
+        active_macro_count_ = 0;
         macro_remaining_points_ = 0;
         peak_active_macros_ = 0;
         active_stream_nd_ = {};
@@ -472,7 +479,7 @@ public:
             throw StaticScheduleError(
                 "ICU queue is not configured for a raw Macro image");
         accept_decoded_macro(macro_decoder_->tick(
-            0, active_macros_.size(), MacroContextDepth,
+            0, active_macro_count_, MacroContextDepth,
             earliest_active_macro_release_cycle()), false);
     }
 
@@ -798,7 +805,7 @@ public:
     {
         if (nop_remaining_ != 0 || repeat_remaining_ != 0
             || repeat_2d_active_
-            || !active_macros_.empty()
+            || active_macro_count_ != 0
             || !active_stream_nd_.empty()
             || iq_.empty()) {
             return false;
@@ -822,13 +829,13 @@ public:
         }
         if (raw_macro_mode_)
             return macro_decoder_.has_value() && macro_decoder_->done()
-                && active_macros_.empty();
+                && active_macro_count_ == 0;
         return fetch_pc_ == program_end_pc_
             && pending_fetches_.empty()
             && iq_.empty()
             && nop_remaining_ == 0
             && repeat_remaining_ == 0
-            && !repeat_2d_active_ && active_macros_.empty()
+            && !repeat_2d_active_ && active_macro_count_ == 0
             && active_stream_nd_.empty()
             && !synchronized_instruction_.has_value();
     }
@@ -924,7 +931,7 @@ private:
         bool execution_started)
     {
         if (!decoded.has_value()) return;
-        if (active_macros_.size() >= MacroContextDepth)
+        if (active_macro_count_ >= MacroContextDepth)
             throw std::logic_error(
                 "Macro decoder produced a context while the context RAM was full");
         validate_macro_schedule(decoded->schedule);
@@ -936,12 +943,10 @@ private:
         }
         macro_remaining_points_ += decoded->schedule.inner_count
             * decoded->schedule.outer_count;
-        active_macros_.push(ActiveMacro{
+        activate_macro(
             IcuMacroInstruction<FuncInstruction>{
                 decoded->schedule, std::move(decoded->instruction)},
-            decoded->record_index, 0, 0, decoded->admission_cycle});
-        peak_active_macros_ = std::max(
-            peak_active_macros_, active_macros_.size());
+            decoded->record_index, decoded->admission_cycle);
     }
 
     std::optional<FuncInstruction> tick_raw_macro()
@@ -954,7 +959,7 @@ private:
         // the next cycle, matching a one-write-port context RAM without bypass.
         auto result = issue_active_macro();
         accept_decoded_macro(macro_decoder_->tick(
-            cycle_, active_macros_.size(), MacroContextDepth,
+            cycle_, active_macro_count_, MacroContextDepth,
             earliest_active_macro_release_cycle()), true);
 
         finish_trace();
@@ -1072,7 +1077,7 @@ private:
             || (!iq_.empty() && std::holds_alternative<
                 IcuSynchronizedInstruction<FuncInstruction>>(iq_.front())))
             return tick_synchronized();
-        if (!active_macros_.empty()
+        if (active_macro_count_ != 0
             || (!iq_.empty() && std::holds_alternative<
                 IcuMacroInstruction<FuncInstruction>>(iq_.front())))
             return tick_macros();
@@ -1595,13 +1600,33 @@ private:
     {
         if (schedule.inner_count == 0 || schedule.outer_count == 0
             || schedule.inner_interval == 0
-            || schedule.outer_interval == 0
-            || (schedule.outer_count > 1
-                && schedule.outer_interval
-                    <= (schedule.inner_count - 1)
-                        * schedule.inner_interval)) {
+            || schedule.outer_interval == 0) {
             throw std::invalid_argument(
                 "ICU macro has an invalid iteration space");
+        }
+        constexpr auto maxCycle = static_cast<std::size_t>(
+            std::numeric_limits<std::uint32_t>::max());
+        const auto innerSteps = schedule.inner_count - 1;
+        if (schedule.start_cycle > maxCycle
+            || (innerSteps != 0
+                && schedule.inner_interval > maxCycle / innerSteps)) {
+            throw std::overflow_error(
+                "ICU macro issue cycle exceeds the physical 32-bit range");
+        }
+        const auto innerSpan = innerSteps * schedule.inner_interval;
+        if (schedule.outer_count > 1
+            && schedule.outer_interval <= innerSpan) {
+            throw std::invalid_argument(
+                "ICU macro has an invalid iteration space");
+        }
+        const auto outerSteps = schedule.outer_count - 1;
+        if (innerSpan > maxCycle - schedule.start_cycle
+            || (outerSteps != 0
+                && schedule.outer_interval
+                    > (maxCycle - schedule.start_cycle - innerSpan)
+                        / outerSteps)) {
+            throw std::overflow_error(
+                "ICU macro issue cycle exceeds the physical 32-bit range");
         }
     }
 
@@ -1611,34 +1636,30 @@ private:
         std::size_t inner{0};
         std::size_t outer{0};
         std::size_t admission_cycle{0};
+        std::uint32_t next_issue_cycle{0};
+        std::uint32_t final_issue_cycle{0};
 
         std::size_t issue_cycle() const noexcept
         {
-            return macro.schedule.start_cycle
-                + outer * macro.schedule.outer_interval
-                + inner * macro.schedule.inner_interval;
+            return next_issue_cycle;
         }
 
         std::size_t release_cycle() const noexcept
         {
-            return macro.schedule.start_cycle
-                + (macro.schedule.outer_count - 1)
-                    * macro.schedule.outer_interval
-                + (macro.schedule.inner_count - 1)
-                    * macro.schedule.inner_interval;
+            return final_issue_cycle;
         }
     };
 
-    struct LaterMacroIssue {
-        bool operator()(const ActiveMacro& lhs,
-            const ActiveMacro& rhs) const noexcept
-        {
-            return lhs.issue_cycle() > rhs.issue_cycle();
-        }
-    };
+    using ActiveMacroStorage =
+        std::array<std::optional<ActiveMacro>, MacroContextDepth>;
 
     std::optional<FuncInstruction> tick_macros()
     {
+        // Existing contexts observe the cycle boundary before a new context is
+        // admitted.  This keeps admission off the current-cycle match path and
+        // also lets a completing context return its slot for same-cycle reuse.
+        auto result = issue_active_macro();
+
         if (!iq_.empty()) {
             if (auto* macro = std::get_if<
                     IcuMacroInstruction<FuncInstruction>>(&iq_.front())) {
@@ -1650,7 +1671,7 @@ private:
                        << cycle_;
                     throw StaticScheduleError(os.str());
                 }
-                if (active_macros_.size() >= MacroContextDepth) {
+                if (active_macro_count_ >= MacroContextDepth) {
                     if (macro->schedule.start_cycle <= cycle_) {
                         std::ostringstream os;
                         os << "ICU Macro context capacity "
@@ -1659,46 +1680,84 @@ private:
                         throw StaticScheduleError(os.str());
                     }
                 } else {
-                    activate_macro(std::move(*macro), iq_pcs_.front());
+                    activate_macro(
+                        std::move(*macro), iq_pcs_.front(), cycle_);
                     iq_.pop_front();
                     iq_pcs_.pop_front();
                 }
-            } else if (!active_macros_.empty()) {
+            } else if (active_macro_count_ != 0) {
                 throw StaticScheduleError(
                     "ICU queue mixes an in-flight macro with legacy commands");
             }
         }
 
-        return issue_active_macro();
+        return result;
     }
 
     void activate_macro(
-        IcuMacroInstruction<FuncInstruction> macro, std::size_t pc)
+        IcuMacroInstruction<FuncInstruction> macro, std::size_t pc,
+        std::size_t admission_cycle)
     {
+        if (active_macro_count_ >= MacroContextDepth)
+            throw std::logic_error(
+                "activate Macro into a full Active Context RAM");
+        if (!active_macro_storage_)
+            active_macro_storage_ = std::make_unique<ActiveMacroStorage>();
+        auto slot = active_macro_storage_->end();
+        for (auto it = active_macro_storage_->begin();
+             it != active_macro_storage_->end(); ++it) {
+            if (!it->has_value()) {
+                slot = it;
+                break;
+            }
+        }
+        if (slot == active_macro_storage_->end())
+            throw std::logic_error(
+                "Active Context RAM credit disagrees with its valid bits");
+
+        const auto firstIssue = static_cast<std::uint32_t>(
+            macro.schedule.start_cycle);
+        const auto finalIssue = static_cast<std::uint32_t>(
+            macro.schedule.start_cycle
+            + (macro.schedule.outer_count - 1)
+                * macro.schedule.outer_interval
+            + (macro.schedule.inner_count - 1)
+                * macro.schedule.inner_interval);
         macro_remaining_points_ += macro.schedule.inner_count
             * macro.schedule.outer_count;
-        active_macros_.push(ActiveMacro{
-            std::move(macro), pc, 0, 0, cycle_});
+        slot->emplace(ActiveMacro{std::move(macro), pc, 0, 0,
+            admission_cycle, firstIssue, finalIssue});
+        ++active_macro_count_;
         peak_active_macros_ = std::max(
-            peak_active_macros_, active_macros_.size());
+            peak_active_macros_, active_macro_count_);
     }
 
     std::optional<FuncInstruction> issue_active_macro()
     {
-        if (active_macros_.empty()
-            || active_macros_.top().issue_cycle() > cycle_) {
+        if (active_macro_count_ == 0) {
             last_trace_.action = IcuQueueAction::MacroWait;
             return std::nullopt;
         }
-        if (active_macros_.top().issue_cycle() < cycle_)
-            throw StaticScheduleError(
-                "ICU macro expansion missed an issue cycle");
-        auto due = active_macros_.top();
-        active_macros_.pop();
-        if (!active_macros_.empty()
-            && active_macros_.top().issue_cycle() == cycle_)
-            throw StaticScheduleError(
-                "overlapping ICU macros issue on the same queue cycle");
+        std::optional<std::size_t> selectedSlot;
+        for (std::size_t slot = 0; slot < MacroContextDepth; ++slot) {
+            const auto& active = (*active_macro_storage_)[slot];
+            if (!active.has_value()) continue;
+            if (active->issue_cycle() < cycle_)
+                throw StaticScheduleError(
+                    "ICU macro expansion missed an issue cycle");
+            if (active->issue_cycle() != cycle_) continue;
+            if (selectedSlot.has_value())
+                throw StaticScheduleError(
+                    "overlapping ICU macros issue on the same queue cycle");
+            selectedSlot = slot;
+        }
+
+        if (!selectedSlot.has_value()) {
+            last_trace_.action = IcuQueueAction::MacroWait;
+            return std::nullopt;
+        }
+        auto& dueSlot = (*active_macro_storage_)[*selectedSlot];
+        auto& due = *dueSlot;
 
         const auto delta = static_cast<std::int64_t>(due.inner)
                 * due.macro.schedule.inner_stride
@@ -1720,10 +1779,17 @@ private:
             ++due.outer;
         }
         if (due.outer != due.macro.schedule.outer_count) {
-            active_macros_.push(std::move(due));
+            due.next_issue_cycle = static_cast<std::uint32_t>(
+                due.macro.schedule.start_cycle
+                + due.outer * due.macro.schedule.outer_interval
+                + due.inner * due.macro.schedule.inner_interval);
         } else if (raw_macro_mode_ && macro_decoder_.has_value()) {
             macro_decoder_->record_context_completion(
                 due.admission_cycle, cycle_);
+        }
+        if (due.outer == due.macro.schedule.outer_count) {
+            dueSlot.reset();
+            --active_macro_count_;
         }
         return result;
     }
@@ -1732,14 +1798,14 @@ private:
     {
         // Active Context RAM is shallow in hardware; this models the parallel
         // minimum reduction across its statically known release-cycle fields.
+        if (active_macro_count_ == 0) return std::nullopt;
         std::optional<std::size_t> result;
-        auto active = active_macros_;
-        while (!active.empty()) {
-            const auto release = active.top().release_cycle();
+        for (const auto& active : *active_macro_storage_) {
+            if (!active.has_value()) continue;
+            const auto release = active->release_cycle();
             result = result.has_value()
                 ? std::min(*result, release)
                 : std::optional<std::size_t>{release};
-            active.pop();
         }
         return result;
     }
@@ -1761,8 +1827,13 @@ private:
     std::optional<FuncInstruction> last_dispatched_{};
     std::optional<FuncInstruction> repeat_instruction_{};
     std::optional<FuncInstruction> repeat_2d_instruction_{};
-    std::priority_queue<ActiveMacro, std::vector<ActiveMacro>,
-        LaterMacroIssue> active_macros_{};
+    // Active Context RAM is a fixed-depth physical structure. Its valid and
+    // next-issue fields form a flat compare array against the current cycle;
+    // the payload is selected only for the unique matching slot. Heap
+    // allocation is a host-model detail that keeps dormant queue objects
+    // small and does not model dynamically sized hardware.
+    std::unique_ptr<ActiveMacroStorage> active_macro_storage_{};
+    std::size_t active_macro_count_{0};
     std::size_t macro_remaining_points_{0};
     std::size_t peak_active_macros_{0};
     std::priority_queue<ActiveStreamNd,

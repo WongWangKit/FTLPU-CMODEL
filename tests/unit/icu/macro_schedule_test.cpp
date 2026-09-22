@@ -1,7 +1,9 @@
 #include "ftlpu/icu/distributed_queue.hpp"
 #include "ftlpu/system/icu.hpp"
 
+#include <cstdint>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -57,6 +59,76 @@ try {
     require(interleaved.done(), "interleaved macro queue did not complete");
     require(interleaved.peak_active_macros() == 2,
         "interleaved macro peak-context count is incorrect");
+
+    static_assert(InstructionControlUnit::MxmIcu::macro_context_depth == 40);
+    static_assert(
+        InstructionControlUnit::MxmIcu::macro_issue_compare_width == 40);
+    static_assert(
+        InstructionControlUnit::MxmIcu::macro_issue_cycle_bits == 32);
+
+    Queue cycleWidth;
+    bool cycleWidthEnforced = false;
+    try {
+        cycleWidth.push_macro(IcuMacroSchedule {
+            static_cast<std::size_t>(
+                std::numeric_limits<std::uint32_t>::max()) + 1,
+            1, 1, 0, 1, 1, 0,
+            IcuInductionTarget::MemAddress,
+        }, MemInstruction::Read(0, 0));
+    } catch (const std::overflow_error&) {
+        cycleWidthEnforced = true;
+    }
+    require(cycleWidthEnforced,
+        "Macro scheduler accepted a cycle outside its 32-bit compare key");
+
+    using Flat40Queue =
+        DistributedIcuQueue<MemInstruction, 128, 128, 64, 1, 40>;
+    Flat40Queue flat40;
+    for (std::size_t context = 0; context < 41; ++context) {
+        flat40.push_macro(IcuMacroSchedule {
+            100 + context, 2, 1000, 1, 1, 1, 0,
+            IcuInductionTarget::MemAddress,
+        }, MemInstruction::Read(1000 + context, 0));
+    }
+    for (std::size_t cycle = 0; cycle < 140; ++cycle)
+        static_cast<void>(flat40.tick());
+    require(flat40.peak_active_macros() == 40,
+        "flat Macro scheduler did not populate all 40 physical entries");
+    bool flat40Overflow = false;
+    try {
+        static_cast<void>(flat40.tick());
+    } catch (const StaticScheduleError&) {
+        flat40Overflow = true;
+    }
+    require(flat40Overflow,
+        "flat Macro scheduler accepted a 41st live context");
+
+    Queue collision;
+    collision.push_macro(IcuMacroSchedule {
+        3, 1, 1, 0, 1, 1, 0,
+        IcuInductionTarget::MemAddress,
+    }, MemInstruction::Read(300, 0));
+    collision.push_macro(IcuMacroSchedule {
+        3, 1, 1, 0, 1, 1, 0,
+        IcuInductionTarget::MemAddress,
+    }, MemInstruction::Read(400, 0));
+    bool collisionDetected = false;
+    try {
+        for (std::size_t cycle = 0; cycle <= 3; ++cycle)
+            static_cast<void>(collision.tick());
+    } catch (const StaticScheduleError&) {
+        collisionDetected = true;
+    }
+    require(collisionDetected,
+        "flat Macro scheduler did not reject a multi-match cycle");
+    bool lateDetected = false;
+    try {
+        static_cast<void>(collision.tick());
+    } catch (const StaticScheduleError&) {
+        lateDetected = true;
+    }
+    require(lateDetected,
+        "flat Macro scheduler dynamically delayed a missed issue cycle");
 
     using OneContextQueue =
         DistributedIcuQueue<MemInstruction, 128, 32, 8, 1, 1>;

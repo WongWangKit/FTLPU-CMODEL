@@ -136,10 +136,11 @@ constexpr std::size_t kIcuMxmIqDepth = 16;
 constexpr std::size_t kIcuSxmIqDepth = 16;
 constexpr std::size_t kIcuC2cIqDepth = 16;
 // Macro descriptors expand independently of the fetch IQ. These finite
-// context files are sized from the maximum simultaneous live descriptors in
-// the seq128 reference schedule (MEM=32, MXM compute=136).
+// context files are physical scheduler capacities. MXM uses a 40-entry flat
+// next-issue compare array: 32 contexts cover the largest current seq128
+// compiler result and eight entries cover the admission-lookahead window.
 constexpr std::size_t kIcuMemMacroContextDepth = 32;
-constexpr std::size_t kIcuMxmMacroContextDepth = 136;
+constexpr std::size_t kIcuMxmMacroContextDepth = 40;
 constexpr std::size_t kIcuVxmMacroContextDepth = 4;
 constexpr std::size_t kIcuSxmMacroContextDepth = 4;
 constexpr std::size_t kIcuC2cMacroContextDepth = 4;
