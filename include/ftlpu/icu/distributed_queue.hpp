@@ -238,7 +238,7 @@ struct EncodedC2cEndpointIcuPacket {
     std::array<C2cEndpointIcuPacket, kWordCount> words{};
 };
 
-// A synchronized MEM write is a physical pair of 96-bit i-MEM words: the
+// A synchronized MEM transfer is a physical pair of 96-bit i-MEM words: the
 // synchronization header followed by one native MEM instruction word.
 struct EncodedMemIcuSynchronizedPacket {
     static constexpr std::size_t kWordBits = 96;
@@ -1397,6 +1397,16 @@ public:
     {
         return tick();
     }
+
+    // Arms the configured local i-MEM/IQ state without consuming a cycle.
+    // Cross-queue producers use this before delivering a cycle-zero event so
+    // lazy queue launch cannot clear a notification that hardware has already
+    // presented.
+    void launch()
+    {
+        ensure_configured();
+    }
+
     void configure(IcuProgramDescriptor descriptor)
     {
         if (descriptor.base_pc > ImemDepth
@@ -1505,6 +1515,36 @@ public:
         return emitted;
     }
 
+    // The shared C2C receive path has no payload buffer between the SR fabric
+    // and MEM.  Do not admit a vector until the matching MEM_WRITE_SYNC is at
+    // the queue head (or already active); otherwise an early RX token can be
+    // latched while its transient stream payload passes the destination.
+    bool accepts_synchronized_notification(
+        std::size_t synchronization_tag) const
+    {
+        if constexpr (QueueRole != IcuQueueRole::Mem) {
+            return false;
+        } else {
+            if (synchronized_instruction_.has_value())
+                return synchronized_instruction_->synchronization_tag
+                    == synchronization_tag;
+            if (nop_remaining_ != 0 || repeat_remaining_ != 0
+                || repeat_2d_active_ || !active_macros_.empty()
+                || !active_stream_nd_.empty() || active_3d_.has_value()
+                || active_write_read_2d_.has_value() || iq_.empty())
+                return false;
+            if (detail::raw_icu_opcode(iq_.front())
+                != isa::IcuCommandOpcode::Extended)
+                return false;
+            if (detail::raw_icu_extended_subtype(iq_.front())
+                != kSynchronizedExtendedSubtype)
+                return false;
+            return decode_synchronized_header(iq_.front())
+                       .synchronization_tag
+                == synchronization_tag;
+        }
+    }
+
     bool blocked_on_sync() const
     {
         if (nop_remaining_ != 0 || repeat_remaining_ != 0
@@ -1591,9 +1631,10 @@ public:
             throw std::logic_error(
                 "raw synchronized packets are only defined for MEM ICU queues");
         } else {
-            if (instruction.opcode != MemOpcode::Write)
+            if (instruction.opcode != MemOpcode::Write
+                && instruction.opcode != MemOpcode::Read)
                 throw std::invalid_argument(
-                    "MEM synchronized packet must carry a write template");
+                    "MEM synchronized packet must carry a read or write template");
             return {encode_synchronized_header(count, synchronization_tag,
                         transport_delay, reservation_cycles, address_stride),
                 encode_native_word(instruction)};
@@ -1611,7 +1652,7 @@ public:
         }
     }
 
-    // Linker surface for placing a two-word MEM_WRITE_SYNC packet into an
+    // Linker surface for placing a two-word MEM_READ_SYNC/MEM_WRITE_SYNC packet into an
     // already assembled, but not launched, local i-MEM image. Insertion is
     // atomic and may occur only at a coarse-instruction packet boundary.
     void insert_encoded_synchronized_packet(std::size_t address,
@@ -1627,9 +1668,10 @@ public:
                 throw std::logic_error(
                     "synchronized MEM template is not a native FU word");
             const auto instruction = decode_native_word(packet[1]);
-            if (instruction.opcode != MemOpcode::Write)
+            if (instruction.opcode != MemOpcode::Write
+                && instruction.opcode != MemOpcode::Read)
                 throw std::logic_error(
-                    "synchronized MEM packet must carry a write template");
+                    "synchronized MEM packet must carry a read or write template");
             if (launched_)
                 throw StaticScheduleError(
                     "ICU local i-MEM cannot be modified after program launch");
@@ -2174,10 +2216,16 @@ private:
         std::size_t absoluteStartCycle, const char* command)
     {
         static_assert(QueueRole != IcuQueueRole::Legacy);
-        if (!raw_compatibility_cycle_known_)
-            throw StaticScheduleError(std::string(command)
-                + " follows a dynamic synchronization point, so its legacy "
-                  "absolute start cannot be translated to queue-local NOPs");
+        if (!raw_compatibility_cycle_known_) {
+            // The preceding hardware WAIT_EVENT/SYNC is the timing boundary:
+            // once it releases, the first following FU domain starts
+            // immediately.  Its legacy absolute start therefore establishes
+            // a fresh compatibility epoch for translating later domains; it
+            // must not become an absolute-cycle comparison in the ICU.
+            raw_compatibility_cycle_ = absoluteStartCycle;
+            raw_compatibility_cycle_known_ = true;
+            return;
+        }
         if (absoluteStartCycle < raw_compatibility_cycle_) {
             auto message = std::ostringstream {};
             message << command << " starts at legacy cycle "
@@ -2541,6 +2589,12 @@ private:
             last_trace_.action = IcuQueueAction::EventRelease;
             iq_.pop_front();
             iq_pcs_.pop_front();
+            // WAIT_EVENT gates the following ICU command; it does not own the
+            // FU issue port.  When the tagged token is already available and
+            // the consumer is prefetched, release and dispatch that consumer
+            // in the same cycle.  A missing token still stalls this queue.
+            if (!iq_.empty())
+                return dispatch_ready_entry();
             return std::nullopt;
         }
         case IcuControlOpcode::Notify:

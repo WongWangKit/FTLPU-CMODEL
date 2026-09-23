@@ -35,6 +35,21 @@ void endpoint_codec_round_trip()
         throw std::runtime_error("C2C RX packet accepted reserved bits");
     } catch (const std::invalid_argument&) {
     }
+
+    const auto txOriginal = C2cTxIcuInstruction::Send(Hemisphere::West,
+        5, 17, 7, 0x315a,
+        C2cMemNotifyRoute::Mem(Hemisphere::East, 36, 1));
+    const auto txPacket = C2cIcuPacketCodec::encode(txOriginal);
+    const auto txDecoded = C2cIcuPacketCodec::decode_tx(txPacket);
+    require(txDecoded.endpoint_hemisphere == Hemisphere::West
+            && txDecoded.lane == 5 && txDecoded.fabric_stream == 17
+            && txDecoded.vector_count == 7
+            && txDecoded.sync_tag == 0x315a
+            && txDecoded.notify.enabled
+            && txDecoded.notify.hemisphere == Hemisphere::East
+            && txDecoded.notify.mem_slice == 36
+            && txDecoded.notify.mem_bank == 1,
+        "C2C TX packet changed its MEM_READ_SYNC notify route");
 }
 
 void dma_codec_and_raw_queue()

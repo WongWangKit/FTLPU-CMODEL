@@ -587,6 +587,130 @@ void test_mem_sr_tx_dma_ddr4()
         "MEM -> SR -> TX -> DMA -> DDR4 changed the vector payload");
 }
 
+void test_shared_rx_waits_for_mem_write_sync_head()
+{
+    constexpr auto kHemisphere = Hemisphere::East;
+    constexpr auto kStream = std::size_t {0};
+    constexpr auto kFabricStream = std::size_t {24};
+    constexpr auto kTargetSlice = std::size_t {36};
+    constexpr auto kTargetBank = std::size_t {1};
+    constexpr auto kTargetRow = std::size_t {19};
+    constexpr auto kDdr4Address = std::uint64_t {0x8000};
+    constexpr auto kHeadDelay = std::size_t {96};
+
+    auto system = C2cDmaSystem(ideal_ddr4(32, 2, 2, 64));
+    auto& chip = system.chip();
+    const auto expected = make_vector(0x5a, 303);
+    system.ddr4().initialize_vector(kDdr4Address, expected);
+
+    chip.icu().enqueue_c2c_dma(kHemisphere,
+        C2cDmaInstruction::Load(kDdr4Address, 1,
+            hw::kPhysicalVectorBytes, 303, kStream));
+    chip.icu().enqueue_c2c_receive(kHemisphere, kStream,
+        kHemisphere, kTargetSlice, kTargetBank, true, kTargetRow,
+        1, 1, kFabricStream);
+
+    const auto queue = InstructionControlUnit::mem_queue(
+        kHemisphere, kTargetSlice, kTargetBank);
+    chip.icu().mem_iq(queue).push_nop(kHeadDelay);
+    const auto group = kTargetSlice / hw::kMemSlicesPerGroup;
+    const auto transportDelay =
+        hw::kMemEastBoundaryStreamRegisterColumn - (group + 1);
+    chip.icu().enqueue_mem_synchronized_write(queue,
+        MemInstruction::Write(
+            kTargetRow, StreamId::West(kFabricStream)),
+        1, transportDelay);
+
+    for (std::size_t cycle = 0; cycle < 256; ++cycle)
+        system.tick();
+
+    require(chip.c2c_endpoint(kHemisphere).rx()
+                .completed_instruction_count(kStream) == 1,
+        "shared C2C RX did not resume when MEM_WRITE_SYNC reached the head");
+    require(chip.icu().mem_iq(queue).synchronized_issued_count() == 1,
+        "delayed MEM_WRITE_SYNC did not consume the held C2C vector");
+    for (std::size_t tile = 0; tile < hw::kTileRows; ++tile)
+        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane)
+            require(chip.read_mem_sram_lane_byte(kHemisphere,
+                        kTargetSlice, kTargetBank, tile, kTargetRow, lane)
+                    == expected.payload[tile][lane],
+                "C2C RX released a vector before MEM_WRITE_SYNC was ready");
+}
+
+void test_mem_read_sync_tx_dma_ddr4()
+{
+    constexpr auto kHemisphere = Hemisphere::East;
+    constexpr auto kLane = std::size_t {3};
+    constexpr auto kSourceSlice = std::size_t {36};
+    constexpr auto kSourceRow = std::size_t {41};
+    constexpr auto kVectorCount = std::size_t {128};
+    constexpr auto kSyncTag = std::uint32_t {0x8123};
+    constexpr auto kDdr4Address = std::uint64_t {0x8000};
+
+    auto system = C2cDmaSystem(ideal_ddr4(8, 2, 2, 16));
+    auto& chip = system.chip();
+    std::array<C2cVector, kVectorCount> expected{};
+    for (std::size_t vector = 0; vector < kVectorCount; ++vector) {
+        expected[vector] = make_vector(
+            static_cast<std::uint8_t>(0x40 + vector * 0x20),
+            500 + vector);
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile)
+            for (std::size_t byte = 0; byte < hw::kLanesPerTile; ++byte)
+                chip.initialize_mem_sram_lane_byte(kHemisphere,
+                    kSourceSlice, tile, kSourceRow + vector, byte,
+                    expected[vector].payload[tile][byte]);
+    }
+
+    const auto sourceQueue = InstructionControlUnit::mem_queue(
+        kHemisphere, kSourceSlice);
+    chip.icu().enqueue_mem_synchronized_read(sourceQueue,
+        MemInstruction::Read(kSourceRow, StreamId::East(kLane)),
+        kVectorCount, kSyncTag, 0, 1, kVectorCount);
+    chip.icu().enqueue_c2c_tx_raw(kHemisphere,
+        C2cIcuPacketCodec::encode(C2cTxIcuInstruction::Send(
+            kHemisphere, kLane, kLane, kVectorCount, kSyncTag,
+            C2cMemNotifyRoute::Mem(
+                kHemisphere, kSourceSlice, 0))));
+    chip.icu().enqueue_c2c_dma(kHemisphere,
+        C2cDmaInstruction::Store(kDdr4Address, kVectorCount,
+            hw::kPhysicalVectorBytes, kLane));
+    chip.icu().enqueue_control(IcuLocation::C2cDma(kHemisphere),
+        IcuControlInstruction::Sync());
+
+    bool ready = false;
+    for (std::size_t cycle = 0; cycle < 4096; ++cycle) {
+        system.tick();
+        ready = chip.icu().mem_iq(sourceQueue).done()
+            && chip.icu().c2c_tx_iq(kHemisphere).done()
+            && chip.icu().c2c_dma_iq(kHemisphere).done()
+            && chip.c2c_endpoint(kHemisphere).tx().idle()
+            && system.dma(kHemisphere).idle() && system.ddr4().idle();
+        if (ready) break;
+    }
+    if (!ready)
+        throw std::runtime_error(
+            "MEM_READ_SYNC page-out did not retire: mem_done="
+            + std::to_string(chip.icu().mem_iq(sourceQueue).done())
+            + " mem_issued=" + std::to_string(
+                chip.icu().mem_iq(sourceQueue).synchronized_issued_count())
+            + " tx_iq_done=" + std::to_string(
+                chip.icu().c2c_tx_iq(kHemisphere).done())
+            + " tx_idle=" + std::to_string(
+                chip.c2c_endpoint(kHemisphere).tx().idle())
+            + " dma_iq_done=" + std::to_string(
+                chip.icu().c2c_dma_iq(kHemisphere).done())
+            + " dma_idle=" + std::to_string(system.dma(kHemisphere).idle())
+            + " ddr_idle=" + std::to_string(system.ddr4().idle()));
+    require(chip.icu().mem_iq(sourceQueue).synchronized_issued_count()
+            == kVectorCount,
+        "MEM_READ_SYNC did not issue one MEM read per C2C vector token");
+    for (std::size_t vector = 0; vector < kVectorCount; ++vector)
+        require(system.ddr4().read_vector(
+                    kDdr4Address + vector * hw::kPhysicalVectorBytes)
+                    .payload == expected[vector].payload,
+            "MEM_READ_SYNC -> C2C TX -> DMA -> DDR4 changed data");
+}
+
 void test_eight_indexed_tx_lanes_store_to_ddr4()
 {
     constexpr auto kHemisphere = Hemisphere::East;
@@ -727,7 +851,9 @@ try {
     test_unified_mem_icu_insertion_and_transport_only_tick();
     test_ddr4_dma_rx_sr_mem();
     test_eight_shared_c2c_lanes_write_through_mem();
+    test_shared_rx_waits_for_mem_write_sync_head();
     test_mem_sr_tx_dma_ddr4();
+    test_mem_read_sync_tx_dma_ddr4();
     test_eight_indexed_tx_lanes_store_to_ddr4();
     test_sixteen_lane_shared_ingress_sustains_qwen_page();
     return 0;

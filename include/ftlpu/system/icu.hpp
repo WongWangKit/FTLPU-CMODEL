@@ -379,15 +379,31 @@ public:
             address_stride, std::move(instruction), reservation_cycles);
     }
 
+    void enqueue_mem_synchronized_read(std::size_t queue,
+        MemInstruction instruction, std::size_t count,
+        std::size_t synchronization_tag, std::size_t transport_delay = 0,
+        std::int64_t address_stride = 1,
+        std::size_t reservation_cycles = 1)
+    {
+        check_mem_queue(queue);
+        if (instruction.opcode != MemOpcode::Read)
+            throw std::invalid_argument(
+                "MEM_READ_SYNC must carry a read template");
+        mem_queues_[queue].push_synchronized(count,
+            synchronization_tag, transport_delay, address_stride,
+            std::move(instruction), reservation_cycles);
+    }
+
     static EncodedMemIcuSynchronizedPacket
     encode_mem_synchronized_packet(std::size_t count,
         std::size_t synchronization_tag, std::size_t transport_delay,
         std::int64_t address_stride, const MemInstruction& instruction,
         std::size_t reservation_cycles = 1)
     {
-        if (instruction.opcode != MemOpcode::Write)
+        if (instruction.opcode != MemOpcode::Write
+            && instruction.opcode != MemOpcode::Read)
             throw std::invalid_argument(
-                "MEM synchronized instruction must carry a write template");
+                "MEM synchronized instruction must carry a read or write template");
         const auto encoded = MemIcu::encode_synchronized_raw_packet(
             count, synchronization_tag, transport_delay, address_stride,
             instruction, reservation_cycles);
@@ -991,6 +1007,19 @@ public:
             location.index, location.bank)).notify(synchronization_tag);
     }
 
+    bool mem_accepts_synchronized_notification(IcuLocation location,
+        std::size_t synchronization_tag) const
+    {
+        if (location.kind != IcuLocationKind::Mem)
+            throw std::invalid_argument(
+                "C2C RX readiness requires a target MEM ICU");
+        check_mem_location(location);
+        return mem_iq(mem_queue(
+            static_cast<Hemisphere>(location.unit),
+            location.index, location.bank))
+            .accepts_synchronized_notification(synchronization_tag);
+    }
+
     void advance_barrier_events()
     {
         for (auto& remaining : barrier_events_) {
@@ -1024,6 +1053,21 @@ public:
         for (auto& queue : c2c_tx_queues_) queue.notify();
         for (auto& queue : c2c_rx_queues_) queue.notify();
         for (auto& queue : c2c_dma_queues_) queue.notify();
+    }
+
+    // Fan out one tagged hardware event to every local ICU.  Page-ready
+    // synchronization uses this path: each ordinary queue carries the same
+    // WAIT_EVENT immediately before its first command at or after the page's
+    // consumer boundary, while C2C transport queues may keep running.
+    void broadcast_tagged_notification(std::size_t event_tag)
+    {
+        for (auto& queue : vxm_queues_) queue.notify(event_tag);
+        for (auto& queue : mem_queues_) queue.notify(event_tag);
+        for (auto& queue : mxm_load_queues_) queue.notify(event_tag);
+        for (auto& queue : mxm_dequant_queues_) queue.notify(event_tag);
+        for (auto& queue : mxm_compute_queues_) queue.notify(event_tag);
+        for (auto& queue : sxm_transpose_queues_) queue.notify(event_tag);
+        for (auto& queue : sxm_permute_queues_) queue.notify(event_tag);
     }
 
     std::size_t barrier_latency_cycles() const noexcept
@@ -1074,6 +1118,13 @@ public:
                 if (c2cs[hemisphere] == nullptr) {
                     throw std::logic_error(
                         "ICU issued C2C TX without an attached hemisphere endpoint");
+                }
+                if (c2c_tx->consumer.notify_mem) {
+                    auto& target = mem_iq(mem_queue(
+                        c2c_tx->consumer.hemisphere,
+                        c2c_tx->consumer.mem_slice,
+                        c2c_tx->consumer.mem_bank));
+                    target.launch();
                 }
                 c2cs[hemisphere]->tx().issue(*c2c_tx);
                 any = true;

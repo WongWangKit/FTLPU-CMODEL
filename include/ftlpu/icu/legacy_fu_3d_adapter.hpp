@@ -120,9 +120,22 @@ inline MxmLoadIcuInstruction lower_legacy_mxm_load_to_3d(
     IcuInductionTarget target,
     const MxmControlInstruction& instruction)
 {
+    if (instruction.opcode == MxmControlOpcode::Decode
+        && instruction.decode_operation
+            == MxmDecodeOperation::LoadActivation) {
+        static_cast<void>(checked_legacy_operand_strides(strides, target,
+            IcuInductionTarget::None,
+            "legacy MXM decode-load descriptor"));
+        return MxmLoadIcuInstruction::DecodeLoadActivation3D(loop,
+            instruction.weight_buffer,
+            MxmIcuBufferMode::Fixed,
+            instruction.activation_stream_base,
+            instruction.data_format,
+            instruction.decode_layout);
+    }
     if (instruction.opcode != MxmControlOpcode::IW)
         throw std::invalid_argument(
-            "legacy MXM load descriptor is not an IW instruction");
+            "legacy MXM load descriptor is neither IW nor DecodeLoadActivation");
     if (instruction.weight_load_mode != MxmWeightLoadMode::Supercell
         || instruction.weight_inner_column != 0)
         throw std::invalid_argument(
@@ -157,9 +170,24 @@ inline MxmComputeIcuInstruction lower_legacy_mxm_compute_to_3d(
     IcuInductionTarget target,
     const MxmControlInstruction& instruction)
 {
-    if (instruction.opcode == MxmControlOpcode::Decode)
-        throw std::invalid_argument(
-            "legacy MXM decode has no MXM compute ICU 3-D encoding");
+    if (instruction.opcode == MxmControlOpcode::Decode
+        && instruction.decode_operation
+            == MxmDecodeOperation::StreamCompute) {
+        strides = checked_legacy_operand_strides(strides, target,
+            IcuInductionTarget::MxmAccumulatorAddress,
+            "legacy MXM decode-compute descriptor");
+        return MxmComputeIcuInstruction::DecodeStreamCompute3D(loop,
+            instruction.weight_buffer,
+            MxmIcuBufferMode::Fixed,
+            instruction.stream_base,
+            instruction.data_format,
+            instruction.accumulator_address,
+            strides,
+            instruction.weight_column,
+            instruction.accumulator_destination,
+            instruction.accumulator_clear,
+            instruction.decode_layout);
+    }
     strides = checked_legacy_operand_strides(strides, target,
         IcuInductionTarget::MxmAccumulatorAddress,
         "legacy MXM compute descriptor");

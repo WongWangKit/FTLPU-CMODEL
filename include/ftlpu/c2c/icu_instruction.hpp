@@ -85,13 +85,15 @@ struct C2cTxIcuInstruction {
     std::size_t fabric_stream{0};
     std::size_t vector_count{1};
     std::uint32_t sync_tag{0};
+    C2cMemNotifyRoute notify{};
 
     static C2cTxIcuInstruction Send(Hemisphere endpoint_hemisphere,
         std::size_t lane, std::size_t fabric_stream,
-        std::size_t vector_count = 1, std::uint32_t sync_tag = 0)
+        std::size_t vector_count = 1, std::uint32_t sync_tag = 0,
+        C2cMemNotifyRoute notify = C2cMemNotifyRoute::Disabled())
     {
         C2cTxIcuInstruction instruction {endpoint_hemisphere, lane,
-            fabric_stream, vector_count, sync_tag};
+            fabric_stream, vector_count, sync_tag, notify};
         instruction.validate();
         return instruction;
     }
@@ -106,7 +108,12 @@ struct C2cTxIcuInstruction {
         return Send(endpoint_hemisphere, instruction.stream_index,
             instruction.fabric_stream_index, instruction.vector_count,
             sync_tag == std::numeric_limits<std::uint32_t>::max()
-                ? instruction.sync_tag : sync_tag);
+                ? instruction.sync_tag : sync_tag,
+            instruction.consumer.notify_mem
+                ? C2cMemNotifyRoute::Mem(instruction.consumer.hemisphere,
+                      instruction.consumer.mem_slice,
+                      instruction.consumer.mem_bank)
+                : C2cMemNotifyRoute::Disabled());
     }
 
     C2cInstruction to_legacy() const
@@ -115,6 +122,10 @@ struct C2cTxIcuInstruction {
         auto instruction = C2cInstruction::Send(
             lane, vector_count, fabric_stream);
         instruction.sync_tag = sync_tag;
+        if (notify.enabled) {
+            instruction.consumer = C2cConsumer {notify.hemisphere,
+                notify.mem_slice, notify.mem_bank, 0, vector_count, 1, true};
+        }
         return instruction;
     }
 
@@ -124,6 +135,7 @@ struct C2cTxIcuInstruction {
         if (vector_count == 0)
             throw std::invalid_argument(
                 "C2C TX ICU vector_count must be non-zero");
+        notify.validate();
     }
 
 private:
@@ -318,6 +330,12 @@ public:
         write(packet, 7, 5, value.fabric_stream);
         write(packet, 12, 16, value.vector_count - 1);
         write(packet, 28, 16, checked_u16(value.sync_tag, "C2C TX sync tag"));
+        write(packet, 44, 1, value.notify.enabled ? 1 : 0);
+        if (value.notify.enabled) {
+            write(packet, 45, 1, hemisphere_index(value.notify.hemisphere));
+            write(packet, 46, 6, value.notify.mem_slice);
+            write(packet, 52, 1, value.notify.mem_bank);
+        }
         return packet;
     }
 
@@ -345,10 +363,14 @@ public:
         validate_endpoint_reserved(packet);
         if (read(packet, 0, 2) != 0 || read(packet, 2, 1) != 0)
             throw std::invalid_argument("C2C endpoint packet is RX, not TX");
+        const auto notify = read(packet, 44, 1) != 0
+            ? C2cMemNotifyRoute::Mem(decode_hemisphere(read(packet, 45, 1)),
+                  read(packet, 46, 6), read(packet, 52, 1))
+            : C2cMemNotifyRoute::Disabled();
         return C2cTxIcuInstruction::Send(
             decode_hemisphere(read(packet, 3, 1)), read(packet, 4, 3),
             read(packet, 7, 5), read(packet, 12, 16) + 1,
-            static_cast<std::uint32_t>(read(packet, 28, 16)));
+            static_cast<std::uint32_t>(read(packet, 28, 16)), notify);
     }
 
     static C2cRxIcuInstruction decode_rx(const C2cEndpointIcuPacket& packet)
@@ -460,10 +482,8 @@ private:
             throw std::invalid_argument("C2C endpoint packet has non-zero reserved bits");
         if (read(packet, 0, 2) != 0)
             throw std::invalid_argument("C2C endpoint packet has invalid ICU opcode");
-        if (read(packet, 2, 1) == 0 && !zero(packet, 44, 53))
-            throw std::invalid_argument("C2C TX packet carries RX routing fields");
         if (read(packet, 44, 1) == 0 && !zero(packet, 45, 53))
-            throw std::invalid_argument("C2C RX packet carries disabled route fields");
+            throw std::invalid_argument("C2C endpoint packet carries disabled route fields");
     }
 };
 

@@ -55,7 +55,8 @@ struct C2cInstruction {
         }
         return C2cInstruction {
             C2cOpcode::Send, stream_index, fabric_stream_index,
-            vector_count, 0, {}};
+            vector_count, 0,
+            C2cConsumer {Hemisphere::East, 0, 0, 0, 1, 1, false}};
     }
 
     static C2cInstruction Receive(

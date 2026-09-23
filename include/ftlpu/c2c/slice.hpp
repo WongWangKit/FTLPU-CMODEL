@@ -55,6 +55,12 @@ struct C2cReceiveNotification {
     C2cVector vector{};
 };
 
+struct C2cTransmitReadRequest {
+    C2cConsumer consumer{};
+    std::size_t stream_index{0};
+    std::uint32_t sync_tag{0};
+};
+
 class C2cTxSlice {
 public:
     explicit C2cTxSlice(
@@ -75,6 +81,7 @@ public:
         for (auto& queue : stream_queues_) queue.clear();
         for (auto& pipeline : stream_pipelines_) pipeline = {};
         for (auto& completed : stream_completed_) completed.clear();
+        read_requests_.clear();
     }
 
     void issue(C2cInstruction instruction)
@@ -104,7 +111,8 @@ public:
                         pipeline.begin(), pipeline.end(),
                         [](const auto& stage) { return stage.has_value(); });
                 });
-        return queue_.empty() && completed_.empty() && indexed_idle
+        return queue_.empty() && completed_.empty() && read_requests_.empty()
+            && indexed_idle
             && std::none_of(
                 pipeline_.begin(), pipeline_.end(),
                 [](const auto& stage) { return stage.has_value(); });
@@ -115,6 +123,14 @@ public:
         return static_cast<std::size_t>(std::count_if(
             pipeline_.begin(), pipeline_.end(),
             [](const auto& stage) { return stage.has_value(); }));
+    }
+
+    std::optional<C2cTransmitReadRequest> take_mem_read_request()
+    {
+        if (read_requests_.empty()) return std::nullopt;
+        auto request = std::move(read_requests_.front());
+        read_requests_.pop_front();
+        return request;
     }
 
     template <typename Transport>
@@ -134,6 +150,7 @@ public:
         if (!queue_.empty() && !pipeline_[0].has_value()) {
             pipeline_[0] = ActiveSend {std::move(queue_.front()), {}};
             queue_.pop_front();
+            publish_mem_read_request(pipeline_[0]->instruction);
         }
 
         auto input = StreamInputPort(
@@ -214,6 +231,7 @@ private:
             if (!queue.empty() && !pipeline[0].has_value()) {
                 pipeline[0] = ActiveSend {std::move(queue.front()), {}};
                 queue.pop_front();
+                publish_mem_read_request(pipeline[0]->instruction);
             }
 
             auto advance = std::array<bool, hw::kTileRows> {};
@@ -282,6 +300,14 @@ private:
             external.send(std::move(vector));
     }
 
+    void publish_mem_read_request(const C2cInstruction& instruction)
+    {
+        if (!instruction.consumer.notify_mem) return;
+        read_requests_.push_back(C2cTransmitReadRequest {
+            instruction.consumer, instruction.stream_index,
+            instruction.sync_tag});
+    }
+
     C2cStreamPortMap::InputEndpoint endpoint_{};
     std::string name_{};
     bool indexed_transport_{false};
@@ -294,6 +320,7 @@ private:
         hw::kC2cStreamsPerDirection> stream_pipelines_{};
     std::array<std::deque<C2cVector>, hw::kC2cStreamsPerDirection>
         stream_completed_{};
+    std::deque<C2cTransmitReadRequest> read_requests_{};
 };
 
 class C2cRxSlice {
@@ -354,11 +381,12 @@ public:
                 [](const auto& stage) { return stage.has_value(); });
     }
 
-    template <typename Transport, typename Consumer>
+    template <typename Transport, typename Ready, typename Consumer>
     void evaluate_shared(
         StreamRegisterFabric& fabric,
         Transport& external,
         std::size_t stream_count,
+        Ready&& ready,
         Consumer&& notify)
     {
         if (!indexed_transport_)
@@ -383,7 +411,8 @@ public:
                     std::move(stream_queues_[stream].front()), 0};
                 stream_queues_[stream].pop_front();
             }
-            if (active.has_value() && external.receive_ready(stream)) {
+            if (active.has_value() && external.receive_ready(stream)
+                && ready(active->instruction)) {
                 auto vector = external.pop_received(stream);
                 auto consumer = active->instruction.consumer;
                 consumer.base_row +=

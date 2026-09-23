@@ -64,6 +64,11 @@ int main()
                          1.0f / -3.25f));
     assert(relative_near(alu.execute(ftlpu::VxmSpecialAluOpcode::Rsqrt, 9.0f),
                          1.0f / 3.0f));
+    // The VXM arithmetic chain feeds the LUT from an FP32 intermediate.  A
+    // normal FP32 value below the FP16-normal range must therefore reach the
+    // address generator instead of being flushed to zero at the LUT input.
+    assert(relative_near(
+        alu.execute(ftlpu::VxmSpecialAluOpcode::Rsqrt, 1.0e-6f), 1000.0f));
 
     const auto a = alu.make_lookup(ftlpu::VxmSpecialAluOpcode::Reciprocal, 1.1f);
     const auto b = alu.make_lookup(ftlpu::VxmSpecialAluOpcode::Reciprocal, 1.8f);

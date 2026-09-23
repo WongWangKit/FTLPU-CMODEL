@@ -91,7 +91,6 @@ public:
 
     VxmLutLookupRequest make_lookup(VxmSpecialAluOpcode opcode, float input) const
     {
-        input = VxmDataFormat::round_fp16_ftz(input);
         auto request = VxmLutLookupRequest {};
         request.opcode = opcode;
         request.bank = bank_for_opcode(opcode);

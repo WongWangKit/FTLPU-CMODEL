@@ -485,9 +485,9 @@ private:
         require_phase(CyclePhase::MxmEvaluated, "evaluating VXM");
         vxm_.prepare_cycle();
         transfer_mem_edges_to_vxm(sinks);
-        transfer_unconsumed_streams_across_vxm(sinks);
         vxm_.tick(sinks.vxm, sinks.vxm_log_tile);
         transfer_vxm_to_mem_edges(sinks);
+        transfer_unconsumed_streams_across_vxm(sinks);
         phase_ = CyclePhase::VxmEvaluated;
     }
 
@@ -572,6 +572,16 @@ private:
         std::optional<C2cReceiveNotification> notification;
         if (c2c_dmas_[hemisphere] != nullptr) {
             endpoint->tx().evaluate(fabric, *c2c_dmas_[hemisphere]);
+            while (const auto request =
+                       endpoint->tx().take_mem_read_request()) {
+                const auto& consumer = request->consumer;
+                const auto location = IcuLocation::Mem(
+                    consumer.hemisphere, consumer.mem_slice,
+                    consumer.mem_bank);
+                icu_.notify_mem_synchronized(location,
+                    request->sync_tag == 0
+                        ? request->stream_index : request->sync_tag);
+            }
             const auto notify = [this](C2cReceiveNotification received) {
                 const auto& consumer = received.consumer;
                 if (consumer.notify_mem) {
@@ -588,10 +598,22 @@ private:
                             location, received.sync_tag);
                 }
             };
+            const auto ready = [this](const C2cInstruction& received) {
+                const auto& consumer = received.consumer;
+                if (!consumer.notify_mem) return true;
+                const auto location = IcuLocation::Mem(
+                    consumer.hemisphere,
+                    consumer.mem_slice,
+                    consumer.mem_bank);
+                const auto tag = received.sync_tag == 0
+                    ? received.fabric_stream_index : received.sync_tag;
+                return icu_.mem_accepts_synchronized_notification(
+                    location, tag);
+            };
             endpoint->rx().evaluate_shared(
                 fabric, *c2c_dmas_[hemisphere],
                 hardware_configuration_.c2c_streams_per_direction,
-                notify);
+                ready, notify);
         } else {
             if (c2c_outbound_links_[hemisphere] == nullptr
                 || c2c_inbound_links_[hemisphere] == nullptr) {
@@ -964,6 +986,25 @@ private:
             for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
                 for (std::size_t stream = 0;
                      stream < hw::kStreamsPerDirection; ++stream) {
+                    // The VXM output and passive bypass share one boundary
+                    // mux.  A result produced in this cycle owns its output
+                    // byte; an unrelated value on the same numbered input
+                    // stream is discarded instead of being forwarded into
+                    // the same stream register.
+                    auto vxm_output_owns_destination = false;
+                    for (const auto& output : vxm_.outputs_at(tile)) {
+                        if (vxm_.output_stream_destination(output.stream)
+                                != static_cast<Hemisphere>(destination_index)
+                            || stream < output.stream
+                            || stream >= output.stream + output.byte_count) {
+                            continue;
+                        }
+                        vxm_output_owns_destination = true;
+                        break;
+                    }
+                    if (vxm_output_owns_destination) {
+                        continue;
+                    }
                     const auto stream_id = transfer.source.direction
                         == StreamDirection::East
                         ? StreamId::East(stream)
