@@ -1,6 +1,7 @@
 #include "ftlpu/icu/distributed_queue.hpp"
 #include "ftlpu/system/icu.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -123,7 +124,7 @@ try {
             && memDdbLayout.delta_bits == 448
             && memDdbLayout.entry_bits == 723,
         "MEM DDB physical layout has the wrong bit width");
-    require(loadDdbLayout.entry_bits == 697
+    require(loadDdbLayout.entry_bits == 710
             && computeDdbLayout.entry_bits == 741
             && dequantDdbLayout.entry_bits == 630,
         "MXM DDB physical layouts have the wrong bit widths");
@@ -194,21 +195,48 @@ try {
             == 6,
         "compact MXM template did not use prefix/decode stages");
 
-    using BufferedCommitDecoder = IcuMacroV1Decoder<
+    using DirectDdbCommitDecoder = IcuMacroV1Decoder<
         MemInstruction, 96, 1, 3, 64, 1, 8, 1>;
-    BufferedCommitDecoder bufferedCommit(
+    DirectDdbCommitDecoder directCommit(
         IcuMacroQueueKind::Mem, kMemImage);
-    std::size_t bufferedContexts = 0;
-    for (std::size_t cycle = 0; !bufferedCommit.done(); ++cycle) {
+    std::size_t directCommitContexts = 0;
+    for (std::size_t cycle = 0; !directCommit.done(); ++cycle) {
         if (cycle > 64)
             throw std::runtime_error(
-                "buffered-commit Macro decoder did not finish");
-        if (bufferedCommit.tick(true).has_value()) ++bufferedContexts;
+                "direct-commit Macro decoder did not finish");
+        if (directCommit.tick(true).has_value()) ++directCommitContexts;
     }
-    require(bufferedContexts == 2
-            && bufferedCommit.statistics().ddb_entries_committed == 2
-            && bufferedCommit.statistics().decoder_ddb_stall_cycles == 0,
-        "ready/valid DDB commit did not sustain pop/push progress");
+    require(directCommitContexts == 2
+            && directCommit.statistics().ddb_entries_committed == 2
+            && directCommit.statistics().decoder_ddb_stall_cycles == 0,
+        "direct DDB commit did not sustain same-cycle pop/push progress");
+
+    DirectDdbCommitDecoder fullDdb(
+        IcuMacroQueueKind::Mem, kMemImage);
+    for (std::size_t cycle = 0; cycle < 32; ++cycle)
+        static_cast<void>(fullDdb.tick(false));
+    require(fullDdb.ddb_occupancy() == 1
+            && fullDdb.pending_decoded_contexts() == 1
+            && fullDdb.decoded_count() == 1
+            && fullDdb.statistics().ddb_entries_committed == 1
+            && fullDdb.statistics().decoder_ddb_stall_cycles != 0,
+        "full DDB retained a hidden completed descriptor outside its depth");
+
+    using TwoWordReservoirDecoder = IcuMacroV1Decoder<
+        MemInstruction, 96, 1, 2, 64, 8, 8, 8>;
+    static_assert(TwoWordReservoirDecoder::reservoir_words == 2);
+    TwoWordReservoirDecoder twoWordReservoir(
+        IcuMacroQueueKind::Mem, kMemImage);
+    std::size_t twoWordContexts = 0;
+    for (std::size_t cycle = 0; !twoWordReservoir.done(); ++cycle) {
+        if (cycle > 64)
+            throw std::runtime_error(
+                "two-word-reservoir Macro decoder did not finish");
+        if (twoWordReservoir.tick(true).has_value()) ++twoWordContexts;
+    }
+    require(twoWordContexts == 2
+            && twoWordReservoir.statistics().peak_reservoir_bits <= 2 * 96,
+        "two-word Macro reservoir changed decode semantics or overflowed");
 
     bool rejectedInfeasibleCapacity = false;
     try {
@@ -293,6 +321,8 @@ try {
                 {3, 100}, {7, 101}},
         "raw MEM Macro image decoded or issued incorrectly");
     require(constrained.done(), "raw MEM Macro queue did not complete");
+    require(constrained.queued_count() == 0,
+        "completed raw MEM Macro queue retained duplicate work accounting");
     require(constrained.macro_decoder_statistics().fetched_words == 3,
         "raw MEM decoder fetched the wrong number of physical words");
     require(constrained.macro_decoder_statistics().decoded_contexts == 2,
@@ -383,6 +413,38 @@ try {
         "raw Macro statistics reported the wrong decoded-context count");
     require(statistics.peak_macro_reservoir_bits != 0,
         "raw Macro statistics did not expose reservoir occupancy");
+    require(statistics.macro_fetched_words == 9
+            && statistics.macro_decoder_active_cycles != 0,
+        "raw Macro aggregate statistics omitted fetch or decoder activity");
+
+    const auto queueStatistics = icu.macro_queue_frontend_statistics();
+    require(queueStatistics.size() == 4,
+        "raw Macro statistics did not report every configured queue");
+    const auto findQueue = [&](IcuMacroQueueKind kind) {
+        return std::find_if(queueStatistics.begin(), queueStatistics.end(),
+            [&](const IcuMacroQueueFrontendStatistics& queue) {
+                return queue.kind == kind && queue.queue_index == 0;
+            });
+    };
+    const auto memQueue = findQueue(IcuMacroQueueKind::Mem);
+    const auto loadQueue = findQueue(IcuMacroQueueKind::MxmLoad);
+    const auto computeQueue = findQueue(IcuMacroQueueKind::MxmCompute);
+    const auto dequantQueue = findQueue(IcuMacroQueueKind::MxmDequant);
+    require(memQueue != queueStatistics.end()
+            && loadQueue != queueStatistics.end()
+            && computeQueue != queueStatistics.end()
+            && dequantQueue != queueStatistics.end(),
+        "raw Macro per-queue statistics lost a queue identity");
+    require(memQueue->decoder.decoded_contexts == 2
+            && loadQueue->decoder.decoded_contexts == 1
+            && computeQueue->decoder.decoded_contexts == 1
+            && dequantQueue->decoder.decoded_contexts == 1,
+        "raw Macro per-queue statistics reported wrong context counts");
+    require(memQueue->ddb_entry_bits == 723
+            && loadQueue->ddb_entry_bits == 710
+            && computeQueue->ddb_entry_bits == 741
+            && dequantQueue->ddb_entry_bits == 630,
+        "raw Macro per-queue statistics reported wrong DDB layouts");
 
     std::cout << "icu_raw_macro_decoder_test passed: prime_cycles="
               << primeCycles

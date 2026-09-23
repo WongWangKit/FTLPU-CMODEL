@@ -24,6 +24,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace ftlpu {
 
@@ -38,6 +39,7 @@ struct IcuFrontendStatistics {
     std::size_t macro_decoder_context_stall_cycles{0};
     std::size_t peak_macro_reservoir_bits{0};
     std::size_t macro_frontend_cycles{0};
+    std::size_t macro_fetched_words{0};
     std::size_t macro_payload_bits_consumed{0};
     std::size_t macro_reservoir_empty_cycles{0};
     std::size_t macro_reservoir_full_cycles{0};
@@ -47,6 +49,7 @@ struct IcuFrontendStatistics {
     std::size_t macro_mxm_descriptor_count{0};
     std::size_t macro_descriptor_decode_cycles{0};
     std::size_t macro_max_descriptor_decode_cycles{0};
+    std::size_t macro_decoder_active_cycles{0};
     std::size_t macro_decoder_starvation_cycles{0};
     std::size_t macro_decoder_ddb_stall_cycles{0};
     std::size_t macro_ddb_entries{0};
@@ -58,6 +61,7 @@ struct IcuFrontendStatistics {
     std::size_t macro_contexts_generated{0};
     std::size_t macro_timing_window_block_cycles{0};
     std::size_t macro_active_ram_full_cycles{0};
+    std::size_t macro_capacity_feasible_wait_cycles{0};
     std::size_t macro_admission_count{0};
     std::size_t macro_admission_stall_cycles{0};
     std::size_t macro_admission_to_start_cycles{0};
@@ -65,6 +69,27 @@ struct IcuFrontendStatistics {
     std::size_t macro_active_occupancy_samples{0};
     std::size_t macro_context_active_lifetime_cycles{0};
     std::size_t macro_max_context_active_lifetime_cycles{0};
+};
+
+struct IcuMacroQueueFrontendStatistics {
+    IcuMacroQueueKind kind{IcuMacroQueueKind::Mem};
+    std::size_t queue_index{0};
+    std::size_t imem_entries{0};
+    std::size_t fetched_entries{0};
+    std::size_t issued_instructions{0};
+    std::size_t peak_active_contexts{0};
+    std::size_t active_context_capacity{0};
+    std::size_t instruction_bits{0};
+    std::size_t imem_read_latency{0};
+    std::size_t imem_request_initiation_interval{0};
+    std::size_t reservoir_words{0};
+    std::size_t decode_window_bits{0};
+    std::size_t ddb_depth{0};
+    std::size_t ddb_run_capacity{0};
+    std::size_t ddb_entry_bits{0};
+    std::size_t admission_lookahead{0};
+    std::size_t context_expand_width{0};
+    IcuMacroDecoderStatistics decoder{};
 };
 
 class InstructionControlUnit {
@@ -1225,6 +1250,49 @@ public:
         return cycle_;
     }
 
+    std::vector<IcuMacroQueueFrontendStatistics>
+    macro_queue_frontend_statistics() const
+    {
+        std::vector<IcuMacroQueueFrontendStatistics> result;
+        result.reserve(kMemQueues + 3 * kMxmQueues);
+        const auto append = [&](IcuMacroQueueKind kind,
+                                std::size_t index,
+                                const auto& queue) {
+            if (!queue.raw_macro_mode()) return;
+            result.push_back(IcuMacroQueueFrontendStatistics{
+                kind,
+                index,
+                queue.imem_occupancy(),
+                queue.fetched_count(),
+                queue.issued_count(),
+                queue.peak_active_macros(),
+                queue.macro_context_depth,
+                queue.instruction_bits,
+                queue.macro_imem_read_latency,
+                queue.macro_imem_request_initiation_interval,
+                queue.macro_reservoir_words,
+                queue.macro_decode_window_bits,
+                queue.macro_ddb_depth,
+                queue.macro_ddb_run_capacity,
+                queue.macro_ddb_layout().entry_bits,
+                queue.macro_admission_lookahead,
+                queue.macro_context_expand_width,
+                queue.macro_decoder_statistics()});
+        };
+        for (std::size_t index = 0; index < mem_queues_.size(); ++index)
+            append(IcuMacroQueueKind::Mem, index, mem_queues_[index]);
+        for (std::size_t index = 0; index < mxm_load_queues_.size(); ++index)
+            append(IcuMacroQueueKind::MxmLoad, index,
+                mxm_load_queues_[index]);
+        for (std::size_t index = 0; index < mxm_dequant_queues_.size(); ++index)
+            append(IcuMacroQueueKind::MxmDequant, index,
+                mxm_dequant_queues_[index]);
+        for (std::size_t index = 0; index < mxm_compute_queues_.size(); ++index)
+            append(IcuMacroQueueKind::MxmCompute, index,
+                mxm_compute_queues_[index]);
+        return result;
+    }
+
     IcuFrontendStatistics frontend_statistics() const noexcept
     {
         IcuFrontendStatistics statistics;
@@ -1242,6 +1310,7 @@ public:
                 statistics.peak_macro_reservoir_bits,
                 decoder.peak_reservoir_bits);
             statistics.macro_frontend_cycles += decoder.cycles;
+            statistics.macro_fetched_words += decoder.fetched_words;
             statistics.macro_payload_bits_consumed +=
                 decoder.payload_bits_consumed;
             statistics.macro_reservoir_empty_cycles +=
@@ -1260,6 +1329,8 @@ public:
             statistics.macro_max_descriptor_decode_cycles = std::max(
                 statistics.macro_max_descriptor_decode_cycles,
                 decoder.max_descriptor_decode_cycles);
+            statistics.macro_decoder_active_cycles +=
+                decoder.decoder_active_cycles;
             statistics.macro_decoder_starvation_cycles +=
                 decoder.decoder_starvation_cycles;
             statistics.macro_decoder_ddb_stall_cycles +=
@@ -1282,6 +1353,8 @@ public:
                 decoder.timing_window_block_cycles;
             statistics.macro_active_ram_full_cycles +=
                 decoder.active_ram_full_cycles;
+            statistics.macro_capacity_feasible_wait_cycles +=
+                decoder.capacity_feasible_wait_cycles;
             statistics.macro_admission_count += decoder.admission_count;
             statistics.macro_admission_stall_cycles +=
                 decoder.admission_stall_cycles;
@@ -1298,7 +1371,8 @@ public:
                 statistics.macro_max_context_active_lifetime_cycles,
                 decoder.max_context_active_lifetime_cycles);
             const auto peak = queue.peak_active_macros();
-            statistics.macro_queues += peak != 0 ? 1 : 0;
+            statistics.macro_queues +=
+                queue.raw_macro_mode() || peak != 0 ? 1 : 0;
             if (peak > statistics.peak_macro_contexts_per_queue)
                 statistics.peak_macro_contexts_per_queue = peak;
         };

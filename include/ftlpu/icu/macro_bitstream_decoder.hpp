@@ -140,7 +140,7 @@ public:
 
     static_assert(ImemReadLatency > 0);
     static_assert(ImemRequestInitiationInterval > 0);
-    static_assert(ReservoirWords >= 3);
+    static_assert(ReservoirWords >= 2);
     static_assert(DecodeWindowBits > 0 && DecodeWindowBits <= WordBits);
     static_assert(DecodeWindowBits <= 64);
     static_assert(DdbDepth > 0);
@@ -198,8 +198,7 @@ public:
 
     bool done() const noexcept
     {
-        return disabled_ || (state_ == State::Done
-            && !commit_buffer_ && ddb_size_ == 0);
+        return disabled_ || (state_ == State::Done && ddb_size_ == 0);
     }
 
     // Priming stops only at an actual decode-ahead boundary: the parser has
@@ -208,7 +207,7 @@ public:
     {
         return control_latched_
             && (disabled_
-                || (state_ == State::Done && !commit_buffer_)
+                || state_ == State::Done
                 || ddb_size_ == DdbDepth);
     }
 
@@ -230,9 +229,6 @@ public:
             result += ddb_run_count(payload)
                 - ddb_next_context_index(payload);
         }
-        if (commit_buffer_)
-            result += ddb_run_count(commit_buffer_->payload)
-                - ddb_next_context_index(commit_buffer_->payload);
         return result;
     }
     std::size_t reservoir_occupancy_bits() const noexcept
@@ -849,9 +845,6 @@ private:
         auto admitted = expand_and_admit(
             current_cycle, active_occupancy, active_capacity,
             earliest_active_release_cycle);
-        // The DDB may pop above and accept the buffered descriptor in the same
-        // cycle. The parser then sees the released commit credit immediately.
-        drain_commit_buffer();
         // Delta apply (D1) runs before stream decode (D0), allowing delta_q to
         // pop and refill in one cycle without a bypass into the apply datapath.
         apply_delta_queue();
@@ -1014,7 +1007,7 @@ private:
         const bool record_completes_descriptor = state_ == State::Record
             && (building_descriptor_.run_count + 1 == DdbRunCapacity
                 || run_remaining_ == 1);
-        if (record_completes_descriptor && commit_buffer_) {
+        if (record_completes_descriptor && ddb_size_ == DdbDepth) {
             ++statistics_.decoder_ddb_stall_cycles;
             return;
         }
@@ -1518,12 +1511,11 @@ private:
 
         if (descriptor.run_count == DdbRunCapacity
             || run_remaining_ == 0) {
-            if (commit_buffer_)
+            if (ddb_size_ == DdbDepth)
                 throw std::logic_error(
-                    "Macro parser completed a descriptor without commit credit");
+                    "Macro parser completed a descriptor while the DDB was full");
             descriptor.completes_run = run_remaining_ == 0;
-            commit_buffer_ = std::make_unique<DdbSlot>(
-                pack_ddb_slot(building_descriptor_));
+            commit_descriptor(pack_ddb_slot(building_descriptor_));
             if (run_remaining_ != 0) {
                 begin_descriptor_chunk();
             }
@@ -1546,7 +1538,7 @@ private:
         const bool completes_descriptor =
             building_descriptor_.run_count + 1 == DdbRunCapacity
             || run_remaining_ == 1;
-        if (completes_descriptor && commit_buffer_) {
+        if (completes_descriptor && ddb_size_ == DdbDepth) {
             ++statistics_.decoder_ddb_stall_cycles;
             return;
         }
@@ -1577,12 +1569,10 @@ private:
                 "decoded Macro operand is out of range");
     }
 
-    void drain_commit_buffer()
+    void commit_descriptor(DdbSlot slot)
     {
-        if (!commit_buffer_ || ddb_size_ == DdbDepth)
-            return;
-        auto slot = std::move(*commit_buffer_);
-        commit_buffer_.reset();
+        if (ddb_size_ == DdbDepth)
+            throw std::logic_error("commit into full Macro DDB");
         slot.sidecar.commit_cycle = statistics_.cycles;
         if (slot.sidecar.completes_run) {
             const auto latency = statistics_.cycles
@@ -1803,7 +1793,6 @@ private:
     std::size_t decoded_count_{0};
     std::size_t run_decode_start_cycle_{0};
     DecodedDescriptor building_descriptor_{};
-    std::unique_ptr<DdbSlot> commit_buffer_{};
     // Heap allocation is a host-model detail that keeps thousands of dormant
     // ICU queue objects small; the modeled hardware remains a fixed DDB RAM.
     std::unique_ptr<std::array<DdbSlot, DdbDepth>> ddb_storage_{};

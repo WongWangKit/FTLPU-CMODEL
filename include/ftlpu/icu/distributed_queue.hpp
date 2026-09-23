@@ -302,7 +302,7 @@ public:
     static_assert(IqDepth > 0);
     static_assert(FetchLatency > 0);
     static_assert(MacroContextDepth > 0);
-    static_assert(MacroReservoirWords >= 3);
+    static_assert(MacroReservoirWords >= 2);
     static_assert(MacroDecodeWindowBits > 0
         && MacroDecodeWindowBits <= InstructionBits);
     static_assert(MacroDdbDepth > 0);
@@ -319,6 +319,8 @@ public:
     static constexpr std::size_t macro_decode_window_bits =
         MacroDecodeWindowBits;
     static constexpr std::size_t macro_ddb_depth = MacroDdbDepth;
+    static constexpr std::size_t macro_ddb_run_capacity =
+        MacroDdbRunCapacity;
     static constexpr std::size_t macro_admission_lookahead =
         MacroAdmissionLookahead;
     static constexpr std::size_t macro_imem_read_latency = FetchLatency;
@@ -488,6 +490,12 @@ public:
         static const IcuMacroDecoderStatistics empty{};
         return macro_decoder_.has_value()
             ? macro_decoder_->statistics() : empty;
+    }
+
+    IcuMacroDdbLayout macro_ddb_layout() const noexcept
+    {
+        return macro_decoder_.has_value()
+            ? macro_decoder_->ddb_layout() : IcuMacroDdbLayout{};
     }
 
     void write_imem(std::size_t address, FuncInstruction instruction)
@@ -941,8 +949,6 @@ private:
                << decoded->schedule.start_cycle << " at cycle " << cycle_;
             throw StaticScheduleError(os.str());
         }
-        macro_remaining_points_ += decoded->schedule.inner_count
-            * decoded->schedule.outer_count;
         activate_macro(
             IcuMacroInstruction<FuncInstruction>{
                 decoded->schedule, std::move(decoded->instruction)},
