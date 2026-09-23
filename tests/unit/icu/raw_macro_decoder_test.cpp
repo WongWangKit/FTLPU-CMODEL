@@ -440,6 +440,11 @@ try {
             && computeQueue->decoder.decoded_contexts == 1
             && dequantQueue->decoder.decoded_contexts == 1,
         "raw Macro per-queue statistics reported wrong context counts");
+    require(memQueue->active_context_bits == 256
+            && loadQueue->active_context_bits == 256
+            && computeQueue->active_context_bits == 256
+            && dequantQueue->active_context_bits == 256,
+        "raw Macro per-queue statistics reported the wrong context width");
     require(memQueue->ddb_entry_bits == 723
             && loadQueue->ddb_entry_bits == 710
             && computeQueue->ddb_entry_bits == 741

@@ -79,6 +79,7 @@ struct IcuMacroQueueFrontendStatistics {
     std::size_t issued_instructions{0};
     std::size_t peak_active_contexts{0};
     std::size_t active_context_capacity{0};
+    std::size_t active_context_bits{0};
     std::size_t instruction_bits{0};
     std::size_t imem_read_latency{0};
     std::size_t imem_request_initiation_interval{0};
@@ -177,6 +178,13 @@ public:
         hw::kIcuC2cMacroContextDepth>;
     using MemRawImemWord = MemIcu::RawImemWord;
     using MxmRawImemWord = MxmIcu::RawImemWord;
+
+    static_assert(MemIcu::macro_context_bits
+        == hw::kIcuMemMacroContextBits);
+    static_assert(MxmIcu::macro_context_bits
+        == hw::kIcuMxmMacroContextBits);
+    static_assert(MxmDequantIcu::macro_context_bits
+        == hw::kIcuMxmMacroContextBits);
 
     explicit InstructionControlUnit(
         std::size_t barrier_latency_cycles = hw::kIcuBarrierLatencyCycles)
@@ -1267,6 +1275,7 @@ public:
                 queue.issued_count(),
                 queue.peak_active_macros(),
                 queue.macro_context_depth,
+                queue.macro_context_bits,
                 queue.instruction_bits,
                 queue.macro_imem_read_latency,
                 queue.macro_imem_request_initiation_interval,

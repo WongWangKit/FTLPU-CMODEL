@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ftlpu/icu/active_macro_context.hpp"
 #include "ftlpu/icu/instruction.hpp"
 #include "ftlpu/icu/macro_bitstream_decoder.hpp"
 #include "ftlpu/mem/slice.hpp"
@@ -327,6 +328,10 @@ public:
     static constexpr std::size_t macro_imem_request_initiation_interval =
         MacroImemRequestInitiationInterval;
     static constexpr std::size_t macro_context_expand_width = 1;
+    static constexpr std::size_t macro_context_bits =
+        IcuPackedActiveMacroContext256::bit_count;
+    static constexpr std::size_t macro_context_words =
+        IcuPackedActiveMacroContext256::word_count;
     static constexpr std::size_t macro_issue_compare_width =
         MacroContextDepth;
     static constexpr std::size_t macro_issue_cycle_bits =
@@ -1636,28 +1641,42 @@ private:
         }
     }
 
-    struct ActiveMacro {
-        IcuMacroInstruction<FuncInstruction> macro;
-        std::size_t pc{0};
-        std::size_t inner{0};
-        std::size_t outer{0};
-        std::size_t admission_cycle{0};
-        std::uint32_t next_issue_cycle{0};
-        std::uint32_t final_issue_cycle{0};
+    using ActiveMacroCodec =
+        IcuActiveMacroContextCodec256<FuncInstruction>;
+    using PackedActiveMacro = typename ActiveMacroCodec::Packed;
 
-        std::size_t issue_cycle() const noexcept
+    // record_index and admission_cycle are CModel observability sidecars. They
+    // are indexed by the physical slot but are not part of the 256-bit RAM.
+    struct ActiveMacroSlot {
+        PackedActiveMacro payload{};
+        std::size_t pc{0};
+        std::size_t admission_cycle{0};
+
+        bool valid() const noexcept
         {
-            return next_issue_cycle;
+            return ActiveMacroCodec::valid(payload);
         }
 
-        std::size_t release_cycle() const noexcept
+        std::size_t issue_cycle() const
         {
-            return final_issue_cycle;
+            return ActiveMacroCodec::issue_cycle(payload);
+        }
+
+        std::size_t release_cycle() const
+        {
+            return ActiveMacroCodec::release_cycle(payload);
+        }
+
+        void reset() noexcept
+        {
+            payload = {};
+            pc = 0;
+            admission_cycle = 0;
         }
     };
 
     using ActiveMacroStorage =
-        std::array<std::optional<ActiveMacro>, MacroContextDepth>;
+        std::array<ActiveMacroSlot, MacroContextDepth>;
 
     std::optional<FuncInstruction> tick_macros()
     {
@@ -1712,7 +1731,7 @@ private:
         auto slot = active_macro_storage_->end();
         for (auto it = active_macro_storage_->begin();
              it != active_macro_storage_->end(); ++it) {
-            if (!it->has_value()) {
+            if (!it->valid()) {
                 slot = it;
                 break;
             }
@@ -1721,18 +1740,12 @@ private:
             throw std::logic_error(
                 "Active Context RAM credit disagrees with its valid bits");
 
-        const auto firstIssue = static_cast<std::uint32_t>(
-            macro.schedule.start_cycle);
-        const auto finalIssue = static_cast<std::uint32_t>(
-            macro.schedule.start_cycle
-            + (macro.schedule.outer_count - 1)
-                * macro.schedule.outer_interval
-            + (macro.schedule.inner_count - 1)
-                * macro.schedule.inner_interval);
+        auto payload = ActiveMacroCodec::pack_initial(
+            macro.schedule, macro.instruction);
         macro_remaining_points_ += macro.schedule.inner_count
             * macro.schedule.outer_count;
-        slot->emplace(ActiveMacro{std::move(macro), pc, 0, 0,
-            admission_cycle, firstIssue, finalIssue});
+        *slot = ActiveMacroSlot{
+            std::move(payload), pc, admission_cycle};
         ++active_macro_count_;
         peak_active_macros_ = std::max(
             peak_active_macros_, active_macro_count_);
@@ -1747,11 +1760,11 @@ private:
         std::optional<std::size_t> selectedSlot;
         for (std::size_t slot = 0; slot < MacroContextDepth; ++slot) {
             const auto& active = (*active_macro_storage_)[slot];
-            if (!active.has_value()) continue;
-            if (active->issue_cycle() < cycle_)
+            if (!active.valid()) continue;
+            if (active.issue_cycle() < cycle_)
                 throw StaticScheduleError(
                     "ICU macro expansion missed an issue cycle");
-            if (active->issue_cycle() != cycle_) continue;
+            if (active.issue_cycle() != cycle_) continue;
             if (selectedSlot.has_value())
                 throw StaticScheduleError(
                     "overlapping ICU macros issue on the same queue cycle");
@@ -1763,37 +1776,23 @@ private:
             return std::nullopt;
         }
         auto& dueSlot = (*active_macro_storage_)[*selectedSlot];
-        auto& due = *dueSlot;
-
-        const auto delta = static_cast<std::int64_t>(due.inner)
-                * due.macro.schedule.inner_stride
-            + static_cast<std::int64_t>(due.outer)
-                * due.macro.schedule.outer_stride;
-        auto result = detail::apply_icu_repeat_2d_stride(
-            due.macro.instruction,
-            due.macro.schedule.induction_target, delta);
+        auto due = ActiveMacroCodec::unpack(dueSlot.payload);
+        auto result = due.instruction;
         last_dispatched_ = result;
-        last_dispatched_pc_ = due.pc;
-        last_trace_.issue_pc = due.pc;
+        last_dispatched_pc_ = dueSlot.pc;
+        last_trace_.issue_pc = dueSlot.pc;
         last_trace_.action = IcuQueueAction::MacroIssue;
         ++issued_count_;
         --macro_remaining_points_;
 
-        ++due.inner;
-        if (due.inner == due.macro.schedule.inner_count) {
-            due.inner = 0;
-            ++due.outer;
-        }
-        if (due.outer != due.macro.schedule.outer_count) {
-            due.next_issue_cycle = static_cast<std::uint32_t>(
-                due.macro.schedule.start_cycle
-                + due.outer * due.macro.schedule.outer_interval
-                + due.inner * due.macro.schedule.inner_interval);
+        const bool complete = ActiveMacroCodec::advance_after_issue(due);
+        if (!complete) {
+            dueSlot.payload = ActiveMacroCodec::pack(due);
         } else if (raw_macro_mode_ && macro_decoder_.has_value()) {
             macro_decoder_->record_context_completion(
-                due.admission_cycle, cycle_);
+                dueSlot.admission_cycle, cycle_);
         }
-        if (due.outer == due.macro.schedule.outer_count) {
+        if (complete) {
             dueSlot.reset();
             --active_macro_count_;
         }
@@ -1807,8 +1806,8 @@ private:
         if (active_macro_count_ == 0) return std::nullopt;
         std::optional<std::size_t> result;
         for (const auto& active : *active_macro_storage_) {
-            if (!active.has_value()) continue;
-            const auto release = active->release_cycle();
+            if (!active.valid()) continue;
+            const auto release = active.release_cycle();
             result = result.has_value()
                 ? std::min(*result, release)
                 : std::optional<std::size_t>{release};

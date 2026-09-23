@@ -144,11 +144,12 @@ constexpr std::size_t kIcuMxmMacroContextDepth = 40;
 constexpr std::size_t kIcuVxmMacroContextDepth = 4;
 constexpr std::size_t kIcuSxmMacroContextDepth = 4;
 constexpr std::size_t kIcuC2cMacroContextDepth = 4;
-// Five 32-bit words hold the decoded template, loop state, next issue cycle,
-// and base induction value. The bitstream remains packed in i-MEM; contexts
-// are the independently addressable expansion state.
-constexpr std::size_t kIcuMemMacroContextBits = 160;
-constexpr std::size_t kIcuMxmMacroContextBits = 160;
+// Eight 32-bit words hold the native instruction, 16-bit loop counters,
+// normalized cycle/operand steps, and absolute next/final issue cycles. The
+// bitstream remains packed in i-MEM; contexts are the independently
+// addressable expansion state.
+constexpr std::size_t kIcuMemMacroContextBits = 256;
+constexpr std::size_t kIcuMxmMacroContextBits = 256;
 
 constexpr std::size_t kMxmsPerHemisphere = 2;
 constexpr std::size_t kMxmCount = kHemispheres * kMxmsPerHemisphere;
