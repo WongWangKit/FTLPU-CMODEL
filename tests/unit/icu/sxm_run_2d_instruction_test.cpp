@@ -13,24 +13,59 @@ void require(bool condition, const char* message)
     if (!condition) throw std::runtime_error(message);
 }
 
+ftlpu::SxmInstruction::StreamList stream_range(
+    std::size_t base, std::size_t count)
+{
+    auto streams = ftlpu::SxmInstruction::StreamList{};
+    for (std::size_t index = 0; index < count; ++index)
+        streams.push_back(ftlpu::SxmStreamId {base + index});
+    return streams;
+}
+
 } // namespace
 
 int main() try
 {
     using namespace ftlpu;
-    using Queue = DistributedIcuQueue<SxmInstruction,
+    using PermuteQueue = DistributedIcuQueue<SxmInstruction,
         hw::kIcuSxmInstructionBits, 64, 16, 1, 1,
-        IcuQueueRole::Sxm>;
+        IcuQueueRole::SxmPermute>;
+    using TransposeQueue = DistributedIcuQueue<SxmInstruction,
+        hw::kIcuSxmInstructionBits, 64, 16, 1, 1,
+        IcuQueueRole::SxmTranspose>;
+
+    auto transpose = SxmInstruction::Transpose(
+        stream_range(0, 16), stream_range(16, 16));
+    transpose.input_row = 3;
+    transpose.src_streams = stream_range(4, 2);
+    const auto transposeRun = SxmIcuRun2DInstruction::Run2D(
+        0, {2, 3}, {4, 19}, transpose);
+    const auto transposePacket =
+        isa::encode_sxm_transpose_icu_run_2d_instruction(transposeRun);
+    const auto decodedTranspose =
+        isa::decode_sxm_transpose_icu_run_2d_instruction(transposePacket);
+    require(decodedTranspose.loop.counts
+                == std::array<std::size_t, 3> {2, 3, 1}
+            && decodedTranspose.instruction.input_row == 3
+            && decodedTranspose.instruction.src_streams
+                == stream_range(4, 2)
+            && decodedTranspose.instruction.dst_streams
+                == stream_range(16, 16),
+        "SXM transpose compact packet lost a consumed field");
+    TransposeQueue transposeQueue;
+    transposeQueue.push_sxm_run_2d(transposeRun);
+    require(transposeQueue.imem_occupancy() == 2,
+        "SXM transpose RUN_2D must occupy two local i-MEM words");
 
     auto map = SxmInstruction::PermuteMap {};
     for (std::size_t lane = 0; lane < map.size(); ++lane)
         map[lane] = (lane + hw::kLanesPerTile) % map.size();
     const auto tile = SxmInstruction::Permute(
-        {{0}, {1}}, {{16}, {17}}, map);
+        stream_range(0, 16), stream_range(16, 16), map);
     const auto run = SxmIcuRun2DInstruction::Run2D(
         0, {3, 2}, {2, 13}, tile, 8);
-    const auto packet = isa::encode_sxm_icu_run_2d_instruction(run);
-    const auto decoded = isa::decode_sxm_icu_run_2d_instruction(packet);
+    const auto packet = isa::encode_sxm_permute_icu_run_2d_instruction(run);
+    const auto decoded = isa::decode_sxm_permute_icu_run_2d_instruction(packet);
     require(decoded.loop.start_cycle == 0
             && decoded.loop.counts
                 == std::array<std::size_t, 3> {3, 2, 1}
@@ -41,11 +76,11 @@ int main() try
             && decoded.permute_map_stride == 8,
         "SXM RUN_2D codec round trip changed the packet");
 
-    Queue queue;
+    PermuteQueue queue;
     queue.push_nop(7);
     queue.push_sxm_run_2d(run);
-    require(queue.imem_occupancy() == 7,
-        "SXM launch delay plus RUN_2D must occupy seven local i-MEM words");
+    require(queue.imem_occupancy() == 5,
+        "SXM launch delay plus RUN_2D must occupy five local i-MEM words");
     std::vector<std::size_t> issueCycles;
     std::size_t launch = 0;
     for (std::size_t cycle = 0; cycle <= 24; ++cycle) {
@@ -65,13 +100,13 @@ int main() try
     auto waitedRun = run;
     waitedRun.loop.wait_cycle = 7;
     const auto waitedPacket =
-        isa::encode_sxm_icu_run_2d_instruction(waitedRun);
-    require(isa::decode_sxm_icu_run_2d_instruction(
+        isa::encode_sxm_permute_icu_run_2d_instruction(waitedRun);
+    require(isa::decode_sxm_permute_icu_run_2d_instruction(
                 waitedPacket).loop.wait_cycle == 7,
         "SXM RUN_2D lost its encoded wait_cycle");
-    Queue waitedQueue;
+    PermuteQueue waitedQueue;
     waitedQueue.push_sxm_run_2d(waitedRun);
-    require(waitedQueue.imem_occupancy() == 6,
+    require(waitedQueue.imem_occupancy() == 4,
         "SXM wait_cycle should replace the NOP i-MEM word");
     std::vector<std::size_t> waitedIssueCycles;
     for (std::size_t cycle = 0; cycle <= 24; ++cycle)
@@ -86,14 +121,14 @@ int main() try
     absoluteStart.loop.start_cycle = 7;
     bool rejectedAbsoluteStart = false;
     try {
-        (void)isa::encode_sxm_icu_run_2d_instruction(absoluteStart);
+        (void)isa::encode_sxm_permute_icu_run_2d_instruction(absoluteStart);
     } catch (const std::invalid_argument&) {
         rejectedAbsoluteStart = true;
     }
     require(rejectedAbsoluteStart,
         "SXM RUN_2D accepted an absolute start cycle");
 
-    Queue sequential;
+    PermuteQueue sequential;
     for (std::size_t phase = 0; phase < 4; ++phase) {
         sequential.push_sxm_run_2d(SxmIcuRun2DInstruction::Run2D(
             0, {2, 1}, {8, 1}, tile));
@@ -109,8 +144,8 @@ int main() try
     std::cout << "sxm_run_2d_instruction_test passed: "
               << "launches=6 active_contexts="
               << hw::kIcuSxmRun2DContextDepth
-              << " packet_words=6 program_words=7 context_bits="
-              << hw::kIcuSxmRun2DContextBits << '\n';
+              << " packet_words=4 program_words=5 context_bits="
+              << hw::kIcuSxmPermuteRun2DContextBits << '\n';
     return 0;
 } catch (const std::exception& error) {
     std::cerr << "sxm_run_2d_instruction_test failed: "

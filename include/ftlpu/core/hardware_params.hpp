@@ -164,8 +164,11 @@ constexpr std::size_t kIcuMxmCompute3DContextBits = 320;
 // Compact VXM config (96), two-counter launch fields/state, and local i-MEM
 // PC. The third counter used by MEM/MXM does not exist in this context.
 constexpr std::size_t kIcuVxmRun2DContextBits = 256;
-// Encoded SXM tile-local instruction (416), two-counter launch state, and PC.
-constexpr std::size_t kIcuSxmRun2DContextBits = 512;
+// Queue-local compact SXM fields, two-counter launch state, and PC. Transpose
+// carries two stream bases and one input-row selector; Permute additionally
+// carries the 32-lane map and output selectors.
+constexpr std::size_t kIcuSxmTransposeRun2DContextBits = 256;
+constexpr std::size_t kIcuSxmPermuteRun2DContextBits = 384;
 
 constexpr std::size_t kMxmsPerHemisphere = 2;
 constexpr std::size_t kMxmCount = kHemispheres * kMxmsPerHemisphere;

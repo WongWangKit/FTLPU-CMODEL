@@ -89,7 +89,8 @@ enum class IcuQueueRole : std::uint8_t {
     MxmDequant,
     MxmCompute,
     Vxm,
-    Sxm,
+    SxmTranspose,
+    SxmPermute,
     C2cTx,
     C2cRx,
     C2cDma,
@@ -102,7 +103,14 @@ constexpr bool is_fu_loop_queue_role(IcuQueueRole role) noexcept
         || role == IcuQueueRole::MxmDequant
         || role == IcuQueueRole::MxmCompute
         || role == IcuQueueRole::Vxm
-        || role == IcuQueueRole::Sxm;
+        || role == IcuQueueRole::SxmTranspose
+        || role == IcuQueueRole::SxmPermute;
+}
+
+constexpr bool is_sxm_queue_role(IcuQueueRole role) noexcept
+{
+    return role == IcuQueueRole::SxmTranspose
+        || role == IcuQueueRole::SxmPermute;
 }
 
 template <typename FuncInstruction, typename... ThreeDInstructions>
@@ -147,9 +155,13 @@ struct IqEntryForRole<FuncInstruction, IcuQueueRole::Vxm> {
 };
 
 template <typename FuncInstruction>
-struct IqEntryForRole<FuncInstruction, IcuQueueRole::Sxm> {
+struct IqEntryForRole<FuncInstruction, IcuQueueRole::SxmTranspose> {
     using Type = isa::EncodedSxmIcuRun2DWord;
 };
+
+template <typename FuncInstruction>
+struct IqEntryForRole<FuncInstruction, IcuQueueRole::SxmPermute>
+    : IqEntryForRole<FuncInstruction, IcuQueueRole::SxmTranspose> {};
 
 template <typename FuncInstruction>
 struct IqEntryForRole<FuncInstruction, IcuQueueRole::C2cTx> {
@@ -206,9 +218,13 @@ struct Icu3DInstructionForRole<IcuQueueRole::Vxm> {
 };
 
 template <>
-struct Icu3DInstructionForRole<IcuQueueRole::Sxm> {
+struct Icu3DInstructionForRole<IcuQueueRole::SxmTranspose> {
     using Type = SxmIcuRun2DInstruction;
 };
+
+template <>
+struct Icu3DInstructionForRole<IcuQueueRole::SxmPermute>
+    : Icu3DInstructionForRole<IcuQueueRole::SxmTranspose> {};
 
 template <>
 struct Icu3DInstructionForRole<IcuQueueRole::C2cTx> {
@@ -289,9 +305,15 @@ struct Icu3DEncodingForRole<IcuQueueRole::Vxm> {
 };
 
 template <>
-struct Icu3DEncodingForRole<IcuQueueRole::Sxm> {
+struct Icu3DEncodingForRole<IcuQueueRole::SxmTranspose> {
     using Word = isa::EncodedSxmIcuRun2DWord;
-    using Packet = isa::EncodedSxmIcuRun2DPacket;
+    using Packet = isa::EncodedSxmTransposeIcuRun2DPacket;
+};
+
+template <>
+struct Icu3DEncodingForRole<IcuQueueRole::SxmPermute> {
+    using Word = isa::EncodedSxmIcuRun2DWord;
+    using Packet = isa::EncodedSxmPermuteIcuRun2DPacket;
 };
 
 template <>
@@ -360,10 +382,19 @@ struct Icu3DContextForRole<IcuQueueRole::Vxm> {
 };
 
 template <>
-struct Icu3DContextForRole<IcuQueueRole::Sxm> {
+struct Icu3DContextForRole<IcuQueueRole::SxmTranspose> {
     static constexpr std::size_t depth = hw::kIcuSxmRun2DContextDepth;
-    static constexpr std::size_t bits = hw::kIcuSxmRun2DContextBits;
-    static constexpr std::size_t minimum_bits = 491;
+    static constexpr std::size_t bits =
+        hw::kIcuSxmTransposeRun2DContextBits;
+    static constexpr std::size_t minimum_bits = 200;
+};
+
+template <>
+struct Icu3DContextForRole<IcuQueueRole::SxmPermute> {
+    static constexpr std::size_t depth = hw::kIcuSxmRun2DContextDepth;
+    static constexpr std::size_t bits =
+        hw::kIcuSxmPermuteRun2DContextBits;
+    static constexpr std::size_t minimum_bits = 365;
 };
 
 template <>
@@ -704,7 +735,7 @@ public:
             || (QueueRole == IcuQueueRole::Vxm
                 && std::is_same_v<FuncInstruction,
                     VxmCompactInstruction>)
-            || (QueueRole == IcuQueueRole::Sxm
+            || (is_sxm_queue_role(QueueRole)
                 && std::is_same_v<FuncInstruction, SxmInstruction>)
             || ((QueueRole == IcuQueueRole::C2cTx
                     || QueueRole == IcuQueueRole::C2cRx)
@@ -1209,10 +1240,14 @@ public:
 
     void push_sxm_run_2d(SxmIcuRun2DInstruction instruction)
         requires (std::is_same_v<FuncInstruction, SxmInstruction>
-            && QueueRole == IcuQueueRole::Sxm)
+            && is_sxm_queue_role(QueueRole))
     {
-        append_3d_packet(
-            isa::encode_sxm_icu_run_2d_instruction(instruction));
+        if constexpr (QueueRole == IcuQueueRole::SxmTranspose)
+            append_3d_packet(
+                isa::encode_sxm_transpose_icu_run_2d_instruction(instruction));
+        else
+            append_3d_packet(
+                isa::encode_sxm_permute_icu_run_2d_instruction(instruction));
     }
 
     // Binary loaders already own hardware-formatted FU packets. Preserve
@@ -1321,7 +1356,7 @@ public:
     void push_sxm_tile_program(IcuSxmTileProgramSchedule schedule,
         FuncInstruction instruction)
     {
-        if constexpr (QueueRole == IcuQueueRole::Sxm) {
+        if constexpr (is_sxm_queue_role(QueueRole)) {
             validate_stream_nd_schedule(schedule);
             const bool hasOperandInduction = std::any_of(
                 schedule.operand_strides.begin(),
@@ -1942,7 +1977,7 @@ private:
             } else if constexpr (QueueRole == IcuQueueRole::MxmDequant) {
                 encoded = isa::encode_mxm_dequant_instruction(instruction);
             } else if constexpr (QueueRole == IcuQueueRole::Vxm
-                || QueueRole == IcuQueueRole::Sxm) {
+                || is_sxm_queue_role(QueueRole)) {
                 throw std::invalid_argument(
                     "VXM/SXM raw queues accept RUN_2D packets, not standalone words");
             } else if constexpr (QueueRole == IcuQueueRole::C2cTx
@@ -3184,8 +3219,10 @@ private:
             return isa::decode_mxm_compute_icu_3d_instruction(packet);
         } else if constexpr (QueueRole == IcuQueueRole::Vxm) {
             return isa::decode_vxm_icu_run_2d_instruction(packet);
-        } else if constexpr (QueueRole == IcuQueueRole::Sxm) {
-            return isa::decode_sxm_icu_run_2d_instruction(packet);
+        } else if constexpr (QueueRole == IcuQueueRole::SxmTranspose) {
+            return isa::decode_sxm_transpose_icu_run_2d_instruction(packet);
+        } else if constexpr (QueueRole == IcuQueueRole::SxmPermute) {
+            return isa::decode_sxm_permute_icu_run_2d_instruction(packet);
         } else {
             static_cast<void>(packet);
             throw std::logic_error(
@@ -3205,8 +3242,10 @@ private:
             detail::validate_mxm_compute_icu_instruction(instruction);
         } else if constexpr (QueueRole == IcuQueueRole::Vxm) {
             detail::validate_vxm_icu_run_2d_instruction(instruction);
-        } else if constexpr (QueueRole == IcuQueueRole::Sxm) {
-            detail::validate_sxm_icu_run_2d_instruction(instruction);
+        } else if constexpr (QueueRole == IcuQueueRole::SxmTranspose) {
+            detail::validate_sxm_transpose_icu_run_2d_instruction(instruction);
+        } else if constexpr (QueueRole == IcuQueueRole::SxmPermute) {
+            detail::validate_sxm_permute_icu_run_2d_instruction(instruction);
         } else {
             static_cast<void>(instruction);
             static_cast<void>(headerPc);
@@ -3302,7 +3341,7 @@ private:
                 active.instruction, active.coordinate);
         } else if constexpr (QueueRole == IcuQueueRole::Vxm) {
             return active.instruction.instruction;
-        } else if constexpr (QueueRole == IcuQueueRole::Sxm) {
+        } else if constexpr (is_sxm_queue_role(QueueRole)) {
             auto result = active.instruction.instruction;
             if (result.opcode == SxmOpcode::Permute
                 && active.instruction.permute_map_stride != 0) {

@@ -101,14 +101,22 @@ public:
         hw::kIcuFetchLatencyCycles,
         hw::kIcuMxmMacroContextDepth,
         IcuQueueRole::MxmCompute>;
-    using SxmIcu = DistributedIcuQueue<
+    using SxmTransposeIcu = DistributedIcuQueue<
         SxmInstruction,
         hw::kIcuSxmInstructionBits,
         hw::kIcuSxmImemDepth,
         hw::kIcuSxmIqDepth,
         hw::kIcuFetchLatencyCycles,
         hw::kIcuSxmMacroContextDepth,
-        IcuQueueRole::Sxm>;
+        IcuQueueRole::SxmTranspose>;
+    using SxmPermuteIcu = DistributedIcuQueue<
+        SxmInstruction,
+        hw::kIcuSxmInstructionBits,
+        hw::kIcuSxmImemDepth,
+        hw::kIcuSxmIqDepth,
+        hw::kIcuFetchLatencyCycles,
+        hw::kIcuSxmMacroContextDepth,
+        IcuQueueRole::SxmPermute>;
     using C2cTxIcu = DistributedIcuQueue<
         C2cInstruction,
         hw::kIcuC2cInstructionBits,
@@ -967,10 +975,10 @@ public:
             if (location.unit >= hw::kHemispheres || location.index > 1)
                 throw std::out_of_range(
                     "ICU tagged SXM location is outside the chip");
-            (location.index == 0
-                    ? sxm_transpose_queues_[location.unit]
-                    : sxm_permute_queues_[location.unit])
-                .notify(event_tag);
+            if (location.index == 0)
+                sxm_transpose_queues_[location.unit].notify(event_tag);
+            else
+                sxm_permute_queues_[location.unit].notify(event_tag);
             return;
         case IcuLocationKind::C2cTx:
             c2c_tx_queues_.at(location.unit).notify(event_tag);
@@ -1320,12 +1328,12 @@ public:
         return mxm_compute_queues_[mxm];
     }
 
-    SxmIcu& sxm_transpose_iq(Hemisphere hemisphere)
+    SxmTransposeIcu& sxm_transpose_iq(Hemisphere hemisphere)
     {
         return sxm_transpose_queues_[hemisphere_index(hemisphere)];
     }
 
-    SxmIcu& sxm_permute_iq(Hemisphere hemisphere)
+    SxmPermuteIcu& sxm_permute_iq(Hemisphere hemisphere)
     {
         return sxm_permute_queues_[hemisphere_index(hemisphere)];
     }
@@ -1575,8 +1583,8 @@ private:
     std::array<MxmDequantIcu, kMxmQueues>
         mxm_dequant_queues_{};
     std::array<MxmComputeIcu, kMxmQueues> mxm_compute_queues_{};
-    std::array<SxmIcu, hw::kHemispheres> sxm_transpose_queues_{};
-    std::array<SxmIcu, hw::kHemispheres> sxm_permute_queues_{};
+    std::array<SxmTransposeIcu, hw::kHemispheres> sxm_transpose_queues_{};
+    std::array<SxmPermuteIcu, hw::kHemispheres> sxm_permute_queues_{};
     std::array<C2cTxIcu, hw::kHemispheres> c2c_tx_queues_{};
     std::array<C2cDmaIcu, hw::kHemispheres> c2c_dma_queues_{};
     std::array<C2cRxIcu, hw::kHemispheres> c2c_rx_queues_{};
