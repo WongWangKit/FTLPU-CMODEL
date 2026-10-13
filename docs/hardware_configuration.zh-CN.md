@@ -148,8 +148,12 @@ slice_depth      = 2 × 8192 = 16384 rows
 
 ### VXM
 
-`vxm.alus` 表示每个镜像方向上的 VXM ALU 数量。默认每个方向为 8，两个方向共
-`2 × 8 = 16` 个物理 ALU，因此 Software 的 `ftlpu.target` 中显示 `vxm_alus = 16`。
+`vxm.alus` 表示 VXM 每个 lane 的独立可调度物理列总数。构建时会据此生成
+`hw::kVxmAluCount`，并同时确定 VALU/SR 数组、VXM ICU queue 数和路由长度。该值必须
+至少为 16 且为 8 的倍数：每个方向至少保留一条完整 8 列链，链内的
+Basic/Exp/Basic/Reciprocal-Rsqrt 能力按四列一组重复。默认配置为 16，即
+`C0..C15`；改为 24 时物理资源和 ICU queue 自动变为 `C0..C23`。Software 使用同一
+JSON 后，`ftlpu.target` 的 `vxm_alus` 与之保持一致。
 
 ## 创建和修改配置
 

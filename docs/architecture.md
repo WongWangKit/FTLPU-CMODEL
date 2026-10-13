@@ -234,12 +234,16 @@ GEMM engine or runtime helper.
 
 ## 6. VXM
 
-The central VXM contains four superlanes, eight lanes per superlane, and 16
-physical ALUs per lane. They form two mirrored 8-stage datapaths. Eight compact
-ICU queues control logical stages `C0..C7`; the superlane decoder mirrors each
-configuration onto physical stage `C(i+8)`. Data and pipeline state remain
-independent between the two chains, and the same decoded configuration is
-broadcast across all physical lanes.
+The central VXM contains four superlanes, eight lanes per superlane, and
+`vxm.alus` physical ALUs per lane (16 by default). Each physical column
+`C0..C(N-1)` is an independently
+schedulable column slice with its own compact ICU queue, decoder, current/next
+configuration registers, and repeat state. The decoded configuration is still
+broadcast across all physical lanes in a superlane. Ordinary stream-register
+columns are interleaved with the VALU columns: eastbound values encounter
+`C0..C(N-1)`, while westbound values encounter them in reverse order. A VALU instruction
+names its source and destination SRs. Values on SRs that the VALU does not
+consume continue through the normal passive SR link.
 
 Supported opcodes are:
 
@@ -248,8 +252,11 @@ Bypass Add Subtract Multiply Negate Max Exp Reciprocal Rsqrt
 ```
 
 Operands use fixed stream groups, previous/original/auxiliary values,
-accumulator or feedback state, local scalars, and FP32 immediates. The active
-chain depth is 2, 4, or 8. Each of the sixteen 2-byte input groups can select
+accumulator state and FP32 immediates. `Previous`, `Original`, `Auxiliary`,
+`Feedback`, and chain depth are compiler concepts rather than hardware muxes:
+lowering assigns ordinary SR numbers to every dependency before encoding the
+ICU instruction. Each 16-bit operand names the low byte SR of an aligned pair,
+and the result SR names the first byte of the cast result. Each of the sixteen 2-byte input groups can select
 the east or west hemisphere; each two-stage output block has a fixed stream
 pair and a configurable destination hemisphere. Results can remain local or
 be emitted as FP16, BF16, INT8, or FP32 stream data.

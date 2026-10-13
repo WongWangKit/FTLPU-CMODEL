@@ -40,6 +40,12 @@ struct SxmInstruction {
     static constexpr std::size_t kZeroFill = static_cast<std::size_t>(-1);
     static constexpr std::size_t kAllOutputRows = static_cast<std::size_t>(-1);
     static constexpr std::size_t kAllInputRows = static_cast<std::size_t>(-1);
+    // Select one byte-stream pair and fan it out to every transpose row.
+    // Selector 8 retains the existing all-rows encoding; 9 is broadcast.
+    static constexpr std::size_t kBroadcastInputRows = 9;
+    // Selectors 9..15 emit row 0..6 and release the complete input block.
+    // Row 7 already releases it; selector 8 remains all rows.
+    static constexpr std::size_t kConsumeOutputRowBase = 9;
     static constexpr std::size_t kAllOutputTiles = static_cast<std::size_t>(-1);
     static constexpr std::size_t kTotalLanes = hw::kTileRows * hw::kLanesPerTile;
 

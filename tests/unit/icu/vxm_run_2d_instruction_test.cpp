@@ -19,18 +19,19 @@ int main()
 {
     try {
         using Queue = ftlpu::DistributedIcuQueue<
-            ftlpu::VxmCompactInstruction,
+            ftlpu::VxmSrCompactInstruction,
             ftlpu::hw::kIcuVxmInstructionBits,
             64, 8, 1, 1, ftlpu::IcuQueueRole::Vxm>;
 
-        auto alu = ftlpu::VxmLaneAluInstruction {};
+        auto alu = ftlpu::VxmSrInstruction {};
         alu.operation = ftlpu::VxmAluOpcode::Multiply;
-        alu.lhs = ftlpu::VxmLaneOperand::StreamBFloat16();
-        alu.rhs = ftlpu::VxmLaneOperand::Imm(0.5f);
-        constexpr auto stage = std::size_t {0};
+        alu.lhs = ftlpu::VxmSrOperand::StreamBFloat16(
+            ftlpu::StreamId::East(0).packed());
+        alu.rhs = ftlpu::VxmSrOperand::Immediate(0.5f);
+        alu.result_sr = static_cast<std::uint8_t>(
+            ftlpu::StreamId::East(0).packed());
         alu.repeat_count = 32;
-        const auto compact = ftlpu::VxmCompactInstructionCodec::encode(
-            stage, ftlpu::VxmChainDepth::Two, alu);
+        const auto compact = ftlpu::VxmSrCompactInstructionCodec::encode(alu);
         const auto run = ftlpu::VxmIcuRun2DInstruction::Run2D(
             0, {3, 2}, {2, 12}, compact);
         const auto packet =

@@ -200,6 +200,10 @@ int main()
     topology.set_chain_depth(VxmChainDepth::Eight);
     assert(topology.chain_count() == 2);
     assert(topology.is_chain_head(0) && topology.is_chain_tail(7));
+    topology.set_chain_depth(VxmChainDepth::Sixteen);
+    assert(topology.chain_count() == 1);
+    assert(topology.is_chain_head(0));
+    assert(topology.is_chain_tail(15));
 
     const auto explicit_group = VxmLaneOperand::StreamFloat16(1.0f, 3);
     assert(VxmLane::input_group_for_operand(0, false, explicit_group) == 3);
@@ -229,81 +233,6 @@ int main()
     assert(selected_group.output());
     assert(VxmLane::unpack_float32(
         selected_group.output()->bytes) == 9.0f);
-
-    // RoPE-style direct fusion. The chain head captures both its own input
-    // pair and the following FMA/FMS stream pair in the same row cycle. The
-    // captured operands stay aligned while the two fully-pipelined
-    // multipliers advance consecutive rows.
-    auto fused_rope = VxmLaneTestDriver{};
-    fused_rope.set_chain_depth(VxmChainDepth::Two);
-    auto low_product = VxmLaneAluInstruction{
-        VxmAluOpcode::Multiply,
-        VxmLaneOperand::StreamFloat16(
-            1.0f, 0, VxmStreamSource::East),
-        VxmLaneOperand::StreamFloat16(
-            1.0f, 4, VxmStreamSource::East)};
-    low_product.repeat_count = 2;
-    fused_rope.enqueue_instruction(0, low_product);
-    auto low_rotate = VxmLaneAluInstruction{
-        VxmAluOpcode::FusedMultiplySubtract,
-        VxmLaneOperand::StreamFloat16(
-            1.0f, 0, VxmStreamSource::West),
-        VxmLaneOperand::StreamFloat16(
-            1.0f, 5, VxmStreamSource::East)};
-    low_rotate.output_stream = 0;
-    low_rotate.output_type = VxmCastTarget::Float32;
-    low_rotate.repeat_count = 2;
-    fused_rope.enqueue_instruction(1, low_rotate);
-
-    auto high_product = VxmLaneAluInstruction{
-        VxmAluOpcode::Multiply,
-        VxmLaneOperand::StreamFloat16(
-            1.0f, 0, VxmStreamSource::West),
-        VxmLaneOperand::StreamFloat16(
-            1.0f, 4, VxmStreamSource::East)};
-    high_product.repeat_count = 2;
-    fused_rope.enqueue_instruction(2, high_product);
-    auto high_rotate = VxmLaneAluInstruction{
-        VxmAluOpcode::FusedMultiplyAdd,
-        VxmLaneOperand::StreamFloat16(
-            1.0f, 0, VxmStreamSource::East),
-        VxmLaneOperand::StreamFloat16(
-            1.0f, 5, VxmStreamSource::East)};
-    high_rotate.output_stream = 2;
-    high_rotate.output_type = VxmCastTarget::Float32;
-    high_rotate.repeat_count = 2;
-    fused_rope.enqueue_instruction(3, high_rotate);
-
-    fused_rope.tick();
-    for (int row = 0; row < 2; ++row) {
-        auto streams = VxmLane::StreamBytes{};
-        put_int32(streams, 0, row == 0 ? 2 : 5);
-        put_int32(streams, 8 * VxmLane::kStreamGroupBytes,
-                  row == 0 ? 3 : 7);
-        put_int32(streams, 4 * VxmLane::kStreamGroupBytes,
-                  row == 0 ? 4 : 2);
-        put_int32(streams, 5 * VxmLane::kStreamGroupBytes,
-                  row == 0 ? 1 : 3);
-        fused_rope.set_stream_inputs(streams);
-        fused_rope.tick();
-    }
-    fused_rope.tick();
-    fused_rope.tick();
-    assert(fused_rope.outputs().size() == 4);
-    assert(VxmLane::unpack_float32(
-        fused_rope.outputs()[0].bytes) == 5.0f);
-    assert(VxmLane::unpack_float32(
-        fused_rope.outputs()[1].bytes) == 5.0f);
-    assert(VxmLane::unpack_float32(
-        fused_rope.outputs()[2].bytes) == 11.0f);
-    assert(VxmLane::unpack_float32(
-        fused_rope.outputs()[3].bytes) == 11.0f);
-    fused_rope.tick();
-    assert(fused_rope.outputs().size() == 4);
-    assert(VxmLane::unpack_float32(
-        fused_rope.outputs()[0].bytes) == -11.0f);
-    assert(VxmLane::unpack_float32(
-        fused_rope.outputs()[2].bytes) == 29.0f);
 
     // One Current Config Register is held for several element cycles.  The
     // repeat counter advances only when that ALU actually executes.
@@ -389,7 +318,19 @@ int main()
     parallel.enqueue_instruction(6, {VxmAluOpcode::Max,
         VxmLaneOperand::StreamFloat16(), VxmLaneOperand::StreamFloat16()});
     parallel.enqueue_instruction(7, output_bypass(6));
-    parallel.tick(); // decode all eight broadcast configurations
+    parallel.enqueue_instruction(8, {VxmAluOpcode::Add,
+        VxmLaneOperand::StreamFloat16(), VxmLaneOperand::StreamFloat16()});
+    parallel.enqueue_instruction(9, output_bypass(8));
+    parallel.enqueue_instruction(10, {VxmAluOpcode::Multiply,
+        VxmLaneOperand::StreamFloat16(), VxmLaneOperand::StreamFloat16()});
+    parallel.enqueue_instruction(11, output_bypass(10));
+    parallel.enqueue_instruction(12, {VxmAluOpcode::Subtract,
+        VxmLaneOperand::StreamFloat16(), VxmLaneOperand::StreamFloat16()});
+    parallel.enqueue_instruction(13, output_bypass(12));
+    parallel.enqueue_instruction(14, {VxmAluOpcode::Max,
+        VxmLaneOperand::StreamFloat16(), VxmLaneOperand::StreamFloat16()});
+    parallel.enqueue_instruction(15, output_bypass(14));
+    parallel.tick(); // decode all sixteen explicit column configurations
     auto streams = VxmLane::StreamBytes{};
     put_int32(streams, 0, 3); put_int32(streams, 2, 4);
     put_int32(streams, 4, 5); put_int32(streams, 6, 6);
@@ -649,7 +590,7 @@ int main()
     multi_feedback.set_stream_inputs(multi_streams);
     multi_feedback.tick();
     multi_feedback.tick(); // four tails complete together
-    assert(multi_feedback.feedback_pending_count() == 4);
+    assert(multi_feedback.feedback_pending_count() == 2);
     assert(!multi_feedback.output());
 
     multi_feedback.tick(); // direct values execute; C3/C7 drain
@@ -657,14 +598,14 @@ int main()
     assert(!multi_feedback.output());
 
     multi_feedback.tick(); // first output pair
-    assert(multi_feedback.outputs().size() == 4);
+    assert(multi_feedback.outputs().size() == 2);
     assert(VxmLane::unpack_float32(
                multi_feedback.outputs()[0].bytes) == 10.0f);
     assert(VxmLane::unpack_float32(
                multi_feedback.outputs()[1].bytes) == 30.0f);
 
     multi_feedback.tick(); // held output pair
-    assert(multi_feedback.outputs().size() == 4);
+    assert(multi_feedback.outputs().size() == 2);
     assert(VxmLane::unpack_float32(
                multi_feedback.outputs()[0].bytes) == 20.0f);
     assert(VxmLane::unpack_float32(
@@ -720,19 +661,19 @@ int main()
     record_lane("input heads execute");
     four_to_one.tick();
     record_lane("tails capture");
-    assert(four_to_one.feedback_pending_count() == 6);
+    assert(four_to_one.feedback_pending_count() == 3);
 
     four_to_one.tick();
     record_lane("feedback drain");
-    assert(four_to_one.feedback_pending_count() == 4);
+    assert(four_to_one.feedback_pending_count() == 2);
     assert(!four_to_one.output());
 
     for (std::size_t expected = 0; expected < 4; ++expected) {
         four_to_one.tick();
         record_lane("pipeline output");
         assert(four_to_one.feedback_pending_count()
-               == (expected < 2 ? 2 - 2 * expected : 0));
-        assert(four_to_one.outputs().size() == 2);
+               == (expected < 2 ? 1 - expected : 0));
+        assert(four_to_one.outputs().size() == 1);
         assert(VxmLane::unpack_float32(
                    four_to_one.outputs()[0].bytes)
                == static_cast<float>(10 * (expected + 1)));

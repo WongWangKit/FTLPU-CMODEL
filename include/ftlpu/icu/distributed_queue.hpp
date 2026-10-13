@@ -734,7 +734,7 @@ public:
                     MxmControlInstruction>)
             || (QueueRole == IcuQueueRole::Vxm
                 && std::is_same_v<FuncInstruction,
-                    VxmCompactInstruction>)
+                    VxmSrCompactInstruction>)
             || (is_sxm_queue_role(QueueRole)
                 && std::is_same_v<FuncInstruction, SxmInstruction>)
             || ((QueueRole == IcuQueueRole::C2cTx
@@ -1231,7 +1231,7 @@ public:
     }
 
     void push_vxm_run_2d(VxmIcuRun2DInstruction instruction)
-        requires (std::is_same_v<FuncInstruction, VxmCompactInstruction>
+        requires (std::is_same_v<FuncInstruction, VxmSrCompactInstruction>
             && QueueRole == IcuQueueRole::Vxm)
     {
         append_3d_packet(
@@ -1333,7 +1333,7 @@ public:
             throw std::invalid_argument(
                 "legacy VXM_STREAM_ND is not encoded on FU raw-word queues");
         } else if constexpr (!std::is_same_v<FuncInstruction,
-                          VxmCompactInstruction>) {
+                          VxmSrCompactInstruction>) {
             throw std::invalid_argument(
                 "VXM_STREAM_ND is valid only on a VXM ICU queue");
         } else {
@@ -1633,6 +1633,44 @@ public:
                 return false;
             const auto control = decode_control_word(iq_.front());
             return lacksTaggedNotification(control.event_tag);
+        }
+    }
+
+    // True only when this queue has reached the matching tagged barrier and
+    // still lacks its release token.  Runtime page synchronization uses this
+    // to rendezvous producer and consumer ICUs before releasing an epoch;
+    // merely latching a token in a queue that is still executing an earlier
+    // command would let another ICU run ahead of its data source.
+    bool blocked_on_event(std::size_t event_tag) const
+    {
+        if (synchronized_instruction_.has_value()
+            || nop_remaining_ != 0 || repeat_remaining_ != 0
+            || repeat_2d_active_ || !active_macros_.empty()
+            || !active_stream_nd_.empty() || active_3d_.has_value()
+            || active_write_read_2d_.has_value() || iq_.empty())
+            return false;
+        const auto lacksNotification = [&]() {
+            return std::none_of(synchronized_notifications_.begin(),
+                synchronized_notifications_.end(),
+                [&](const TaggedNotification& notification) {
+                    return notification.tag == event_tag;
+                });
+        };
+        if constexpr (QueueRole == IcuQueueRole::Legacy) {
+            const auto* control =
+                std::get_if<IcuControlInstruction>(&iq_.front());
+            return control != nullptr
+                && control->opcode == IcuControlOpcode::WaitEvent
+                && control->event_tag == event_tag
+                && lacksNotification();
+        } else {
+            if (detail::raw_icu_opcode(iq_.front())
+                    != isa::IcuCommandOpcode::Extended
+                || detail::raw_icu_extended_subtype(iq_.front())
+                    != kWaitEventExtendedSubtype)
+                return false;
+            const auto control = decode_control_word(iq_.front());
+            return control.event_tag == event_tag && lacksNotification();
         }
     }
 
@@ -3617,7 +3655,7 @@ private:
         constexpr bool isMem =
             std::is_same_v<FuncInstruction, MemInstruction>;
         constexpr bool isVxm =
-            std::is_same_v<FuncInstruction, VxmCompactInstruction>;
+            std::is_same_v<FuncInstruction, VxmSrCompactInstruction>;
         constexpr bool isSxm =
             std::is_same_v<FuncInstruction, SxmInstruction>;
         if (active_stream_nd_.empty()

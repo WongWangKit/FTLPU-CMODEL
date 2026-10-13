@@ -10,11 +10,11 @@ using ftlpu::IcuControlInstruction;
 using ftlpu::IcuLocation;
 using ftlpu::IcuQueueAction;
 using ftlpu::InstructionControlUnit;
-using ftlpu::VxmSlice;
+using ftlpu::VxmSrSlice;
 
 void tick_vxm(
     InstructionControlUnit& icu,
-    VxmSlice& vxm)
+    VxmSrSlice& vxm)
 {
     icu.dispatch_vxm(vxm);
     vxm.tick();
@@ -24,7 +24,7 @@ void tick_vxm(
 void test_delayed_broadcast()
 {
     auto icu = InstructionControlUnit{2};
-    auto vxm = VxmSlice{};
+    auto vxm = VxmSrSlice{};
     icu.enqueue_control(
         IcuLocation::Vxm(0),
         IcuControlInstruction::Notify());
@@ -51,7 +51,7 @@ void test_delayed_broadcast()
 void test_zero_latency_and_direct_notify()
 {
     auto icu = InstructionControlUnit{0};
-    auto vxm = VxmSlice{};
+    auto vxm = VxmSrSlice{};
     icu.enqueue_control(
         IcuLocation::Vxm(0),
         IcuControlInstruction::Notify());
@@ -64,7 +64,7 @@ void test_zero_latency_and_direct_notify()
     assert(icu.vxm_iq(1).done());
 
     auto direct = InstructionControlUnit{};
-    auto direct_vxm = VxmSlice{};
+    auto direct_vxm = VxmSrSlice{};
     direct.enqueue_control(
         IcuLocation::Vxm(2),
         IcuControlInstruction::Sync());
@@ -101,7 +101,7 @@ void test_tsp_automatic_advance()
 void test_tagged_event_wait()
 {
     auto icu = InstructionControlUnit{};
-    auto vxm = VxmSlice{};
+    auto vxm = VxmSrSlice{};
     constexpr std::size_t eventTag = 0x1234;
     icu.enqueue_control(IcuLocation::Vxm(0),
         IcuControlInstruction::WaitEvent(eventTag));

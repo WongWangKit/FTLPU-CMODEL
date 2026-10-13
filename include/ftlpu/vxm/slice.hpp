@@ -19,8 +19,9 @@ class VxmSlice {
 public:
     static constexpr std::size_t kTileCount = hw::kTileRows;
     static constexpr std::size_t kRows = hw::kTileRows * hw::kLanesPerTile;
-    // Eight Slice instruction channels feed eight shared control queues.
-    // Superlane-local decode mirrors logical Ci onto physical C(i+8).
+    // Each physical VXM column owns one independent Slice instruction channel.
+    // A packet configures exactly one column; no implicit C(i+8) mirroring is
+    // performed by the Slice or Superlane decoder.
     static constexpr std::size_t kAluQueues =
         VxmSuperlaneInstructionControl::kStageCount;
 
@@ -266,7 +267,7 @@ private:
     {
         if (alu >= kAluQueues) {
             throw std::out_of_range(
-                "VXM shared ALU control queue is outside 0..7");
+                "VXM column control queue exceeds the configured physical column count");
         }
     }
 
@@ -401,13 +402,7 @@ private:
                     if (!stream_consumers[alu]) {
                         continue;
                     }
-                    const auto consumed =
-                        executed[alu]
-                        || executed[
-                            alu
-                            + VxmSuperlaneInstructionControl::
-                                kMirroredStageOffset];
-                    if (!consumed) {
+                    if (!executed[alu]) {
                         throw std::logic_error(
                             "VXM compiler/static-schedule error: a scheduled stream consumer did not execute");
                     }
@@ -473,26 +468,12 @@ private:
         return operand_uses_stream(instruction.lhs) || operand_uses_stream(instruction.rhs);
     }
 
-    static bool is_fused_multiply(
-        const VxmLaneAluInstruction& instruction)
-    {
-        const auto* opcode =
-            std::get_if<VxmAluOpcode>(&instruction.operation);
-        return opcode != nullptr
-            && (*opcode == VxmAluOpcode::FusedMultiplyAdd
-                || *opcode == VxmAluOpcode::FusedMultiplySubtract);
-    }
-
     static bool head_configuration_uses_stream(
         const Superlane& superlane, std::size_t alu,
         const VxmLaneAluInstruction& instruction)
     {
         if (instruction_uses_stream(instruction)) return true;
-        const auto successor = alu + 1;
-        if (successor >= kAluQueues) return false;
-        const auto next = superlane.next_instruction(successor);
-        return next && is_fused_multiply(*next)
-            && instruction_uses_stream(*next);
+        return false;
     }
 
     void refresh_required_streams()
@@ -522,33 +503,6 @@ private:
                 }
                 mark_operand_streams(required, instruction->lhs, alu, false);
                 mark_operand_streams(required, instruction->rhs, alu, true);
-                const auto mirrored =
-                    alu + VxmSuperlaneInstructionControl::kMirroredStageOffset;
-                mark_operand_streams(
-                    required, instruction->lhs, mirrored, false);
-                mark_operand_streams(
-                    required, instruction->rhs, mirrored, true);
-                const auto successor = alu + 1;
-                if (successor < kAluQueues) {
-                    const auto fused =
-                        superlanes_[tile].next_instruction(successor);
-                    if (fused && is_fused_multiply(*fused)) {
-                        mark_operand_streams(
-                            required, fused->lhs, successor, false);
-                        mark_operand_streams(
-                            required, fused->rhs, successor, true);
-                        mark_operand_streams(required, fused->lhs,
-                            successor
-                                + VxmSuperlaneInstructionControl::
-                                    kMirroredStageOffset,
-                            false);
-                        mark_operand_streams(required, fused->rhs,
-                            successor
-                                + VxmSuperlaneInstructionControl::
-                                    kMirroredStageOffset,
-                            true);
-                    }
-                }
                 any = true;
             }
             if (any) {

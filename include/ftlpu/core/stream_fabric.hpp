@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -44,6 +45,9 @@ public:
         , next_(column_count)
         , next_producers_(column_count)
         , consumed_(column_count)
+        , last_staged_cycle_(column_count * hw::kTileRows
+              * hw::kLanesPerTile * hw::kStreams,
+              std::numeric_limits<std::size_t>::max())
     {
         if (column_count == 0) {
             throw std::invalid_argument("stream-register fabric must contain at least one column");
@@ -59,6 +63,8 @@ public:
         current_cells_.clear();
         next_cells_.clear();
         consumed_cells_.clear();
+        std::fill(last_staged_cycle_.begin(), last_staged_cycle_.end(),
+            std::numeric_limits<std::size_t>::max());
         cycle_ = 0;
         cycle_open_ = false;
         current_activity_ = {};
@@ -137,6 +143,34 @@ public:
         return true;
     }
 
+    bool staged_segment_valid(
+        std::size_t column, std::size_t tile, StreamId stream) const
+    {
+        check_column(column);
+        check_tile(tile);
+        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+            if (!select(next_[column].lanes[tile][lane], stream).valid)
+                return false;
+        }
+        return true;
+    }
+
+    std::string last_segment_cycles(
+        std::size_t column, std::size_t tile, StreamId stream) const
+    {
+        check_column(column);
+        check_tile(tile);
+        std::string result;
+        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+            if (!result.empty()) result += ",";
+            const auto value = last_staged_cycle_[
+                encode_cell(column, tile, lane, stream)];
+            result += value == std::numeric_limits<std::size_t>::max()
+                ? "none" : std::to_string(value);
+        }
+        return result;
+    }
+
     void stage_write(
         std::size_t column,
         std::size_t tile,
@@ -167,6 +201,7 @@ public:
         select(next_producers_[column].lanes[tile][lane], stream) =
             classify_producer(producer);
         next_cells_.push_back(encode_cell(column, tile, lane, stream));
+        last_staged_cycle_[encode_cell(column, tile, lane, stream)] = cycle_ + 1;
         ++current_activity_.staged_writes;
         if (stream.direction() == StreamDirection::East)
             ++current_activity_.east_staged_writes;
@@ -559,6 +594,7 @@ private:
     std::vector<std::size_t> current_cells_{};
     std::vector<std::size_t> next_cells_{};
     std::vector<std::size_t> consumed_cells_{};
+    std::vector<std::size_t> last_staged_cycle_{};
     std::size_t cycle_{0};
     bool cycle_open_{false};
     CycleActivity current_activity_{};

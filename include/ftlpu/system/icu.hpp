@@ -13,6 +13,7 @@
 #include "ftlpu/sxm/slice.hpp"
 #include "ftlpu/vxm/compact_instruction.hpp"
 #include "ftlpu/vxm/slice.hpp"
+#include "ftlpu/vxm/sr_slice.hpp"
 
 #include <array>
 #include <cstddef>
@@ -29,7 +30,7 @@ namespace ftlpu {
 
 class InstructionControlUnit {
 public:
-    static constexpr std::size_t kVxmQueues = VxmSlice::kAluQueues;
+    static constexpr std::size_t kVxmQueues = VxmSrSlice::kAluQueues;
     static constexpr std::size_t kMemQueuesPerHemisphere =
         hw::kMemSliceColumns * hw::kMemBanksPerSlice;
     static constexpr std::size_t kMxmQueuesPerHemisphere =
@@ -62,7 +63,7 @@ public:
 
     using Repeat = IcuRepeat;
     using VxmIcu = DistributedIcuQueue<
-        VxmCompactInstruction,
+        VxmSrCompactInstruction,
         hw::kIcuVxmInstructionBits,
         hw::kIcuVxmImemDepth,
         hw::kIcuVxmIqDepth,
@@ -266,7 +267,7 @@ public:
     }
     void enqueue_vxm(
         std::size_t alu,
-        VxmCompactInstruction instruction)
+        VxmSrCompactInstruction instruction)
     {
         check_vxm_queue(alu);
         vxm_queues_[alu].push_vxm_run_2d(
@@ -289,8 +290,9 @@ public:
     {
         enqueue_vxm(
             alu,
-            VxmCompactInstructionCodec::encode(
-                alu, depth, instruction));
+            VxmSrCompactInstructionCodec::encode(
+                lower_legacy_vxm_to_explicit_sr(
+                    alu, depth, instruction)));
     }
 
     void enqueue_vxm_nop(std::size_t alu, std::size_t cycles)
@@ -307,7 +309,7 @@ public:
 
     void enqueue_vxm_stream_nd(std::size_t alu,
         IcuVxmStreamNdSchedule schedule,
-        VxmCompactInstruction instruction)
+        VxmSrCompactInstruction instruction)
     {
         check_vxm_queue(alu);
         vxm_queues_[alu].push_vxm_stream_nd(
@@ -993,6 +995,44 @@ public:
         throw std::logic_error("unknown tagged ICU location kind");
     }
 
+    bool blocked_on_tagged_event(
+        IcuLocation location, std::size_t event_tag)
+    {
+        switch (location.kind) {
+        case IcuLocationKind::Mem:
+            check_mem_location(location);
+            return mem_iq(mem_queue(static_cast<Hemisphere>(location.unit),
+                location.index, location.bank)).blocked_on_event(event_tag);
+        case IcuLocationKind::Vxm:
+            return vxm_iq(location.index).blocked_on_event(event_tag);
+        case IcuLocationKind::MxmLoad:
+            return mxm_load_iq(location.unit).blocked_on_event(event_tag);
+        case IcuLocationKind::MxmCompute:
+            return mxm_compute_iq(location.unit).blocked_on_event(event_tag);
+        case IcuLocationKind::MxmDequant:
+            return mxm_dequant_iq(location.unit).blocked_on_event(event_tag);
+        case IcuLocationKind::Sxm:
+            if (location.unit >= hw::kHemispheres || location.index > 1)
+                throw std::out_of_range(
+                    "ICU tagged SXM location is outside the chip");
+            return location.index == 0
+                ? sxm_transpose_queues_[location.unit]
+                      .blocked_on_event(event_tag)
+                : sxm_permute_queues_[location.unit]
+                      .blocked_on_event(event_tag);
+        case IcuLocationKind::C2cTx:
+            return c2c_tx_queues_.at(location.unit)
+                .blocked_on_event(event_tag);
+        case IcuLocationKind::C2cRx:
+            return c2c_rx_queues_.at(location.unit)
+                .blocked_on_event(event_tag);
+        case IcuLocationKind::C2cDma:
+            return c2c_dma_queues_.at(location.unit)
+                .blocked_on_event(event_tag);
+        }
+        throw std::logic_error("unknown tagged ICU location kind");
+    }
+
     void set_program_issue_enabled(bool enabled) noexcept
     {
         program_issue_enabled_ = enabled;
@@ -1087,7 +1127,7 @@ public:
     {
         return barrier_events_.size();
     }
-    void dispatch_vxm(VxmSlice& vxm, std::ostream* os = nullptr)
+    void dispatch_vxm(VxmSrSlice& vxm, std::ostream* os = nullptr)
     {
         log_cycle_header(os);
         bool any = false;
@@ -1108,7 +1148,7 @@ public:
     }
     void dispatch(
         std::array<MemArrayModel, hw::kHemispheres>& mems,
-        VxmSlice& vxm,
+        VxmSrSlice& vxm,
         std::array<SxmSlice, hw::kHemispheres>& sxms,
         std::array<Mxm, kMxmQueues>& mxms,
         std::ostream* os = nullptr,
@@ -1558,18 +1598,15 @@ private:
     }
 
     static std::string describe_vxm(
-        std::size_t stage,
-        const VxmCompactInstruction& packet)
+        std::size_t,
+        const VxmSrCompactInstruction& packet)
     {
-        const auto decoded =
-            VxmCompactInstructionCodec::decode(stage, packet);
-        const auto& instruction = decoded.instruction;
+        const auto instruction =
+            VxmSrCompactInstructionCodec::decode(packet);
         std::ostringstream os;
         os << VxmLane::operation_name(instruction.operation)
-           << " depth=" << static_cast<std::size_t>(decoded.chain_depth);
-        if (instruction.output_stream.has_value()) {
-            os << " output=" << *instruction.output_stream;
-        }
+           << " result_sr=" << static_cast<std::size_t>(instruction.result_sr)
+           << " repeat=" << instruction.repeat_count;
         return os.str();
     }
 

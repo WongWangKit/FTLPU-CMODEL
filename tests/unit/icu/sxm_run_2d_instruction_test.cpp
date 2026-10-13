@@ -141,6 +141,23 @@ int main() try
             == std::vector<std::size_t> {0, 8, 9, 17, 18, 26, 27, 35},
         "one-context SXM ICU did not serialize relative RUN_2D packets");
 
+    auto broadcast = SxmInstruction::Transpose(
+        {{4},{5}}, {{16},{17},{18},{19},{20},{21},{22},{23},{24},{25},{26},{27},{28},{29},{30},{31}});
+    broadcast.input_row = SxmInstruction::kBroadcastInputRows;
+    auto broadcastRun = SxmIcuRun2DInstruction::Run2D(0,{2,1},{16,1},broadcast);
+    const auto broadcastDecoded = isa::decode_sxm_transpose_icu_run_2d_instruction(
+        isa::encode_sxm_transpose_icu_run_2d_instruction(broadcastRun));
+    require(broadcastDecoded.instruction.input_row == SxmInstruction::kBroadcastInputRows
+        && broadcastDecoded.instruction.src_streams.size()==2,
+        "SXM broadcast-row selector did not round trip");
+
+    auto consumeRow = tile;
+    consumeRow.output_row = SxmInstruction::kConsumeOutputRowBase + 2;
+    const auto consumeRun = SxmIcuRun2DInstruction::Run2D(0,{2,1},{16,1},consumeRow);
+    require(isa::decode_sxm_permute_icu_run_2d_instruction(
+        isa::encode_sxm_permute_icu_run_2d_instruction(consumeRun)).instruction.output_row == 11,
+        "SXM consuming output-row selector did not round trip");
+
     std::cout << "sxm_run_2d_instruction_test passed: "
               << "launches=6 active_contexts="
               << hw::kIcuSxmRun2DContextDepth

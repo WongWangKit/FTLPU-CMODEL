@@ -6,6 +6,7 @@
 #include "ftlpu/mxm/control_slice.hpp"
 #include "ftlpu/sxm/instruction.hpp"
 #include "ftlpu/vxm/compact_instruction.hpp"
+#include "ftlpu/vxm/sr_instruction.hpp"
 
 #include <array>
 #include <cstddef>
@@ -63,7 +64,7 @@ struct EncodedIcuRepeat2D {
     std::array<std::uint32_t, 3> words{};
 };
 
-using EncodedVxmInstruction = VxmCompactInstruction;
+using EncodedVxmInstruction = VxmSrCompactInstruction;
 
 struct EncodedSxmInstruction {
     std::array<std::uint32_t, 13> words{};
@@ -523,14 +524,15 @@ inline EncodedVxmInstruction encode_vxm_instruction(
     VxmChainDepth depth,
     const VxmLaneAluInstruction& instruction)
 {
-    return VxmCompactInstructionCodec::encode(queue, depth, instruction);
+    return VxmSrCompactInstructionCodec::encode(
+        lower_legacy_vxm_to_explicit_sr(queue, depth, instruction));
 }
 
-inline VxmDecodedInstruction decode_vxm_instruction(
-    std::size_t queue,
+inline VxmSrInstruction decode_vxm_instruction(
+    std::size_t,
     const EncodedVxmInstruction& encoded)
 {
-    return VxmCompactInstructionCodec::decode(queue, encoded);
+    return VxmSrCompactInstructionCodec::decode(encoded);
 }
 
 inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instruction)

@@ -25,6 +25,7 @@ enum class VxmChainDepth : std::size_t {
     Two = 2,
     Four = 4,
     Eight = 8,
+    Sixteen = 16,
 };
 
 enum class VxmLaneOperandKind {
@@ -92,6 +93,10 @@ struct VxmLaneAluInstruction {
     bool accumulator_reset{false};
     bool accumulator_write{false};
     bool accumulator_emit{true};
+    // Coarse RUN_2D terminal controls.  The ICU repeat counter gates these
+    // flags so one non-preemptible instruction can express a reduction.
+    bool accumulator_reset_first{false};
+    bool accumulator_emit_last{false};
     std::size_t repeat_count{1};
     // Capture this operation's completed value in the small C1/C3 scalar
     // register.  Unlike accumulator_write this is a one-shot result write and
@@ -114,7 +119,7 @@ using VxmLaneExecutionMask = std::array<bool, kVxmAluStageCount>;
 class VxmLane {
 public:
     static constexpr std::size_t kAluCount = hw::kVxmAluCount;
-    static constexpr std::size_t kBlockCount = hw::kVxmAlusPerDirection;
+    static constexpr std::size_t kBlockCount = hw::kVxmAluCount / 2;
     static constexpr std::size_t kStagesPerBlock = 2;
     static constexpr std::size_t kInputStreams = hw::kStreamsPerDirection;
     static constexpr std::size_t kStreamGroupBytes = 2;
@@ -185,7 +190,7 @@ public:
         std::uint64_t executed_slots{0};
         std::uint64_t useful_slots{0};
         std::array<std::uint64_t, kAluCount> stage_executions{};
-        std::array<Utilization, 3> by_chain_depth{};
+        std::array<Utilization, 4> by_chain_depth{};
         std::vector<CycleActivity> timeline{};
 
         double active_utilization() const
@@ -230,6 +235,7 @@ public:
             case VxmChainDepth::Two: return 0;
             case VxmChainDepth::Four: return 1;
             case VxmChainDepth::Eight: return 2;
+            case VxmChainDepth::Sixteen: return 3;
             }
             return 0;
         }
@@ -280,7 +286,7 @@ public:
 
     void reset()
     {
-        for (auto& token : stage_inputs_) token.reset();
+        for (auto& token : column_input_registers_) token.reset();
         for (auto& pipeline : basic_pipelines_) pipeline.reset();
         for (auto& pipeline : special_pipelines_) pipeline.reset();
         for (auto& accumulator : accumulators_) accumulator.reset();
@@ -309,7 +315,7 @@ public:
     void validate_chain_depth_transition(VxmChainDepth depth) const
     {
         for (std::size_t stage = 0; stage < kAluCount; ++stage) {
-            if (stage_inputs_[stage]
+            if (column_input_registers_[stage]
                 && !is_chain_head_for(stage, depth)) {
                 throw std::logic_error(
                     "VXM chain-depth transition left data outside a new "
@@ -355,8 +361,9 @@ public:
             || tail % 2 == 0 || head % 2 != 0) {
             return false;
         }
-        // Feedback never crosses the two physical 8-stage chains.  A tail may
-        // return to the head of the enclosing 2-, 4-, or 8-stage chain.
+        // The full-width mode connects C7->C8 and provides a C15->C0 return;
+        // shorter modes retain the local 2/4/8-column feedback paths.
+        if (tail == 15 && head == 0) return true;
         if (tail / 8 != head / 8 || head > tail) return false;
         return head == (tail / 2) * 2
             || head == (tail / 4) * 4
@@ -486,7 +493,8 @@ public:
             }
         }
         auto consumed = ExecutionMask{};
-        auto next_inputs = std::array<std::optional<Token>, kAluCount>{};
+        auto next_inputs =
+            std::array<std::optional<ColumnStreamRegister>, kAluCount>{};
         auto basic_requests =
             std::array<std::optional<BasicPipeline::Request>, kAluCount>{};
         auto special_requests =
@@ -501,40 +509,28 @@ public:
         // later leaves the internal pipeline.
         for (std::size_t stage = 0; stage < kAluCount; ++stage) {
             if (!issued[stage]) {
-                if (stage_inputs_[stage]) next_inputs[stage] = stage_inputs_[stage];
+                if (column_input_registers_[stage])
+                    next_inputs[stage] = column_input_registers_[stage];
                 continue;
             }
             const auto& instruction = *issued[stage];
-            std::optional<Token> source;
+            std::optional<ColumnStreamRegister> source;
             if (is_chain_head(stage)) {
-                const auto captures_fused_operands =
-                    stage + 1 < kAluCount && issued[stage + 1]
-                    && is_fused_multiply_operation(
-                        issued[stage + 1]->operation);
-                if (!head_operands_ready(instruction, stage)
-                    || (captures_fused_operands && !stream_inputs_valid_)) {
+                if (!head_operands_ready(instruction, stage)) {
                     waiting_for_input[stage] = true;
                     continue;
                 }
                 if (instruction_uses_feedback(instruction)) {
-                    source = stage_inputs_[stage];
+                    source = column_input_registers_[stage];
                 } else {
                     const auto lhs =
                         read_head_operand(instruction.lhs, stage, false);
                     const auto rhs =
                         read_head_operand(instruction.rhs, stage, true);
-                    source = Token {0.0f, lhs, rhs, true};
-                    if (captures_fused_operands) {
-                        const auto& fused = *issued[stage + 1];
-                        source->fused_lhs = read_head_operand(
-                            fused.lhs, stage + 1, false);
-                        source->fused_rhs = read_head_operand(
-                            fused.rhs, stage + 1, true);
-                        source->fused_operands_valid = true;
-                    }
+                    source = ColumnStreamRegister {0.0f, lhs, rhs, true};
                 }
             } else {
-                source = stage_inputs_[stage];
+                source = column_input_registers_[stage];
                 if (!source) {
                     waiting_for_input[stage] = true;
                     continue;
@@ -542,18 +538,10 @@ public:
             }
 
             prepare_accumulator(stage, instruction);
-            const auto fused =
-                is_fused_multiply_operation(instruction.operation);
-            if (fused && !source->fused_operands_valid) {
-                throw std::logic_error(
-                    "VXM fused multiply operands were not captured at the chain head");
-            }
-            const auto a = fused ? source->fused_lhs
-                                 : read_operand(
-                                       instruction.lhs, *source, stage, false);
-            const auto b = fused ? source->fused_rhs
-                                 : read_operand(
-                                       instruction.rhs, *source, stage, true);
+            const auto a = read_operand(
+                instruction.lhs, *source, stage, false);
+            const auto b = read_operand(
+                instruction.rhs, *source, stage, true);
             auto metadata = ExecutionMetadata{*source, instruction};
             if (const auto* special =
                     std::get_if<VxmSpecialAluOpcode>(&instruction.operation)) {
@@ -574,7 +562,6 @@ public:
                     {std::get<VxmAluOpcode>(instruction.operation),
                      instruction.precision},
                     a, b, std::move(metadata)};
-                if (fused) request.addend = source->value;
                 basic_requests[stage] = std::move(request);
             }
             consumed[stage] = true;
@@ -645,10 +632,8 @@ public:
             if (!emit) continue;
 
             const auto& source = completed->metadata.source;
-            auto token = Token{
-                completed->value, source.original, source.auxiliary, true,
-                source.fused_lhs, source.fused_rhs,
-                source.fused_operands_valid};
+            auto token = ColumnStreamRegister{
+                completed->value, source.original, source.auxiliary, true};
             if (is_chain_tail(stage)) {
                 // Fixed tail-to-head feedback bypasses Stream Register and
                 // the tail output register.  The destination head's already
@@ -729,7 +714,7 @@ public:
             }
         }
 
-        stage_inputs_ = std::move(next_inputs);
+        column_input_registers_ = std::move(next_inputs);
         stream_inputs_valid_ = false;
         for (std::size_t block = 0; block < kBlockCount; ++block) {
             auto requests = std::vector<VxmStaticQuantizer::Request>{};
@@ -788,7 +773,8 @@ public:
 
     bool datapath_idle() const
     {
-        for (const auto& token : stage_inputs_) if (token) return false;
+        for (const auto& token : column_input_registers_)
+            if (token) return false;
         for (const auto& pipeline : basic_pipelines_) {
             if (!pipeline.empty()) return false;
         }
@@ -908,8 +894,6 @@ public:
         case VxmAluOpcode::Multiply: return "mul";
         case VxmAluOpcode::Negate: return "neg";
         case VxmAluOpcode::Max: return "max";
-        case VxmAluOpcode::FusedMultiplyAdd: return "fma";
-        case VxmAluOpcode::FusedMultiplySubtract: return "fms";
             }
         }
         if (const auto* opcode = std::get_if<VxmSpecialAluOpcode>(&operation)) {
@@ -946,23 +930,23 @@ public:
     }
 
 private:
-    struct Token {
+    // One statically scheduled register sits in front of every VALU column.
+    // Together these registers are the local VXM stream between adjacent
+    // column slices; they are intentionally not part of the global SR fabric.
+    struct ColumnStreamRegister {
         float value{0.0f};
         float original{0.0f};
         float auxiliary{0.0f};
         bool valid{false};
-        float fused_lhs{0.0f};
-        float fused_rhs{0.0f};
-        bool fused_operands_valid{false};
     };
 
     struct PendingFeedback {
-        Token token{};
+        ColumnStreamRegister token{};
         std::size_t destination_head{0};
     };
 
     struct ExecutionMetadata {
-        Token source{};
+        ColumnStreamRegister source{};
         VxmLaneAluInstruction instruction{};
     };
 
@@ -976,22 +960,15 @@ private:
 
     static void check_stage(std::size_t stage)
     {
-        if (stage >= kAluCount) throw std::out_of_range("VXM ALU stage is outside 0..15");
+        if (stage >= kAluCount)
+            throw std::out_of_range(
+                "VXM ALU stage exceeds the configured physical column count");
     }
 
     static bool is_stream(VxmLaneOperandKind kind)
     {
         return kind == VxmLaneOperandKind::StreamFloat16
             || kind == VxmLaneOperandKind::StreamBFloat16;
-    }
-
-    static bool is_fused_multiply_operation(
-        const VxmLaneOperation& operation)
-    {
-        const auto* opcode = std::get_if<VxmAluOpcode>(&operation);
-        return opcode != nullptr
-            && (*opcode == VxmAluOpcode::FusedMultiplyAdd
-                || *opcode == VxmAluOpcode::FusedMultiplySubtract);
     }
 
     static bool is_chain_head_for(std::size_t stage, VxmChainDepth depth)
@@ -1015,6 +992,18 @@ private:
         if (instruction.accumulator_reset && !instruction.accumulator_write) {
             throw std::invalid_argument("accumulator reset requires accumulator write");
         }
+        if (instruction.accumulator_reset_first
+            && (!instruction.accumulator_reset
+                || !instruction.accumulator_write)) {
+            throw std::invalid_argument(
+                "first-repeat accumulator reset requires reset and write");
+        }
+        if (instruction.accumulator_emit_last
+            && (!instruction.accumulator_emit
+                || !instruction.accumulator_write)) {
+            throw std::invalid_argument(
+                "last-repeat accumulator emit requires emit and write");
+        }
         if (instruction.local_scalar_write) {
             if (instruction.accumulator_write
                 || (stage % 4 != 1 && stage % 4 != 3)) {
@@ -1035,13 +1024,7 @@ private:
                    && stage % 4 != 1 && stage % 4 != 3) {
             throw std::invalid_argument("only C1/C3 may read their local scalar register");
         }
-        const auto fused = is_fused_multiply_operation(
-            instruction.operation);
         if (is_chain_head_for(stage, depth)) {
-            if (fused) {
-                throw std::invalid_argument(
-                    "VXM fused multiply must follow a chain head");
-            }
             const auto allowed = [](VxmLaneOperandKind kind) {
                 return is_stream(kind) || kind == VxmLaneOperandKind::Immediate;
             };
@@ -1054,14 +1037,6 @@ private:
                     "except LHS may select its fixed tail feedback path");
             }
         } else {
-            if (fused) {
-                if (!is_chain_head_for(stage - 1, depth)
-                    || !is_stream(instruction.lhs.kind)
-                    || !is_stream(instruction.rhs.kind)) {
-                    throw std::invalid_argument(
-                        "VXM fused multiply must immediately follow a chain head and use two stream operands");
-                }
-            } else {
             if (instruction.lhs.kind != VxmLaneOperandKind::Previous) {
                 throw std::invalid_argument("internal stage lhs is fixed to the preceding pipeline register");
             }
@@ -1073,7 +1048,6 @@ private:
                                       && rhs == VxmLaneOperandKind::Accumulator);
             if (!rhs_allowed) {
                 throw std::invalid_argument("internal stage rhs is outside its small local mux");
-            }
             }
         }
         if (instruction.output_stream) {
@@ -1109,7 +1083,7 @@ private:
 
     void drain_feedback_holding_registers(
         const Configs& issued,
-        std::array<std::optional<Token>, kAluCount>& next_inputs)
+        std::array<std::optional<ColumnStreamRegister>, kAluCount>& next_inputs)
     {
         auto destination_used = std::array<bool, kAluCount>{};
         for (auto& holding : feedback_holding_registers_) {
@@ -1135,7 +1109,7 @@ private:
     {
         const auto feedback_ready =
             !instruction_uses_feedback(instruction)
-            || stage_inputs_[stage].has_value();
+            || column_input_registers_[stage].has_value();
         const auto stream_ready =
             (!is_stream(instruction.lhs.kind)
              && !is_stream(instruction.rhs.kind))
@@ -1150,7 +1124,7 @@ private:
             if (!issued[stage]) continue;
             executes[stage] = is_chain_head(stage)
                 ? head_operands_ready(*issued[stage], stage)
-                : stage_inputs_[stage].has_value();
+                : column_input_registers_[stage].has_value();
         }
         return executes;
     }
@@ -1169,7 +1143,8 @@ private:
             if (!instruction_emits(instruction)) continue;
 
             const auto downstream = stage + 1;
-            if (stage_inputs_[downstream].has_value() && !executes[downstream]) {
+            if (column_input_registers_[downstream].has_value()
+                && !executes[downstream]) {
                 throw std::logic_error(
                     "VXM static schedule collision: ALU"
                     + std::to_string(stage)
@@ -1218,7 +1193,8 @@ private:
         }
     }
 
-    float read_operand(const VxmLaneOperand& operand, const Token& token,
+    float read_operand(const VxmLaneOperand& operand,
+                       const ColumnStreamRegister& token,
                        std::size_t stage, bool rhs_port) const
     {
         switch (operand.kind) {
@@ -1284,7 +1260,8 @@ private:
 
     VxmChainDepth chain_depth_{VxmChainDepth::Eight};
     std::shared_ptr<VxmSpecialAlu> special_alu_;
-    std::array<std::optional<Token>, kAluCount> stage_inputs_{};
+    std::array<std::optional<ColumnStreamRegister>, kAluCount>
+        column_input_registers_{};
     std::array<BasicPipeline, kAluCount> basic_pipelines_{};
     std::array<SpecialPipeline, kAluCount> special_pipelines_{};
     std::array<std::optional<float>, kAluCount> accumulators_{};

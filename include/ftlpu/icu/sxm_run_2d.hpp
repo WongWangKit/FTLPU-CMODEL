@@ -90,6 +90,7 @@ inline void validate_sxm_transpose_icu_run_2d_instruction(
         instruction.input_row == SxmInstruction::kAllInputRows
         ? 2 * hw::kLanesPerTile : std::size_t {2};
     if (instruction.input_row != SxmInstruction::kAllInputRows
+        && instruction.input_row != SxmInstruction::kBroadcastInputRows
         && instruction.input_row >= hw::kLanesPerTile)
         throw std::invalid_argument(
             "SXM transpose input row is outside the physical tile");
@@ -112,7 +113,7 @@ inline void validate_sxm_permute_icu_run_2d_instruction(
         throw std::invalid_argument(
             "SXM permute RUN_2D cannot carry a transpose input selector");
     if (instruction.output_row != SxmInstruction::kAllOutputRows
-        && instruction.output_row >= hw::kLanesPerTile)
+        && instruction.output_row > 15)
         throw std::invalid_argument(
             "SXM permute output row is outside the physical tile");
     if (instruction.output_tile != SxmInstruction::kAllOutputTiles
@@ -282,7 +283,7 @@ inline SxmIcuRun2DInstruction decode_sxm_transpose_icu_run_2d_instruction(
         packet, 120, "SXM transpose RUN_2D reserved field is non-zero");
     const auto inputRow = static_cast<std::size_t>(
         codec::read_unsigned(packet, 116, 4));
-    if (inputRow > hw::kLanesPerTile)
+    if (inputRow > hw::kLanesPerTile && inputRow != SxmInstruction::kBroadcastInputRows)
         throw std::logic_error("encoded SXM transpose input row is invalid");
     const auto sourceCount = inputRow == hw::kLanesPerTile
         ? 2 * hw::kLanesPerTile : std::size_t {2};
@@ -360,7 +361,7 @@ inline SxmIcuRun2DInstruction decode_sxm_permute_icu_run_2d_instruction(
         codec::read_unsigned(packet, 276, 4));
     const auto outputTile = static_cast<std::size_t>(
         codec::read_unsigned(packet, 280, 3));
-    if (outputRow > hw::kLanesPerTile || outputTile > hw::kTileRows)
+    if (outputRow > 15 || outputTile > hw::kTileRows)
         throw std::logic_error("encoded SXM permute output selector is invalid");
     instruction.output_row = outputRow == hw::kLanesPerTile
         ? SxmInstruction::kAllOutputRows : outputRow;

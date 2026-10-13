@@ -513,6 +513,72 @@ private:
             // selected stream may update SRAM.
             return;
         } else if (missing_stream_policy_ == MissingStreamPolicy::Error) {
+            std::string valid_streams;
+            for (std::size_t candidate = 0;
+                 candidate < hw::kStreamsPerDirection; ++candidate) {
+                if (!input.segment_valid(tile, candidate)) continue;
+                if (!valid_streams.empty()) valid_streams += ",";
+                valid_streams += std::to_string(candidate);
+            }
+            std::string valid_tiles;
+            for (std::size_t candidate = 0;
+                 candidate < hw::kTileRows; ++candidate) {
+                if (!input.segment_valid(candidate, stream.index())) continue;
+                if (!valid_tiles.empty()) valid_tiles += ",";
+                valid_tiles += std::to_string(candidate);
+            }
+            std::string valid_cells;
+            for (std::size_t candidate_tile = 0;
+                 candidate_tile < hw::kTileRows; ++candidate_tile) {
+                for (std::size_t candidate_stream = 0;
+                     candidate_stream < hw::kStreamsPerDirection;
+                     ++candidate_stream) {
+                    if (!input.segment_valid(
+                            candidate_tile, candidate_stream))
+                        continue;
+                    if (!valid_cells.empty()) valid_cells += ",";
+                    valid_cells += std::to_string(candidate_tile) + ":"
+                        + std::to_string(candidate_stream);
+                }
+            }
+            std::string stream_columns;
+            for (std::size_t candidate_column = 0;
+                 candidate_column < fabric.column_count();
+                 ++candidate_column) {
+                for (std::size_t candidate_tile = 0;
+                     candidate_tile < hw::kTileRows; ++candidate_tile) {
+                    if (!fabric.segment_valid(
+                            candidate_column, candidate_tile, stream))
+                        continue;
+                    if (!stream_columns.empty()) stream_columns += ",";
+                    stream_columns += std::to_string(candidate_column) + ":"
+                        + std::to_string(candidate_tile);
+                }
+            }
+            std::string staged_stream_columns;
+            std::string last_stream_column_cycles;
+            for (std::size_t candidate_column = 0;
+                 candidate_column < fabric.column_count();
+                 ++candidate_column) {
+                for (std::size_t candidate_tile = 0;
+                     candidate_tile < hw::kTileRows; ++candidate_tile) {
+                    if (!last_stream_column_cycles.empty())
+                        last_stream_column_cycles += ";";
+                    last_stream_column_cycles +=
+                        std::to_string(candidate_column) + ":"
+                        + std::to_string(candidate_tile) + "="
+                        + fabric.last_segment_cycles(
+                            candidate_column, candidate_tile, stream);
+                    if (!fabric.staged_segment_valid(
+                            candidate_column, candidate_tile, stream))
+                        continue;
+                    if (!staged_stream_columns.empty())
+                        staged_stream_columns += ",";
+                    staged_stream_columns +=
+                        std::to_string(candidate_column) + ":"
+                        + std::to_string(candidate_tile);
+                }
+            }
             throw std::logic_error(
                 "MEM Write reached an invalid stream segment: slice="
                 + std::to_string(mem_slice)
@@ -520,7 +586,22 @@ private:
                 + " tile=" + std::to_string(tile)
                 + " sr_column=" + std::to_string(sr_column)
                 + " stream=" + std::to_string(stream.packed())
-                + " address=" + std::to_string(instruction.address));
+                + " address=" + std::to_string(instruction.address)
+                + " valid_stream_indices_at_tile="
+                + (valid_streams.empty() ? "none" : valid_streams)
+                + " valid_tiles_for_stream="
+                + (valid_tiles.empty() ? "none" : valid_tiles)
+                + " valid_cells_at_column="
+                + (valid_cells.empty() ? "none" : valid_cells)
+                + " stream_columns="
+                + (stream_columns.empty() ? "none" : stream_columns)
+                + " staged_stream_columns="
+                + (staged_stream_columns.empty()
+                    ? "none" : staged_stream_columns)
+                + " last_target_segment_cycles="
+                + fabric.last_segment_cycles(sr_column, tile, stream)
+                + " last_stream_column_cycles="
+                + last_stream_column_cycles);
         }
 
         sram_.bank(mem_slice, bank).write_segment(

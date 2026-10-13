@@ -55,10 +55,10 @@ void test_feedback_2_to_8()
                 std::move(event)));
         };
 
-    // Two compact packets are sent on every logical Slice instruction
-    // channel. The old depth-2 configuration produces four values per
-    // physical 8-ALU block; the following depth-8 configuration consumes
-    // those values through the fixed Feedback network.
+    // Two compact packets are sent on every physical column channel. The old
+    // depth-2 configuration produces four values per 8-column chain; the
+    // following depth-8 configuration consumes those values through the fixed
+    // Feedback network.
     for (std::size_t stage = 0; stage < VxmSlice::kAluQueues; ++stage) {
         auto producer = stage % 2 == 0
             ? VxmLaneAluInstruction{
@@ -72,7 +72,7 @@ void test_feedback_2_to_8()
             VxmCompactInstructionCodec::encode(
                 stage, VxmChainDepth::Two, producer));
 
-        auto consumer = stage == 0
+        auto consumer = stage % 8 == 0
             ? VxmLaneAluInstruction{
                 VxmAluOpcode::Bypass,
                 VxmLaneOperand::Feedback()}
@@ -80,8 +80,10 @@ void test_feedback_2_to_8()
                 VxmAluOpcode::Bypass,
                 VxmLaneOperand::Previous()};
         consumer.repeat_count = 4;
-        if (stage == 7) {
-            consumer.output_stream = 6;
+        if (stage % 8 == 7) {
+            consumer.output_stream =
+                VxmLane::fixed_output_stream_for_block(
+                    VxmLane::block_for_stage(stage));
             consumer.output_type = VxmCastTarget::Float32;
         }
         slice.issue_south(
@@ -190,41 +192,6 @@ void test_missing_bundle_is_schedule_error()
     assert(schedule_error);
 }
 
-void test_fused_operand_bundle_capture()
-{
-    using namespace ftlpu;
-
-    auto slice = VxmSlice{};
-    slice.set_chain_depth(VxmChainDepth::Two);
-    auto head = VxmLaneAluInstruction{
-        VxmAluOpcode::Multiply,
-        VxmLaneOperand::StreamFloat16(
-            1.0f, 0, VxmStreamSource::East),
-        VxmLaneOperand::StreamFloat16(
-            1.0f, 4, VxmStreamSource::East)};
-    auto tail = VxmLaneAluInstruction{
-        VxmAluOpcode::FusedMultiplySubtract,
-        VxmLaneOperand::StreamFloat16(
-            1.0f, 0, VxmStreamSource::West),
-        VxmLaneOperand::StreamFloat16(
-            1.0f, 5, VxmStreamSource::East)};
-    tail.output_stream = 0;
-    tail.output_type = VxmCastTarget::Float32;
-    slice.issue_south(0, VxmCompactInstructionCodec::encode(
-        0, VxmChainDepth::Two, head));
-    slice.issue_south(1, VxmCompactInstructionCodec::encode(
-        1, VxmChainDepth::Two, tail));
-
-    slice.tick();
-    slice.prepare_cycle();
-    const auto required = slice.required_streams_at(0);
-    assert(required);
-    for (const auto group : {0U, 4U, 5U, 8U}) {
-        const auto base = group * VxmLane::kStreamGroupBytes;
-        assert((*required)[base]);
-        assert((*required)[base + 1]);
-    }
-}
 
 }
 
@@ -316,7 +283,6 @@ int main()
     assert(repeated.output_at(0));
     test_feedback_2_to_8();
     test_missing_bundle_is_schedule_error();
-    test_fused_operand_bundle_capture();
     vxm_hardware_test::write_pass_result(
         "slice_test_results.txt", "slice_test");
     return 0;

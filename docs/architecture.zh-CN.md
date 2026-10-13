@@ -182,10 +182,12 @@ helper。
 
 ## 6. VXM
 
-中心 VXM 有四个 superlane、每个 superlane 8 lane、每个 lane 16 个物理 ALU，组成
-两条镜像的 8 级数据通路。8 条紧凑 ICU queue 控制逻辑级 `C0..C7`，superlane
-decoder 将每份配置镜像到物理级 `C(i+8)`。两条链的数据和流水状态彼此独立，解码后
-的配置广播到所有物理 lane。
+中心 VXM 有四个 superlane、每个 superlane 8 lane、每个 lane 有 `vxm.alus` 个物理
+ALU（默认 16）。每个物理列 `C0..C(N-1)` 都是独立可调度的 column slice，分别拥有紧凑 ICU queue、
+decoder、current/next configuration register 和 repeat 状态。解码后的配置仍广播到
+同一 superlane 的所有物理 lane。VALU 列之间穿插的全部是普通 stream register：
+east 数据依次经过 `C0..C(N-1)`，west 数据按相反顺序传播。VALU 指令显式给出
+源 SR 和结果 SR；未被该列 VALU 消费的有效 SR 数据沿普通 link 自然传播。
 
 支持的 opcode：
 
@@ -194,7 +196,10 @@ Bypass Add Subtract Multiply Negate Max Exp Reciprocal Rsqrt
 ```
 
 operand 使用固定 stream group、previous/original/auxiliary 值、accumulator 或 feedback
-状态、local scalar 和 FP32 immediate。链深可选 2、4、8。16 个 2-byte 输入 group
+状态和 FP32 immediate。`Previous`、`Original`、`Auxiliary`、`Feedback` 与链深只保留为
+编译器 lowering 概念，不对应硬件 mux；在编码 ICU 指令前，所有依赖都必须分配为
+普通 SR 号。16-bit operand 指向对齐 SR pair 的低字节，result SR 指向 cast 结果的
+首字节。16 个 2-byte 输入 group
 分别选择 east 或 west hemisphere；每个两级 output block 使用固定 stream pair，并可
 配置目标 hemisphere。结果可保留在本地，也可输出 FP16、BF16、INT8 或 FP32 stream。
 

@@ -41,7 +41,7 @@ function(ftlpu_generate_hardware_config input_json output_header)
     ftlpu_json_get(FTLPU_HW_SR_REGISTERS sr registers_per_lane)
     ftlpu_json_get(FTLPU_HW_SR_BYTES_PER_STREAM sr bytes_per_stream_per_lane)
     ftlpu_json_get(FTLPU_HW_MXM_ACCUM_CONTEXTS mxm accum_contexts)
-    ftlpu_json_get(FTLPU_HW_VXM_ALUS_PER_DIRECTION vxm alus)
+    ftlpu_json_get(FTLPU_HW_VXM_COLUMNS vxm alus)
 
     set(FTLPU_POSITIVE_INTEGER_FIELDS
         FTLPU_HW_HEMISPHERES
@@ -54,7 +54,7 @@ function(ftlpu_generate_hardware_config input_json output_header)
         FTLPU_HW_SR_REGISTERS
         FTLPU_HW_SR_BYTES_PER_STREAM
         FTLPU_HW_MXM_ACCUM_CONTEXTS
-        FTLPU_HW_VXM_ALUS_PER_DIRECTION)
+        FTLPU_HW_VXM_COLUMNS)
     foreach(field IN LISTS FTLPU_POSITIVE_INTEGER_FIELDS)
         if(NOT "${${field}}" MATCHES "^[1-9][0-9]*$")
             message(FATAL_ERROR "${field} must be a positive integer")
@@ -77,6 +77,12 @@ function(ftlpu_generate_hardware_config input_json output_header)
     if(FTLPU_HW_MXM_ACCUM_CONTEXTS GREATER 256)
         message(FATAL_ERROR
             "mxm.accum_contexts exceeds the 13-bit accumulator address capacity")
+    endif()
+    math(EXPR FTLPU_HW_VXM_COLUMN_REMAINDER "${FTLPU_HW_VXM_COLUMNS} % 8")
+    if(FTLPU_HW_VXM_COLUMNS LESS 16 OR
+       NOT FTLPU_HW_VXM_COLUMN_REMAINDER EQUAL 0)
+        message(FATAL_ERROR
+            "vxm.alus must be at least 16 and a multiple of 8")
     endif()
 
     # MEM addresses occupy a contiguous power-of-two field in the ISA.

@@ -75,6 +75,16 @@ ftlpu_add_test(vxm_alu_test tests/unit/vxm/alu_test.cpp
     unit.vxm.alu unit vxm fast)
 ftlpu_add_test(vxm_lane_test tests/unit/vxm/lane_test.cpp
     unit.vxm.lane unit vxm fast)
+ftlpu_add_test(vxm_column_slice_test tests/unit/vxm/column_slice_test.cpp
+    unit.vxm.column_slice unit vxm fast)
+ftlpu_add_test(vxm_sr_instruction_test tests/unit/vxm/sr_instruction_test.cpp
+    unit.vxm.sr_instruction unit vxm fast)
+ftlpu_add_test(vxm_stream_fabric_test tests/unit/vxm/stream_fabric_test.cpp
+    unit.vxm.stream_fabric unit vxm fast)
+ftlpu_add_test(vxm_sr_datapath_test tests/unit/vxm/sr_datapath_test.cpp
+    unit.vxm.sr_datapath unit vxm fast)
+ftlpu_add_test(vxm_sr_slice_test tests/unit/vxm/sr_slice_test.cpp
+    unit.vxm.sr_slice unit vxm fast)
 ftlpu_add_test(vxm_superlane_test tests/unit/vxm/superlane_test.cpp
     unit.vxm.superlane unit vxm fast)
 ftlpu_add_test(vxm_slice_test tests/unit/vxm/slice_test.cpp

@@ -93,6 +93,7 @@ public:
         for (auto& instruction : transpose_instruction_rows_) instruction.reset();
         permute_instruction_.reset();
         transpose_bank_ = TransposeBank {};
+        fanout_outputs_.clear();
     }
 
     std::size_t cycle() const noexcept
@@ -170,6 +171,16 @@ public:
         }
 
         cycle_events_.clear();
+
+        // Fanout traverses the same four superlane pipeline positions as a
+        // MEM vector. Keep its output beat skew explicit rather than making
+        // all tiles appear on the SR fabric in one cycle.
+        for (const auto& output : fanout_outputs_)
+            if (output.cycle == units_.cycle())
+                stage_block_segment(fabric, output.tile, output.segment,
+                    output.stream, "SXM block fanout pipeline");
+        fanout_outputs_.erase(std::remove_if(fanout_outputs_.begin(), fanout_outputs_.end(),
+            [&](const auto& output) { return output.cycle <= units_.cycle(); }), fanout_outputs_.end());
 
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
             auto inputs = read_and_consume_inputs(fabric, tile);
@@ -261,7 +272,8 @@ private:
         if (instruction.input_row == SxmInstruction::kAllInputRows)
             return instruction.src_streams.size()
                 == kTransposeBytePlanes * hw::kLanesPerTile;
-        return instruction.input_row < hw::kLanesPerTile
+        return (instruction.input_row < hw::kLanesPerTile
+                || instruction.input_row == SxmInstruction::kBroadcastInputRows)
             && instruction.src_streams.size() == kTransposeBytePlanes;
     }
 
@@ -321,7 +333,24 @@ private:
                 tile,
                 StreamId::from_packed(source_stream.stream));
         }
-        if (!all_valid) return;
+        if (!all_valid) {
+            if (trace_enabled_) {
+                std::ostringstream event;
+                event << "transpose wait tile=" << tile << " valid=";
+                for (std::size_t index = 0;
+                     index < instruction.src_streams.size(); ++index) {
+                    if (index != 0) event << ',';
+                    const auto source = StreamId::from_packed(
+                        instruction.src_streams[index].stream);
+                    event << (fabric.segment_valid(
+                        input_column, tile, source) ? '1' : '0')
+                          << '@' << fabric.last_segment_cycles(
+                              input_column, tile, source);
+                }
+                cycle_events_.push_back(event.str());
+            }
+            return;
+        }
 
             auto& bank = transpose_bank_;
             if (bank.tile_ready[tile]) {
@@ -338,9 +367,11 @@ private:
 
             const std::size_t first_row =
                 instruction.input_row == SxmInstruction::kAllInputRows
+                    || instruction.input_row == SxmInstruction::kBroadcastInputRows
                 ? 0 : instruction.input_row;
             const std::size_t row_end =
                 instruction.input_row == SxmInstruction::kAllInputRows
+                    || instruction.input_row == SxmInstruction::kBroadcastInputRows
                 ? hw::kLanesPerTile : first_row + 1;
             for (std::size_t row = first_row; row < row_end; ++row) {
                 for (std::size_t plane = 0; plane < kTransposeBytePlanes; ++plane) {
@@ -432,9 +463,21 @@ private:
         const SxmInstruction& instruction,
         std::array<bool, hw::kTileRows>& processed_tiles)
     {
-        Permute320::validate_bijection(instruction.permute_map);
+        // The block crossbar may fan out one source superlane to several
+        // destinations. Each destination still selects one complete block;
+        // this requires no arithmetic or additional transpose storage.
+        for (const auto source : instruction.permute_map)
+            if (source >= SxmInstruction::kTotalLanes)
+                throw std::out_of_range("SXM block source is outside the physical plane");
+        std::array<bool, hw::kTileRows> used_sources{};
+        bool fanout = false;
+        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+            const auto source = block_permute_source_tile(tile, instruction.permute_map);
+            fanout = fanout || used_sources[source];
+            used_sources[source] = true;
+        }
         if (instruction.output_row != SxmInstruction::kAllOutputRows
-            && instruction.output_row >= hw::kLanesPerTile) {
+            && instruction.output_row > 15) {
             throw std::out_of_range("SXM Permute output row is outside the block");
         }
         if (instruction.output_tile != SxmInstruction::kAllOutputTiles
@@ -462,12 +505,21 @@ private:
 
             const std::size_t first_row =
                 instruction.output_row == SxmInstruction::kAllOutputRows
-                ? 0 : instruction.output_row;
+                ? 0 : instruction.output_row >= SxmInstruction::kConsumeOutputRowBase
+                    ? instruction.output_row - SxmInstruction::kConsumeOutputRowBase : instruction.output_row;
             const std::size_t row_end =
                 instruction.output_row == SxmInstruction::kAllOutputRows
                 ? hw::kLanesPerTile : first_row + 1;
             for (std::size_t row = first_row; row < row_end; ++row) {
                 for (std::size_t plane = 0; plane < kTransposeBytePlanes; ++plane) {
+                    if (fanout && destination_tile != 0) {
+                        fanout_outputs_.push_back(FanoutOutput {units_.cycle() + destination_tile,
+                            destination_tile,
+                            permute_block_segment(bank, plane, row, source_tile,
+                                destination_tile, instruction.permute_map),
+                            instruction.dst_streams[row * kTransposeBytePlanes + plane]});
+                        continue;
+                    }
                     stage_block_segment(
                         fabric,
                         destination_tile,
@@ -482,11 +534,6 @@ private:
                         "SXM parallel block output");
                 }
             }
-            if (instruction.output_row == SxmInstruction::kAllOutputRows
-                || instruction.output_row + 1 == hw::kLanesPerTile) {
-                bank.tile_ready[source_tile] = false;
-                bank.input_row_mask[source_tile] = 0;
-            }
             processed_tiles[destination_tile] = true;
             if (trace_enabled_) {
                 std::ostringstream event;
@@ -494,6 +541,25 @@ private:
                       << " destination_tile=" << destination_tile
                       << " output_streams=" << instruction.dst_streams.size();
                 cycle_events_.push_back(event.str());
+            }
+        }
+        // Release only after every destination has observed the source. A
+        // full-plane operation consumes even the source blocks it discards.
+        if (instruction.output_row == SxmInstruction::kAllOutputRows
+            || instruction.output_row >= SxmInstruction::kConsumeOutputRowBase
+            || instruction.output_row + 1 == hw::kLanesPerTile) {
+            if (instruction.output_tile == SxmInstruction::kAllOutputTiles) {
+                for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+                    if (!transpose_bank_.tile_ready[tile]
+                        || transpose_bank_.ready_cycle[tile] >= units_.cycle()
+                        || transpose_bank_.dst_streams[tile] != instruction.src_streams) continue;
+                    transpose_bank_.tile_ready[tile] = false;
+                    transpose_bank_.input_row_mask[tile] = 0;
+                }
+            } else {
+                const auto source = block_permute_source_tile(instruction.output_tile, instruction.permute_map);
+                transpose_bank_.tile_ready[source] = false;
+                transpose_bank_.input_row_mask[source] = 0;
             }
         }
     }
@@ -580,6 +646,13 @@ private:
 
     SxmStreamPortMap ports_;
     UnitGroup units_{};
+    struct FanoutOutput {
+        std::size_t cycle;
+        std::size_t tile;
+        StreamPayloadTileSegment segment;
+        SxmStreamId stream;
+    };
+    std::vector<FanoutOutput> fanout_outputs_;
     std::array<std::optional<SxmInstruction>, hw::kTileRows> transpose_instruction_rows_{};
     std::optional<SxmInstruction> permute_instruction_{};
     TransposeBank transpose_bank_{};

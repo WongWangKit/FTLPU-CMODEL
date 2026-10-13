@@ -27,8 +27,10 @@ inline constexpr std::size_t kMxmAccumulatorContexts = @FTLPU_HW_MXM_ACCUM_CONTE
 inline constexpr bool kMxmSupportsNative4x4 = @FTLPU_HW_MXM_SUPPORTS_NATIVE4X4@;
 inline constexpr bool kMxmSupportsLinear1x16 = @FTLPU_HW_MXM_SUPPORTS_LINEAR1X16@;
 
-// JSON `vxm.alus` is the number of stages in each mirrored direction chain.
-inline constexpr std::size_t kVxmAlusPerDirection = @FTLPU_HW_VXM_ALUS_PER_DIRECTION@;
+// JSON `vxm.alus` is the total number of independently schedulable VALU
+// columns. The two directional halves each contain at least eight columns and
+// grow in four-column groups with the same repeating ALU capabilities.
+inline constexpr std::size_t kVxmColumns = @FTLPU_HW_VXM_COLUMNS@;
 
 inline constexpr std::array<std::string_view, @FTLPU_STREAM_FABRIC_COUNT@>
     kStreamFabricNames{{

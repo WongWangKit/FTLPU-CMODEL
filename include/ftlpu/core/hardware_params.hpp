@@ -101,9 +101,8 @@ constexpr std::size_t kMxmAccumulatorBytes =
 constexpr bool kMxmSupportsNative4x4 = config::kMxmSupportsNative4x4;
 constexpr bool kMxmSupportsLinear1x16 = config::kMxmSupportsLinear1x16;
 
-constexpr std::size_t kVxmAlusPerDirection =
-    config::kVxmAlusPerDirection;
-constexpr std::size_t kVxmAluCount = 2 * kVxmAlusPerDirection;
+constexpr std::size_t kVxmAluCount = config::kVxmColumns;
+constexpr std::size_t kVxmColumnsPerDirection = kVxmAluCount / 2;
 constexpr std::size_t kSxmConcurrentStreamOps = 2 * kLanesPerTile;
 
 // Distributed ICU geometry. Every functional queue owns local instruction
@@ -214,6 +213,10 @@ static_assert(kEastStreams + kWestStreams == kStreams);
 static_assert(kMxmRows == kMxmSupercellRows * kMxmSupercellsPerPlane);
 static_assert(kMxmColumns == kMxmSupercellColumns * kMxmSupercellsPerPlane);
 static_assert(kMxmInt8ColumnLoadStreamsPerCycle == 1);
+static_assert(kVxmAluCount >= 16,
+    "VXM must contain at least two eight-column directional chains");
+static_assert(kVxmAluCount % 8 == 0,
+    "VXM directional halves must grow in complete four-column groups");
 static_assert(kMxmLoadStreamsPerCycle <= kStreamsPerDirection);
 static_assert(kMxmInt8LoadStreamsPerCycle <= kStreamsPerDirection);
 static_assert(kMxmAccumulatorBlockCount > 0);

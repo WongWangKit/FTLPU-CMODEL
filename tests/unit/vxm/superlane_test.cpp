@@ -31,6 +31,28 @@ std::vector<ftlpu::VxmLutEntry> table(float min, float width,
 
 int main()
 {
+    // C0 and C8 are separate physical column slices. Consuming C8 must not
+    // decrement C0's independently owned repeat counter.
+    auto column_control = ftlpu::VxmSuperlaneInstructionControl {};
+    auto c0 = ftlpu::VxmLaneAluInstruction {
+        ftlpu::VxmAluOpcode::Bypass,
+        ftlpu::VxmLaneOperand::StreamFloat16()};
+    c0.repeat_count = 2;
+    auto c8 = c0;
+    c8.repeat_count = 1;
+    column_control.enqueue(0, ftlpu::VxmChainDepth::Eight, c0);
+    column_control.enqueue(8, ftlpu::VxmChainDepth::Eight, c8);
+    column_control.issue(ftlpu::VxmChainDepth::Eight);
+    const auto independent =
+        column_control.issue(ftlpu::VxmChainDepth::Eight);
+    assert(independent[0]);
+    assert(independent[8]);
+    auto executed = ftlpu::VxmLaneExecutionMask {};
+    executed[8] = true;
+    column_control.consume(executed);
+    assert(column_control.remaining_in_current(0) == 2);
+    assert(column_control.remaining_in_current(8) == 0);
+
     auto superlane = ftlpu::VxmSuperlane{};
     constexpr std::size_t entries = 64;
     superlane.configure_special_lut(ftlpu::VxmSpecialAluOpcode::Reciprocal,
@@ -108,8 +130,8 @@ int main()
     hidden_decode.tick();
     assert(hidden_decode.idle());
 
-    // The Superlane owns one shared Current Config and repeat counter.  The
-    // 16 lanes execute it in lockstep; the counter is consumed once per cycle,
+    // Each column owns one shared Current Config and repeat counter. The
+    // 8 lanes execute it in lockstep; the counter is consumed once per cycle,
     // not once per lane.
     superlane.set_chain_depth(ftlpu::VxmChainDepth::Two);
     auto head = ftlpu::VxmLaneAluInstruction{ftlpu::VxmAluOpcode::Bypass,
@@ -147,13 +169,13 @@ int main()
     superlane.tick();
     assert(superlane.idle());
 
-    // One shared Feedback configuration selects the fixed C7 -> C0 wire in
-    // all 16 lanes, while each lane carries its own numerical result.
+    // The two 8-column chains are programmed explicitly. Each chain's head
+    // selects its fixed feedback wire while every lane carries its own value.
     auto feedback = ftlpu::VxmSuperlane{};
     feedback.set_chain_depth(ftlpu::VxmChainDepth::Eight);
     for (std::size_t stage = 0;
-         stage < 8; ++stage) {
-        feedback.enqueue_instruction(stage, stage == 0
+         stage < 16; ++stage) {
+        feedback.enqueue_instruction(stage, stage % 8 == 0
             ? ftlpu::VxmLaneAluInstruction{
                 ftlpu::VxmAluOpcode::Add,
                 ftlpu::VxmLaneOperand::StreamFloat16(),
@@ -162,7 +184,7 @@ int main()
                 ftlpu::VxmAluOpcode::Bypass,
                 ftlpu::VxmLaneOperand::Previous()});
 
-        auto second = stage == 0
+        auto second = stage % 8 == 0
             ? ftlpu::VxmLaneAluInstruction{
                 ftlpu::VxmAluOpcode::Add,
                 ftlpu::VxmLaneOperand::Feedback(),
@@ -170,8 +192,10 @@ int main()
             : ftlpu::VxmLaneAluInstruction{
                 ftlpu::VxmAluOpcode::Bypass,
                 ftlpu::VxmLaneOperand::Previous()};
-        if (stage == 7) {
-            second.output_stream = 6;
+        if (stage % 8 == 7) {
+            second.output_stream =
+                ftlpu::VxmLane::fixed_output_stream_for_block(
+                    ftlpu::VxmLane::block_for_stage(stage));
             second.output_type = ftlpu::VxmCastTarget::Float32;
         }
         feedback.enqueue_instruction(stage, second);
@@ -233,7 +257,7 @@ int main()
                     std::move(event)));
         };
     for (std::size_t stage = 0;
-         stage < 8; ++stage) {
+         stage < 16; ++stage) {
         auto old_instruction = stage % 2 == 0
             ? ftlpu::VxmLaneAluInstruction{
                 ftlpu::VxmAluOpcode::Bypass,
@@ -245,7 +269,7 @@ int main()
             ftlpu::VxmChainDepth::Two,
             stage, old_instruction);
 
-        auto new_instruction = stage == 0
+        auto new_instruction = stage % 8 == 0
             ? ftlpu::VxmLaneAluInstruction{
                 ftlpu::VxmAluOpcode::Bypass,
                 ftlpu::VxmLaneOperand::Feedback()}
@@ -253,8 +277,10 @@ int main()
                 ftlpu::VxmAluOpcode::Bypass,
                 ftlpu::VxmLaneOperand::Previous()};
         new_instruction.repeat_count = 4;
-        if (stage == 7) {
-            new_instruction.output_stream = 6;
+        if (stage % 8 == 7) {
+            new_instruction.output_stream =
+                ftlpu::VxmLane::fixed_output_stream_for_block(
+                    ftlpu::VxmLane::block_for_stage(stage));
             new_instruction.output_type =
                 ftlpu::VxmCastTarget::Float32;
         }

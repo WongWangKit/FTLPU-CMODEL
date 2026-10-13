@@ -84,6 +84,10 @@ public:
                kLhsStreamGroupShift, kStreamGroupMask);
         insert(control, encode_stream_group(instruction.rhs),
                kRhsStreamGroupShift, kStreamGroupMask);
+        insert(control, instruction.accumulator_reset_first ? 1 : 0,
+               kAccumulatorResetFirstShift, 0x1);
+        insert(control, instruction.accumulator_emit_last ? 1 : 0,
+               kAccumulatorEmitLastShift, 0x1);
 
         auto immediate = 0.0f;
         if (instruction.lhs.kind == VxmLaneOperandKind::Immediate) {
@@ -131,6 +135,10 @@ public:
             packet.control, kRepeatShift, kRepeatMask));
         instruction.local_scalar_write = extract(
             packet.control, kLocalScalarWriteShift, 0x1) != 0;
+        instruction.accumulator_reset_first = extract(
+            packet.control, kAccumulatorResetFirstShift, 0x1) != 0;
+        instruction.accumulator_emit_last = extract(
+            packet.control, kAccumulatorEmitLastShift, 0x1) != 0;
         if (instruction.repeat_count == 0) {
             throw std::invalid_argument(
                 "VXM compact instruction decoded a zero repeat_count");
@@ -162,6 +170,8 @@ private:
     static constexpr unsigned kLocalScalarWriteShift = 51;
     static constexpr unsigned kLhsStreamGroupShift = 52;
     static constexpr unsigned kRhsStreamGroupShift = 57;
+    static constexpr unsigned kAccumulatorResetFirstShift = 62;
+    static constexpr unsigned kAccumulatorEmitLastShift = 63;
 
     static void insert(std::uint64_t& word, std::uint64_t value,
                        unsigned shift, std::uint64_t mask)
@@ -189,8 +199,6 @@ private:
             case VxmAluOpcode::Multiply: return 3;
             case VxmAluOpcode::Negate: return 4;
             case VxmAluOpcode::Max: return 5;
-            case VxmAluOpcode::FusedMultiplyAdd: return 9;
-            case VxmAluOpcode::FusedMultiplySubtract: return 10;
             }
         }
         switch (std::get<VxmSpecialAluOpcode>(operation)) {
@@ -213,8 +221,6 @@ private:
         case 6: return VxmSpecialAluOpcode::Exp;
         case 7: return VxmSpecialAluOpcode::Reciprocal;
         case 8: return VxmSpecialAluOpcode::Rsqrt;
-        case 9: return VxmAluOpcode::FusedMultiplyAdd;
-        case 10: return VxmAluOpcode::FusedMultiplySubtract;
         default:
             throw std::invalid_argument(
                 "VXM compact instruction has an invalid opcode");
@@ -313,6 +319,7 @@ private:
         case VxmChainDepth::Two: return 0;
         case VxmChainDepth::Four: return 1;
         case VxmChainDepth::Eight: return 2;
+        case VxmChainDepth::Sixteen: return 3;
         }
         throw std::invalid_argument("unsupported VXM compact chain depth");
     }
@@ -323,10 +330,10 @@ private:
         case 0: return VxmChainDepth::Two;
         case 1: return VxmChainDepth::Four;
         case 2: return VxmChainDepth::Eight;
-        default:
-            throw std::invalid_argument(
-                "VXM compact instruction has an invalid chain depth");
+        case 3: return VxmChainDepth::Sixteen;
         }
+        throw std::invalid_argument(
+            "VXM compact instruction has an invalid chain depth");
     }
 
     static void validate_compact_operand(const VxmLaneOperand& operand)

@@ -547,5 +547,46 @@ int main()
         }
     }
 
+    // A packed vector can be replicated over transpose rows, then one
+    // complete superlane can fan out to all four destination tiles. Verify
+    // the four-cycle output skew and that the discarded source blocks are
+    // released for a subsequent transpose.
+    ftlpu::StreamRegisterFabric fanout_fabric(2);
+    ftlpu::SxmSlice fanout_sxm(ftlpu::SxmStreamPortMap::SameDirection(0, 1));
+    for (std::size_t iteration = 0; iteration < 3; ++iteration) {
+        for (std::size_t cycle = 0; cycle < 10; ++cycle) {
+            if (cycle < 4) {
+                for (std::size_t plane = 0; plane < 2; ++plane)
+                    for (std::size_t lane = 0; lane < 8; ++lane)
+                        fanout_fabric.initialize_cell(0, cycle, lane,
+                            ftlpu::StreamId::East(plane),
+                            ftlpu::StreamCell::Valid(static_cast<std::uint8_t>(
+                                iteration * 32 + plane * 64 + cycle * 8 + lane), lane == 7));
+            }
+            if (cycle == 0) {
+                auto instruction = ftlpu::SxmInstruction::Transpose(stream_range(0,2),stream_range(16,16));
+                instruction.input_row = ftlpu::SxmInstruction::kBroadcastInputRows;
+                fanout_sxm.issue(instruction);
+            }
+            if (cycle == 5) {
+                auto map = ftlpu::Permute320::identity_map();
+                for (std::size_t i=0;i<32;++i) map[i]=16+i%8;
+                auto instruction = ftlpu::SxmInstruction::Permute(stream_range(16,16),stream_range(0,16),map);
+                if (iteration == 1) instruction.output_row = ftlpu::SxmInstruction::kConsumeOutputRowBase + 2;
+                fanout_sxm.issue(instruction);
+            }
+            fanout_fabric.begin_cycle();fanout_sxm.evaluate(fanout_fabric);fanout_fabric.commit_cycle();
+            if (cycle>=5 && cycle<9) {
+                const auto tile=cycle-5;
+                for (std::size_t row=0;row<8;++row)
+                    if (iteration != 1 || row == 2)
+                    for (std::size_t plane=0;plane<2;++plane)
+                        for (std::size_t lane=0;lane<8;++lane) {
+                            const auto cell=fanout_fabric.cell(1,tile,lane,ftlpu::StreamId::East(row*2+plane));
+                            assert(cell.valid && cell.data==iteration*32+plane*64+16+row);
+                        }
+            }
+        }
+    }
     return 0;
 }

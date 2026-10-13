@@ -159,7 +159,7 @@ public:
         if (!read.request.lookup_valid) {
             return {read.request, read.request.direct_result};
         }
-        return {read.request, std::fma(read.k, read.request.dx, read.b)};
+        return {read.request, read.k * read.request.dx + read.b};
     }
 
     float restore(const VxmLutLinearResult& linear_result) const
@@ -184,7 +184,7 @@ public:
         return complete_lookup(make_lookup(opcode, input));
     }
 
-    // Five registered stages: address, SRAM, two FMA stages, and restore.
+    // Five registered stages: address, SRAM, two multiply/add stages, and restore.
     // Latency is five cycles; a new lookup may enter every cycle.
     template<typename Metadata>
     class Pipeline {
