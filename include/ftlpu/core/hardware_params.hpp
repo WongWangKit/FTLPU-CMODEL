@@ -3,6 +3,7 @@
 #include "ftlpu/core/hardware_config.hpp"
 
 #include <cstddef>
+#include <bit>
 #include <string_view>
 
 namespace ftlpu::hw {
@@ -28,18 +29,18 @@ constexpr std::size_t kWestStreams = kStreamsPerDirection;
 constexpr std::size_t kStreamRegisterBytes =
     config::kBytesPerStreamPerLane;
 
-// C2C exposes independent external transport lanes. Each lane carries one
-// complete 32-byte vector per cycle; the default receive path then injects the
-// vector into an ordinary E/W stream for on-chip transport and MEM consumption.
+// C2C transport beats do not grow when the on-chip vector grows. A complete
+// vector is injected into ordinary SR only after all its beats have arrived.
 constexpr std::size_t kC2cStreamsPerDirection = kLanesPerTile;
-constexpr std::size_t kC2cBytesPerStreamPerCycle = kPhysicalVectorBytes;
+constexpr std::size_t kC2cBytesPerStreamPerCycle = config::kC2cBeatBytes;
 constexpr std::size_t kC2cBytesPerDirectionPerCycle =
     kC2cStreamsPerDirection * kC2cBytesPerStreamPerCycle;
 
 // MEM/SRAM geometry for one modeled hemisphere.
 constexpr std::size_t kMemSliceColumns = config::kMemSlicesPerHemisphere;
 constexpr std::size_t kMemBanksPerSlice = config::kMemBanksPerSlice;
-constexpr std::size_t kMemSlicesPerGroup = kTileRows;
+constexpr std::size_t kMemSlicesPerGroup =
+    config::kStreamTopology.mem_slices_per_group;
 constexpr std::size_t kMemGroups = kMemSliceColumns / kMemSlicesPerGroup;
 constexpr std::size_t kMemBoundaryStreamRegisterColumns = kMemGroups + 1;
 constexpr std::size_t kC2cToSxmStreamRegisterColumns = 1;
@@ -90,11 +91,18 @@ constexpr std::size_t kMxmInt8LoadStreamStride =
     kMxmInt8LoadStreamsPerCycle;
 constexpr std::size_t kMxmActivationStreamsPerVector = 2;
 constexpr std::size_t kMxmLoadBytesPerCycle = kLanesPerTile * kMxmLoadStreamsPerCycle * kStreamRegisterBytes;
-// One partial-sum block contains a complete 32x32 FP32 output tile.
+// One partial-sum block contains a complete physical MXM output tile in FP32.
 constexpr std::size_t kMxmAccumulatorBlockCount =
     config::kMxmAccumulatorContexts;
 constexpr std::size_t kMxmAccumulatorRows =
     kMxmAccumulatorBlockCount * kMxmRows;
+constexpr std::size_t kMxmAccumulatorAddressBits =
+    std::bit_width(kMxmAccumulatorRows - 1) < 13
+    ? 13 : std::bit_width(kMxmAccumulatorRows - 1);
+constexpr std::size_t kMxmColumnBits =
+    std::bit_width(kMxmSupercellsPerPlane - 1) < 2
+    ? 2 : std::bit_width(kMxmSupercellsPerPlane - 1);
+constexpr std::size_t kMxmAccumulatorStrideBits = kMxmAccumulatorAddressBits + 1;
 constexpr std::size_t kMxmAccumulatorBytes =
     kMxmAccumulatorRows * kMxmColumns * sizeof(float);
 
@@ -157,17 +165,35 @@ constexpr std::size_t kIcuSxmRun2DContextDepth = 1;
 // WRITE_READ_2D shares the single MEM context slot but needs two independent
 // 2-D event cursors while its write and read sweeps overlap in time.
 constexpr std::size_t kIcuMem3DContextBits = 384;
-constexpr std::size_t kIcuMxmLoad3DContextBits = 288;
+constexpr std::size_t kIcuMxmLoad3DContextBits =
+    ((288 + kMxmColumnBits - 2 + 31) / 32) * 32;
 constexpr std::size_t kIcuMxmDequant3DContextBits = 224;
-constexpr std::size_t kIcuMxmCompute3DContextBits = 320;
+constexpr std::size_t kIcuMxmCompute3DContextBits =
+    ((320 + 2 * (kMxmAccumulatorAddressBits - 13)
+      + 3 * (kMxmAccumulatorStrideBits - 14) + 31) / 32) * 32;
+// Retained in the existing ABI encoding-version field. The 32-lane ISA keeps
+// version 1; wide packets/FU fields require version 2 on both sides.
+constexpr std::size_t kIcuIsaLayoutVersion =
+    kPhysicalVectorBytes > 32 || kMxmAccumulatorAddressBits > 13 || kMxmColumnBits > 2 ? 2 : 1;
 // Compact VXM config (96), two-counter launch fields/state, and local i-MEM
 // PC. The third counter used by MEM/MXM does not exist in this context.
 constexpr std::size_t kIcuVxmRun2DContextBits = 256;
 // Queue-local compact SXM fields, two-counter launch state, and PC. Transpose
 // carries two stream bases and one input-row selector; Permute additionally
-// carries the 32-lane map and output selectors.
+// carries the physical-lane map and output selectors.
 constexpr std::size_t kIcuSxmTransposeRun2DContextBits = 256;
-constexpr std::size_t kIcuSxmPermuteRun2DContextBits = 384;
+// Keep the 32-lane context unchanged; wider permutations retain their complete
+// lane map and larger tile selectors in the single active hardware context.
+constexpr std::size_t kSxmLaneIndexBits =
+    std::bit_width(kPhysicalVectorBytes - 1) < 5
+    ? 5 : std::bit_width(kPhysicalVectorBytes - 1);
+constexpr std::size_t kSxmTileSelectorBits =
+    std::bit_width(kTileRows) < 3 ? 3 : std::bit_width(kTileRows);
+constexpr std::size_t kSxmGroupStrideBits =
+    std::bit_width(kTileRows - 1) < 2 ? 2 : std::bit_width(kTileRows - 1);
+constexpr std::size_t kIcuSxmPermuteRun2DContextBits =
+    ((384 + kPhysicalVectorBytes * kSxmLaneIndexBits - 160
+      + kSxmTileSelectorBits - 3 + kSxmGroupStrideBits - 2 + 31) / 32) * 32;
 
 constexpr std::size_t kMxmsPerHemisphere = 2;
 constexpr std::size_t kMxmCount = kHemispheres * kMxmsPerHemisphere;
@@ -197,6 +223,9 @@ static_assert(!kTargetName.empty());
 static_assert(kHemispheres > 0);
 static_assert(kTileRows > 0);
 static_assert(kLanesPerTile > 0);
+static_assert(kMemSlicesPerGroup > 0);
+static_assert(kC2cBytesPerStreamPerCycle > 0
+    && kC2cBytesPerStreamPerCycle <= kPhysicalVectorBytes);
 static_assert(kStreams > 0 && kStreams <= 64 && kStreams % 2 == 0);
 static_assert(kStreamRegisterBytes == kMemBytesPerLane);
 static_assert(kReferenceVectorBytes % kPhysicalVectorBytes == 0);
@@ -221,7 +250,7 @@ static_assert(kMxmLoadStreamsPerCycle <= kStreamsPerDirection);
 static_assert(kMxmInt8LoadStreamsPerCycle <= kStreamsPerDirection);
 static_assert(kMxmAccumulatorBlockCount > 0);
 static_assert(kMxmAccumulatorBlockCount <= 256,
-    "the 13-bit MXM accumulator address supports at most 256 blocks");
+    "the current MXM supports at most 256 accumulator blocks");
 static_assert(kMxmAccumulatorRows
     == kMxmAccumulatorBlockCount * kMxmRows);
 static_assert(kSxmConcurrentStreamOps == 16);

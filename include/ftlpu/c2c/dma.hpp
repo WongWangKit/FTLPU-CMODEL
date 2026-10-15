@@ -31,17 +31,20 @@ public:
     explicit C2cDmaEngine(
         Ddr4Model& ddr4,
         std::size_t fifo_depth_vectors = 4,
-        std::size_t stream_count = 1)
+        std::size_t stream_count = 1,
+        std::size_t transport_lane_base = 0)
         : ddr4_(ddr4)
         , fifo_depth_vectors_(fifo_depth_vectors)
         , stream_count_(stream_count)
+        , transport_lane_base_(transport_lane_base)
     {
         if (fifo_depth_vectors_ == 0) {
             throw std::invalid_argument(
                 "C2C DMA FIFO depth must be non-zero");
         }
         if (stream_count_ == 0
-            || stream_count_ > hw::kC2cStreamsPerDirection) {
+            || stream_count_ > hw::kC2cStreamsPerDirection
+            || transport_lane_base_ + stream_count_ > hw::kHemispheres * hw::kC2cStreamsPerDirection) {
             throw std::invalid_argument(
                 "C2C DMA stream count exceeds the physical fabric");
         }
@@ -217,7 +220,8 @@ private:
             const auto vector_index = active.next_vector_index++;
             pending.push_back(PendingRequest {
                 ddr4_.request_read(
-                    active.instruction.vector_address(vector_index)),
+                    active.instruction.vector_address(vector_index),
+                    2 * (transport_lane_base_ + stream)),
                 vector_index,
                 0});
         }
@@ -254,7 +258,7 @@ private:
             pending.push_back(PendingRequest {
                 ddr4_.request_write(
                     active.instruction.vector_address(vector_index),
-                    std::move(vector)),
+                    std::move(vector),2 * (transport_lane_base_ + stream) + 1),
                 vector_index,
                 tag});
         }
@@ -289,6 +293,7 @@ private:
     Ddr4Model& ddr4_;
     std::size_t fifo_depth_vectors_{4};
     std::size_t stream_count_{1};
+    std::size_t transport_lane_base_{0};
     std::array<std::deque<C2cVector>, hw::kC2cStreamsPerDirection> outbound_{};
     std::array<std::deque<C2cVector>, hw::kC2cStreamsPerDirection> inbound_{};
     std::array<std::deque<C2cDmaInstruction>, hw::kC2cStreamsPerDirection> queues_{};

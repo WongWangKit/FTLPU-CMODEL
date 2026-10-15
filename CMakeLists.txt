@@ -45,8 +45,17 @@ endfunction()
 # Unit tests: one class or functional block, without a whole-chip route.
 ftlpu_add_test(instruction_codec_test tests/unit/core/instruction_codec_test.cpp
     unit.core.instruction_codec unit core fast)
+# Header-only MEM port/SXM codec coverage also builds when another FU's ISA
+# explicitly rejects the experimental target geometry.
+add_executable(geometry_encoding_test tests/unit/core/geometry_encoding_test.cpp)
+target_include_directories(geometry_encoding_test PRIVATE
+    "${FTLPU_GENERATED_INCLUDE_DIR}" include)
+add_test(NAME unit.core.geometry_encoding COMMAND $<TARGET_FILE:geometry_encoding_test>)
+set_tests_properties(unit.core.geometry_encoding PROPERTIES LABELS "unit;core;sxm;fast")
 ftlpu_add_test(bf16_test tests/unit/core/bf16_test.cpp
     unit.core.bf16 unit core fast)
+ftlpu_add_test(wide_transport_codec_test tests/unit/core/wide_transport_codec_test.cpp
+    unit.core.wide_transport_codec unit core mxm c2c fast)
 
 ftlpu_add_test(stream_fabric_test tests/unit/stream/stream_fabric_test.cpp
     unit.stream.fabric unit stream fast)
@@ -108,6 +117,8 @@ ftlpu_add_test(icu_barrier_test tests/unit/icu/barrier_test.cpp
     unit.icu.barrier unit icu fast)
 ftlpu_add_test(icu_repeat_2d_test tests/unit/icu/repeat_2d_test.cpp
     unit.icu.repeat_2d unit icu fast)
+ftlpu_add_test(icu_short_packet_test tests/unit/icu/short_packet_test.cpp
+    unit.icu.short_packet unit icu fast)
 ftlpu_add_test(icu_fu_3d_codec_test tests/unit/icu/fu_3d_codec_test.cpp
     unit.icu.fu_3d_codec unit icu fast)
 ftlpu_add_test(icu_legacy_fu_3d_adapter_test

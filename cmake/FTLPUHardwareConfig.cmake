@@ -43,6 +43,24 @@ function(ftlpu_generate_hardware_config input_json output_header)
     ftlpu_json_get(FTLPU_HW_MXM_ACCUM_CONTEXTS mxm accum_contexts)
     ftlpu_json_get(FTLPU_HW_VXM_COLUMNS vxm alus)
 
+    # A transport beat is independent of the on-chip vector/row width.
+    # Legacy targets omit c2c and retain the original 32-byte link beat.
+    math(EXPR FTLPU_HW_VECTOR_BYTES
+        "${FTLPU_HW_TILES_PER_SLICE} * ${FTLPU_HW_LANES_PER_TILE} * ${FTLPU_HW_MEM_BYTES_PER_LANE}")
+    string(JSON FTLPU_HW_C2C_OBJECT ERROR_VARIABLE FTLPU_C2C_ERROR GET "${FTLPU_HW_JSON}" c2c)
+    if(FTLPU_C2C_ERROR)
+        set(FTLPU_HW_C2C_BEAT_BYTES 32)
+        if(FTLPU_HW_VECTOR_BYTES LESS 32)
+            set(FTLPU_HW_C2C_BEAT_BYTES ${FTLPU_HW_VECTOR_BYTES})
+        endif()
+    else()
+        ftlpu_json_get(FTLPU_HW_C2C_BEAT_BYTES c2c beat_bytes)
+    endif()
+    if(NOT FTLPU_HW_C2C_BEAT_BYTES MATCHES "^[1-9][0-9]*$" OR
+       FTLPU_HW_C2C_BEAT_BYTES GREATER FTLPU_HW_VECTOR_BYTES)
+        message(FATAL_ERROR "c2c.beat_bytes must be positive and fit within one physical vector")
+    endif()
+
     set(FTLPU_POSITIVE_INTEGER_FIELDS
         FTLPU_HW_HEMISPHERES
         FTLPU_HW_TILES_PER_SLICE
@@ -76,7 +94,7 @@ function(ftlpu_generate_hardware_config input_json output_header)
     endif()
     if(FTLPU_HW_MXM_ACCUM_CONTEXTS GREATER 256)
         message(FATAL_ERROR
-            "mxm.accum_contexts exceeds the 13-bit accumulator address capacity")
+            "mxm.accum_contexts exceeds the supported 256 contexts")
     endif()
     math(EXPR FTLPU_HW_VXM_COLUMN_REMAINDER "${FTLPU_HW_VXM_COLUMNS} % 8")
     if(FTLPU_HW_VXM_COLUMNS LESS 16 OR
@@ -398,10 +416,6 @@ function(ftlpu_generate_hardware_config input_json output_header)
         stream_topology bindings mem slices_per_group)
     if(NOT FTLPU_STREAM_MEM_SLICES_PER_GROUP MATCHES "^[1-9][0-9]*$")
         message(FATAL_ERROR "stream_topology.bindings.mem.slices_per_group must be positive")
-    endif()
-    if(NOT FTLPU_STREAM_MEM_SLICES_PER_GROUP EQUAL FTLPU_HW_TILES_PER_SLICE)
-        message(FATAL_ERROR
-            "the current CModel requires MEM slices_per_group to equal topology.tiles_per_slice")
     endif()
     math(EXPR FTLPU_STREAM_MEM_GROUP_REMAINDER
         "${FTLPU_HW_MEM_SLICES} % ${FTLPU_STREAM_MEM_SLICES_PER_GROUP}")

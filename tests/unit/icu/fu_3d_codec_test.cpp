@@ -136,15 +136,13 @@ bool verify_golden_vectors_and_extended_discriminator()
             },
             "FU 3-D encoder accepted an absolute start cycle"))
         return false;
-    auto legacy_start_bits = encoded_mem;
-    legacy_start_bits.words[0].lanes[0] |= std::uint32_t {1} << 8;
-    if (!require_throws(
-            [&] {
-                static_cast<void>(
-                    ftlpu::isa::decode_mem_icu_3d_instruction(
-                        legacy_start_bits));
-            },
-            "FU 3-D decoder accepted legacy absolute-start bits"))
+    // P[23:0] now carries relative wait_cycle. Absolute start_cycle is still
+    // rejected above, but setting physical bit 8 is a legal one-cycle wait.
+    auto waited_bits = encoded_mem;
+    waited_bits.words[0].lanes[0] |= std::uint32_t {1} << 8;
+    const auto waited = ftlpu::isa::decode_mem_icu_3d_instruction(waited_bits);
+    if (!require(waited.loop.start_cycle == 0 && waited.loop.wait_cycle == 1,
+            "FU 3-D decoder did not preserve relative wait_cycle"))
         return false;
 
     const auto load = ftlpu::MxmLoadIcuInstruction::Load3D(
@@ -205,7 +203,7 @@ bool verify_golden_vectors_and_extended_discriminator()
         ftlpu::MxmIcuBufferMode::ToggleDimension1,
         30,
         28,
-        8191,
+        ftlpu::hw::kMxmAccumulatorRows - 1,
         {0, -8192, 8191},
         8191,
         ftlpu::MxmDataFormat::BFloat16,
@@ -214,10 +212,14 @@ bool verify_golden_vectors_and_extended_discriminator()
         terminal);
     const auto encoded_compute =
         ftlpu::isa::encode_mxm_compute_icu_3d_instruction(compute);
-    const std::array<std::array<std::uint32_t, 4>, 2> compute_golden {{
+    std::array<std::array<std::uint32_t, 4>, 2> compute_golden {{
         {0x00000043U, 0x00000000U, 0x02300000U, 0x05060102U},
         {0x08090447U, 0x3fffcf57U, 0xfe000000U, 0x3e3fff7fU},
     }};
+    // The golden ISA layout remains 13-bit even when the SRAM is smaller.
+    // Its base at payload bit 157 occupies word 1 lane 1 bits [29:17].
+    compute_golden[1][1] = (compute_golden[1][1] & ~(0x1fffU << 17))
+        | (static_cast<std::uint32_t>(ftlpu::hw::kMxmAccumulatorRows - 1) << 17);
     if (!require_golden(encoded_compute, compute_golden,
             "MXM COMPUTE_3D golden bit vector changed")
         || !require(same_compute(compute,
@@ -513,9 +515,9 @@ bool verify_mxm_compute_codec()
         ftlpu::MxmIcuBufferMode::ToggleDimension2,
         16,
         12,
-        100,
-        {0, 64, -32},
-        2,
+        32,
+        {0, 16, -16},
+        1,
         ftlpu::MxmDataFormat::BFloat16,
         regular,
         2,
@@ -536,7 +538,7 @@ bool verify_mxm_compute_codec()
         ftlpu::MxmComputeIcuInstruction::AccumulatorRead3D(
             ftlpu::IcuLoop3D {0, {2, 3, 1}, {1, 4, 16}},
             28,
-            100,
+            32,
             {1, 16, 0},
             false,
             ftlpu::MxmAccumulatorOutputFormat::BFloat16,

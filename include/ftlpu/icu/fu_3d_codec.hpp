@@ -2,6 +2,7 @@
 
 #include "ftlpu/core/instruction_codec.hpp"
 #include "ftlpu/icu/fu_3d_instruction.hpp"
+#include "ftlpu/icu/packet_bit_codec.hpp"
 
 #include <array>
 #include <cstddef>
@@ -13,6 +14,31 @@
 namespace ftlpu {
 
 namespace isa {
+
+struct MxmIcuEncodingLayout {
+    static constexpr unsigned kAddressBits = MxmEncodingLayout::kAddressBits;
+    static constexpr unsigned kColumnBits = MxmEncodingLayout::kColumnBits;
+    static constexpr unsigned kStrideBits = MxmEncodingLayout::kStrideBits;
+    static constexpr unsigned kLoadStrides = 147 + kColumnBits;
+    static constexpr unsigned kLoadStream = kLoadStrides + 3 * 16;
+    static constexpr unsigned kLoadInputMode = kLoadStream + 5;
+    static constexpr unsigned kLoadEnd = kLoadInputMode + 1;
+    static constexpr unsigned kComputeStrides = 157 + kAddressBits;
+    static constexpr unsigned kRowStride = kComputeStrides + 3 * kStrideBits;
+    static constexpr unsigned kFormat = kRowStride + kAddressBits;
+    static constexpr unsigned kRegularMode = kFormat + 1;
+    static constexpr unsigned kTerminalDimension = kRegularMode + 3;
+    static constexpr unsigned kTerminalMode = kTerminalDimension + 2;
+    static constexpr unsigned kComputeEnd = kTerminalMode + 3;
+    static constexpr unsigned kDecodeStrides = 152 + kAddressBits;
+    static constexpr unsigned kDecodeColumn = kDecodeStrides + 3 * kStrideBits;
+    static constexpr unsigned kDecodeDestination = kDecodeColumn + kColumnBits;
+    static constexpr unsigned kDecodeClear = kDecodeDestination + 1;
+    static constexpr unsigned kDecodeFormat = kDecodeClear + 1;
+    static constexpr unsigned kDecodeLayout = kDecodeFormat + 1;
+    static constexpr unsigned kDecodeEnd = kDecodeLayout + 1;
+    static_assert(kDecodeEnd <= kComputeEnd);
+};
 
 // Each functional queue has its own physical word and packet type. The packet
 // type supplies the instruction kind for the three MXM queues; consequently no
@@ -101,7 +127,9 @@ struct EncodedMxmDequantIcu3DPacket {
 
 struct EncodedMxmComputeIcu3DPacket {
     static constexpr std::size_t kWordBits = 128;
-    static constexpr std::size_t kWordCount = 2;
+    static constexpr std::size_t kRequiredWords =
+        (MxmIcuEncodingLayout::kComputeEnd + 4 + 119) / 120;
+    static constexpr std::size_t kWordCount = kRequiredWords < 2 ? 2 : kRequiredWords;
     static constexpr std::size_t kLanesPerWord = 4;
     static constexpr std::size_t kHeaderBits = 8;
     static constexpr std::size_t kPayloadBitsPerWord = 120;
@@ -111,11 +139,11 @@ struct EncodedMxmComputeIcu3DPacket {
 static_assert(hw::kIcuMemInstructionBits == 96);
 static_assert(hw::kIcuMxmInstructionBits == 128);
 static_assert(hw::kSramDepthRows <= (std::size_t {1} << 13));
-static_assert(hw::kMxmAccumulatorRows <= (std::size_t {1} << 13));
+static_assert(hw::kMxmAccumulatorRows <= (std::size_t {1} << MxmEncodingLayout::kAddressBits));
 static_assert(hw::kStreams <= (std::size_t {1} << 6));
 static_assert(hw::kEastStreams <= (std::size_t {1} << 5));
 static_assert(hw::kWestStreams <= (std::size_t {1} << 5));
-static_assert(hw::kMxmSupercellsPerPlane <= (std::size_t {1} << 2));
+static_assert(hw::kMxmSupercellsPerPlane <= (std::size_t {1} << MxmEncodingLayout::kColumnBits));
 static_assert(sizeof(EncodedMemIcu3DWord) == 96 / 8);
 static_assert(sizeof(EncodedMxmLoadIcu3DWord) == 128 / 8);
 static_assert(sizeof(EncodedMxmDequantIcu3DWord) == 128 / 8);
@@ -124,7 +152,8 @@ static_assert(sizeof(EncodedMemIcu3DPacket) == 3 * 96 / 8);
 static_assert(sizeof(EncodedMemIcuWriteRead2DPacket) == 3 * 96 / 8);
 static_assert(sizeof(EncodedMxmLoadIcu3DPacket) == 2 * 128 / 8);
 static_assert(sizeof(EncodedMxmDequantIcu3DPacket) == 2 * 128 / 8);
-static_assert(sizeof(EncodedMxmComputeIcu3DPacket) == 2 * 128 / 8);
+static_assert(sizeof(EncodedMxmComputeIcu3DPacket)
+    == EncodedMxmComputeIcu3DPacket::kWordCount * 128 / 8);
 static_assert(std::is_trivially_copyable_v<EncodedMemIcu3DPacket>);
 static_assert(std::is_trivially_copyable_v<EncodedMemIcuWriteRead2DPacket>);
 static_assert(std::is_trivially_copyable_v<EncodedMxmLoadIcu3DPacket>);
@@ -134,8 +163,6 @@ static_assert(std::is_trivially_copyable_v<EncodedMxmComputeIcu3DPacket>);
 namespace fu_3d_codec_detail {
 
 constexpr std::size_t kLoopBits = 144;
-constexpr std::size_t kExtendedSubtypePhysicalOffset = 88;
-constexpr unsigned kExtendedSubtypeBits = 4;
 constexpr std::uint8_t kFu3DExtendedSubtype = 2;
 constexpr std::uint8_t kMemWriteRead2DExtendedSubtype = 7;
 constexpr std::uint8_t kExtendedEnvelope =
@@ -144,42 +171,6 @@ constexpr std::uint8_t kPacketClass3D = 1;
 constexpr std::uint8_t kFormatVersion = 0;
 constexpr std::uint8_t kMxmLocalOperation = 0;
 static_assert(kExtendedEnvelope == 0b11);
-
-struct PacketBitLocation {
-    std::size_t word{0};
-    std::size_t lane{0};
-    unsigned bit{0};
-};
-
-template <typename Packet>
-constexpr std::size_t packet_payload_bits() noexcept
-{
-    return Packet::kPayloadBitsPerWord * Packet::kWordCount
-        - kExtendedSubtypeBits;
-}
-
-template <typename Packet>
-PacketBitLocation packet_bit_location(std::size_t bit)
-{
-    if (bit >= packet_payload_bits<Packet>())
-        throw std::logic_error("invalid FU 3-D codec payload bit");
-    auto remaining = bit;
-    for (std::size_t word = 0; word < Packet::kWordCount; ++word) {
-        for (std::size_t physical_bit = Packet::kHeaderBits;
-             physical_bit < Packet::kWordBits; ++physical_bit) {
-            if (word == 0
-                && physical_bit >= kExtendedSubtypePhysicalOffset
-                && physical_bit < kExtendedSubtypePhysicalOffset
-                        + kExtendedSubtypeBits)
-                continue;
-            if (remaining == 0)
-                return {word, physical_bit / 32,
-                    static_cast<unsigned>(physical_bit % 32)};
-            --remaining;
-        }
-    }
-    throw std::logic_error("invalid FU 3-D codec payload mapping");
-}
 
 template <typename Packet>
 void initialize_word_headers(Packet& packet, std::uint8_t local_operation,
@@ -249,79 +240,6 @@ std::uint8_t decode_word0_local_operation(
         || subtype != expected_subtype)
         throw std::logic_error(message);
     return static_cast<std::uint8_t>((header >> 4) & 3U);
-}
-
-template <typename Packet>
-void write_unsigned(Packet& packet, std::size_t offset,
-    unsigned width, std::uint64_t value, const char* field)
-{
-    if (width == 0 || width > 63
-        || offset + width > packet_payload_bits<Packet>())
-        throw std::logic_error("invalid FU 3-D codec field layout");
-    const auto maximum = (std::uint64_t {1} << width) - 1;
-    if (value > maximum) throw std::out_of_range(field);
-    for (unsigned bit = 0; bit < width; ++bit) {
-        if (((value >> bit) & 1U) == 0) continue;
-        const auto position = offset + bit;
-        const auto location = packet_bit_location<Packet>(position);
-        packet.words[location.word].lanes[location.lane]
-            |= std::uint32_t {1} << location.bit;
-    }
-}
-
-template <typename Packet>
-std::uint64_t read_unsigned(
-    const Packet& packet, std::size_t offset, unsigned width)
-{
-    if (width == 0 || width > 63
-        || offset + width > packet_payload_bits<Packet>())
-        throw std::logic_error("invalid FU 3-D codec field layout");
-    std::uint64_t value = 0;
-    for (unsigned bit = 0; bit < width; ++bit) {
-        const auto position = offset + bit;
-        const auto location = packet_bit_location<Packet>(position);
-        if (((packet.words[location.word].lanes[location.lane]
-                 >> location.bit)
-                & 1U)
-            != 0)
-            value |= std::uint64_t {1} << bit;
-    }
-    return value;
-}
-
-template <typename Packet>
-void write_signed(Packet& packet, std::size_t offset,
-    unsigned width, std::int64_t value, const char* field)
-{
-    if (width < 2 || width > 63)
-        throw std::logic_error("invalid FU 3-D signed field width");
-    const auto minimum = -(std::int64_t {1} << (width - 1));
-    const auto maximum = (std::int64_t {1} << (width - 1)) - 1;
-    if (value < minimum || value > maximum) throw std::out_of_range(field);
-    const auto mask = (std::uint64_t {1} << width) - 1;
-    write_unsigned(packet, offset, width,
-        static_cast<std::uint64_t>(value) & mask, field);
-}
-
-template <typename Packet>
-std::int64_t read_signed(
-    const Packet& packet, std::size_t offset, unsigned width)
-{
-    const auto raw = read_unsigned(packet, offset, width);
-    const auto sign = std::uint64_t {1} << (width - 1);
-    if ((raw & sign) == 0) return static_cast<std::int64_t>(raw);
-    const auto mask = (std::uint64_t {1} << width) - 1;
-    return -1 - static_cast<std::int64_t>((~raw) & mask);
-}
-
-template <typename Packet>
-void require_reserved_zero(
-    const Packet& packet, std::size_t used_bits, const char* message)
-{
-    for (auto bit = used_bits; bit < packet_payload_bits<Packet>(); ++bit) {
-        if (read_unsigned(packet, bit, 1) != 0)
-            throw std::logic_error(message);
-    }
 }
 
 template <typename Packet>
@@ -401,6 +319,159 @@ inline MxmComputeIcuMode decode_compute_mode(std::uint64_t encoded)
 
 } // namespace fu_3d_codec_detail
 
+// Subtypes 8/9/10 are sequential singleton/1D/2D packets. These are
+// independent physical encodings, not multiple in-flight descriptors.
+template <typename Word>
+int short_icu_rank(const Word& word)
+{
+    const auto subtype = (word.lanes[2] >> 24) & 15U;
+    return subtype >= 8 && subtype <= 10 ? static_cast<int>(subtype - 8) : -1;
+}
+
+template <typename Packet>
+constexpr bool supports_short_icu_packet =
+    std::is_same_v<Packet, EncodedMemIcu3DPacket>
+    || std::is_same_v<Packet, EncodedMxmLoadIcu3DPacket>
+    || std::is_same_v<Packet, EncodedMxmDequantIcu3DPacket>
+    || std::is_same_v<Packet, EncodedMxmComputeIcu3DPacket>;
+
+template <typename Packet>
+constexpr std::size_t short_icu_tail_bits()
+{
+    if constexpr (std::is_same_v<Packet, EncodedMxmLoadIcu3DPacket>)
+        return MxmIcuEncodingLayout::kLoadEnd - 144;
+    else if constexpr (std::is_same_v<Packet, EncodedMxmComputeIcu3DPacket>)
+        return MxmIcuEncodingLayout::kComputeEnd - 144;
+    else return 16; // Dequant scale.
+}
+
+template <typename Packet>
+std::size_t short_icu_used_bits(std::size_t rank)
+{
+    if constexpr (std::is_same_v<Packet, EncodedMemIcu3DPacket>)
+        return 43 + 60 * rank; // wait + axes + stream/base + address strides
+    else return 24 + (rank ? 2 : 0) + 40 * rank + short_icu_tail_bits<Packet>();
+}
+
+template <typename Packet, typename Word>
+std::size_t fu_loop_packet_word_count(const Word& first)
+{
+    if constexpr (supports_short_icu_packet<Packet>) {
+        const auto rank = short_icu_rank(first);
+        if (rank >= 0)
+            return (short_icu_used_bits<Packet>(rank) + 4
+                + Packet::kPayloadBitsPerWord - 1) / Packet::kPayloadBitsPerWord;
+    }
+    return Packet::kWordCount;
+}
+
+template <typename Packet>
+std::size_t fu_loop_packet_word_count(const Packet& packet)
+{
+    return fu_loop_packet_word_count<Packet>(packet.words[0]);
+}
+
+template <typename Packet>
+void initialize_short_icu_packet(Packet& packet, unsigned operation, unsigned rank)
+{
+    fu_3d_codec_detail::initialize_word_headers(packet, operation, 8 + rank);
+    const auto words = fu_loop_packet_word_count(packet);
+    for (auto i = words; i < Packet::kWordCount; ++i) packet.words[i] = {};
+}
+
+template <typename Packet>
+IcuLoop3D decode_short_icu_loop(const Packet& packet)
+{
+    namespace codec = fu_3d_codec_detail;
+    const auto rank = short_icu_rank(packet.words[0]);
+    if (rank < 0) throw std::logic_error("invalid short ICU subtype");
+    const auto op = codec::decode_word0_local_operation(packet,
+        "invalid short ICU header", 8 + rank);
+    Packet headers{};
+    initialize_short_icu_packet(headers, op, rank);
+    for (std::size_t w = 0; w < fu_loop_packet_word_count(packet); ++w)
+        if ((packet.words[w].lanes[0] & 255U) != (headers.words[w].lanes[0] & 255U))
+            throw std::logic_error("invalid short ICU continuation header");
+    codec::require_reserved_zero(packet, short_icu_used_bits<Packet>(rank),
+        "nonzero short ICU reserved bits");
+    IcuLoop3D loop{};
+    loop.wait_cycle = codec::read_unsigned(packet, 0, 24);
+    unsigned selector = 0;
+    constexpr bool mxm = !std::is_same_v<Packet, EncodedMemIcu3DPacket>;
+    const auto axisBits = mxm && rank ? 2 : 0;
+    if (axisBits) {
+        selector = static_cast<unsigned>(codec::read_unsigned(packet, 24, 2));
+        if (selector > 2) throw std::logic_error("invalid MXM short axis selector");
+    }
+    int n = 0;
+    for (int d = 0; d < 3; ++d) {
+        const bool active = mxm ? (rank == 1 ? d == selector : rank == 2 && d != selector) : d < rank;
+        if (!active) continue;
+        loop.counts[d] = codec::read_unsigned(packet, 24 + axisBits + n * 16, 16) + 1;
+        loop.cycle_strides[d] = codec::read_unsigned(packet, 24 + axisBits + rank * 16 + n * 24, 24);
+        ++n;
+    }
+    ::ftlpu::detail::validate_icu_loop_3d(loop);
+    return loop;
+}
+
+template <typename Packet>
+void encode_short_icu_loop(Packet& packet, const IcuLoop3D& loop, unsigned rank)
+{
+    namespace codec = fu_3d_codec_detail;
+    codec::write_unsigned(packet, 0, 24, loop.wait_cycle, "short ICU wait overflow");
+    constexpr bool mxm = !std::is_same_v<Packet, EncodedMemIcu3DPacket>;
+    const auto axisBits = mxm && rank ? 2 : 0;
+    if (axisBits) {
+        unsigned selector = 0;
+        for (unsigned d = 0; d < 3; ++d)
+            if ((rank == 1 && loop.counts[d] > 1) || (rank == 2 && loop.counts[d] == 1)) selector = d;
+        codec::write_unsigned(packet, 24, 2, selector, "MXM axis selector");
+    }
+    unsigned n = 0;
+    for (unsigned d = 0; d < 3; ++d) {
+        if (mxm ? loop.counts[d] == 1 : d >= rank) continue;
+        codec::write_unsigned(packet, 24 + axisBits + n * 16, 16, loop.counts[d] - 1, "short ICU count overflow");
+        codec::write_unsigned(packet, 24 + axisBits + rank * 16 + n * 24, 24,
+            loop.cycle_strides[d], "short ICU cycle stride overflow");
+        ++n;
+    }
+}
+
+// MXM short packets keep the FU-specific payload, including buffer/terminal
+// modes, and omit the inactive loop axes. The software storage object is a
+// maximum-sized buffer; only fu_loop_packet_word_count() words enter iMEM.
+template <typename Packet>
+Packet expand_short_mxm_packet(const Packet& packet)
+{
+    namespace codec = fu_3d_codec_detail;
+    const auto rank = short_icu_rank(packet.words[0]);
+    const auto loop = decode_short_icu_loop(packet);
+    Packet full{};
+    codec::initialize_word_headers(full, (packet.words[0].lanes[0] >> 4) & 3U);
+    codec::encode_loop(full, loop);
+    for (std::size_t b = 0; b < short_icu_tail_bits<Packet>(); ++b)
+        codec::write_unsigned(full, 144 + b, 1,
+            codec::read_unsigned(packet, 24 + (rank ? 2 : 0) + 40 * rank + b, 1), "MXM payload bit");
+    return full;
+}
+
+template <typename Packet>
+Packet compact_mxm_packet(const Packet& full, const IcuLoop3D& loop)
+{
+    namespace codec = fu_3d_codec_detail;
+    unsigned rank = 0;
+    for (const auto count : loop.counts) if (count > 1) ++rank;
+    if (rank == 3) return full;
+    Packet packet{};
+    initialize_short_icu_packet(packet, (full.words[0].lanes[0] >> 4) & 3U, rank);
+    encode_short_icu_loop(packet, loop, rank);
+    for (std::size_t b = 0; b < short_icu_tail_bits<Packet>(); ++b)
+        codec::write_unsigned(packet, 24 + (rank ? 2 : 0) + 40 * rank + b, 1,
+            codec::read_unsigned(full, 144 + b, 1), "MXM payload bit");
+    return packet;
+}
+
 // MEM packet, 3 consecutive 96-bit words (260 payload bits):
 //   P[143:  0] common loop
 //   P[149:144] packed stream selector
@@ -449,6 +520,22 @@ inline EncodedMemIcu3DPacket encode_mem_icu_3d_instruction(
 inline MemIcuInstruction decode_mem_icu_3d_instruction(
     const EncodedMemIcu3DPacket& packet)
 {
+    if (short_icu_rank(packet.words[0]) >= 0) {
+        namespace codec = fu_3d_codec_detail;
+        const auto rank = short_icu_rank(packet.words[0]);
+        MemIcuInstruction instruction{};
+        instruction.loop = decode_short_icu_loop(packet);
+        const auto op = (packet.words[0].lanes[0] >> 4) & 3U;
+        if (op > 2) throw std::logic_error("invalid short MEM operation");
+        instruction.opcode = static_cast<MemIcuOpcode>(op);
+        const auto tail = 24 + 40 * rank;
+        instruction.stream = codec::read_unsigned(packet, tail, 6);
+        instruction.address.base_address = codec::read_unsigned(packet, tail + 6, 13);
+        if (rank > 0) instruction.address.inner_stride = codec::read_signed(packet, tail + 19, 20);
+        if (rank > 1) instruction.address.middle_stride = codec::read_signed(packet, tail + 39, 20);
+        ::ftlpu::detail::validate_mem_icu_instruction(instruction);
+        return instruction;
+    }
     namespace codec = fu_3d_codec_detail;
     const auto local_operation = codec::decode_word0_local_operation(packet,
         "encoded MEM ICU 3-D packet has an invalid word-0 header");
@@ -627,17 +714,17 @@ inline EncodedMxmLoadIcu3DPacket encode_mxm_load_icu_3d_instruction(
     codec::write_unsigned(packet, 145, 2,
         static_cast<std::uint8_t>(instruction.weight_buffer_mode),
         "MXM LOAD_3D buffer mode does not fit 2 bits");
-    codec::write_unsigned(packet, 147, 2,
+    codec::write_unsigned(packet, 147, MxmIcuEncodingLayout::kColumnBits,
         instruction.weight_column_base,
         "MXM LOAD_3D weight-column base does not fit 2 bits");
     for (std::size_t dimension = 0; dimension < 3; ++dimension)
-        codec::write_signed(packet, 149 + 16 * dimension, 16,
+        codec::write_signed(packet, MxmIcuEncodingLayout::kLoadStrides + 16 * dimension, 16,
             instruction.weight_column_strides[dimension],
             "MXM LOAD_3D column stride does not fit 16 bits");
-    codec::write_unsigned(packet, 197, 5,
+    codec::write_unsigned(packet, MxmIcuEncodingLayout::kLoadStream, 5,
         instruction.weight_stream_base,
         "MXM LOAD_3D weight stream base does not fit 5 bits");
-    codec::write_unsigned(packet, 202, 1,
+    codec::write_unsigned(packet, MxmIcuEncodingLayout::kLoadInputMode, 1,
         static_cast<std::uint8_t>(instruction.weight_input_mode),
         "MXM LOAD_3D input mode does not fit 1 bit");
     return packet;
@@ -646,6 +733,8 @@ inline EncodedMxmLoadIcu3DPacket encode_mxm_load_icu_3d_instruction(
 inline MxmLoadIcuInstruction decode_mxm_load_icu_3d_instruction(
     const EncodedMxmLoadIcu3DPacket& packet)
 {
+    if (short_icu_rank(packet.words[0]) >= 0)
+        return decode_mxm_load_icu_3d_instruction(expand_short_mxm_packet(packet));
     namespace codec = fu_3d_codec_detail;
     const auto local_operation = codec::decode_word0_local_operation(packet,
         "encoded MXM LOAD_3D packet has an invalid word-0 header");
@@ -676,7 +765,7 @@ inline MxmLoadIcuInstruction decode_mxm_load_icu_3d_instruction(
         ::ftlpu::detail::validate_mxm_load_icu_instruction(instruction);
         return instruction;
     }
-    codec::require_reserved_zero(packet, 203,
+    codec::require_reserved_zero(packet, MxmIcuEncodingLayout::kLoadEnd,
         "encoded MXM LOAD_3D packet has non-zero reserved bits");
     auto instruction = MxmLoadIcuInstruction {};
     instruction.opcode = MxmLoadIcuOpcode::Load3D;
@@ -686,14 +775,14 @@ inline MxmLoadIcuInstruction decode_mxm_load_icu_3d_instruction(
     instruction.weight_buffer_mode = static_cast<MxmIcuBufferMode>(
         codec::read_unsigned(packet, 145, 2));
     instruction.weight_column_base = static_cast<std::size_t>(
-        codec::read_unsigned(packet, 147, 2));
+        codec::read_unsigned(packet, 147, MxmIcuEncodingLayout::kColumnBits));
     for (std::size_t dimension = 0; dimension < 3; ++dimension)
         instruction.weight_column_strides[dimension] =
-            codec::read_signed(packet, 149 + 16 * dimension, 16);
+            codec::read_signed(packet, MxmIcuEncodingLayout::kLoadStrides + 16 * dimension, 16);
     instruction.weight_stream_base = static_cast<std::size_t>(
-        codec::read_unsigned(packet, 197, 5));
+        codec::read_unsigned(packet, MxmIcuEncodingLayout::kLoadStream, 5));
     instruction.weight_input_mode = static_cast<MxmWeightInputMode>(
-        codec::read_unsigned(packet, 202, 1));
+        codec::read_unsigned(packet, MxmIcuEncodingLayout::kLoadInputMode, 1));
     codec::validate_buffer_mode(instruction.weight_buffer_mode);
     codec::validate_weight_input_mode(instruction.weight_input_mode);
     ::ftlpu::detail::validate_mxm_load_icu_instruction(instruction);
@@ -722,6 +811,8 @@ encode_mxm_dequant_icu_3d_instruction(
 inline MxmDequantIcuInstruction decode_mxm_dequant_icu_3d_instruction(
     const EncodedMxmDequantIcu3DPacket& packet)
 {
+    if (short_icu_rank(packet.words[0]) >= 0)
+        return decode_mxm_dequant_icu_3d_instruction(expand_short_mxm_packet(packet));
     namespace codec = fu_3d_codec_detail;
     const auto local_operation = codec::decode_word0_local_operation(packet,
         "encoded MXM DEQUANT_3D packet has an invalid word-0 header");
@@ -741,7 +832,9 @@ inline MxmDequantIcuInstruction decode_mxm_dequant_icu_3d_instruction(
     return instruction;
 }
 
-// MXM compute-ICU packet, 2 consecutive 128-bit words (236 payload bits).
+// MXM compute-ICU packet. The diagram below is the compatible 32-lane layout,
+// two 128-bit words. MxmIcuEncodingLayout derives all widened fields; 64 lanes
+// use three words to retain 14-bit addresses and 15-bit signed strides.
 // FU-local operation 0 is COMPUTE_3D:
 //   P[143:  0] common loop
 //   P[144]     weight-buffer base
@@ -797,14 +890,14 @@ encode_mxm_compute_icu_3d_instruction(
         codec::write_unsigned(packet, 152, 5,
             instruction.result_stream_base,
             "MXM ACCUMULATOR_READ_3D result stream base does not fit 5 bits");
-        codec::write_unsigned(packet, 157, 13,
+        codec::write_unsigned(packet, 157, MxmIcuEncodingLayout::kAddressBits,
             instruction.accumulator_address_base,
-            "MXM ACCUMULATOR_READ_3D accumulator base does not fit 13 bits");
+            "MXM ACCUMULATOR_READ_3D accumulator base does not fit target address width");
         for (std::size_t dimension = 0; dimension < 3; ++dimension)
-            codec::write_signed(packet, 170 + 14 * dimension, 14,
+            codec::write_signed(packet, MxmIcuEncodingLayout::kComputeStrides + MxmIcuEncodingLayout::kStrideBits * dimension, MxmIcuEncodingLayout::kStrideBits,
                 instruction.accumulator_address_strides[dimension],
-                "MXM ACCUMULATOR_READ_3D accumulator stride does not fit 14 bits");
-        codec::write_unsigned(packet, 226, 3,
+                "MXM ACCUMULATOR_READ_3D accumulator stride does not fit target signed-stride width");
+        codec::write_unsigned(packet, MxmIcuEncodingLayout::kRegularMode, 3,
             codec::encode_compute_mode(instruction.regular_mode),
             "MXM ACCUMULATOR_READ_3D mode does not fit 3 bits");
         return packet;
@@ -817,31 +910,31 @@ encode_mxm_compute_icu_3d_instruction(
             "MXM DECODE_STREAM_COMPUTE_3D buffer base does not fit 1 bit");
         codec::write_unsigned(packet, 145, 2,
             static_cast<std::uint8_t>(instruction.weight_buffer_mode),
-            "MXM DECODE_STREAM_COMPUTE_3D buffer mode does not fit 2 bits");
+            "MXM DECODE_STREAM_COMPUTE_3D buffer mode does not fit target field width");
         codec::write_unsigned(packet, 147, 5,
             instruction.result_stream_base,
             "MXM DECODE_STREAM_COMPUTE_3D result stream does not fit 5 bits");
-        codec::write_unsigned(packet, 152, 13,
+        codec::write_unsigned(packet, 152, MxmIcuEncodingLayout::kAddressBits,
             instruction.accumulator_address_base,
-            "MXM DECODE_STREAM_COMPUTE_3D accumulator base does not fit 13 bits");
+            "MXM DECODE_STREAM_COMPUTE_3D accumulator base does not fit target address width");
         for (std::size_t dimension = 0; dimension < 3; ++dimension)
-            codec::write_signed(packet, 165 + 14 * dimension, 14,
+            codec::write_signed(packet, MxmIcuEncodingLayout::kDecodeStrides + MxmIcuEncodingLayout::kStrideBits * dimension, MxmIcuEncodingLayout::kStrideBits,
                 instruction.accumulator_address_strides[dimension],
-                "MXM DECODE_STREAM_COMPUTE_3D accumulator stride does not fit 14 bits");
-        codec::write_unsigned(packet, 207, 2,
+                "MXM DECODE_STREAM_COMPUTE_3D accumulator stride does not fit target signed-stride width");
+        codec::write_unsigned(packet, MxmIcuEncodingLayout::kDecodeColumn, MxmIcuEncodingLayout::kColumnBits,
             instruction.accumulator_column,
-            "MXM DECODE_STREAM_COMPUTE_3D accumulator column does not fit 2 bits");
-        codec::write_unsigned(packet, 209, 1,
+            "MXM DECODE_STREAM_COMPUTE_3D accumulator column does not fit target field width");
+        codec::write_unsigned(packet, MxmIcuEncodingLayout::kDecodeDestination, 1,
             static_cast<std::uint8_t>(
                 instruction.regular_mode.accumulator_destination),
             "MXM DECODE_STREAM_COMPUTE_3D destination does not fit 1 bit");
-        codec::write_unsigned(packet, 210, 1,
+        codec::write_unsigned(packet, MxmIcuEncodingLayout::kDecodeClear, 1,
             instruction.regular_mode.accumulator_clear ? 1U : 0U,
             "MXM DECODE_STREAM_COMPUTE_3D clear flag does not fit 1 bit");
-        codec::write_unsigned(packet, 211, 1,
+        codec::write_unsigned(packet, MxmIcuEncodingLayout::kDecodeFormat, 1,
             static_cast<std::uint8_t>(instruction.data_format),
             "MXM DECODE_STREAM_COMPUTE_3D data format does not fit 1 bit");
-        codec::write_unsigned(packet, 212, 1,
+        codec::write_unsigned(packet, MxmIcuEncodingLayout::kDecodeLayout, 1,
             static_cast<std::uint8_t>(instruction.decode_layout),
             "MXM DECODE_STREAM_COMPUTE_3D layout does not fit 1 bit");
         return packet;
@@ -852,33 +945,33 @@ encode_mxm_compute_icu_3d_instruction(
         "MXM COMPUTE_3D weight-buffer base does not fit 1 bit");
     codec::write_unsigned(packet, 145, 2,
         static_cast<std::uint8_t>(instruction.weight_buffer_mode),
-        "MXM COMPUTE_3D buffer mode does not fit 2 bits");
+        "MXM COMPUTE_3D buffer mode does not fit target field width");
     codec::write_unsigned(packet, 147, 5,
         instruction.activation_stream_base,
         "MXM COMPUTE_3D activation stream base does not fit 5 bits");
     codec::write_unsigned(packet, 152, 5,
         instruction.result_stream_base,
         "MXM COMPUTE_3D result stream base does not fit 5 bits");
-    codec::write_unsigned(packet, 157, 13,
+    codec::write_unsigned(packet, 157, MxmIcuEncodingLayout::kAddressBits,
         instruction.accumulator_address_base,
-        "MXM COMPUTE_3D accumulator base does not fit 13 bits");
+        "MXM COMPUTE_3D accumulator base does not fit target address width");
     for (std::size_t dimension = 0; dimension < 3; ++dimension)
-        codec::write_signed(packet, 170 + 14 * dimension, 14,
+        codec::write_signed(packet, MxmIcuEncodingLayout::kComputeStrides + MxmIcuEncodingLayout::kStrideBits * dimension, MxmIcuEncodingLayout::kStrideBits,
             instruction.accumulator_address_strides[dimension],
-            "MXM COMPUTE_3D accumulator stride does not fit 14 bits");
-    codec::write_unsigned(packet, 212, 13,
+            "MXM COMPUTE_3D accumulator stride does not fit target signed-stride width");
+    codec::write_unsigned(packet, MxmIcuEncodingLayout::kRowStride, MxmIcuEncodingLayout::kAddressBits,
         instruction.accumulator_row_stride,
-        "MXM COMPUTE_3D accumulator row stride does not fit 13 bits");
-    codec::write_unsigned(packet, 225, 1,
+        "MXM COMPUTE_3D accumulator row stride does not fit target address width");
+    codec::write_unsigned(packet, MxmIcuEncodingLayout::kFormat, 1,
         static_cast<std::uint8_t>(instruction.data_format),
         "MXM COMPUTE_3D data format does not fit 1 bit");
-    codec::write_unsigned(packet, 226, 3,
+    codec::write_unsigned(packet, MxmIcuEncodingLayout::kRegularMode, 3,
         codec::encode_compute_mode(instruction.regular_mode),
         "MXM COMPUTE_3D regular mode does not fit 3 bits");
-    codec::write_unsigned(packet, 229, 2,
+    codec::write_unsigned(packet, MxmIcuEncodingLayout::kTerminalDimension, 2,
         instruction.terminal_dimension,
-        "MXM COMPUTE_3D terminal dimension does not fit 2 bits");
-    codec::write_unsigned(packet, 231, 3,
+        "MXM COMPUTE_3D terminal dimension does not fit target field width");
+    codec::write_unsigned(packet, MxmIcuEncodingLayout::kTerminalMode, 3,
         codec::encode_compute_mode(instruction.terminal_mode),
         "MXM COMPUTE_3D terminal mode does not fit 3 bits");
     return packet;
@@ -887,6 +980,8 @@ encode_mxm_compute_icu_3d_instruction(
 inline MxmComputeIcuInstruction decode_mxm_compute_icu_3d_instruction(
     const EncodedMxmComputeIcu3DPacket& packet)
 {
+    if (short_icu_rank(packet.words[0]) >= 0)
+        return decode_mxm_compute_icu_3d_instruction(expand_short_mxm_packet(packet));
     namespace codec = fu_3d_codec_detail;
     const auto local_operation = codec::decode_word0_local_operation(packet,
         "encoded MXM compute ICU 3-D packet has an invalid word-0 header");
@@ -900,22 +995,24 @@ inline MxmComputeIcuInstruction decode_mxm_compute_icu_3d_instruction(
     if (local_operation == static_cast<std::uint8_t>(
             MxmComputeIcuOpcode::AccumulatorRead3D)) {
         if (codec::read_unsigned(packet, 144, 8) != 0
-            || codec::read_unsigned(packet, 212, 14) != 0
-            || codec::read_unsigned(packet, 229, 7) != 0)
+            || codec::read_unsigned(packet, MxmIcuEncodingLayout::kRowStride,
+                MxmIcuEncodingLayout::kRegularMode - MxmIcuEncodingLayout::kRowStride) != 0)
             throw std::logic_error(
                 "encoded MXM ACCUMULATOR_READ_3D packet has non-zero reserved bits");
+        codec::require_reserved_zero(packet, MxmIcuEncodingLayout::kTerminalDimension,
+            "encoded MXM ACCUMULATOR_READ_3D packet has non-zero reserved bits");
         std::array<std::int64_t, 3> strides{};
         for (std::size_t dimension = 0; dimension < 3; ++dimension)
             strides[dimension] =
-                codec::read_signed(packet, 170 + 14 * dimension, 14);
+                codec::read_signed(packet, MxmIcuEncodingLayout::kComputeStrides + MxmIcuEncodingLayout::kStrideBits * dimension, MxmIcuEncodingLayout::kStrideBits);
         const auto mode = codec::decode_compute_mode(
-            codec::read_unsigned(packet, 226, 3));
+            codec::read_unsigned(packet, MxmIcuEncodingLayout::kRegularMode, 3));
         auto instruction = MxmComputeIcuInstruction::AccumulatorRead3D(
             loop,
             static_cast<std::size_t>(
                 codec::read_unsigned(packet, 152, 5)),
             static_cast<std::size_t>(
-                codec::read_unsigned(packet, 157, 13)),
+                codec::read_unsigned(packet, 157, MxmIcuEncodingLayout::kAddressBits)),
             strides,
             mode.accumulator_clear,
             mode.accumulator_output_format,
@@ -925,12 +1022,12 @@ inline MxmComputeIcuInstruction decode_mxm_compute_icu_3d_instruction(
     }
     if (local_operation == static_cast<std::uint8_t>(
             MxmComputeIcuOpcode::DecodeStreamCompute3D)) {
-        codec::require_reserved_zero(packet, 213,
+        codec::require_reserved_zero(packet, MxmIcuEncodingLayout::kDecodeEnd,
             "encoded MXM DECODE_STREAM_COMPUTE_3D packet has non-zero reserved bits");
         std::array<std::int64_t, 3> strides{};
         for (std::size_t dimension = 0; dimension < 3; ++dimension)
             strides[dimension] =
-                codec::read_signed(packet, 165 + 14 * dimension, 14);
+                codec::read_signed(packet, MxmIcuEncodingLayout::kDecodeStrides + MxmIcuEncodingLayout::kStrideBits * dimension, MxmIcuEncodingLayout::kStrideBits);
         auto instruction =
             MxmComputeIcuInstruction::DecodeStreamCompute3D(
                 loop,
@@ -941,22 +1038,22 @@ inline MxmComputeIcuInstruction decode_mxm_compute_icu_3d_instruction(
                 static_cast<std::size_t>(
                     codec::read_unsigned(packet, 147, 5)),
                 static_cast<MxmDataFormat>(
-                    codec::read_unsigned(packet, 211, 1)),
+                    codec::read_unsigned(packet, MxmIcuEncodingLayout::kDecodeFormat, 1)),
                 static_cast<std::size_t>(
-                    codec::read_unsigned(packet, 152, 13)),
+                    codec::read_unsigned(packet, 152, MxmIcuEncodingLayout::kAddressBits)),
                 strides,
                 static_cast<std::size_t>(
-                    codec::read_unsigned(packet, 207, 2)),
+                    codec::read_unsigned(packet, MxmIcuEncodingLayout::kDecodeColumn, MxmIcuEncodingLayout::kColumnBits)),
                 static_cast<MxmAccumulatorDestination>(
-                    codec::read_unsigned(packet, 209, 1)),
-                codec::read_unsigned(packet, 210, 1) != 0,
+                    codec::read_unsigned(packet, MxmIcuEncodingLayout::kDecodeDestination, 1)),
+                codec::read_unsigned(packet, MxmIcuEncodingLayout::kDecodeClear, 1) != 0,
                 static_cast<MxmDecodeLayout>(
-                    codec::read_unsigned(packet, 212, 1)));
+                    codec::read_unsigned(packet, MxmIcuEncodingLayout::kDecodeLayout, 1)));
         codec::validate_buffer_mode(instruction.weight_buffer_mode);
         ::ftlpu::detail::validate_mxm_compute_icu_instruction(instruction);
         return instruction;
     }
-    codec::require_reserved_zero(packet, 234,
+    codec::require_reserved_zero(packet, MxmIcuEncodingLayout::kComputeEnd,
         "encoded MXM COMPUTE_3D packet has non-zero reserved bits");
     auto instruction = MxmComputeIcuInstruction {};
     instruction.opcode = MxmComputeIcuOpcode::Compute3D;
@@ -970,23 +1067,137 @@ inline MxmComputeIcuInstruction decode_mxm_compute_icu_3d_instruction(
     instruction.result_stream_base = static_cast<std::size_t>(
         codec::read_unsigned(packet, 152, 5));
     instruction.accumulator_address_base = static_cast<std::size_t>(
-        codec::read_unsigned(packet, 157, 13));
+        codec::read_unsigned(packet, 157, MxmIcuEncodingLayout::kAddressBits));
     for (std::size_t dimension = 0; dimension < 3; ++dimension)
         instruction.accumulator_address_strides[dimension] =
-            codec::read_signed(packet, 170 + 14 * dimension, 14);
+            codec::read_signed(packet, MxmIcuEncodingLayout::kComputeStrides + MxmIcuEncodingLayout::kStrideBits * dimension, MxmIcuEncodingLayout::kStrideBits);
     instruction.accumulator_row_stride = static_cast<std::size_t>(
-        codec::read_unsigned(packet, 212, 13));
+        codec::read_unsigned(packet, MxmIcuEncodingLayout::kRowStride, MxmIcuEncodingLayout::kAddressBits));
     instruction.data_format = static_cast<MxmDataFormat>(
-        codec::read_unsigned(packet, 225, 1));
+        codec::read_unsigned(packet, MxmIcuEncodingLayout::kFormat, 1));
     instruction.regular_mode = codec::decode_compute_mode(
-        codec::read_unsigned(packet, 226, 3));
+        codec::read_unsigned(packet, MxmIcuEncodingLayout::kRegularMode, 3));
     instruction.terminal_dimension = static_cast<std::size_t>(
-        codec::read_unsigned(packet, 229, 2));
+        codec::read_unsigned(packet, MxmIcuEncodingLayout::kTerminalDimension, 2));
     instruction.terminal_mode = codec::decode_compute_mode(
-        codec::read_unsigned(packet, 231, 3));
+        codec::read_unsigned(packet, MxmIcuEncodingLayout::kTerminalMode, 3));
     codec::validate_buffer_mode(instruction.weight_buffer_mode);
     ::ftlpu::detail::validate_mxm_compute_icu_instruction(instruction);
     return instruction;
+}
+
+
+// Canonicalize closed-form domains only; never materialize FU issues.
+inline MemIcuInstruction canonical_mem_icu_domain(MemIcuInstruction instruction)
+{
+    ::ftlpu::detail::validate_mem_icu_instruction(instruction);
+    const auto a = instruction.address;
+    std::int64_t outer = a.outer_group_stride;
+    if (instruction.loop.counts[2] > 1 && a.outer_group_size > 1) {
+        if (instruction.loop.counts[2] <= a.outer_group_size)
+            outer = a.outer_inner_stride;
+        else if (a.outer_group_stride == static_cast<std::int64_t>(a.outer_group_size) * a.outer_inner_stride)
+            outer = a.outer_inner_stride;
+        else return instruction; // Non-affine blocked outer stays 3D.
+    }
+    auto loop = instruction.loop;
+    loop.counts = {1, 1, 1};
+    loop.cycle_strides = {1, 1, 1};
+    std::array<std::int64_t, 3> address{};
+    const std::array<std::int64_t, 3> oldAddress{a.inner_stride, a.middle_stride, outer};
+    unsigned rank = 0;
+    for (unsigned d = 0; d < 3; ++d) {
+        const auto count = instruction.loop.counts[d];
+        if (count == 1) continue;
+        if (rank > 0 && count <= 65536 / loop.counts[rank - 1]
+            && instruction.loop.cycle_strides[d] == loop.counts[rank - 1] * loop.cycle_strides[rank - 1]
+            && oldAddress[d] == static_cast<std::int64_t>(loop.counts[rank - 1]) * address[rank - 1]) {
+            loop.counts[rank - 1] *= count;
+        } else {
+            loop.counts[rank] = count;
+            loop.cycle_strides[rank] = instruction.loop.cycle_strides[d];
+            address[rank++] = oldAddress[d];
+        }
+    }
+    instruction.loop = loop;
+    instruction.address = MemIcuAddress3D::Affine(a.base_address, address);
+    return instruction;
+}
+
+inline EncodedMemIcu3DPacket encode_mem_icu_shortest_instruction(MemIcuInstruction instruction)
+{
+    instruction = canonical_mem_icu_domain(instruction);
+    // Validate the complete domain and original field limits before selecting.
+    const auto full = encode_mem_icu_3d_instruction(instruction);
+    if (instruction.address.outer_group_size != 1) return full;
+    unsigned rank = 0;
+    while (rank < 3 && instruction.loop.counts[rank] > 1) ++rank;
+    if (rank == 3) return full;
+    EncodedMemIcu3DPacket packet{};
+    initialize_short_icu_packet(packet, static_cast<unsigned>(instruction.opcode), rank);
+    encode_short_icu_loop(packet, instruction.loop, rank);
+    namespace codec = fu_3d_codec_detail;
+    const auto tail = 24 + 40 * rank;
+    codec::write_unsigned(packet, tail, 6, instruction.stream, "MEM stream overflow");
+    codec::write_unsigned(packet, tail + 6, 13, instruction.address.base_address, "MEM address overflow");
+    if (rank > 0) codec::write_signed(packet, tail + 19, 20, instruction.address.inner_stride, "MEM stride overflow");
+    if (rank > 1) codec::write_signed(packet, tail + 39, 20, instruction.address.middle_stride, "MEM stride overflow");
+    return packet;
+}
+
+// MXM row, K and N axes retain their identities via the short axis selector.
+inline EncodedMxmLoadIcu3DPacket encode_mxm_load_icu_shortest_instruction(const MxmLoadIcuInstruction& instruction)
+{
+    return compact_mxm_packet(encode_mxm_load_icu_3d_instruction(instruction), instruction.loop);
+}
+inline EncodedMxmDequantIcu3DPacket encode_mxm_dequant_icu_shortest_instruction(const MxmDequantIcuInstruction& instruction)
+{
+    return compact_mxm_packet(encode_mxm_dequant_icu_3d_instruction(instruction), instruction.loop);
+}
+inline EncodedMxmComputeIcu3DPacket encode_mxm_compute_icu_shortest_instruction(const MxmComputeIcuInstruction& instruction)
+{
+    return compact_mxm_packet(encode_mxm_compute_icu_3d_instruction(instruction), instruction.loop);
+}
+
+// Relocations preserve the selected physical format and all following PCs.
+// write_unsigned initializes zeroed buffers, so replacement must clear bits.
+template <typename Packet>
+void replace_icu_payload_field(Packet& packet, std::size_t offset, unsigned width,
+    std::uint64_t value, const char* message)
+{
+    auto updated = packet;
+    for (unsigned bit = 0; bit < width; ++bit) {
+        const auto location = fu_3d_codec_detail::packet_bit_location<Packet>(offset + bit);
+        updated.words[location.word].lanes[location.lane] &= ~(std::uint32_t{1} << location.bit);
+    }
+    fu_3d_codec_detail::write_unsigned(updated, offset, width, value, message);
+    packet = updated;
+}
+
+inline EncodedMemIcu3DPacket patch_mem_icu_base_address(
+    EncodedMemIcu3DPacket packet, std::size_t base)
+{
+    auto instruction = decode_mem_icu_3d_instruction(packet);
+    instruction.address.base_address = base;
+    const auto rank = short_icu_rank(packet.words[0]);
+    if (rank < 0) return encode_mem_icu_3d_instruction(instruction);
+    replace_icu_payload_field(packet, 24 + 40 * rank + 6, 13, base,
+        "short MEM relocation address overflow");
+    static_cast<void>(decode_mem_icu_3d_instruction(packet));
+    return packet;
+}
+
+inline EncodedMxmDequantIcu3DPacket patch_mxm_dequant_icu_scale(
+    EncodedMxmDequantIcu3DPacket packet, MxmDequantInstruction scale)
+{
+    auto instruction = decode_mxm_dequant_icu_3d_instruction(packet);
+    instruction.instruction = scale;
+    const auto rank = short_icu_rank(packet.words[0]);
+    if (rank < 0) return encode_mxm_dequant_icu_3d_instruction(instruction);
+    replace_icu_payload_field(packet, 24 + (rank ? 2 : 0) + 40 * rank, 16,
+        encode_mxm_dequant_instruction(scale), "short MXM scale relocation overflow");
+    static_cast<void>(decode_mxm_dequant_icu_3d_instruction(packet));
+    return packet;
 }
 
 } // namespace isa

@@ -79,8 +79,8 @@ int main() try
     PermuteQueue queue;
     queue.push_nop(7);
     queue.push_sxm_run_2d(run);
-    require(queue.imem_occupancy() == 5,
-        "SXM launch delay plus RUN_2D must occupy five local i-MEM words");
+    require(queue.imem_occupancy() == 1 + isa::EncodedSxmPermuteIcuRun2DPacket::kWordCount,
+        "SXM launch delay plus RUN_2D has the wrong local i-MEM size");
     std::vector<std::size_t> issueCycles;
     std::size_t launch = 0;
     for (std::size_t cycle = 0; cycle <= 24; ++cycle) {
@@ -106,7 +106,7 @@ int main() try
         "SXM RUN_2D lost its encoded wait_cycle");
     PermuteQueue waitedQueue;
     waitedQueue.push_sxm_run_2d(waitedRun);
-    require(waitedQueue.imem_occupancy() == 4,
+    require(waitedQueue.imem_occupancy() == isa::EncodedSxmPermuteIcuRun2DPacket::kWordCount,
         "SXM wait_cycle should replace the NOP i-MEM word");
     std::vector<std::size_t> waitedIssueCycles;
     for (std::size_t cycle = 0; cycle <= 24; ++cycle)
@@ -161,7 +161,9 @@ int main() try
     std::cout << "sxm_run_2d_instruction_test passed: "
               << "launches=6 active_contexts="
               << hw::kIcuSxmRun2DContextDepth
-              << " packet_words=4 program_words=5 context_bits="
+              << " packet_words=" << isa::EncodedSxmPermuteIcuRun2DPacket::kWordCount
+              << " program_words=" << 1 + isa::EncodedSxmPermuteIcuRun2DPacket::kWordCount
+              << " context_bits="
               << hw::kIcuSxmPermuteRun2DContextBits << '\n';
     return 0;
 } catch (const std::exception& error) {

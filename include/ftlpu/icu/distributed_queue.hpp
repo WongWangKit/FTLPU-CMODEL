@@ -2322,7 +2322,7 @@ private:
             throw StaticScheduleError(
                 "ICU local i-MEM cannot be modified after program launch");
         }
-        constexpr auto wordCount = Encoded3DPacket::kWordCount;
+        const auto wordCount = isa::fu_loop_packet_word_count(packet);
         if (imem_.size() > ImemDepth
             || wordCount > ImemDepth - imem_.size()) {
             throw StaticScheduleError(
@@ -3137,7 +3137,7 @@ private:
             const auto& word = *imem_[pc];
             std::size_t packetWords = 1;
             if (is_3d_entry(word)) {
-                packetWords = Encoded3DPacket::kWordCount;
+                packetWords = isa::fu_loop_packet_word_count<Encoded3DPacket>(word);
             } else if constexpr (QueueRole == IcuQueueRole::Mem) {
                 if (is_write_read_2d_entry(word))
                     packetWords =
@@ -3167,8 +3167,10 @@ private:
         if constexpr (QueueRole != IcuQueueRole::Legacy) {
             return detail::raw_icu_opcode(entry)
                     == isa::IcuCommandOpcode::Extended
-                && detail::raw_icu_extended_subtype(entry)
-                    == kFu3DExtendedSubtype;
+                && (detail::raw_icu_extended_subtype(entry) == kFu3DExtendedSubtype
+                    || (isa::supports_short_icu_packet<Encoded3DPacket>
+                        && detail::raw_icu_extended_subtype(entry) >= 8
+                        && detail::raw_icu_extended_subtype(entry) <= 10));
         } else {
             static_cast<void>(entry);
             return false;
@@ -3311,7 +3313,7 @@ private:
     bool try_activate_front_3d()
     {
         if constexpr (QueueRole != IcuQueueRole::Legacy) {
-            constexpr auto wordCount = Encoded3DPacket::kWordCount;
+            const auto wordCount = isa::fu_loop_packet_word_count<Encoded3DPacket>(iq_.front());
             const auto headerPc = iq_pcs_.front();
             if (headerPc >= program_end_pc_
                 || wordCount > program_end_pc_ - headerPc) {

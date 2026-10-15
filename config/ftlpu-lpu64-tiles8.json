@@ -1,0 +1,241 @@
+{
+  "schema_version": 2,
+  "target": {
+    "name": "ftlpu-lpu64-tiles8"
+  },
+  "topology": {
+    "hemispheres": 2,
+    "tiles_per_slice": 8,
+    "lanes_per_tile": 8
+  },
+  "mem": {
+    "slices_per_hemisphere": 52,
+    "banks_per_slice": 2,
+    "rows_per_bank": 8192,
+    "bytes_per_lane": 1
+  },
+  "sr": {
+    "registers_per_lane": 64,
+    "bytes_per_stream_per_lane": 1
+  },
+  "stream_topology": {
+    "fabric_template": {
+      "replicas": [
+        "east",
+        "west"
+      ],
+      "columns": [
+        "mem.b0",
+        "mem.b1",
+        "mem.b2",
+        "mem.b3",
+        "mem.b4",
+        "mem.b5",
+        "mem.b6",
+        "mem.b7",
+        "mem.b8",
+        "mem.b9",
+        "mem.b10",
+        "mem.b11",
+        "mem.b12",
+        "mem.b13",
+        "c2c_sxm",
+        "sxm_mxm"
+      ],
+      "paths": [
+        {
+          "name": "main",
+          "columns": [
+            "mem.b0",
+            "mem.b1",
+            "mem.b2",
+            "mem.b3",
+            "mem.b4",
+            "mem.b5",
+            "mem.b6",
+            "mem.b7",
+            "mem.b8",
+            "mem.b9",
+            "mem.b10",
+            "mem.b11",
+            "mem.b12",
+            "mem.b13",
+            "c2c_sxm",
+            "sxm_mxm"
+          ],
+          "bidirectional": true,
+          "kind": "normal",
+          "enabled_by_default": true,
+          "multicast_allowed": false,
+          "hop_latency_cycles": 1
+        }
+      ],
+      "routes": []
+    },
+    "bindings": {
+      "mem": {
+        "slices_per_group": 4,
+        "boundary_columns": [
+          "mem.b0",
+          "mem.b1",
+          "mem.b2",
+          "mem.b3",
+          "mem.b4",
+          "mem.b5",
+          "mem.b6",
+          "mem.b7",
+          "mem.b8",
+          "mem.b9",
+          "mem.b10",
+          "mem.b11",
+          "mem.b12",
+          "mem.b13"
+        ]
+      },
+      "sxm": {
+        "forward_input": {
+          "column": "c2c_sxm",
+          "flow": "forward"
+        },
+        "forward_output": {
+          "column": "sxm_mxm",
+          "flow": "forward"
+        },
+        "reverse_input": {
+          "column": "sxm_mxm",
+          "flow": "reverse"
+        },
+        "reverse_output": {
+          "column": "c2c_sxm",
+          "flow": "reverse"
+        }
+      },
+      "mxm": {
+        "weight_input": {
+          "column": "sxm_mxm",
+          "flow": "forward"
+        },
+        "activation_input": {
+          "column": "sxm_mxm",
+          "flow": "forward"
+        },
+        "result_output": {
+          "column": "sxm_mxm",
+          "flow": "reverse"
+        }
+      },
+      "vxm": {
+        "input": {
+          "column": "mem.b0",
+          "flow": "reverse"
+        },
+        "output": {
+          "column": "mem.b0",
+          "flow": "forward"
+        }
+      },
+      "c2c": {
+        "tx_input": {
+          "column": "mem.b13",
+          "flow": "forward"
+        },
+        "rx_output": {
+          "column": "mem.b13",
+          "flow": "reverse"
+        }
+      }
+    },
+    "system_transfers": [
+      {
+        "name": "vxm.passive.east_fabric_to_west_fabric",
+        "kind": "passive_bridge",
+        "source": {
+          "fabric": "east",
+          "column": "mem.b0",
+          "flow": "reverse"
+        },
+        "destination": {
+          "fabric": "west",
+          "column": "mem.b0",
+          "flow": "forward"
+        },
+        "latency_cycles": 1
+      },
+      {
+        "name": "vxm.passive.west_fabric_to_east_fabric",
+        "kind": "passive_bridge",
+        "source": {
+          "fabric": "west",
+          "column": "mem.b0",
+          "flow": "reverse"
+        },
+        "destination": {
+          "fabric": "east",
+          "column": "mem.b0",
+          "flow": "forward"
+        },
+        "latency_cycles": 1
+      }
+    ]
+  },
+  "c2c": {
+    "beat_bytes": 32
+  },
+  "mxm": {
+    "accum_contexts": 4,
+    "supported_modes": [
+      "native4x4",
+      "linear1x16"
+    ]
+  },
+  "vxm": {
+    "alus": 16
+  },
+  "memory": {
+    "dedicated_slice_roles": 1,
+    "w8a16_weight_slice_base": 20,
+    "w8a16_weight_slice_stride": 4,
+    "w8a16_output_weight_spare_slices": [
+      22,
+      38
+    ],
+    "w8a16_activation_slice_base": 0,
+    "w8a16_hidden_slice_base": 0,
+    "w8a16_hidden_base_row": 0,
+    "w8a16_fused_gate_temp_slices": [
+      0,
+      4,
+      8,
+      12
+    ],
+    "w8a16_fused_up_temp_slices": [
+      1,
+      5,
+      9,
+      13
+    ],
+    "attention_mask_base_row": 7936,
+    "matmul_result_base_row": 1600,
+    "w8a16_result_slice_base": 16
+  },
+  "throughput": {
+    "mxms_per_hemisphere": 1,
+    "mxm_weight_buffers": 2,
+    "mxm_local_dequant_enabled": 1,
+    "mxm_block_compute_enabled": 0,
+    "mxm_weight_activation_overlap_enabled": 1,
+    "vxm_cross_hemisphere_streams_enabled": 1,
+    "vxm_fma_enabled": 1
+  },
+  "external_memory": {
+    "lpu_clock_mhz": 500,
+    "ddr_peak_bandwidth_mbytes_per_second": 51200,
+    "ddr_scheduling_efficiency_percent": 90,
+    "ddr_read_latency_cycles": 35,
+    "ddr_write_latency_cycles": 25,
+    "ddr_read_latency_jitter_cycles": 15,
+    "ddr_write_latency_jitter_cycles": 10,
+    "ddr_request_queue_depth": 256,
+    "ddr_latency_random_seed": 1179929680
+  }
+}

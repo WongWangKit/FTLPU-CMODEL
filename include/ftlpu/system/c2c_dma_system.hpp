@@ -21,7 +21,7 @@ public:
             C2cDmaEngine(ddr4_, dma_fifo_depth_vectors,
                 hardware.c2c_streams_per_direction),
             C2cDmaEngine(ddr4_, dma_fifo_depth_vectors,
-                hardware.c2c_streams_per_direction)}
+                hardware.c2c_streams_per_direction,hw::kC2cStreamsPerDirection)}
         , chip_(hardware)
     {
         for (std::size_t index = 0; index < hw::kHemispheres; ++index) {

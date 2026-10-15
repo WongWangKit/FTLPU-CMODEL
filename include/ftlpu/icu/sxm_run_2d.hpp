@@ -1,6 +1,8 @@
 #pragma once
 
-#include "ftlpu/icu/fu_3d_codec.hpp"
+#include "ftlpu/core/instruction_codec.hpp"
+#include "ftlpu/icu/fu_3d_instruction.hpp"
+#include "ftlpu/icu/packet_bit_codec.hpp"
 #include "ftlpu/sxm/instruction.hpp"
 
 #include <array>
@@ -18,7 +20,7 @@ namespace ftlpu {
 struct SxmIcuRun2DInstruction {
     IcuLoop3D loop{};
     SxmInstruction instruction{};
-    // Add this modulo-32 delta to every permute-map entry after each launch.
+    // Add this modulo-vector-width delta after each launch.
     std::size_t permute_map_stride{0};
 
     static SxmIcuRun2DInstruction Run2D(
@@ -68,7 +70,7 @@ inline void validate_sxm_icu_run_2d_loop(
     if (instruction.permute_map_stride >= SxmInstruction::kTotalLanes
         || instruction.permute_map_stride % hw::kLanesPerTile != 0)
         throw std::invalid_argument(
-            "SXM RUN_2D permute-map stride must be a modulo-32 multiple of eight lanes");
+            "SXM RUN_2D permute-map stride must be a physical tile-lane multiple within the vector");
 }
 
 inline void validate_sxm_transpose_icu_run_2d_instruction(
@@ -151,27 +153,33 @@ namespace isa {
 
 namespace sxm_run_2d_codec_detail {
 
+// Version 0 retains the [3:2] word index. Wide Permute uses version 1 and
+// [4:2] indices for up to eight words; SXM has no local operation in bit 4.
+// Transpose keeps two words. Permute length is fixed for each hardware target.
 template <typename Packet>
 void initialize_headers(Packet& packet)
 {
+    static_assert(Packet::kWordCount <= 8);
+    constexpr std::uint32_t version = Packet::kWordCount > 4 ? 1 : 0;
     for (std::size_t word = 0; word < Packet::kWordCount; ++word)
         packet.words[word].lanes[0] =
             static_cast<std::uint32_t>(IcuCommandOpcode::Extended)
             | (static_cast<std::uint32_t>(word) << 2)
-            | (std::uint32_t {1} << 6);
+            | (std::uint32_t {1} << 6) | (version << 7);
     packet.words[0].lanes[2] |= std::uint32_t {2} << 24;
 }
 
 template <typename Packet>
 void validate_headers(const Packet& packet, const char* message)
 {
+    constexpr std::uint32_t version = Packet::kWordCount > 4 ? 1 : 0;
     if (((packet.words[0].lanes[2] >> 24) & 0xfU) != 2U)
         throw std::logic_error(message);
     for (std::size_t word = 0; word < Packet::kWordCount; ++word) {
         const auto expected =
             static_cast<std::uint32_t>(IcuCommandOpcode::Extended)
             | (static_cast<std::uint32_t>(word) << 2)
-            | (std::uint32_t {1} << 6);
+            | (std::uint32_t {1} << 6) | (version << 7);
         if ((packet.words[word].lanes[0] & 0xffU) != expected)
             throw std::logic_error(message);
     }
@@ -237,7 +245,11 @@ struct EncodedSxmTransposeIcuRun2DPacket {
 
 struct EncodedSxmPermuteIcuRun2DPacket {
     static constexpr std::size_t kWordBits = 96;
-    static constexpr std::size_t kWordCount = 4;
+    // Four subtype bits are removed from word zero's logical payload. Keep
+    // the established four-word packet at 32 lanes; 64 lanes need six words.
+    static constexpr std::size_t kRequiredWords =
+        (SxmEncodingLayout::kUsedBits + 4 + 87) / 88;
+    static constexpr std::size_t kWordCount = kRequiredWords < 4 ? 4 : kRequiredWords;
     static constexpr std::size_t kLanesPerWord = 3;
     static constexpr std::size_t kHeaderBits = 8;
     static constexpr std::size_t kPayloadBitsPerWord = 88;
@@ -246,7 +258,8 @@ struct EncodedSxmPermuteIcuRun2DPacket {
 
 static_assert(sizeof(EncodedSxmIcuRun2DWord) == 96 / 8);
 static_assert(sizeof(EncodedSxmTransposeIcuRun2DPacket) == 2 * 96 / 8);
-static_assert(sizeof(EncodedSxmPermuteIcuRun2DPacket) == 4 * 96 / 8);
+static_assert(sizeof(EncodedSxmPermuteIcuRun2DPacket)
+    == EncodedSxmPermuteIcuRun2DPacket::kWordCount * 96 / 8);
 static_assert(std::is_trivially_copyable_v<EncodedSxmTransposeIcuRun2DPacket>);
 static_assert(std::is_trivially_copyable_v<EncodedSxmPermuteIcuRun2DPacket>);
 
@@ -318,7 +331,8 @@ encode_sxm_permute_icu_run_2d_instruction(
         instruction.instruction.dst_streams.front().stream,
         "SXM permute destination stream base");
     for (std::size_t lane = 0; lane < SxmInstruction::kTotalLanes; ++lane)
-        codec::write_unsigned(packet, 116 + lane * 5, 5,
+        codec::write_unsigned(packet, SxmEncodingLayout::kMapOffset + lane * SxmEncodingLayout::kLaneBits,
+            SxmEncodingLayout::kLaneBits,
             instruction.instruction.permute_map[lane],
             "SXM permute map source");
     const auto outputRow =
@@ -327,11 +341,11 @@ encode_sxm_permute_icu_run_2d_instruction(
     const auto outputTile =
         instruction.instruction.output_tile == SxmInstruction::kAllOutputTiles
         ? hw::kTileRows : instruction.instruction.output_tile;
-    codec::write_unsigned(packet, 276, 4, outputRow,
+    codec::write_unsigned(packet, SxmEncodingLayout::kOutputRowOffset, 4, outputRow,
         "SXM permute output row");
-    codec::write_unsigned(packet, 280, 3, outputTile,
+    codec::write_unsigned(packet, SxmEncodingLayout::kOutputTileOffset, SxmEncodingLayout::kTileBits, outputTile,
         "SXM permute output tile");
-    codec::write_unsigned(packet, 283, 2,
+    codec::write_unsigned(packet, SxmEncodingLayout::kStrideOffset, SxmEncodingLayout::kStrideBits,
         instruction.permute_map_stride / hw::kLanesPerTile,
         "SXM RUN_2D permute-map group stride");
     return packet;
@@ -344,11 +358,12 @@ inline SxmIcuRun2DInstruction decode_sxm_permute_icu_run_2d_instruction(
     sxm_run_2d_codec_detail::validate_headers(
         packet, "invalid SXM permute RUN_2D packet header");
     codec::require_reserved_zero(
-        packet, 285, "SXM permute RUN_2D reserved field is non-zero");
+        packet, SxmEncodingLayout::kUsedBits, "SXM permute RUN_2D reserved field is non-zero");
     auto map = SxmInstruction::PermuteMap{};
     for (std::size_t lane = 0; lane < map.size(); ++lane)
         map[lane] = static_cast<std::size_t>(
-            codec::read_unsigned(packet, 116 + lane * 5, 5));
+            codec::read_unsigned(packet, SxmEncodingLayout::kMapOffset + lane * SxmEncodingLayout::kLaneBits,
+                SxmEncodingLayout::kLaneBits));
     auto instruction = SxmInstruction::Permute(
         sxm_run_2d_codec_detail::stream_range(
             static_cast<std::size_t>(codec::read_unsigned(packet, 104, 6)),
@@ -358,9 +373,9 @@ inline SxmIcuRun2DInstruction decode_sxm_permute_icu_run_2d_instruction(
             2 * hw::kLanesPerTile),
         map);
     const auto outputRow = static_cast<std::size_t>(
-        codec::read_unsigned(packet, 276, 4));
+        codec::read_unsigned(packet, SxmEncodingLayout::kOutputRowOffset, 4));
     const auto outputTile = static_cast<std::size_t>(
-        codec::read_unsigned(packet, 280, 3));
+        codec::read_unsigned(packet, SxmEncodingLayout::kOutputTileOffset, SxmEncodingLayout::kTileBits));
     if (outputRow > 15 || outputTile > hw::kTileRows)
         throw std::logic_error("encoded SXM permute output selector is invalid");
     instruction.output_row = outputRow == hw::kLanesPerTile
@@ -368,7 +383,7 @@ inline SxmIcuRun2DInstruction decode_sxm_permute_icu_run_2d_instruction(
     instruction.output_tile = outputTile == hw::kTileRows
         ? SxmInstruction::kAllOutputTiles : outputTile;
     const auto mapStride = static_cast<std::size_t>(
-        codec::read_unsigned(packet, 283, 2)) * hw::kLanesPerTile;
+        codec::read_unsigned(packet, SxmEncodingLayout::kStrideOffset, SxmEncodingLayout::kStrideBits)) * hw::kLanesPerTile;
     auto result = sxm_run_2d_codec_detail::decode_loop(
         packet, std::move(instruction), mapStride);
     ::ftlpu::detail::validate_sxm_permute_icu_run_2d_instruction(result);

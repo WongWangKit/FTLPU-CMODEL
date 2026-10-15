@@ -148,8 +148,12 @@
     ]
   },
 
+  "c2c": {
+    "beat_bytes": 32
+  },
+
   "mxm": {
-    "accum_contexts": 256,
+    "accum_contexts": 4,
     "supported_modes": [
       "native4x4",
       "linear1x16"

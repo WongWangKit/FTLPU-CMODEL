@@ -15,7 +15,7 @@ struct C2cVector {
 };
 
 struct C2cLinkConfig {
-    std::size_t beat_bytes{hw::kPhysicalVectorBytes};
+    std::size_t beat_bytes{hw::kC2cBytesPerStreamPerCycle};
     std::size_t flight_latency_cycles{0};
     std::size_t rx_fifo_depth_vectors{4};
 
@@ -36,7 +36,5 @@ struct C2cLinkConfig {
         return (hw::kPhysicalVectorBytes + beat_bytes - 1) / beat_bytes;
     }
 };
-
-static_assert(hw::kPhysicalVectorBytes == 32);
 
 } // namespace ftlpu

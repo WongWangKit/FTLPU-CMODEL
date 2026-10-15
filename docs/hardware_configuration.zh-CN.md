@@ -31,7 +31,7 @@ CMake 配置阶段读取它并生成编译期常量，Software 编译器也可�
     "bytes_per_stream_per_lane": 1
   },
   "mxm": {
-    "accum_contexts": 256,
+    "accum_contexts": 4,
     "supported_modes": [
       "native4x4",
       "linear1x16"
@@ -64,6 +64,34 @@ column ID 递增方向传播，`reverse` 表示沿 column ID 递减方向传播�
 数组中存在的 transfer 即被生成并执行；不需要传输时应从数组中删除对应项。当前支持的
 跨 fabric 类型为 `passive_bridge`。完整的 LPU32 实例见
 [`config/ftlpu-lpu32.json`](../config/ftlpu-lpu32.json)。
+
+`stream_topology.bindings.mem.slices_per_group` 独立于
+`topology.tiles_per_slice`：前者定义 MEM slice 共用 SR 边界的分组，后者定义
+数据通路的 tile 数。分组必须为正整数，且整除 `mem.slices_per_hemisphere`；
+MEM 边界数量为 `slices_per_hemisphere / slices_per_group + 1`。
+例如 52 slices、每组 4 slices 始终对应 13 组和 14 个 MEM 边界，增加 tile 数
+不会改变这些 SR 边界。compiler、CModel 和 target ABI 都读取独立的分组配置。
+
+SXM 编码按物理 lane 数派生 Permute map 位宽和包长度：4 tiles × 8 lanes
+保留原有 5-bit map、4 个 96-bit ICU word；8 tiles × 8 lanes 使用 6-bit map、
+6 个 ICU word。后者使用版本 1 的三位 continuation word index；Transpose
+仍为 2 个 ICU word。旧 FU 编码也随 lane/tile 选择器位宽扩展。
+MXM 地址、column 和 stride 位宽也从物理几何派生：8-tile 使用 14-bit
+accumulator 地址、3-bit column 和 15-bit signed stride，Compute ICU 包为
+3 个 128-bit word；4-tile 保留原来的 2 个 word 和字段布局。ICU 到 FU 的
+编码使用同一几何定义。ABI 的编码版本字段在 4-tile 为 1、宽格式为 2，
+runtime 会拒绝不匹配的版本。模型是否完成整层验收，以实际运行报告为准。
+
+`c2c.beat_bytes` 独立指定每条 C2C lane 每拍传输字节数。未设置时默认
+32 B（小于 32 B 的物理 vector 使用其自身宽度）；值必须为正且不大于
+物理 vector 宽度。默认配置及 8-tile 实验都保持 32 B，因此 32 B vector
+一拍完成，64 B vector 两拍完成；完整 vector 收到后才交给片内 SR。
+DDR 使用同一 beat 宽度，字节带宽与延时仍由 `external_memory` 独立配置。
+DMA 请求携带物理 C2C hemisphere/lane/direction 身份，DDR 调度每周期最多
+服务该方向的同一 lane 一次；增加 outstanding 请求不会增加链路带宽。
+不同 lane 仍可并行，且共享 DDR 总字节预算和 request queue。
+默认使用 4 accumulator contexts，每个 MXM 的 FP32 accumulator 容量
+从 32×32×4×4 = 16 KiB 派生为 64×64×4×4 = 64 KiB。
 
 `fabric` 名称 `east`/`west` 表示全局物理 hemisphere；`flow` 不使用 east/west，避免
 和全局位置混淆。对于默认的对称模板，East fabric 的 `forward` 是全局向东，West
@@ -140,7 +168,7 @@ slice_depth      = 2 × 8192 = 16384 rows
 
 | 字段 | 含义 | 默认值 |
 | --- | --- | ---: |
-| `mxm.accum_contexts` | 每个 MXM 的完整 32 x 32 FP32 accumulator context 数 | 256 |
+| `mxm.accum_contexts` | 每个 MXM 的完整 MXM tile FP32 accumulator context 数 | 4 |
 | `mxm.supported_modes` | target 支持的 MXM decode layout | `native4x4`、`linear1x16` |
 
 `Block8` 已删除，不能再写入 `supported_modes`。模式列表不能为空，不能重复，也不能包含
@@ -253,9 +281,14 @@ hemispheres = 2
 slices_per_hemisphere = 52
 banks_per_slice = 2
 sram_depth_rows = 8192
-mxm_accumulator_blocks = 256
+mxm_accumulator_blocks = 4
 vxm_alus = 16
 ```
 
 其中 `sram_depth_rows` 是单 bank depth；单 slice 总 depth 还需要乘以
 `banks_per_slice`。
+
+默认 4-tile 配置和 8-tile 实验配置均使用每个 MXM 4 个 ACC context。
+一个 context 保存一个完整的 FP32 MXM tile：4-tile 时为 32×32，
+每个 MXM 共 16 KiB；8-tile 时为 64×64，共 64 KiB。
+编译器按配置分配 ACC 行地址，已生成的旧程序不能直接复用于缩小容量后的硬件。

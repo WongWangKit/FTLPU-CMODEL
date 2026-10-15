@@ -27,7 +27,7 @@ namespace isa {
 //   through [30] are reserved,
 //   [31] preserves a Write input for passive forwarding. The distributed ICU
 //   queue identifies one of the slice's two single-port SRAM banks.
-// MXM control 49b:
+// MXM control (32-lane layout shown; geometry-derived offsets below):
 //   IW      [1:0] opcode, [2] weight buffer, [4:3] weight column,
 //           [5] column mode, [8:6] inner column, [9] Direct16 input mode.
 //   Compute [1:0] opcode, [2] weight buffer, [8:3] activation stream base,
@@ -51,9 +51,9 @@ namespace isa {
 //   NOP    [1:0] opcode, [31:2] cycle count.
 //   Repeat [1:0] opcode, [11:2] count, [19:12] interval,
 //          [31:20] signed MEM address stride.
-// SXM control 13x32b:
+// SXM control (geometry-derived number of 32-bit words; 13 at 32 lanes):
 //   header, 16 source selectors, 16 destination selectors, 8 lane-map
-//   selectors, and 32 cross-tile permute selectors. The fixed packet avoids
+//   selectors, and one cross-tile permute selector per physical lane. The packet avoids
 //   host-sized vector/index fields in the hardware-facing ISA.
 using EncodedMemInstruction = std::uint64_t;
 using EncodedMxmInstruction = std::uint64_t;
@@ -66,8 +66,52 @@ struct EncodedIcuRepeat2D {
 
 using EncodedVxmInstruction = VxmSrCompactInstruction;
 
+// Each target has one fixed MXM layout, shared by ICU lowering and FU decode.
+// Minimum widths preserve the established 32-lane bit vectors.
+struct MxmEncodingLayout {
+    static constexpr unsigned kAddressBits = hw::kMxmAccumulatorAddressBits;
+    static constexpr unsigned kColumnBits = hw::kMxmColumnBits;
+    static constexpr unsigned kStrideBits = hw::kMxmAccumulatorStrideBits;
+    static constexpr std::uint64_t mask(unsigned width) { return (std::uint64_t{1} << width) - 1; }
+    static constexpr unsigned kIwMode = 3 + kColumnBits;
+    static constexpr unsigned kIwInner = kIwMode + 1;
+    static constexpr unsigned kIwInput = kIwInner + 3;
+    static constexpr unsigned kIwStream = kIwInput + 1;
+    static constexpr unsigned kIwEnd = kIwStream + 6;
+    static constexpr unsigned kComputeStride = 15 + kAddressBits;
+    static constexpr unsigned kComputeDestination = kComputeStride + 16;
+    static constexpr unsigned kComputeFormat = kComputeDestination + 1;
+    static constexpr unsigned kComputeReserved = kComputeDestination + 2;
+    static constexpr unsigned kComputeRetain = kComputeDestination + 3;
+    static constexpr unsigned kComputeOutputFormat = kComputeDestination + 4;
+    static constexpr unsigned kComputeEnd = kComputeDestination + 5;
+    static constexpr unsigned kDecodeColumn = 10 + kAddressBits;
+    static constexpr unsigned kDecodeFormat = kDecodeColumn + kColumnBits;
+    static constexpr unsigned kDecodeDestination = kDecodeFormat + 1;
+    static constexpr unsigned kDecodeRetain = kDecodeFormat + 2;
+    static constexpr unsigned kDecodeLayout = kDecodeFormat + 3;
+    static constexpr unsigned kDecodeEnd = kDecodeLayout + 1;
+    static_assert(kComputeEnd <= 64 && kDecodeEnd <= 64 && kIwEnd <= 64);
+};
+
+struct SxmEncodingLayout {
+    static constexpr std::size_t kLaneBits = hw::kSxmLaneIndexBits;
+    static constexpr std::size_t kTileBits = hw::kSxmTileSelectorBits;
+    static constexpr std::size_t kStrideBits = hw::kSxmGroupStrideBits;
+    static constexpr std::size_t kMapOffset = 116;
+    static constexpr std::size_t kOutputRowOffset =
+        kMapOffset + SxmInstruction::kTotalLanes * kLaneBits;
+    static constexpr std::size_t kOutputTileOffset = kOutputRowOffset + 4;
+    static constexpr std::size_t kStrideOffset = kOutputTileOffset + kTileBits;
+    static constexpr std::size_t kUsedBits = kStrideOffset + kStrideBits;
+    static constexpr std::size_t kRawMapOffset = 208 + hw::kLanesPerTile * 4;
+    static constexpr std::size_t kRawUsedBits =
+        kRawMapOffset + SxmInstruction::kTotalLanes * kLaneBits + 8 + kTileBits;
+    static constexpr std::size_t kRawWords = (kRawUsedBits + 31) / 32;
+};
+
 struct EncodedSxmInstruction {
-    std::array<std::uint32_t, 13> words{};
+    std::array<std::uint32_t, SxmEncodingLayout::kRawWords> words{};
 };
 
 enum class IcuCommandOpcode : std::uint8_t {
@@ -217,7 +261,7 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
 {
     constexpr std::uint64_t kOpcodeMask = 0x3;
     constexpr std::uint64_t kWeightBufferMask = 0x1;
-    constexpr std::uint64_t kWeightColumnMask = 0x3;
+    constexpr std::uint64_t kWeightColumnMask = MxmEncodingLayout::mask(MxmEncodingLayout::kColumnBits);
     constexpr std::uint64_t kWeightInnerColumnMask = 0x7;
     constexpr std::uint64_t kWeightStreamBaseMask = 0x3f;
     constexpr std::uint64_t kStreamBaseMask = 0x3f;
@@ -260,10 +304,10 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
             | (static_cast<std::uint64_t>(instruction.weight_column) << 3)
             | (static_cast<std::uint64_t>(
                    instruction.weight_load_mode == MxmWeightLoadMode::Column)
-               << 5)
-            | (static_cast<std::uint64_t>(instruction.weight_inner_column) << 6)
-            | (static_cast<std::uint64_t>(instruction.weight_input_mode) << 9)
-            | (static_cast<std::uint64_t>(instruction.weight_stream_base) << 10);
+               << MxmEncodingLayout::kIwMode)
+            | (static_cast<std::uint64_t>(instruction.weight_inner_column) << MxmEncodingLayout::kIwInner)
+            | (static_cast<std::uint64_t>(instruction.weight_input_mode) << MxmEncodingLayout::kIwInput)
+            | (static_cast<std::uint64_t>(instruction.weight_stream_base) << MxmEncodingLayout::kIwStream);
     case MxmControlOpcode::Compute:
         MxmControlInstruction::check_data_format(instruction.data_format);
         MxmControlInstruction::check_activation_stream_base(
@@ -299,12 +343,12 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
             | (static_cast<std::uint64_t>(instruction.activation_stream_base) << 3)
             | (static_cast<std::uint64_t>(instruction.stream_base) << 9)
             | (static_cast<std::uint64_t>(instruction.accumulator_address) << 15)
-            | (static_cast<std::uint64_t>(instruction.accumulator_row_stride) << 28)
-            | (static_cast<std::uint64_t>(instruction.accumulator_destination) << 44)
-            | (static_cast<std::uint64_t>(instruction.data_format) << 45)
-            | (static_cast<std::uint64_t>(!instruction.accumulator_clear) << 47)
+            | (static_cast<std::uint64_t>(instruction.accumulator_row_stride) << MxmEncodingLayout::kComputeStride)
+            | (static_cast<std::uint64_t>(instruction.accumulator_destination) << MxmEncodingLayout::kComputeDestination)
+            | (static_cast<std::uint64_t>(instruction.data_format) << MxmEncodingLayout::kComputeFormat)
+            | (static_cast<std::uint64_t>(!instruction.accumulator_clear) << MxmEncodingLayout::kComputeRetain)
             | (static_cast<std::uint64_t>(
-                   instruction.accumulator_output_format) << 48);
+                   instruction.accumulator_output_format) << MxmEncodingLayout::kComputeOutputFormat);
     case MxmControlOpcode::Decode:
         MxmControlInstruction::check_data_format(instruction.data_format);
         MxmControlInstruction::check_decode_layout(instruction.decode_layout);
@@ -357,15 +401,15 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
             | (static_cast<std::uint64_t>(
                    instruction.accumulator_address) << 10)
             | (static_cast<std::uint64_t>(
-                   instruction.weight_column) << 23)
+                   instruction.weight_column) << MxmEncodingLayout::kDecodeColumn)
             | (static_cast<std::uint64_t>(
-                   instruction.data_format) << 25)
+                   instruction.data_format) << MxmEncodingLayout::kDecodeFormat)
             | (static_cast<std::uint64_t>(
-                   instruction.accumulator_destination) << 26)
+                   instruction.accumulator_destination) << MxmEncodingLayout::kDecodeDestination)
             | (static_cast<std::uint64_t>(
-                   !instruction.accumulator_clear) << 27)
+                   !instruction.accumulator_clear) << MxmEncodingLayout::kDecodeRetain)
             | (static_cast<std::uint64_t>(
-                   instruction.decode_layout) << 28);
+                   instruction.decode_layout) << MxmEncodingLayout::kDecodeLayout);
     case MxmControlOpcode::AccumulatorRead:
         MxmControlInstruction::check_accumulator_read_stream_base(
             instruction.stream_base,
@@ -383,11 +427,11 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
         return opcode
             | (static_cast<std::uint64_t>(instruction.stream_base) << 9)
             | (static_cast<std::uint64_t>(instruction.accumulator_address) << 15)
-            | (static_cast<std::uint64_t>(instruction.accumulator_clear) << 28)
+            | (static_cast<std::uint64_t>(instruction.accumulator_clear) << MxmEncodingLayout::kComputeStride)
             | (static_cast<std::uint64_t>(
-                   instruction.accumulator_destination) << 44)
+                   instruction.accumulator_destination) << MxmEncodingLayout::kComputeDestination)
             | (static_cast<std::uint64_t>(
-                   instruction.accumulator_output_format) << 48);
+                   instruction.accumulator_output_format) << MxmEncodingLayout::kComputeOutputFormat);
     }
     throw std::logic_error("unknown MXM opcode");
 }
@@ -396,22 +440,22 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
 {
     const auto opcode = static_cast<MxmControlOpcode>(word & 0x3u);
     const auto iw_weight_buffer = static_cast<std::size_t>((word >> 2) & 0x1u);
-    const auto iw_weight_column = static_cast<std::size_t>((word >> 3) & 0x3u);
-    const auto iw_column_mode = ((word >> 5) & 0x1u) != 0;
-    const auto iw_inner_column = static_cast<std::size_t>((word >> 6) & 0x7u);
+    const auto iw_weight_column = static_cast<std::size_t>((word >> 3) & MxmEncodingLayout::mask(MxmEncodingLayout::kColumnBits));
+    const auto iw_column_mode = ((word >> MxmEncodingLayout::kIwMode) & 0x1u) != 0;
+    const auto iw_inner_column = static_cast<std::size_t>((word >> MxmEncodingLayout::kIwInner) & 0x7u);
     const auto iw_input_mode =
-        static_cast<MxmWeightInputMode>((word >> 9) & 0x1u);
+        static_cast<MxmWeightInputMode>((word >> MxmEncodingLayout::kIwInput) & 0x1u);
     const auto iw_weight_stream_base =
-        static_cast<std::size_t>((word >> 10) & 0x3fu);
+        static_cast<std::size_t>((word >> MxmEncodingLayout::kIwStream) & 0x3fu);
     const auto compute_weight_buffer = static_cast<std::size_t>((word >> 2) & 0x1u);
     const auto compute_activation_stream_base = static_cast<std::size_t>((word >> 3) & 0x3fu);
     const auto stream_base = static_cast<std::size_t>((word >> 9) & 0x3fu);
     const auto compute_data_format =
-        static_cast<MxmDataFormat>((word >> 45) & 0x1u);
+        static_cast<MxmDataFormat>((word >> MxmEncodingLayout::kComputeFormat) & 0x1u);
 
     switch (opcode) {
     case MxmControlOpcode::IW:
-        detail::require_reserved_zero(word, 0x0000ffffu, "encoded MXM IW instruction has non-zero reserved bits");
+        detail::require_reserved_zero(word, MxmEncodingLayout::mask(MxmEncodingLayout::kIwEnd), "encoded MXM IW instruction has non-zero reserved bits");
         return iw_column_mode
             ? MxmControlInstruction::IWColumn(
                   iw_weight_buffer,
@@ -427,31 +471,35 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
     case MxmControlOpcode::Compute:
         detail::require_reserved_zero(
             word,
-            ((std::uint64_t {1} << 49) - 1)
-                & ~(std::uint64_t {1} << 46),
+            ((std::uint64_t {1} << MxmEncodingLayout::kComputeEnd) - 1)
+                & ~(std::uint64_t {1} << MxmEncodingLayout::kComputeReserved),
             "encoded MXM Compute instruction has non-zero reserved bits");
         return MxmControlInstruction::Compute(
             compute_weight_buffer,
             compute_activation_stream_base,
             stream_base,
-            static_cast<std::size_t>((word >> 15) & 0x1fffu),
-            static_cast<std::size_t>((word >> 28) & 0xffffu),
-            static_cast<MxmAccumulatorDestination>((word >> 44) & 0x1u),
+            static_cast<std::size_t>((word >> 15) & MxmEncodingLayout::mask(MxmEncodingLayout::kAddressBits)),
+            static_cast<std::size_t>((word >> MxmEncodingLayout::kComputeStride) & 0xffffu),
+            static_cast<MxmAccumulatorDestination>((word >> MxmEncodingLayout::kComputeDestination) & 0x1u),
             compute_data_format,
-            ((word >> 47) & 0x1u) == 0,
+            ((word >> MxmEncodingLayout::kComputeRetain) & 0x1u) == 0,
             static_cast<MxmAccumulatorOutputFormat>(
-                (word >> 48) & 0x1u));
+                (word >> MxmEncodingLayout::kComputeOutputFormat) & 0x1u));
     case MxmControlOpcode::AccumulatorRead:
         detail::require_reserved_zero(
             word,
-            0x150001ffffe03ull & ~(std::uint64_t {1} << 46),
+            0x3ull | (0x3full << 9)
+                | (MxmEncodingLayout::mask(MxmEncodingLayout::kAddressBits) << 15)
+                | (std::uint64_t{1} << MxmEncodingLayout::kComputeStride)
+                | (std::uint64_t{1} << MxmEncodingLayout::kComputeDestination)
+                | (std::uint64_t{1} << MxmEncodingLayout::kComputeOutputFormat),
             "encoded MXM AccumulatorRead instruction has non-zero reserved bits");
         return MxmControlInstruction::AccumulatorRead(
-            static_cast<std::size_t>((word >> 15) & 0x1fffu),
+            static_cast<std::size_t>((word >> 15) & MxmEncodingLayout::mask(MxmEncodingLayout::kAddressBits)),
             stream_base,
-            ((word >> 28) & 0x1u) != 0,
-            static_cast<MxmAccumulatorOutputFormat>((word >> 48) & 0x1u),
-            static_cast<MxmAccumulatorDestination>((word >> 44) & 0x1u));
+            ((word >> MxmEncodingLayout::kComputeStride) & 0x1u) != 0,
+            static_cast<MxmAccumulatorOutputFormat>((word >> MxmEncodingLayout::kComputeOutputFormat) & 0x1u),
+            static_cast<MxmAccumulatorDestination>((word >> MxmEncodingLayout::kComputeDestination) & 0x1u));
     case MxmControlOpcode::Decode: {
         const auto activation_buffer =
             static_cast<std::size_t>((word >> 2) & 0x1u);
@@ -460,9 +508,9 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
         const auto decode_stream_base =
             static_cast<std::size_t>((word >> 4) & 0x3fu);
         const auto data_format =
-            static_cast<MxmDataFormat>((word >> 25) & 0x1u);
+            static_cast<MxmDataFormat>((word >> (operation == MxmDecodeOperation::LoadActivation ? 25 : MxmEncodingLayout::kDecodeFormat)) & 0x1u);
         const auto decode_layout =
-            static_cast<MxmDecodeLayout>((word >> 28) & 0x1u);
+            static_cast<MxmDecodeLayout>((word >> (operation == MxmDecodeOperation::LoadActivation ? 28 : MxmEncodingLayout::kDecodeLayout)) & 0x1u);
         if (operation == MxmDecodeOperation::LoadActivation) {
             detail::require_reserved_zero(
                 word,
@@ -477,17 +525,17 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
         }
         detail::require_reserved_zero(
             word,
-            (std::uint64_t {1} << 29) - 1,
+            (std::uint64_t {1} << MxmEncodingLayout::kDecodeEnd) - 1,
             "encoded MXM DecodeStreamCompute instruction has non-zero reserved bits");
         return MxmControlInstruction::DecodeStreamCompute(
             activation_buffer,
             decode_stream_base,
             data_format,
-            static_cast<std::size_t>((word >> 10) & 0x1fffu),
-            static_cast<std::size_t>((word >> 23) & 0x3u),
+            static_cast<std::size_t>((word >> 10) & MxmEncodingLayout::mask(MxmEncodingLayout::kAddressBits)),
+            static_cast<std::size_t>((word >> MxmEncodingLayout::kDecodeColumn) & MxmEncodingLayout::mask(MxmEncodingLayout::kColumnBits)),
             static_cast<MxmAccumulatorDestination>(
-                (word >> 26) & 0x1u),
-            ((word >> 27) & 0x1u) == 0,
+                (word >> MxmEncodingLayout::kDecodeDestination) & 0x1u),
+            ((word >> MxmEncodingLayout::kDecodeRetain) & 0x1u) == 0,
             decode_layout);
     }
     }
@@ -544,7 +592,7 @@ inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instru
     constexpr std::size_t kPermuteMapOffset =
         kLaneMapOffset + hw::kLanesPerTile * 4;
     constexpr std::size_t kOutputRowOffset =
-        kPermuteMapOffset + SxmInstruction::kTotalLanes * 5;
+        kPermuteMapOffset + SxmInstruction::kTotalLanes * SxmEncodingLayout::kLaneBits;
     constexpr std::size_t kInputRowOffset = kOutputRowOffset + 4;
     constexpr std::size_t kOutputTileOffset = kInputRowOffset + 4;
 
@@ -595,7 +643,7 @@ inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instru
             SxmInstruction::kTotalLanes - 1,
             "SXM permute map does not fit");
         detail::write_bits(
-            encoded.words, kPermuteMapOffset + lane * 5, 5,
+            encoded.words, kPermuteMapOffset + lane * SxmEncodingLayout::kLaneBits, SxmEncodingLayout::kLaneBits,
             static_cast<std::uint32_t>(instruction.permute_map[lane]));
     }
     const auto output_row = instruction.output_row == SxmInstruction::kAllOutputRows
@@ -614,7 +662,7 @@ inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instru
         ? hw::kTileRows : instruction.output_tile;
     detail::require_unsigned_fit(
         output_tile, hw::kTileRows, "SXM output tile does not fit");
-    detail::write_bits(encoded.words, kOutputTileOffset, 3,
+    detail::write_bits(encoded.words, kOutputTileOffset, SxmEncodingLayout::kTileBits,
         static_cast<std::uint32_t>(output_tile));
     return encoded;
 }
@@ -628,11 +676,11 @@ inline SxmInstruction decode_sxm_instruction(const EncodedSxmInstruction& encode
     constexpr std::size_t kPermuteMapOffset =
         kLaneMapOffset + hw::kLanesPerTile * 4;
     constexpr std::size_t kOutputRowOffset =
-        kPermuteMapOffset + SxmInstruction::kTotalLanes * 5;
+        kPermuteMapOffset + SxmInstruction::kTotalLanes * SxmEncodingLayout::kLaneBits;
     constexpr std::size_t kInputRowOffset = kOutputRowOffset + 4;
     constexpr std::size_t kOutputTileOffset = kInputRowOffset + 4;
     constexpr std::size_t kUsedBits =
-        kOutputTileOffset + 3;
+        kOutputTileOffset + SxmEncodingLayout::kTileBits;
 
     for (std::size_t bit = kUsedBits; bit < encoded.words.size() * 32; ++bit) {
         if (detail::read_bits(encoded.words, bit, 1) != 0) {
@@ -668,7 +716,7 @@ inline SxmInstruction decode_sxm_instruction(const EncodedSxmInstruction& encode
     }
     for (std::size_t lane = 0; lane < SxmInstruction::kTotalLanes; ++lane) {
         const auto source =
-            detail::read_bits(encoded.words, kPermuteMapOffset + lane * 5, 5);
+            detail::read_bits(encoded.words, kPermuteMapOffset + lane * SxmEncodingLayout::kLaneBits, SxmEncodingLayout::kLaneBits);
         if (source >= SxmInstruction::kTotalLanes) {
             throw std::logic_error("encoded SXM permute map is invalid");
         }
@@ -685,7 +733,7 @@ inline SxmInstruction decode_sxm_instruction(const EncodedSxmInstruction& encode
         throw std::logic_error("encoded SXM input row is invalid");
     instruction.input_row = input_row == hw::kLanesPerTile
         ? SxmInstruction::kAllInputRows : input_row;
-    const auto output_tile = detail::read_bits(encoded.words, kOutputTileOffset, 3);
+    const auto output_tile = detail::read_bits(encoded.words, kOutputTileOffset, SxmEncodingLayout::kTileBits);
     if (output_tile > hw::kTileRows)
         throw std::logic_error("encoded SXM output tile is invalid");
     instruction.output_tile = output_tile == hw::kTileRows

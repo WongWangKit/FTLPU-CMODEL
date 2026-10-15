@@ -17,7 +17,7 @@
 namespace ftlpu {
 
 struct Ddr4Config {
-    std::size_t beat_bytes{hw::kPhysicalVectorBytes};
+    std::size_t beat_bytes{hw::kC2cBytesPerStreamPerCycle};
     // Default platform: a 500 MHz LPU attached to dual-channel DDR4-3200.
     // 51.2 GB/s corresponds to an average 102.4 bytes per LPU cycle.
     std::size_t read_latency_cycles{35};
@@ -121,8 +121,10 @@ public:
                     * config_.lpu_clock_hz
                 + config_.peak_bandwidth_bytes_per_second - 1)
             / config_.peak_bandwidth_bytes_per_second);
+        const auto beatCycles = (hw::kPhysicalVectorBytes + config_.beat_bytes - 1)
+            / config_.beat_bytes;
         return config_.read_latency_cycles
-            + config_.read_latency_jitter_cycles + transferCycles + 1;
+            + config_.read_latency_jitter_cycles + std::max(transferCycles, beatCycles) + 1;
     }
     std::size_t cycle() const noexcept { return cycle_; }
     bool idle() const noexcept
@@ -151,20 +153,24 @@ public:
             < config_.request_queue_depth;
     }
 
-    RequestId request_read(std::uint64_t address)
+    RequestId request_read(std::uint64_t address,
+        std::optional<std::size_t> transport_lane = std::nullopt)
     {
+        validate_transport_lane(transport_lane);
         require_request_credit();
         validate_vector_range(address);
         const auto id = allocate_request_id();
         requests_.push_back(Request {
             id, Operation::Read, address, {},
             config_.read_latency_cycles
-                + latency_jitter(id, address, Operation::Read)});
+                + latency_jitter(id, address, Operation::Read),transport_lane});
         return id;
     }
 
-    RequestId request_write(std::uint64_t address, C2cVector vector)
+    RequestId request_write(std::uint64_t address, C2cVector vector,
+        std::optional<std::size_t> transport_lane = std::nullopt)
     {
+        validate_transport_lane(transport_lane);
         require_request_credit();
         validate_vector_range(address);
         const auto id = allocate_request_id();
@@ -175,6 +181,7 @@ public:
             std::move(vector),
             config_.write_latency_cycles
                 + latency_jitter(id, address, Operation::Write),
+            transport_lane,
         });
         return id;
     }
@@ -267,6 +274,7 @@ public:
         bandwidth_remainder_ %= config_.lpu_clock_hz;
 
         std::size_t channelsUsed = 0;
+        std::array<bool,kTransportLaneCount> laneUsed{};
         const std::size_t activeCount = active_.size();
         const std::size_t start = activeCount == 0
             ? 0 : round_robin_cursor_ % activeCount;
@@ -276,12 +284,15 @@ public:
              ++visited) {
             auto& active = active_[(start + visited) % activeCount];
             if (active.request.remaining_latency != 0) continue;
+            if (active.request.transport_lane && laneUsed[*active.request.transport_lane])
+                continue;
             const auto remaining =
                 hw::kPhysicalVectorBytes - active.bytes_transferred;
             const auto byteCount = static_cast<std::size_t>(
                 std::min<std::uint64_t>(
                     {config_.beat_bytes, remaining, byteBudget}));
             transfer_active_beat(active, byteCount);
+            if (active.request.transport_lane) laneUsed[*active.request.transport_lane] = true;
             byteBudget -= byteCount;
             ++channelsUsed;
         }
@@ -301,6 +312,13 @@ public:
 
 private:
     enum class Operation { Read, Write };
+    static constexpr std::size_t kTransportLaneCount =
+        2 * hw::kHemispheres * hw::kC2cStreamsPerDirection;
+    static void validate_transport_lane(std::optional<std::size_t> lane)
+    {
+        if (lane && *lane >= kTransportLaneCount)
+            throw std::out_of_range("DDR request transport lane is outside the C2C fabric");
+    }
 
     struct Request {
         RequestId id{0};
@@ -308,6 +326,9 @@ private:
         std::uint64_t address{0};
         C2cVector vector{};
         std::size_t remaining_latency{0};
+        // DMA requests identify a physical direction/lane; aggregate DDR
+        // concurrency must not service that lane more than once per cycle.
+        std::optional<std::size_t> transport_lane{};
     };
 
     struct ActiveRequest {
