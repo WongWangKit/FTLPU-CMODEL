@@ -116,7 +116,10 @@ constexpr std::size_t kSxmConcurrentStreamOps = 2 * kLanesPerTile;
 // Distributed ICU geometry. Every functional queue owns local instruction
 // memory and a finite prefetch IQ; instruction fetch never consumes MEM/SR
 // bandwidth.
+// Initial physical baseline. Keep response latency and request initiation
+// interval independent so post-RTL simulation can tune either parameter.
 constexpr std::size_t kIcuFetchLatencyCycles = 1;
+constexpr std::size_t kIcuMacroImemRequestInitiationIntervalCycles = 1;
 constexpr std::size_t kIcuBarrierLatencyCycles = 35;
 constexpr std::size_t kIcuVxmInstructionBits = 96;
 constexpr std::size_t kIcuMemInstructionBits = 96;
@@ -139,18 +142,21 @@ constexpr std::size_t kIcuMemIqDepth = 16;
 constexpr std::size_t kIcuMxmIqDepth = 16;
 constexpr std::size_t kIcuSxmIqDepth = 16;
 constexpr std::size_t kIcuC2cIqDepth = 16;
-// Legacy macro descriptors use the same single active loop state as the raw
-// packets. They remain readable for compatibility, but may not interleave.
-constexpr std::size_t kIcuMemMacroContextDepth = 1;
-constexpr std::size_t kIcuMxmMacroContextDepth = 1;
-constexpr std::size_t kIcuVxmMacroContextDepth = 1;
-constexpr std::size_t kIcuSxmMacroContextDepth = 1;
-constexpr std::size_t kIcuC2cMacroContextDepth = 1;
-// Five 32-bit words hold the decoded template, loop state, next issue cycle,
-// and base induction value. The bitstream remains packed in i-MEM; contexts
-// are the independently addressable expansion state.
-constexpr std::size_t kIcuMemMacroContextBits = 160;
-constexpr std::size_t kIcuMxmMacroContextBits = 160;
+// Macro descriptors expand independently of the fetch IQ. These finite
+// context files are physical scheduler capacities. MXM uses a 40-entry flat
+// next-issue compare array: 32 contexts cover the largest current seq128
+// compiler result and eight entries cover the admission-lookahead window.
+constexpr std::size_t kIcuMemMacroContextDepth = 32;
+constexpr std::size_t kIcuMxmMacroContextDepth = 40;
+constexpr std::size_t kIcuVxmMacroContextDepth = 4;
+constexpr std::size_t kIcuSxmMacroContextDepth = 4;
+constexpr std::size_t kIcuC2cMacroContextDepth = 4;
+// Eight 32-bit words hold the native instruction, 16-bit loop counters,
+// normalized cycle/operand steps, and absolute next/final issue cycles. The
+// bitstream remains packed in i-MEM; contexts are the independently
+// addressable expansion state.
+constexpr std::size_t kIcuMemMacroContextBits = 256;
+constexpr std::size_t kIcuMxmMacroContextBits = 256;
 
 // Each physical FU ICU owns one decoded loop state. Each context retains the
 // decoded static fields, loop counters, and packet PC.

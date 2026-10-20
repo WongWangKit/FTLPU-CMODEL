@@ -1,6 +1,9 @@
 #include "ftlpu/icu/distributed_queue.hpp"
+#include "ftlpu/system/icu.hpp"
 
+#include <cstdint>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -56,6 +59,160 @@ try {
     require(interleaved.done(), "interleaved macro queue did not complete");
     require(interleaved.peak_active_macros() == 2,
         "interleaved macro peak-context count is incorrect");
+
+    static_assert(InstructionControlUnit::MxmIcu::macro_context_depth == 40);
+    static_assert(
+        InstructionControlUnit::MxmIcu::macro_issue_compare_width == 40);
+    static_assert(
+        InstructionControlUnit::MxmIcu::macro_issue_cycle_bits == 32);
+    static_assert(
+        InstructionControlUnit::MxmIcu::macro_context_bits == 256);
+    static_assert(
+        InstructionControlUnit::MxmIcu::macro_context_words == 8);
+    static_assert(hw::kIcuMemMacroContextBits == 256);
+    static_assert(hw::kIcuMxmMacroContextBits == 256);
+
+    using MemContextCodec = IcuActiveMacroContextCodec256<MemInstruction>;
+    const IcuMacroSchedule wideCountSchedule {
+        20, 4097, 3, 0, 2, 20000, 1,
+        IcuInductionTarget::MemAddress,
+    };
+    const auto packedContext = MemContextCodec::pack_initial(
+        wideCountSchedule, MemInstruction::Read(100, 3));
+    require(MemContextCodec::valid(packedContext),
+        "packed Active Context did not set its physical valid bit");
+    require(packedContext.words[6] == 20
+            && packedContext.words[7] == 32308,
+        "packed Active Context did not expose next/final cycles in words 6/7");
+    auto unpackedContext = MemContextCodec::unpack(packedContext);
+    require(unpackedContext.instruction.address == 100
+            && unpackedContext.instruction.stream == 3
+            && unpackedContext.inner_count == 4097
+            && unpackedContext.inner_remaining == 4097
+            && unpackedContext.outer_remaining == 2
+            && unpackedContext.inner_interval == 3
+            && unpackedContext.outer_residual == 7712
+            && unpackedContext.inner_operand_step == 0
+            && unpackedContext.row_transition_step == 1
+            && unpackedContext.next_issue_cycle == 20
+            && unpackedContext.final_issue_cycle == 32308,
+        "256-bit Active Context round-trip changed its physical state");
+    require(MemContextCodec::pack(unpackedContext).words
+            == packedContext.words,
+        "Active Context pack(unpack(bits)) is not bit-exact");
+    require(!MemContextCodec::advance_after_issue(unpackedContext)
+            && unpackedContext.inner_remaining == 4096
+            && unpackedContext.next_issue_cycle == 23,
+        "packed Active Context did not advance its inner state");
+    const auto maximumCountContext = MemContextCodec::unpack(
+        MemContextCodec::pack_initial(
+            IcuMacroSchedule {0, 65536, 1, 0, 1, 1, 0,
+                IcuInductionTarget::MemAddress},
+            MemInstruction::Read(0, 0)));
+    require(maximumCountContext.inner_count == 65536,
+        "Active Context did not preserve the maximum 16-bit count");
+
+    using MxmContextCodec =
+        IcuActiveMacroContextCodec256<MxmControlInstruction>;
+    const auto mxmPacked = MxmContextCodec::pack_initial(
+        IcuMacroSchedule {5, 3, 2, 1, 2, 10, -2,
+            IcuInductionTarget::MxmAccumulatorAddress},
+        MxmControlInstruction::Compute(0, 0, 0, 100));
+    const auto mxmState = MxmContextCodec::unpack(mxmPacked);
+    require(mxmState.induction_target
+                == IcuInductionTarget::MxmAccumulatorAddress
+            && mxmState.inner_operand_step == 1
+            && mxmState.row_transition_step == -4
+            && mxmState.final_issue_cycle == 19,
+        "MXM Active Context lost its target or signed operand steps");
+
+    bool countWidthEnforced = false;
+    try {
+        static_cast<void>(MemContextCodec::pack_initial(
+            IcuMacroSchedule {0, 65537, 1, 0, 1, 1, 0,
+                IcuInductionTarget::MemAddress},
+            MemInstruction::Read(0, 0)));
+    } catch (const StaticScheduleError&) {
+        countWidthEnforced = true;
+    }
+    require(countWidthEnforced,
+        "Active Context accepted a count outside its 16-bit field");
+
+    bool operandRangeEnforced = false;
+    try {
+        static_cast<void>(MemContextCodec::pack_initial(
+            IcuMacroSchedule {0, 2, 1, -1, 1, 1, 0,
+                IcuInductionTarget::MemAddress},
+            MemInstruction::Read(0, 0)));
+    } catch (const StaticScheduleError&) {
+        operandRangeEnforced = true;
+    }
+    require(operandRangeEnforced,
+        "Active Context accepted an out-of-range affine operand");
+
+    Queue cycleWidth;
+    bool cycleWidthEnforced = false;
+    try {
+        cycleWidth.push_macro(IcuMacroSchedule {
+            static_cast<std::size_t>(
+                std::numeric_limits<std::uint32_t>::max()) + 1,
+            1, 1, 0, 1, 1, 0,
+            IcuInductionTarget::MemAddress,
+        }, MemInstruction::Read(0, 0));
+    } catch (const std::overflow_error&) {
+        cycleWidthEnforced = true;
+    }
+    require(cycleWidthEnforced,
+        "Macro scheduler accepted a cycle outside its 32-bit compare key");
+
+    using Flat40Queue =
+        DistributedIcuQueue<MemInstruction, 128, 128, 64, 1, 40>;
+    Flat40Queue flat40;
+    for (std::size_t context = 0; context < 41; ++context) {
+        flat40.push_macro(IcuMacroSchedule {
+            100 + context, 2, 1000, 1, 1, 1, 0,
+            IcuInductionTarget::MemAddress,
+        }, MemInstruction::Read(1000 + context, 0));
+    }
+    for (std::size_t cycle = 0; cycle < 140; ++cycle)
+        static_cast<void>(flat40.tick());
+    require(flat40.peak_active_macros() == 40,
+        "flat Macro scheduler did not populate all 40 physical entries");
+    bool flat40Overflow = false;
+    try {
+        static_cast<void>(flat40.tick());
+    } catch (const StaticScheduleError&) {
+        flat40Overflow = true;
+    }
+    require(flat40Overflow,
+        "flat Macro scheduler accepted a 41st live context");
+
+    Queue collision;
+    collision.push_macro(IcuMacroSchedule {
+        3, 1, 1, 0, 1, 1, 0,
+        IcuInductionTarget::MemAddress,
+    }, MemInstruction::Read(300, 0));
+    collision.push_macro(IcuMacroSchedule {
+        3, 1, 1, 0, 1, 1, 0,
+        IcuInductionTarget::MemAddress,
+    }, MemInstruction::Read(400, 0));
+    bool collisionDetected = false;
+    try {
+        for (std::size_t cycle = 0; cycle <= 3; ++cycle)
+            static_cast<void>(collision.tick());
+    } catch (const StaticScheduleError&) {
+        collisionDetected = true;
+    }
+    require(collisionDetected,
+        "flat Macro scheduler did not reject a multi-match cycle");
+    bool lateDetected = false;
+    try {
+        static_cast<void>(collision.tick());
+    } catch (const StaticScheduleError&) {
+        lateDetected = true;
+    }
+    require(lateDetected,
+        "flat Macro scheduler dynamically delayed a missed issue cycle");
 
     using OneContextQueue =
         DistributedIcuQueue<MemInstruction, 128, 32, 8, 1, 1>;
