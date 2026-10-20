@@ -150,6 +150,9 @@ public:
                 // resident control register: hold it until ready/valid fires
                 // instead of treating operand latency as a schedule error.
                 if (!last_execution_[tile][column]) continue;
+                if (os && (!log_tile || *log_tile == tile))
+                    *os << "  tile " << tile << " C" << column
+                        << " launch\n";
                 if (--control.current->remaining == 0) {
                     control.current.reset();
                     control.promote();

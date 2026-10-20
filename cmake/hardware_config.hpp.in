@@ -25,6 +25,7 @@ inline constexpr std::size_t kBytesPerStreamPerLane = @FTLPU_HW_SR_BYTES_PER_STR
 inline constexpr std::size_t kC2cBeatBytes = @FTLPU_HW_C2C_BEAT_BYTES@;
 
 inline constexpr std::size_t kMxmAccumulatorContexts = @FTLPU_HW_MXM_ACCUM_CONTEXTS@;
+inline constexpr std::size_t kMxmsPerHemisphere = @FTLPU_HW_PHYSICAL_MXMS@;
 inline constexpr bool kMxmSupportsNative4x4 = @FTLPU_HW_MXM_SUPPORTS_NATIVE4X4@;
 inline constexpr bool kMxmSupportsLinear1x16 = @FTLPU_HW_MXM_SUPPORTS_LINEAR1X16@;
 

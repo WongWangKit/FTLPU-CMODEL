@@ -139,6 +139,8 @@ enum class MxmIcuBufferMode : std::uint8_t {
 enum class MxmLoadIcuOpcode : std::uint8_t {
     Load3D = 0,
     DecodeLoadActivation3D = 1,
+    // Affine column coordinates address individual columns, not supercells.
+    LoadColumn3D = 2,
 };
 
 struct MxmLoadIcuInstruction {
@@ -146,6 +148,8 @@ struct MxmLoadIcuInstruction {
     IcuLoop3D loop{};
     std::size_t weight_buffer_base{0};
     MxmIcuBufferMode weight_buffer_mode{MxmIcuBufferMode::Fixed};
+    // Load3D uses supercell columns. LoadColumn3D uses physical columns;
+    // expansion divides by eight to select supercell and inner column.
     std::size_t weight_column_base{0};
     std::array<std::int64_t, 3> weight_column_strides{1, 0, 0};
     std::size_t weight_stream_base{0};
@@ -730,7 +734,8 @@ inline void validate_mxm_load_icu_instruction(
             instruction.decode_layout));
         return;
     }
-    if (instruction.opcode != MxmLoadIcuOpcode::Load3D)
+    if (instruction.opcode != MxmLoadIcuOpcode::Load3D
+        && instruction.opcode != MxmLoadIcuOpcode::LoadColumn3D)
         throw std::invalid_argument("MXM load ICU 3-D opcode is invalid");
     for (std::size_t mask = 0; mask < 8; ++mask) {
         IcuCoordinate3D coordinate {{
@@ -746,12 +751,19 @@ inline void validate_mxm_load_icu_instruction(
         if (column < 0)
             throw std::out_of_range(
                 "MXM LOAD_3D weight column underflows");
-        MxmControlInstruction::check_column(
-            static_cast<std::size_t>(column));
+        MxmControlInstruction::check_column(static_cast<std::size_t>(column)
+            / (instruction.opcode == MxmLoadIcuOpcode::LoadColumn3D ? 8 : 1));
         static_cast<void>(mxm_icu_buffer_3d(
             instruction.weight_buffer_base,
             instruction.weight_buffer_mode,
             coordinate));
+    }
+    if (instruction.opcode == MxmLoadIcuOpcode::LoadColumn3D) {
+        static_cast<void>(MxmControlInstruction::IWColumn(
+            instruction.weight_buffer_base, instruction.weight_column_base / 8,
+            instruction.weight_column_base % 8, instruction.weight_input_mode,
+            instruction.weight_stream_base));
+        return;
     }
     static_cast<void>(MxmControlInstruction::IW(
         instruction.weight_buffer_base,
@@ -772,7 +784,8 @@ inline MxmControlInstruction expand_mxm_load_icu_instruction(
             instruction.weight_stream_base,
             instruction.data_format,
             instruction.decode_layout);
-    if (instruction.opcode != MxmLoadIcuOpcode::Load3D)
+    if (instruction.opcode != MxmLoadIcuOpcode::Load3D
+        && instruction.opcode != MxmLoadIcuOpcode::LoadColumn3D)
         throw std::logic_error("MXM load ICU 3-D opcode is invalid");
     const auto column = checked_icu_3d_operand(
         instruction.weight_column_base,
@@ -781,6 +794,13 @@ inline MxmControlInstruction expand_mxm_load_icu_instruction(
         "MXM LOAD_3D weight column");
     if (column < 0)
         throw std::out_of_range("MXM LOAD_3D weight column underflows");
+    if (instruction.opcode == MxmLoadIcuOpcode::LoadColumn3D)
+        return MxmControlInstruction::IWColumn(
+            mxm_icu_buffer_3d(instruction.weight_buffer_base,
+                instruction.weight_buffer_mode, coordinate),
+            static_cast<std::size_t>(column) / 8,
+            static_cast<std::size_t>(column) % 8,
+            instruction.weight_input_mode, instruction.weight_stream_base);
     return MxmControlInstruction::IW(
         mxm_icu_buffer_3d(instruction.weight_buffer_base,
             instruction.weight_buffer_mode, coordinate),

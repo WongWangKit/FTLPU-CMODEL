@@ -28,7 +28,7 @@ The induction target is typed by queue and native opcode:
 | Queue/native opcode | Induced field |
 | --- | --- |
 | MXM load / `IW` | `weight_column` |
-| MXM compute / `Compute` or `AccumulatorRead` | `accumulator_address` |
+| MXM compute / `Compute`, `AccumulatorRead`, or `DecodeStreamCompute` | `accumulator_address` |
 | MXM dequant | None |
 
 All remaining native fields are invariant. In particular, stream destination,

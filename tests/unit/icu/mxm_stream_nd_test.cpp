@@ -64,6 +64,59 @@ try {
                 {11, 8}, {12, 8}, {13, 8}},
         "MXM compute STREAM_ND emitted incorrect cycles or accumulator addresses");
 
+    // Native4 FFN keeps one descriptor active in each physical MXM ICU
+    // queue for an entire K parity.  The load queue advances once per K
+    // reduction; the compute queue visits all output waves before advancing.
+    using DecodeLoadQueue = DistributedIcuQueue<
+        MxmControlInstruction, 128, 64, 16, 1, 1,
+        IcuQueueRole::MxmLoad>;
+    using DecodeComputeQueue = DistributedIcuQueue<
+        MxmControlInstruction, 128, 64, 16, 1, 1,
+        IcuQueueRole::MxmCompute>;
+    DecodeLoadQueue decodeLoad;
+    decodeLoad.push_mxm_stream_nd(IcuMxmStreamNdSchedule {
+        2, 3, {1, 1, 3}, {1, 1, 7}, {0, 0, 0},
+        IcuInductionTarget::None},
+        MxmControlInstruction::DecodeLoadActivation(
+            1, 0, MxmDataFormat::BFloat16, MxmDecodeLayout::Native4x4));
+    DecodeComputeQueue decodeCompute;
+    decodeCompute.push_mxm_stream_nd(IcuMxmStreamNdSchedule {
+        6, 3, {3, 1, 3}, {1, 1, 7}, {1, 0, 0},
+        IcuInductionTarget::MxmAccumulatorAddress},
+        MxmControlInstruction::DecodeStreamCompute(
+            1, 0, MxmDataFormat::BFloat16, 0, 0,
+            MxmAccumulatorDestination::Sram, false,
+            MxmDecodeLayout::Native4x4));
+    std::vector<std::size_t> decodeLoadCycles;
+    std::vector<std::pair<std::size_t, std::size_t>> decodeComputeIssues;
+    for (std::size_t cycle = 0; cycle <= 22; ++cycle) {
+        if (const auto instruction = decodeLoad.tick()) {
+            require(instruction->decode_operation
+                    == MxmDecodeOperation::LoadActivation
+                    && instruction->decode_layout == MxmDecodeLayout::Native4x4,
+                "Native4 K-loop load changed its FU operation");
+            decodeLoadCycles.push_back(cycle);
+        }
+        if (const auto instruction = decodeCompute.tick()) {
+            require(instruction->decode_operation
+                    == MxmDecodeOperation::StreamCompute
+                    && instruction->decode_layout == MxmDecodeLayout::Native4x4,
+                "Native4 K-loop compute changed its FU operation");
+            decodeComputeIssues.emplace_back(
+                cycle, instruction->accumulator_address);
+        }
+    }
+    require(decodeLoadCycles == std::vector<std::size_t> {2, 9, 16},
+        "Native4 K-loop load emitted incorrect reduction cycles");
+    require(decodeComputeIssues
+            == std::vector<std::pair<std::size_t, std::size_t>> {
+                {6, 0}, {7, 1}, {8, 2},
+                {13, 0}, {14, 1}, {15, 2},
+                {20, 0}, {21, 1}, {22, 2}},
+        "Native4 K-loop compute emitted incorrect wave/reduction cycles");
+    require(decodeLoad.done() && decodeCompute.done(),
+        "Native4 K-loop descriptors did not complete");
+
     using DequantQueue = DistributedIcuQueue<
         MxmDequantInstruction, 32, 32, 8, 1>;
     DequantQueue dequant;

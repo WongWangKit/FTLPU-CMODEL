@@ -78,6 +78,10 @@ struct VxmSrInstruction {
     bool accumulator_emit {true};
     bool accumulator_reset_first {false};
     bool accumulator_emit_last {false};
+    // A tapped stream operand feeds the ALU and keeps forwarding to the next
+    // SR column. The final reader consumes it in the usual way.
+    bool lhs_stream_tap {false};
+    bool rhs_stream_tap {false};
     std::uint32_t repeat_count {1};
 };
 
@@ -93,7 +97,8 @@ struct VxmSrCompactInstruction {
 // [21:16] rhs SR, [27:22] result SR, [28] precision,
 // [30:29] result type, [33:31] accumulator flags, [57:34] repeat,
 // [58] reset accumulator only on the first repeat, [59] emit only on the
-// final repeat. [63:60] is reserved and must be zero.
+// final repeat, [60] lhs stream tap, [61] rhs stream tap.
+// [63:62] is reserved and must be zero.
 // The other word is the shared FP32 immediate. There is no chain-depth field.
 class VxmSrCompactInstructionCodec {
 public:
@@ -117,6 +122,8 @@ public:
         put(control, instruction.repeat_count, 34, 0xffffffull);
         put(control, instruction.accumulator_reset_first, 58, 0x1);
         put(control, instruction.accumulator_emit_last, 59, 0x1);
+        put(control, instruction.lhs_stream_tap, 60, 0x1);
+        put(control, instruction.rhs_stream_tap, 61, 0x1);
 
         float immediate = 0.0f;
         bool immediateSeen = false;
@@ -153,6 +160,8 @@ public:
             get(packet.control, 34, 0xffffffull));
         result.accumulator_reset_first = get(packet.control, 58, 0x1) != 0;
         result.accumulator_emit_last = get(packet.control, 59, 0x1) != 0;
+        result.lhs_stream_tap = get(packet.control, 60, 0x1) != 0;
+        result.rhs_stream_tap = get(packet.control, 61, 0x1) != 0;
         float immediate = 0.0f;
         std::memcpy(&immediate, &packet.immediate_bits, sizeof(immediate));
         if (result.lhs.kind == VxmSrOperandKind::Immediate)
@@ -164,6 +173,14 @@ public:
     }
 
 private:
+    static bool is_stream(const VxmSrOperand& operand)
+    {
+        return operand.kind == VxmSrOperandKind::StreamFloat16
+            || operand.kind == VxmSrOperandKind::StreamBFloat16
+            || operand.kind == VxmSrOperandKind::StreamFloat32
+            || operand.kind == VxmSrOperandKind::StreamInt8;
+    }
+
     static void validate(const VxmSrInstruction& instruction)
     {
         if (instruction.repeat_count == 0)
@@ -182,6 +199,11 @@ private:
                 "last-repeat accumulator emit requires emit and write");
         validate_operand(instruction.lhs);
         if (uses_rhs(instruction.operation)) validate_operand(instruction.rhs);
+        if (instruction.lhs_stream_tap && !is_stream(instruction.lhs))
+            throw std::invalid_argument("VXM lhs tap requires a stream operand");
+        if (instruction.rhs_stream_tap
+            && (!uses_rhs(instruction.operation) || !is_stream(instruction.rhs)))
+            throw std::invalid_argument("VXM rhs tap requires a used stream operand");
         const auto check_immediate = [&](const VxmSrOperand& operand,
                                          float& shared, bool& seen) {
             if (operand.kind != VxmSrOperandKind::Immediate) return;

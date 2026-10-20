@@ -1,14 +1,19 @@
 #include "ftlpu/vxm/sr_datapath.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstring>
+#include <memory>
+#include <iostream>
 
 namespace {
 
 void check_swiglu_multiply_streams(bool westward)
 {
     using namespace ftlpu;
-    VxmSrDatapath datapath;
+    auto ownedDatapath = std::make_unique<VxmSrDatapath>();
+    auto& datapath = *ownedDatapath;
     auto& sr = datapath.fabric().registers();
     const auto local = [westward](std::size_t index) {
         return westward ? StreamId::West(index) : StreamId::East(index);
@@ -37,7 +42,8 @@ void check_swiglu_multiply_streams(bool westward)
     multiply.result_sr = local(result).packed();
     multiply.result_type = VxmCastTarget::BFloat16;
     issued[0][tail] = multiply;
-    for (std::size_t cycle = 0; cycle <= 33; ++cycle) {
+    const auto resultCycle = 2 * hw::kVxmAluCount + 1;
+    for (std::size_t cycle = 0; cycle <= resultCycle; ++cycle) {
         datapath.begin_cycle();
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             if (cycle == 0) {
@@ -48,10 +54,11 @@ void check_swiglu_multiply_streams(bool westward)
                     sr.stage_write(output, 0, lane, opposite(20 + byte),
                         StreamCell::Valid(static_cast<std::uint8_t>(bits >> (8 * byte))));
             }
-            if (cycle == 15 || cycle == 16) {
+            if (cycle == hw::kVxmAluCount - 1 || cycle == hw::kVxmAluCount) {
                 const auto bits = VxmDataFormat::float_to_bf16_bits(
-                    cycle == 15 ? 2.0f : 3.0f);
-                const std::size_t stream = gateStream + (cycle == 15 ? 0 : 2);
+                    cycle == hw::kVxmAluCount - 1 ? 2.0f : 3.0f);
+                const std::size_t stream = gateStream
+                    + (cycle == hw::kVxmAluCount - 1 ? 0 : 2);
                 for (std::size_t byte = 0; byte < 2; ++byte)
                     sr.stage_write(input, 0, lane, local(stream + byte),
                         StreamCell::Valid(static_cast<std::uint8_t>(bits >> (8 * byte))));
@@ -59,7 +66,7 @@ void check_swiglu_multiply_streams(bool westward)
         }
         datapath.execute(issued);
         datapath.finish_cycle();
-        if (sr.segment_valid(output, 0, local(result)) != (cycle == 33))
+        if (sr.segment_valid(output, 0, local(result)) != (cycle == resultCycle))
             throw std::logic_error("SwiGLU multiply result arrived at the wrong SR cycle");
     }
     const auto bits = static_cast<std::uint16_t>(sr.cell(output, 0, 0, local(result)).data)
@@ -68,12 +75,175 @@ void check_swiglu_multiply_streams(bool westward)
         throw std::logic_error("SwiGLU multiply consumed misaligned operands");
 }
 
-} // namespace
-
-int main()
+void check_tapped_operands_forward()
 {
     using namespace ftlpu;
-    VxmSrDatapath datapath {};
+    auto ownedDatapath = std::make_unique<VxmSrDatapath>();
+    auto& datapath = *ownedDatapath;
+    auto& sr = datapath.fabric().registers();
+    const auto a = StreamId::East(0);
+    const auto b = StreamId::East(4);
+    for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+        const auto aBits = VxmDataFormat::float_to_fp16_bits(2.0f);
+        const auto bBits = VxmDataFormat::float_to_fp16_bits(3.0f);
+        sr.initialize_cell(0, 0, lane, a, StreamCell::Valid(aBits & 0xff));
+        sr.initialize_cell(0, 0, lane, StreamId::East(1),
+            StreamCell::Valid(aBits >> 8));
+        sr.initialize_cell(0, 0, lane, b, StreamCell::Valid(bBits & 0xff));
+        sr.initialize_cell(0, 0, lane, StreamId::East(5),
+            StreamCell::Valid(bBits >> 8));
+    }
+    VxmSrInstruction first {};
+    first.operation = VxmAluOpcode::Multiply;
+    first.lhs = VxmSrOperand::StreamFloat16(a.packed());
+    first.rhs = VxmSrOperand::StreamFloat16(b.packed());
+    first.result_sr = StreamId::East(16).packed();
+    first.lhs_stream_tap = true;
+    first.rhs_stream_tap = true;
+    VxmSrDatapath::Instructions issued {};
+    issued[0][0] = VxmSrCompactInstructionCodec::decode(
+        VxmSrCompactInstructionCodec::encode(first));
+    if (!datapath.tick(issued)[0][0]
+        || !sr.segment_valid(1, 0, a)
+        || !sr.segment_valid(1, 0, b))
+        throw std::logic_error("tapped VXM inputs did not reach the next column");
+    issued[0][0].reset();
+    first.result_sr = StreamId::East(20).packed();
+    first.lhs_stream_tap = false;
+    first.rhs_stream_tap = false;
+    issued[0][1] = first;
+    if (!datapath.tick(issued)[0][1]
+        || sr.segment_valid(2, 0, a)
+        || sr.segment_valid(2, 0, b))
+        throw std::logic_error("final VXM reader did not consume tapped inputs");
+}
+
+void check_rope_tap_pipeline(bool westward, bool returnToSource = false)
+{
+    using namespace ftlpu;
+    auto ownedDatapath = std::make_unique<VxmSrDatapath>();
+    auto& datapath = *ownedDatapath;
+    auto& sr = datapath.fabric().registers();
+    constexpr std::size_t head = hw::kVxmAluCount - 1;
+    const std::size_t ingress = westward ? hw::kVxmAluCount : 0;
+    const std::size_t egress = returnToSource
+        ? ingress : westward ? 0 : hw::kVxmAluCount;
+    const auto sr_id = [westward](std::size_t index) {
+        return westward ? StreamId::West(index) : StreamId::East(index);
+    };
+    const auto output_id = [westward, returnToSource](std::size_t index) {
+        return westward != returnToSource ? StreamId::West(index) : StreamId::East(index);
+    };
+    const auto column = [westward](std::size_t stage) {
+        return westward ? head - stage : stage;
+    };
+    const auto put_f32 = [&](std::size_t lane, std::size_t stream, float value) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        for (std::size_t byte = 0; byte < 4; ++byte)
+            sr.initialize_cell(ingress, 0, lane, sr_id(stream + byte),
+                StreamCell::Valid(static_cast<std::uint8_t>(bits >> (8 * byte))));
+    };
+    const auto put_bf16 = [&](std::size_t lane, std::size_t stream, float value) {
+        const auto bits = VxmDataFormat::float_to_bf16_bits(value);
+        for (std::size_t byte = 0; byte < 2; ++byte)
+            sr.initialize_cell(ingress, 0, lane, sr_id(stream + byte),
+                StreamCell::Valid(static_cast<std::uint8_t>(bits >> (8 * byte))));
+    };
+    for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+        put_f32(lane, 0, 2.0f);
+        put_f32(lane, 4, 3.0f);
+        put_bf16(lane, 8, 0.5f);
+        put_bf16(lane, 10, 0.25f);
+    }
+    VxmSrDatapath::Instructions issued {};
+    const auto product = [&](std::size_t column, std::size_t lhs,
+                             std::size_t rhs, std::size_t result, bool tap) {
+        VxmSrInstruction instruction {};
+        instruction.operation = VxmAluOpcode::Multiply;
+        instruction.precision = VxmAluPrecision::Float32;
+        instruction.lhs = VxmSrOperand::StreamFloat32(sr_id(lhs).packed());
+        instruction.rhs = VxmSrOperand::StreamBFloat16(sr_id(rhs).packed());
+        instruction.result_sr = sr_id(result).packed();
+        instruction.result_type = VxmCastTarget::Float32;
+        instruction.lhs_stream_tap = tap;
+        instruction.rhs_stream_tap = tap;
+        issued[0][column] = VxmSrCompactInstructionCodec::decode(
+            VxmSrCompactInstructionCodec::encode(instruction));
+    };
+    product(column(0), 0, 8, 16, true);
+    product(column(1), 4, 10, 20, true);
+    product(column(3), 4, 8, 24, false);
+    product(column(4), 0, 10, 28, false);
+    const auto combine = [&](std::size_t column, VxmAluOpcode operation,
+                             std::size_t lhs, std::size_t rhs,
+                             std::size_t result) {
+        VxmSrInstruction instruction {};
+        instruction.operation = operation;
+        instruction.precision = VxmAluPrecision::Float32;
+        instruction.lhs = VxmSrOperand::StreamFloat32(sr_id(lhs).packed());
+        instruction.rhs = VxmSrOperand::StreamFloat32(sr_id(rhs).packed());
+        instruction.result_sr = sr_id(result).packed();
+        instruction.result_type = VxmCastTarget::BFloat16;
+        issued[0][column] = instruction;
+    };
+    combine(column(2), VxmAluOpcode::Subtract, 16, 20, 12);
+    combine(column(5), VxmAluOpcode::Add, 24, 28, 14);
+    const auto finish = [&](std::size_t stage, std::size_t source,
+                            std::size_t result) {
+        VxmSrInstruction instruction {};
+        instruction.operation = VxmAluOpcode::Bypass;
+        instruction.lhs = VxmSrOperand::StreamBFloat16(sr_id(source).packed());
+        instruction.result_sr = output_id(result).packed();
+        instruction.result_type = VxmCastTarget::BFloat16;
+        issued[0][column(stage)] = instruction;
+    };
+    finish(6, 12, 0);
+    finish(7, 14, 2);
+    bool sawLow = false;
+    bool sawHigh = false;
+    std::array<bool, 8> launched {};
+    for (std::size_t cycle = 0; cycle < 45; ++cycle) {
+        const auto executed = datapath.tick(issued);
+        for (std::size_t stage = 0; stage < launched.size(); ++stage)
+            if (executed[0][column(stage)])
+                launched[stage] = true;
+        if (sr.segment_valid(egress, 0, output_id(0))) {
+            const auto bits = static_cast<std::uint16_t>(
+                sr.cell(egress, 0, 0, output_id(0)).data)
+                | (static_cast<std::uint16_t>(
+                    sr.cell(egress, 0, 0, output_id(1)).data) << 8);
+            if (VxmDataFormat::bf16_bits_to_float(bits) != 0.25f)
+                throw std::logic_error("west RoPE low output is incorrect at cycle "
+                    + std::to_string(cycle));
+            sawLow = true;
+            if (returnToSource && cycle != 13)
+                throw std::logic_error("return RoPE low latency changed");
+        }
+        if (sr.segment_valid(egress, 0, output_id(2))) {
+            const auto bits = static_cast<std::uint16_t>(
+                sr.cell(egress, 0, 0, output_id(2)).data)
+                | (static_cast<std::uint16_t>(
+                    sr.cell(egress, 0, 0, output_id(3)).data) << 8);
+            if (VxmDataFormat::bf16_bits_to_float(bits) != 2.0f)
+                throw std::logic_error("west RoPE high output is incorrect");
+            sawHigh = true;
+            if (returnToSource && cycle != 15)
+                throw std::logic_error("return RoPE high latency changed");
+        }
+    }
+    if (!sawLow || !sawHigh
+        || !std::all_of(launched.begin(), launched.end(), [](bool value) { return value; }))
+        throw std::logic_error("RoPE tap pipeline did not emit both outputs");
+}
+
+} // namespace
+
+int main() try
+{
+    using namespace ftlpu;
+    auto ownedDatapath = std::make_unique<VxmSrDatapath>();
+    auto& datapath = *ownedDatapath;
     auto& sr = datapath.fabric().registers();
     const auto lhs = StreamId::East(0);
     const auto rhs = StreamId::East(2);
@@ -118,5 +288,14 @@ int main()
     }
     check_swiglu_multiply_streams(false);
     check_swiglu_multiply_streams(true);
+    check_tapped_operands_forward();
+    check_rope_tap_pipeline(false);
+    check_rope_tap_pipeline(true);
+    check_rope_tap_pipeline(false, true);
+    check_rope_tap_pipeline(true, true);
     return 0;
+}
+catch (const std::exception& error) {
+    std::cerr << error.what() << '\n';
+    return 1;
 }

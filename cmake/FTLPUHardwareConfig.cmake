@@ -41,6 +41,23 @@ function(ftlpu_generate_hardware_config input_json output_header)
     ftlpu_json_get(FTLPU_HW_SR_REGISTERS sr registers_per_lane)
     ftlpu_json_get(FTLPU_HW_SR_BYTES_PER_STREAM sr bytes_per_stream_per_lane)
     ftlpu_json_get(FTLPU_HW_MXM_ACCUM_CONTEXTS mxm accum_contexts)
+    # Old targets instantiate two MXMs per hemisphere, independently of the
+    # compiler's enabled count in throughput.mxms_per_hemisphere.
+    string(JSON FTLPU_HW_PHYSICAL_MXMS ERROR_VARIABLE FTLPU_PHYSICAL_MXM_ERROR
+        GET "${FTLPU_HW_JSON}" mxm instances_per_hemisphere)
+    if(FTLPU_PHYSICAL_MXM_ERROR)
+        set(FTLPU_HW_PHYSICAL_MXMS 2)
+    endif()
+    if(NOT FTLPU_HW_PHYSICAL_MXMS MATCHES "^[12]$")
+        message(FATAL_ERROR "mxm.instances_per_hemisphere must be 1 or 2")
+    endif()
+    string(JSON FTLPU_HW_ACTIVE_MXMS ERROR_VARIABLE FTLPU_ACTIVE_MXM_ERROR
+        GET "${FTLPU_HW_JSON}" throughput mxms_per_hemisphere)
+    if(NOT FTLPU_ACTIVE_MXM_ERROR AND
+       (FTLPU_HW_ACTIVE_MXMS LESS 1 OR
+        FTLPU_HW_ACTIVE_MXMS GREATER FTLPU_HW_PHYSICAL_MXMS))
+        message(FATAL_ERROR "enabled MXM count exceeds physical instances")
+    endif()
     ftlpu_json_get(FTLPU_HW_VXM_COLUMNS vxm alus)
 
     # A transport beat is independent of the on-chip vector/row width.

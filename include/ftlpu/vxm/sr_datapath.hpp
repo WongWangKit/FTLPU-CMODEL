@@ -243,8 +243,8 @@ private:
     void consume_stream_operands(std::size_t tile, std::size_t column,
         const VxmSrInstruction& instruction)
     {
-        for_each_used_operand(instruction, [&](const VxmSrOperand& operand) {
-            if (!is_stream(operand)) return;
+        const auto consume = [&](const VxmSrOperand& operand, bool tap) {
+            if (!is_stream(operand) || tap) return;
             const auto base = StreamId::from_packed(operand.sr);
             const auto width = operand.kind == VxmSrOperandKind::StreamFloat32
                 ? std::size_t {4}
@@ -256,7 +256,10 @@ private:
                     : StreamId::West(base.index() + byte);
                 fabric_.consume_operand(column, tile, stream);
             }
-        });
+        };
+        consume(instruction.lhs, instruction.lhs_stream_tap);
+        if (uses_rhs(instruction))
+            consume(instruction.rhs, instruction.rhs_stream_tap);
     }
 
     void advance_pipelines()
