@@ -629,6 +629,37 @@ bool verify_mxm_compute_codec()
         "MXM COMPUTE_3D encoder accepted a row stride wider than 13 bits");
 }
 
+bool verify_column_load_codec()
+{
+    using namespace ftlpu;
+    for (const auto reverse : {false, true}) {
+        IcuLoop3D loop{0, {hw::kMxmColumns, 4, 1}, {1, hw::kMxmColumns, 1}};
+        loop.wait_cycle = 17;
+        auto instruction = MxmLoadIcuInstruction::Load3D(loop, 0,
+            MxmIcuBufferMode::ToggleDimension1,
+            reverse ? hw::kMxmColumns - 1 : 0,
+            {reverse ? -1 : 1, 0, 0}, 31);
+        instruction.opcode = MxmLoadIcuOpcode::LoadColumn3D;
+        const auto packet = isa::encode_mxm_load_icu_shortest_instruction(instruction);
+        const auto decoded = isa::decode_mxm_load_icu_3d_instruction(packet);
+        if (!require(same_load(instruction, decoded)
+                && decoded.opcode == MxmLoadIcuOpcode::LoadColumn3D
+                && decoded.loop.wait_cycle == 17,
+                "column-load packet lost opcode, inner column or wait")) return false;
+        for (std::size_t tile = 0; tile < 4; ++tile)
+            for (std::size_t index = 0; index < hw::kMxmColumns; ++index) {
+                const auto column = reverse ? hw::kMxmColumns - 1 - index : index;
+                const auto fu = detail::expand_mxm_load_icu_instruction(decoded, {{index, tile, 0}});
+                if (!require(fu.weight_column == column / 8
+                        && fu.weight_inner_column == column % 8
+                        && fu.weight_buffer == tile % 2
+                        && fu.weight_stream_base == 31,
+                        "column-load counter expansion is incorrect")) return false;
+            }
+    }
+    return true;
+}
+
 } // namespace
 
 int main()
@@ -637,6 +668,7 @@ int main()
         if (!verify_golden_vectors_and_extended_discriminator()
             || !verify_mem_codec()
             || !verify_mxm_load_codec()
+            || !verify_column_load_codec()
             || !verify_mxm_dequant_codec()
             || !verify_mxm_compute_codec())
             return 1;

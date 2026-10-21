@@ -20,9 +20,8 @@ constexpr float kScale = 0.125f;
 constexpr std::array<std::size_t, 2> kActivationSlices {50, 51};
 constexpr std::array<std::size_t, 2> kOutputSlices {40, 41};
 
-static_assert(ftlpu::hw::kMxmRows == 32);
-static_assert(ftlpu::hw::kEastStreams == 32);
-static_assert(ftlpu::hw::kMxmSupercellsPerPlane == 4);
+static_assert(ftlpu::hw::kMxmColumns <= ftlpu::hw::kEastStreams,
+    "this streamed-weight fixture requires one stream per output column");
 constexpr std::size_t kDecodeStages =
     ftlpu::hw::kTileRows
     + ftlpu::hw::kMxmSupercellsPerPlane - 1;
@@ -144,7 +143,7 @@ void initialize(ftlpu::TspSliceSystem& system)
                  output_block < kWeightWaves;
                  ++output_block) {
                 for (std::size_t stream = 0;
-                     stream < ftlpu::hw::kEastStreams;
+                     stream < kDecodeN;
                      ++stream) {
                     const auto column =
                         stream / ftlpu::hw::kMxmSupercellColumns;
@@ -323,12 +322,12 @@ try {
         });
     }
     if (!verify(system)) return 1;
-    std::cout << "MXM decode streamed-weight passed: K=32 N=32, "
-                 "4 activation[8] vectors broadcast across columns, "
-                 "32 INT8 streams, tile+column diamond weights, "
-                 "four parallel 4-stage partial-sum chains in a 7-cycle wave, "
-                 "INT8 to BF16 dequant "
-                 "and BF16 MAC; logs=" << log_dir.string() << '\n';
+    std::cout << "MXM decode streamed-weight passed: K=" << kDecodeK
+              << " N=" << kDecodeN << ", " << ftlpu::hw::kTileRows
+              << " activation vectors, " << kDecodeN
+              << " INT8 streams, wave_cycles=" << kDecodeStages
+              << ", INT8 to BF16 dequant and BF16 MAC; logs="
+              << log_dir.string() << '\n';
     return 0;
 } catch (const std::exception& error) {
     std::cerr << "MXM decode streamed-weight test failed: "

@@ -27,7 +27,7 @@ operand_delta =               sum(i[d] * operand_stride[d])
 | 队列/原生 opcode | 递增字段 |
 | --- | --- |
 | MXM load / `IW` | `weight_column` |
-| MXM compute / `Compute` 或 `AccumulatorRead` | `accumulator_address` |
+| MXM compute / `Compute`、`AccumulatorRead` 或 `DecodeStreamCompute` | `accumulator_address` |
 | MXM dequant | 无 |
 
 其他原生字段全部保持不变，特别是 stream destination、accumulator clear 和

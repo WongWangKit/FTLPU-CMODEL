@@ -701,11 +701,18 @@ private:
                         + " IW tile " + std::to_string(tile) + ": " + ex.what());
                 }
             };
-            if (sinks.mxm != nullptr) {
-                mxms_[mxm].control().tick(*sinks.mxm, provider, false, sinks.mxm_log_tile);
-            } else {
-                static NullStream null_stream;
-                mxms_[mxm].control().tick(null_stream.stream(), provider, false);
+            try {
+                if (sinks.mxm != nullptr) {
+                    mxms_[mxm].control().tick(*sinks.mxm, provider, false, sinks.mxm_log_tile);
+                } else {
+                    static NullStream null_stream;
+                    mxms_[mxm].control().tick(null_stream.stream(), provider, false);
+                }
+            } catch (const std::exception& error) {
+                throw std::logic_error(
+                    "MXM" + std::to_string(mxm)
+                    + " control at system cycle " + std::to_string(cycle_)
+                    + ": " + error.what());
             }
         }
     }
@@ -724,9 +731,16 @@ private:
                 stream_layout_.mxm_result_output.column,
                 stream_layout_.mxm_result_output.direction,
                 "MXM" + std::to_string(mxm) + " datapath");
-            mxms_[mxm].tick_datapath(
-                input, output, local_mxm_index(mxm), sinks.mxm,
-                sinks.mxm_log_tile);
+            try {
+                mxms_[mxm].tick_datapath(
+                    input, output, local_mxm_index(mxm), sinks.mxm,
+                    sinks.mxm_log_tile);
+            } catch (const std::exception& error) {
+                throw std::logic_error(
+                    "MXM" + std::to_string(mxm)
+                    + " datapath at system cycle " + std::to_string(cycle_)
+                    + ": " + error.what());
+            }
         }
     }
 
@@ -758,7 +772,11 @@ private:
                         tile, lane, stream_base);
                     if (!word.valid) {
                         throw std::logic_error(
-                            "MXM INT8 column IW reached tile before its weight stream arrived at the MXM boundary register");
+                            "MXM INT8 column IW reached tile before its weight stream arrived at the MXM boundary register"
+                            " buffer=" + std::to_string(instruction->weight_buffer)
+                            + " column=" + std::to_string(instruction->weight_column)
+                            + " inner=" + std::to_string(column)
+                            + " stream=" + std::to_string(stream_base));
                     }
                     input[lane][column] =
                         MxmArray::Supercell::InputWord {
@@ -833,7 +851,12 @@ private:
                     tile, lane, low_stream + 1);
                 if (!low.valid || !high.valid) {
                     throw std::logic_error(
-                        "MXM IW reached tile before both 16-bit weight streams arrived at the MXM boundary register");
+                        "MXM IW reached tile before both 16-bit weight streams arrived at the MXM boundary register"
+                        " lane=" + std::to_string(lane)
+                        + " column=" + std::to_string(column)
+                        + " low_stream=" + std::to_string(low_stream)
+                        + " low_valid=" + std::to_string(low.valid)
+                        + " high_valid=" + std::to_string(high.valid));
                 }
                 const auto bits = static_cast<std::uint16_t>(
                     static_cast<std::uint16_t>(low.data)

@@ -715,7 +715,8 @@ inline EncodedMxmLoadIcu3DPacket encode_mxm_load_icu_3d_instruction(
         static_cast<std::uint8_t>(instruction.weight_buffer_mode),
         "MXM LOAD_3D buffer mode does not fit 2 bits");
     codec::write_unsigned(packet, 147, MxmIcuEncodingLayout::kColumnBits,
-        instruction.weight_column_base,
+        instruction.weight_column_base /
+            (instruction.opcode == MxmLoadIcuOpcode::LoadColumn3D ? 8 : 1),
         "MXM LOAD_3D weight-column base does not fit 2 bits");
     for (std::size_t dimension = 0; dimension < 3; ++dimension)
         codec::write_signed(packet, MxmIcuEncodingLayout::kLoadStrides + 16 * dimension, 16,
@@ -727,6 +728,9 @@ inline EncodedMxmLoadIcu3DPacket encode_mxm_load_icu_3d_instruction(
     codec::write_unsigned(packet, MxmIcuEncodingLayout::kLoadInputMode, 1,
         static_cast<std::uint8_t>(instruction.weight_input_mode),
         "MXM LOAD_3D input mode does not fit 1 bit");
+    if (instruction.opcode == MxmLoadIcuOpcode::LoadColumn3D)
+        codec::write_unsigned(packet, MxmIcuEncodingLayout::kLoadEnd, 3,
+            instruction.weight_column_base % 8, "MXM inner column overflow");
     return packet;
 }
 
@@ -739,7 +743,7 @@ inline MxmLoadIcuInstruction decode_mxm_load_icu_3d_instruction(
     const auto local_operation = codec::decode_word0_local_operation(packet,
         "encoded MXM LOAD_3D packet has an invalid word-0 header");
     if (local_operation > static_cast<std::uint8_t>(
-            MxmLoadIcuOpcode::DecodeLoadActivation3D))
+            MxmLoadIcuOpcode::LoadColumn3D))
         throw std::logic_error(
             "encoded MXM LOAD_3D packet has an invalid local operation");
     codec::validate_word_headers(packet, local_operation,
@@ -765,10 +769,12 @@ inline MxmLoadIcuInstruction decode_mxm_load_icu_3d_instruction(
         ::ftlpu::detail::validate_mxm_load_icu_instruction(instruction);
         return instruction;
     }
-    codec::require_reserved_zero(packet, MxmIcuEncodingLayout::kLoadEnd,
+    const bool columnLoad = local_operation == static_cast<std::uint8_t>(
+        MxmLoadIcuOpcode::LoadColumn3D);
+    codec::require_reserved_zero(packet, MxmIcuEncodingLayout::kLoadEnd + (columnLoad ? 3 : 0),
         "encoded MXM LOAD_3D packet has non-zero reserved bits");
     auto instruction = MxmLoadIcuInstruction {};
-    instruction.opcode = MxmLoadIcuOpcode::Load3D;
+    instruction.opcode = static_cast<MxmLoadIcuOpcode>(local_operation);
     instruction.loop = loop;
     instruction.weight_buffer_base = static_cast<std::size_t>(
         codec::read_unsigned(packet, 144, 1));
@@ -776,6 +782,9 @@ inline MxmLoadIcuInstruction decode_mxm_load_icu_3d_instruction(
         codec::read_unsigned(packet, 145, 2));
     instruction.weight_column_base = static_cast<std::size_t>(
         codec::read_unsigned(packet, 147, MxmIcuEncodingLayout::kColumnBits));
+    if (columnLoad)
+        instruction.weight_column_base = instruction.weight_column_base * 8
+            + codec::read_unsigned(packet, MxmIcuEncodingLayout::kLoadEnd, 3);
     for (std::size_t dimension = 0; dimension < 3; ++dimension)
         instruction.weight_column_strides[dimension] =
             codec::read_signed(packet, MxmIcuEncodingLayout::kLoadStrides + 16 * dimension, 16);
@@ -1148,6 +1157,10 @@ inline EncodedMemIcu3DPacket encode_mem_icu_shortest_instruction(MemIcuInstructi
 // MXM row, K and N axes retain their identities via the short axis selector.
 inline EncodedMxmLoadIcu3DPacket encode_mxm_load_icu_shortest_instruction(const MxmLoadIcuInstruction& instruction)
 {
+    // Preserve existing short-packet layouts. The column opcode uses three
+    // additional tail bits and currently has only the full packet encoding.
+    if (instruction.opcode == MxmLoadIcuOpcode::LoadColumn3D)
+        return encode_mxm_load_icu_3d_instruction(instruction);
     return compact_mxm_packet(encode_mxm_load_icu_3d_instruction(instruction), instruction.loop);
 }
 inline EncodedMxmDequantIcu3DPacket encode_mxm_dequant_icu_shortest_instruction(const MxmDequantIcuInstruction& instruction)

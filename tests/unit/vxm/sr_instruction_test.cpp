@@ -15,6 +15,8 @@ int main()
     instruction.precision = VxmAluPrecision::Float32;
     instruction.result_type = VxmCastTarget::Float32;
     instruction.repeat_count = 123456;
+    instruction.lhs_stream_tap = true;
+    instruction.lhs_stream_tap = true;
 
     const auto packet = VxmSrCompactInstructionCodec::encode(instruction);
     const auto decoded = VxmSrCompactInstructionCodec::decode(packet);
@@ -28,6 +30,10 @@ int main()
     assert(decoded.precision == VxmAluPrecision::Float32);
     assert(decoded.result_type == VxmCastTarget::Float32);
     assert(decoded.repeat_count == 123456);
+    if (!decoded.lhs_stream_tap || decoded.rhs_stream_tap)
+        throw std::logic_error("VXM stream tap bits did not round-trip");
+    assert(decoded.lhs_stream_tap);
+    assert(!decoded.rhs_stream_tap);
 
     bool rejected = false;
     try {

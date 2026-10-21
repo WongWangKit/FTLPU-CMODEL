@@ -97,9 +97,10 @@ int main() try
     vector.vector_tag=91;
     for (std::size_t i=0;i<hw::kPhysicalVectorBytes;++i)
         vector.payload[i/hw::kLanesPerTile][i%hw::kLanesPerTile]=static_cast<std::uint8_t>(i+1);
-    C2cLink link({32,0,1});
+    constexpr auto beatBytes = hw::kC2cBytesPerStreamPerCycle;
+    C2cLink link({beatBytes,0,1});
     link.send(vector);
-    const auto beats=(hw::kPhysicalVectorBytes+31)/32;
+    const auto beats=(hw::kPhysicalVectorBytes+beatBytes-1)/beatBytes;
     for (std::size_t i=0;i<beats;++i) {
         link.tick();
         require(link.receive_ready()==(i+1==beats),"C2C exposed a partially assembled vector");
@@ -109,24 +110,24 @@ int main() try
     require(received.payload==vector.payload && received.vector_tag==91 && link.can_send(),
         "C2C reassembly or credit return failed");
     Ddr4Config config;
-    config.beat_bytes=32;config.read_latency_cycles=0;config.write_latency_cycles=0;
+    config.beat_bytes=beatBytes;config.read_latency_cycles=0;config.write_latency_cycles=0;
     config.read_latency_jitter_cycles=0;config.write_latency_jitter_cycles=0;
     config.transfer_channels=1;
-    config.peak_bandwidth_bytes_per_second=config.lpu_clock_hz*32;
+    config.peak_bandwidth_bytes_per_second=config.lpu_clock_hz*beatBytes;
     Ddr4Model ddr(config);
     ddr.initialize_vector(0x1000,vector);
     const auto request=ddr.request_read(0x1000);
     for (std::size_t i=0;i<beats;++i) {
         ddr.tick();
         require(ddr.read_completion_ready(request)==(i+1==beats),"DDR completed a partial vector");
-        require(ddr.read_bytes_transferred()==std::min<std::size_t>((i+1)*32,hw::kPhysicalVectorBytes),
+        require(ddr.read_bytes_transferred()==std::min<std::size_t>((i+1)*beatBytes,hw::kPhysicalVectorBytes),
             "DDR byte accounting used link beats as logical vectors");
     }
     require(ddr.pop_read_completion(request).vector.payload==vector.payload,"DDR read lost upper vector lanes");
     // Multiple pending requests share a physical lane rather than creating
     // extra link bandwidth. Other lanes retain independent DDR capacity.
     config.transfer_channels=2;
-    config.peak_bandwidth_bytes_per_second=config.lpu_clock_hz*64;
+    config.peak_bandwidth_bytes_per_second=config.lpu_clock_hz*2*beatBytes;
     Ddr4Model concurrent(config);
     concurrent.initialize_vector(0x1000,vector);
     concurrent.initialize_vector(0x1100,vector);
@@ -135,7 +136,7 @@ int main() try
     for (std::size_t i=0;i<2*beats;++i) {
         const auto before=concurrent.read_bytes_transferred();
         concurrent.tick();
-        require(concurrent.read_bytes_transferred()-before<=32,
+        require(concurrent.read_bytes_transferred()-before<=beatBytes,
             "pending requests multiplied one C2C lane's beat bandwidth");
         if (i+1<2*beats)
             require(!(concurrent.read_completion_ready(first)&&concurrent.read_completion_ready(second)),

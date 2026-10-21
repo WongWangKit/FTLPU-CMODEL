@@ -1,0 +1,458 @@
+{
+  "schema_version": 2,
+  "target": {
+    "name": "ftlpu-lpu64-cloud"
+  },
+  "topology": {
+    "hemispheres": 2,
+    "tiles_per_slice": 8,
+    "lanes_per_tile": 8
+  },
+  "mem": {
+    "slices_per_hemisphere": 52,
+    "banks_per_slice": 2,
+    "rows_per_bank": 2048,
+    "bytes_per_lane": 1
+  },
+  "sr": {
+    "registers_per_lane": 64,
+    "bytes_per_stream_per_lane": 1
+  },
+  "stream_topology": {
+    "fabric_template": {
+      "replicas": [
+        "east",
+        "west"
+      ],
+      "columns": [
+        "mem.b0",
+        "mem.b1",
+        "mem.b2",
+        "mem.b3",
+        "mem.b4",
+        "mem.b5",
+        "mem.b6",
+        "mem.b7",
+        "mem.b8",
+        "mem.b9",
+        "mem.b10",
+        "mem.b11",
+        "mem.b12",
+        "mem.b13",
+        "c2c_sxm",
+        "sxm_mxm"
+      ],
+      "paths": [
+        {
+          "name": "main",
+          "columns": [
+            "mem.b0",
+            "mem.b1",
+            "mem.b2",
+            "mem.b3",
+            "mem.b4",
+            "mem.b5",
+            "mem.b6",
+            "mem.b7",
+            "mem.b8",
+            "mem.b9",
+            "mem.b10",
+            "mem.b11",
+            "mem.b12",
+            "mem.b13",
+            "c2c_sxm",
+            "sxm_mxm"
+          ],
+          "bidirectional": true,
+          "kind": "normal",
+          "enabled_by_default": true,
+          "multicast_allowed": false,
+          "hop_latency_cycles": 1
+        }
+      ],
+      "routes": []
+    },
+    "bindings": {
+      "mem": {
+        "slices_per_group": 4,
+        "boundary_columns": [
+          "mem.b0",
+          "mem.b1",
+          "mem.b2",
+          "mem.b3",
+          "mem.b4",
+          "mem.b5",
+          "mem.b6",
+          "mem.b7",
+          "mem.b8",
+          "mem.b9",
+          "mem.b10",
+          "mem.b11",
+          "mem.b12",
+          "mem.b13"
+        ]
+      },
+      "sxm": {
+        "forward_input": {
+          "column": "c2c_sxm",
+          "flow": "forward"
+        },
+        "forward_output": {
+          "column": "sxm_mxm",
+          "flow": "forward"
+        },
+        "reverse_input": {
+          "column": "sxm_mxm",
+          "flow": "reverse"
+        },
+        "reverse_output": {
+          "column": "c2c_sxm",
+          "flow": "reverse"
+        }
+      },
+      "mxm": {
+        "weight_input": {
+          "column": "sxm_mxm",
+          "flow": "forward"
+        },
+        "activation_input": {
+          "column": "sxm_mxm",
+          "flow": "forward"
+        },
+        "result_output": {
+          "column": "sxm_mxm",
+          "flow": "reverse"
+        }
+      },
+      "vxm": {
+        "input": {
+          "column": "mem.b0",
+          "flow": "reverse"
+        },
+        "output": {
+          "column": "mem.b0",
+          "flow": "forward"
+        }
+      },
+      "c2c": {
+        "tx_input": {
+          "column": "mem.b13",
+          "flow": "forward"
+        },
+        "rx_output": {
+          "column": "mem.b13",
+          "flow": "reverse"
+        }
+      }
+    },
+    "system_transfers": [
+      {
+        "name": "vxm.passive.east_fabric_to_west_fabric",
+        "kind": "passive_bridge",
+        "source": {
+          "fabric": "east",
+          "column": "mem.b0",
+          "flow": "reverse"
+        },
+        "destination": {
+          "fabric": "west",
+          "column": "mem.b0",
+          "flow": "forward"
+        },
+        "latency_cycles": 1
+      },
+      {
+        "name": "vxm.passive.west_fabric_to_east_fabric",
+        "kind": "passive_bridge",
+        "source": {
+          "fabric": "west",
+          "column": "mem.b0",
+          "flow": "reverse"
+        },
+        "destination": {
+          "fabric": "east",
+          "column": "mem.b0",
+          "flow": "forward"
+        },
+        "latency_cycles": 1
+      }
+    ]
+  },
+  "c2c": {
+    "beat_bytes": 32
+  },
+  "mxm": {
+    "accum_contexts": 4,
+    "supported_modes": [
+      "native4x4",
+      "linear1x16"
+    ],
+    "instances_per_hemisphere": 2
+  },
+  "vxm": {
+    "alus": 32
+  },
+  "memory": {
+    "dedicated_slice_roles": 1,
+    "w8a16_weight_slice_base": 20,
+    "w8a16_weight_slice_stride": 4,
+    "w8a16_output_weight_spare_slices": [
+      22,
+      38
+    ],
+    "w8a16_activation_slice_base": 0,
+    "w8a16_hidden_slice_base": 0,
+    "w8a16_hidden_base_row": 0,
+    "w8a16_fused_gate_temp_slices": [
+      0,
+      4,
+      8,
+      12
+    ],
+    "w8a16_fused_up_temp_slices": [
+      1,
+      5,
+      9,
+      13
+    ],
+    "attention_mask_base_row": 1792,
+    "matmul_result_base_row": 1024,
+    "w8a16_result_slice_base": 16
+  },
+  "throughput": {
+    "mxms_per_hemisphere": 2,
+    "mxm_weight_buffers": 2,
+    "mxm_local_dequant_enabled": 1,
+    "mxm_block_compute_enabled": 0,
+    "mxm_weight_activation_overlap_enabled": 1,
+    "vxm_cross_hemisphere_streams_enabled": 1,
+    "vxm_fma_enabled": 1
+  },
+  "external_memory": {
+    "lpu_clock_mhz": 1000,
+    "ddr_peak_bandwidth_mbytes_per_second": 512000,
+    "ddr_scheduling_efficiency_percent": 80,
+    "ddr_read_latency_cycles": 100,
+    "ddr_write_latency_cycles": 100,
+    "ddr_read_latency_jitter_cycles": 0,
+    "ddr_write_latency_jitter_cycles": 0,
+    "ddr_request_queue_depth": 512,
+    "ddr_latency_random_seed": 1179929680
+  },
+  "planning": {
+    "source_workbook": "LPU参数配置.xlsx",
+    "source_sha256": "0ccabacbada7c82fb75624b9dc13ed1f5a904c2efdecc8197eec4c9514fa3379",
+    "source_sheet": "三档参数对照",
+    "source_column": "C",
+    "status": "experimental target; model-level validation required",
+    "workbook_rows": {
+      "7": {
+        "parameter": "主要用途",
+        "value": "云端单 LPU 高吞吐推理"
+      },
+      "8": {
+        "parameter": "实现形态",
+        "value": "单 LPU ASIC"
+      },
+      "9": {
+        "parameter": "参数统计口径",
+        "value": "单个云端 LPU 及存储接口"
+      },
+      "11": {
+        "parameter": "LPU 实例数",
+        "value": 1
+      },
+      "12": {
+        "parameter": "hemisphere 数",
+        "value": 2
+      },
+      "13": {
+        "parameter": "tile / superlane 数",
+        "value": 8
+      },
+      "14": {
+        "parameter": "每 tile 的 lane 数",
+        "value": 8
+      },
+      "15": {
+        "parameter": "内部向量 lane 数",
+        "value": 64
+      },
+      "16": {
+        "parameter": "物理 MXM 数",
+        "value": 2
+      },
+      "17": {
+        "parameter": "MXM 总数",
+        "value": 4
+      },
+      "18": {
+        "parameter": "MXM 阵列行数",
+        "value": 64
+      },
+      "19": {
+        "parameter": "MXM 阵列列数",
+        "value": 64
+      },
+      "20": {
+        "parameter": "每 MXM weight buffers",
+        "value": 2
+      },
+      "21": {
+        "parameter": "每 MXM ACC contexts",
+        "value": 4
+      },
+      "22": {
+        "parameter": "ACC 数据宽度",
+        "value": 32
+      },
+      "23": {
+        "parameter": "每 MXM ACC 容量",
+        "value": 64
+      },
+      "24": {
+        "parameter": "ACC 总容量",
+        "value": 256
+      },
+      "25": {
+        "parameter": "VXM ALU 列数",
+        "value": 32
+      },
+      "26": {
+        "parameter": "计算时钟目标",
+        "value": 1000
+      },
+      "27": {
+        "parameter": "首版计算格式",
+        "value": "W8A16 / BF16 / FP32 ACC"
+      },
+      "29": {
+        "parameter": "MEM slices",
+        "value": 52
+      },
+      "30": {
+        "parameter": "每组 MEM slices",
+        "value": 4
+      },
+      "31": {
+        "parameter": "每 slice 的 banks",
+        "value": 2
+      },
+      "32": {
+        "parameter": "每 bank 深度",
+        "value": 2048
+      },
+      "33": {
+        "parameter": "MEM 每 lane 字节数",
+        "value": 1
+      },
+      "34": {
+        "parameter": "MEM 每行宽度",
+        "value": 64
+      },
+      "35": {
+        "parameter": "每 LPU MEM 容量",
+        "value": 26
+      },
+      "36": {
+        "parameter": "MEM 总容量",
+        "value": 26
+      },
+      "37": {
+        "parameter": "MEM bank 端口约束",
+        "value": "每周期一次读或写"
+      },
+      "39": {
+        "parameter": "MEM ICU 总数",
+        "value": 208
+      },
+      "40": {
+        "parameter": "每 ICU 活动指令数",
+        "value": 1
+      },
+      "41": {
+        "parameter": "每 ICU IQ 深度",
+        "value": 16
+      },
+      "42": {
+        "parameter": "ICU iMEM 定容方式",
+        "value": "按程序峰值定容"
+      },
+      "43": {
+        "parameter": "SR stream 数",
+        "value": 64
+      },
+      "44": {
+        "parameter": "C2C/DMA 每通道 beat",
+        "value": 32
+      },
+      "45": {
+        "parameter": "每内部向量传输拍数",
+        "value": 2
+      },
+      "46": {
+        "parameter": "每侧 RX 逻辑通道数",
+        "value": 8
+      },
+      "47": {
+        "parameter": "芯片/板级 RX 理论入口",
+        "value": 512
+      },
+      "48": {
+        "parameter": "连接方式",
+        "value": "LPU 内双向 SR，接 HBM 控制器"
+      },
+      "49": {
+        "parameter": "SXM ICU 队列",
+        "value": "permute / transpose 独立"
+      },
+      "51": {
+        "parameter": "外部存储类型",
+        "value": "HBM3E，1 个 stack"
+      },
+      "52": {
+        "parameter": "外部存储容量",
+        "value": 24
+      },
+      "53": {
+        "parameter": "接口峰值建模输入",
+        "value": 1200
+      },
+      "54": {
+        "parameter": "分配给单 LPU 的带宽预算",
+        "value": 1200
+      },
+      "55": {
+        "parameter": "外部存储效率假设",
+        "value": 0.8
+      },
+      "56": {
+        "parameter": "估算可持续带宽上界",
+        "value": 409.6
+      },
+      "57": {
+        "parameter": "基础读延时假设",
+        "value": 100
+      },
+      "58": {
+        "parameter": "基础写延时假设",
+        "value": 100
+      },
+      "59": {
+        "parameter": "基础读延时换算",
+        "value": 100
+      },
+      "60": {
+        "parameter": "最大 outstanding 请求",
+        "value": 512
+      }
+    },
+    "unimplemented_requirements": [
+      "RTL/PPA/FPGA acceptance and timing closure",
+      "iMEM capacity from program peak and FPGA segmented loading",
+      "external-memory capacity/type enforcement (budget, efficiency and latency are modeled)"
+    ],
+    "layout_note": "Mask starts at depth-256; result seed=min(1600,depth/2). These seeds do not prove tensor lifetime fit.",
+    "timing_note": "No jitter specified in workbook; jitter=0. Effective peak=min(per-LPU budget,RX entrance); then apply efficiency, matching workbook row 56. Raw interface peak and budget remain in workbook_rows."
+  }
+}

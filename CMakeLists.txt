@@ -43,6 +43,8 @@ function(ftlpu_add_demo target source)
 endfunction()
 
 # Unit tests: one class or functional block, without a whole-chip route.
+ftlpu_add_test(hardware_profile_test tests/integration/hardware_profile_test.cpp
+    integration.hardware_profile integration core fast)
 ftlpu_add_test(instruction_codec_test tests/unit/core/instruction_codec_test.cpp
     unit.core.instruction_codec unit core fast)
 # Header-only MEM port/SXM codec coverage also builds when another FU's ISA
@@ -66,6 +68,8 @@ ftlpu_add_test(mem_slice_test tests/unit/mem/slice_test.cpp
     unit.mem.slice unit mem fast)
 ftlpu_add_test(mem_array_separated_test tests/unit/mem/mem_array_test.cpp
     unit.mem.array unit mem fast)
+ftlpu_add_test(mem_replay_copy_test tests/unit/mem/replay_copy_test.cpp
+    unit.mem.replay_copy unit mem fast)
 ftlpu_add_test(vector_roundtrip_test tests/unit/mem/vector_roundtrip_test.cpp
     unit.mem.vector_roundtrip unit mem fast)
 
@@ -92,6 +96,8 @@ ftlpu_add_test(vxm_stream_fabric_test tests/unit/vxm/stream_fabric_test.cpp
     unit.vxm.stream_fabric unit vxm fast)
 ftlpu_add_test(vxm_sr_datapath_test tests/unit/vxm/sr_datapath_test.cpp
     unit.vxm.sr_datapath unit vxm fast)
+ftlpu_add_test(vxm_sr_swiglu_replay_test tests/unit/vxm/sr_swiglu_replay_test.cpp
+    unit.vxm.sr_swiglu_replay unit vxm fast)
 ftlpu_add_test(vxm_sr_slice_test tests/unit/vxm/sr_slice_test.cpp
     unit.vxm.sr_slice unit vxm fast)
 ftlpu_add_test(vxm_superlane_test tests/unit/vxm/superlane_test.cpp
@@ -193,6 +199,8 @@ ftlpu_add_test(sxm_mem_transpose_test tests/subsystem/sxm/mem_transpose_test.cpp
 # Kernel tests: one neural-network operator or fused operator pipeline.
 ftlpu_add_test(w8a16_projection_test tests/kernel/w8a16_projection_test.cpp
     kernel.projection.w8a16 kernel projection slow serial)
+ftlpu_add_test(prefill_weight_streams_test tests/kernel/prefill_weight_streams_test.cpp
+    kernel.projection.prefill_weight_streams kernel projection fast)
 ftlpu_add_test(w8a16_swiglu_test tests/kernel/w8a16_swiglu_test.cpp
     kernel.swiglu.w8a16 kernel swiglu slow serial)
 ftlpu_add_test(rmsnorm_test tests/kernel/rmsnorm_test.cpp

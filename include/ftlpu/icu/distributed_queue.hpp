@@ -397,7 +397,11 @@ struct Icu3DContextForRole<IcuQueueRole::SxmPermute> {
     static constexpr std::size_t depth = hw::kIcuSxmRun2DContextDepth;
     static constexpr std::size_t bits =
         hw::kIcuSxmPermuteRun2DContextBits;
-    static constexpr std::size_t minimum_bits = 365;
+    // The lane map and selectors grow/shrink with the physical SXM geometry.
+    // 365 is the 32-lane requirement, including its 160-bit permutation map.
+    static constexpr std::size_t minimum_bits = 365
+        + hw::kPhysicalVectorBytes * hw::kSxmLaneIndexBits - 160
+        + hw::kSxmTileSelectorBits - 3 + hw::kSxmGroupStrideBits - 2;
 };
 
 template <>
@@ -670,7 +674,7 @@ inline MxmControlInstruction apply_icu_repeat_2d_stride(
                 && instruction.decode_operation
                     == MxmDecodeOperation::StreamCompute))
             throw std::invalid_argument(
-                "ICU Repeat2D accumulator induction requires an MXM compute or accumulator-read instruction");
+                "ICU Repeat2D accumulator induction requires an MXM compute, accumulator-read, or decode-stream-compute instruction");
         const auto address =
             static_cast<std::int64_t>(instruction.accumulator_address)
             + delta;
@@ -1307,7 +1311,7 @@ public:
                         && instruction.decode_operation
                             == MxmDecodeOperation::StreamCompute))
                     throw std::invalid_argument(
-                        "MXM compute STREAM_ND induction requires compute or accumulator-read");
+                        "MXM compute STREAM_ND induction requires compute, accumulator-read, or decode-stream-compute");
             }
             append_program(Entry {std::in_place_type<
                 IcuStreamNdInstruction<FuncInstruction>>,

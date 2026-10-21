@@ -205,7 +205,7 @@ constexpr std::size_t kIcuSxmPermuteRun2DContextBits =
     ((384 + kPhysicalVectorBytes * kSxmLaneIndexBits - 160
       + kSxmTileSelectorBits - 3 + kSxmGroupStrideBits - 2 + 31) / 32) * 32;
 
-constexpr std::size_t kMxmsPerHemisphere = 2;
+constexpr std::size_t kMxmsPerHemisphere = config::kMxmsPerHemisphere;
 constexpr std::size_t kMxmCount = kHemispheres * kMxmsPerHemisphere;
 constexpr std::size_t kModeledSramBlocks =
     kMemSliceColumns * kMemBanksPerSlice;
