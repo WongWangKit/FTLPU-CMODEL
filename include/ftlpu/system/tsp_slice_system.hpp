@@ -379,6 +379,17 @@ public:
         return cycle_;
     }
 
+    // The runtime may query this after the last visible MEM commit before
+    // notifying an event. Transport must leave shared issue/SR resources.
+    bool common_barrier_resources_drained() const noexcept
+    {
+        if (!vxm_.idle() || !vxm_.datapath().fabric().registers().empty()) return false;
+        for (const auto& mxm : mxms_) if (!mxm.idle()) return false;
+        for (std::size_t h = 0; h < hw::kHemispheres; ++h)
+            if (!mems_[h].idle() || !sxms_[h].idle() || !streams_[h].empty()) return false;
+        return true;
+    }
+
     std::size_t passive_bridge_transfer_count(
         Hemisphere source, std::size_t stream) const
     {
@@ -461,6 +472,22 @@ private:
     void dispatch_phase(LogSinks sinks)
     {
         require_phase(CyclePhase::Begun, "dispatching ICU instructions");
+        // The first implementation only admits an already-drained boundary.
+        // Active Macro Context RAM and SRAM/accumulator/transpose storage may
+        // remain populated; transient FU pipelines and SR cannot cross HOLD.
+        // Validate before consuming even an early-ready barrier at cycle C.
+        if (icu_.common_barrier_due()) {
+            if (!vxm_.idle() || !vxm_.datapath().fabric().registers().empty())
+                throw StaticScheduleError("unsafe common barrier: VXM has in-flight computation");
+            for (const auto& mxm : mxms_)
+                if (!mxm.idle())
+                    throw StaticScheduleError("unsafe common barrier: MXM has in-flight computation");
+            for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
+                if (!mems_[hemisphere].idle() || !sxms_[hemisphere].idle()
+                    || !streams_[hemisphere].empty())
+                    throw StaticScheduleError("unsafe common barrier: MEM/SXM/SR has in-flight data; schedule a drain window before C");
+            }
+        }
         auto c2c_endpoints =
             std::array<C2cEndpoint*, hw::kHemispheres> {};
         auto c2c_dmas =

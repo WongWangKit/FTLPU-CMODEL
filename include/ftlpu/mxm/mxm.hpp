@@ -78,6 +78,14 @@ public:
         return accumulator_;
     }
 
+    bool idle() const noexcept
+    {
+        if (!control_.idle() || !pipelines_empty() || decode_launch_) return false;
+        for (const auto& stage : decode_stages_) if (stage) return false;
+        for (const auto& stage : decode_output_pipeline_) if (stage) return false;
+        return true;
+    }
+
     const MxmAccumulator& accumulator() const noexcept
     {
         return accumulator_;

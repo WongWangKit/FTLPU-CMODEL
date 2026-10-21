@@ -6,6 +6,7 @@
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/icu/distributed_queue.hpp"
+#include "ftlpu/icu/common_barrier.hpp"
 #include "ftlpu/icu/fu_3d_instruction.hpp"
 #include "ftlpu/icu/location.hpp"
 #include "ftlpu/mem/mem_array.hpp"
@@ -305,6 +306,7 @@ public:
         for (auto& queue : mem_queues_) {
             queue.reset();
         }
+        for (auto& queue : mem_transport_queues_) queue.reset();
         for (auto& queue : mxm_load_queues_) {
             queue.reset();
         }
@@ -322,6 +324,8 @@ public:
         pending_c2c_dma_raw_words_.fill(std::nullopt);
         barrier_events_.clear();
         program_issue_enabled_ = true;
+        common_barriers_.reset();
+        compute_enabled_ = true;
         cycle_ = 0;
     }
 
@@ -578,6 +582,31 @@ public:
         mem_queues_[queue].push_encoded_synchronized_packet(
             MemIcu::EncodedSynchronizedPacket {
                 packet.words[0], packet.words[1]});
+    }
+
+    MemIcu& mem_transport_iq(std::size_t queue)
+    {
+        check_mem_queue(queue);
+        if (mem_transport_queues_.empty())
+            mem_transport_queues_ = std::vector<MemIcu>(kMemQueues);
+        return mem_transport_queues_[queue];
+    }
+
+    const MemIcu& mem_transport_iq(std::size_t queue) const
+    {
+        check_mem_queue(queue);
+        if (mem_transport_queues_.empty()) {
+            static const MemIcu empty;
+            return empty;
+        }
+        return mem_transport_queues_[queue];
+    }
+
+    void push_mem_transport_synchronized_raw(std::size_t queue,
+        const EncodedMemIcuSynchronizedPacket& packet)
+    {
+        mem_transport_iq(queue).push_encoded_synchronized_packet(
+            MemIcu::EncodedSynchronizedPacket{packet.words[0], packet.words[1]});
     }
 
     void insert_mem_synchronized_raw(std::size_t queue,
@@ -1194,6 +1223,29 @@ public:
         return program_issue_enabled_;
     }
 
+    void configure_common_barriers(std::uint64_t generation,
+        std::vector<IcuCommonBarrierEntry> entries,
+        const std::vector<IcuCommonEventBinding>& bindings)
+    {
+        if (cycle_ != 0)
+            throw StaticScheduleError("common barrier RAM must be prepared before execution");
+        common_barriers_.configure(generation, std::move(entries), bindings);
+    }
+
+    void notify_common_mem_commit(std::uint64_t generation,
+        std::uint32_t completion_instance)
+    {
+        common_barriers_.notify_mem_commit(generation, completion_instance);
+    }
+
+    std::uint64_t logical_cycle() const noexcept { return common_barriers_.logical_cycle(); }
+    std::uint64_t physical_cycle() const noexcept { return common_barriers_.physical_cycle(); }
+    std::uint64_t common_barrier_wait_cycles() const noexcept { return common_barriers_.wait_cycles(); }
+    bool compute_enabled() const noexcept { return compute_enabled_; }
+    bool common_barrier_holding() const noexcept { return common_barriers_.holding(); }
+    bool common_barriers_done() const noexcept { return common_barriers_.done(); }
+    bool common_barrier_due() const noexcept { return common_barriers_.barrier_due(); }
+
     void notify_mem_synchronized(IcuLocation location,
         std::size_t synchronization_tag)
     {
@@ -1201,9 +1253,14 @@ public:
             throw std::invalid_argument(
                 "C2C RX can only notify a target MEM ICU");
         check_mem_location(location);
-        mem_iq(mem_queue(
+        const auto queue = mem_queue(
             static_cast<Hemisphere>(location.unit),
-            location.index, location.bank)).notify(synchronization_tag);
+            location.index, location.bank);
+        if (!mem_transport_queues_.empty()
+            && mem_transport_queues_[queue].accepts_synchronized_notification(synchronization_tag))
+            mem_transport_queues_[queue].notify(synchronization_tag);
+        else
+            mem_iq(queue).notify(synchronization_tag);
     }
 
     bool mem_accepts_synchronized_notification(IcuLocation location,
@@ -1213,10 +1270,12 @@ public:
             throw std::invalid_argument(
                 "C2C RX readiness requires a target MEM ICU");
         check_mem_location(location);
-        return mem_iq(mem_queue(
+        const auto queue = mem_queue(
             static_cast<Hemisphere>(location.unit),
-            location.index, location.bank))
-            .accepts_synchronized_notification(synchronization_tag);
+            location.index, location.bank);
+        return (!mem_transport_queues_.empty()
+                && mem_transport_queues_[queue].accepts_synchronized_notification(synchronization_tag))
+            || mem_iq(queue).accepts_synchronized_notification(synchronization_tag);
     }
 
     void advance_barrier_events()
@@ -1281,8 +1340,12 @@ public:
     void dispatch_vxm(VxmSrSlice& vxm, std::ostream* os = nullptr)
     {
         log_cycle_header(os);
+        if (common_barriers_.barrier_due()
+            && (!vxm.idle() || !vxm.datapath().fabric().registers().empty()))
+            throw StaticScheduleError("unsafe common barrier: VXM has in-flight computation");
+        compute_enabled_ = common_barriers_.begin_cycle(program_issue_enabled_);
         bool any = false;
-        if (program_issue_enabled_) {
+        if (compute_enabled_) {
             for (std::size_t alu = 0; alu < kVxmQueues; ++alu) {
                 const auto instruction = vxm_queues_[alu].dispatch_next();
                 if (!instruction.has_value()) continue;
@@ -1294,7 +1357,9 @@ public:
                 }
             }
         }
+        else for (auto& queue : vxm_queues_) queue.hold_compute_cycle();
         log_dispatch_idle(os, any);
+        common_barriers_.end_cycle();
         ++cycle_;
     }
     void dispatch(
@@ -1307,6 +1372,16 @@ public:
         std::array<C2cDmaEngine*, hw::kHemispheres> c2c_dmas = {})
     {
         log_cycle_header(os);
+
+        compute_enabled_ = common_barriers_.begin_cycle(program_issue_enabled_);
+        if (!compute_enabled_) {
+            for (auto& queue : vxm_queues_) queue.hold_compute_cycle();
+            for (auto& queue : mxm_load_queues_) queue.hold_compute_cycle();
+            for (auto& queue : mxm_dequant_queues_) queue.hold_compute_cycle();
+            for (auto& queue : mxm_compute_queues_) queue.hold_compute_cycle();
+            for (auto& queue : sxm_transpose_queues_) queue.hold_compute_cycle();
+            for (auto& queue : sxm_permute_queues_) queue.hold_compute_cycle();
+        }
 
         bool any = false;
         for (std::size_t hemisphere = 0;
@@ -1324,6 +1399,11 @@ public:
                         c2c_tx->consumer.mem_slice,
                         c2c_tx->consumer.mem_bank));
                     target.launch();
+                    if (!mem_transport_queues_.empty())
+                        mem_transport_queues_[mem_queue(
+                            c2c_tx->consumer.hemisphere,
+                            c2c_tx->consumer.mem_slice,
+                            c2c_tx->consumer.mem_bank)].launch();
                 }
                 c2cs[hemisphere]->tx().issue(*c2c_tx);
                 any = true;
@@ -1378,7 +1458,7 @@ public:
                 }
             }
         }
-        if (program_issue_enabled_) {
+        if (compute_enabled_) {
             for (std::size_t alu = 0; alu < kVxmQueues; ++alu) {
                 const auto instruction = vxm_queues_[alu].dispatch_next();
                 if (!instruction.has_value()) continue;
@@ -1392,9 +1472,19 @@ public:
         }
 
         for (std::size_t queue = 0; queue < kMemQueues; ++queue) {
-            const auto instruction = program_issue_enabled_
-                ? mem_queues_[queue].dispatch_next()
-                : mem_queues_[queue].tick_transport_only();
+            auto instruction = std::optional<MemInstruction>{};
+            if (compute_enabled_)
+                instruction = mem_queues_[queue].dispatch_next();
+            else if (common_barriers_.configured())
+                mem_queues_[queue].hold_compute_cycle();
+            else
+                instruction = mem_queues_[queue].tick_transport_only();
+            const auto transport = mem_transport_queues_.empty()
+                ? std::optional<MemInstruction>{}
+                : mem_transport_queues_[queue].dispatch_next();
+            if (instruction && transport)
+                throw StaticScheduleError("MEM transport and compute contend for the shared bank issue port");
+            if (transport) instruction = transport;
             if (!instruction.has_value()) {
                 continue;
             }
@@ -1415,7 +1505,7 @@ public:
             }
         }
 
-        if (program_issue_enabled_)
+        if (compute_enabled_)
         for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
             const auto transpose = sxm_transpose_queues_[hemisphere].dispatch_next();
             if (transpose.has_value()) {
@@ -1438,7 +1528,7 @@ public:
             }
         }
 
-        if (program_issue_enabled_)
+        if (compute_enabled_)
         for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
             const auto instruction =
                 mxm_dequant_queues_[mxm].dispatch_next();
@@ -1453,7 +1543,7 @@ public:
             }
         }
 
-        if (program_issue_enabled_)
+        if (compute_enabled_)
         for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
             const auto instruction = mxm_load_queues_[mxm].dispatch_next();
             if (!instruction.has_value()) {
@@ -1466,7 +1556,7 @@ public:
             }
         }
 
-        if (program_issue_enabled_)
+        if (compute_enabled_)
         for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
             const auto instruction = mxm_compute_queues_[mxm].dispatch_next();
             if (!instruction.has_value()) {
@@ -1480,6 +1570,7 @@ public:
         }
 
         log_dispatch_idle(os, any);
+        common_barriers_.end_cycle();
         ++cycle_;
     }
 
@@ -1703,6 +1794,7 @@ private:
         };
         collect(vxm_queues_);
         collect(mem_queues_);
+        collect(mem_transport_queues_);
         collect(mxm_load_queues_);
         collect(mxm_dequant_queues_);
         collect(mxm_compute_queues_);
@@ -1911,6 +2003,9 @@ private:
     // gaps become local-iMEM NOPs and every hardware RUN_2D packet starts at
     // relative cycle zero. They are never consulted by the runtime ICU.
     std::array<MemIcu, kMemQueues> mem_queues_{};
+    // Separate bounded native transport control RAM. It shares the physical
+    // bank issue port, never the raw Macro decoder or its logical clock.
+    std::vector<MemIcu> mem_transport_queues_{};
     std::array<MxmLoadIcu, kMxmQueues> mxm_load_queues_{};
     std::array<MxmDequantIcu, kMxmQueues>
         mxm_dequant_queues_{};
@@ -1925,6 +2020,8 @@ private:
     std::size_t barrier_latency_cycles_{hw::kIcuBarrierLatencyCycles};
     std::deque<std::size_t> barrier_events_{};
     bool program_issue_enabled_{true};
+    bool compute_enabled_{true};
+    IcuCommonBarrierController common_barriers_{};
     std::size_t cycle_{0};
 };
 

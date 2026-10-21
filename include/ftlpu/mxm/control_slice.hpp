@@ -466,6 +466,16 @@ public:
     {
     }
 
+    bool idle() const noexcept
+    {
+        if (!load_instruction_queue_.empty() || !compute_instruction_queue_.empty()
+            || !dequant_instruction_queue_.empty()) return false;
+        for (const auto& row : load_instruction_rows_) if (row) return false;
+        for (const auto& row : compute_instruction_rows_) if (row) return false;
+        for (const auto& row : dequant_instruction_rows_) if (row) return false;
+        return true;
+    }
+
     void reset()
     {
         load_instruction_queue_.clear();

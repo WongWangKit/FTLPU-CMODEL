@@ -162,6 +162,20 @@ public:
         return ports_;
     }
 
+    bool idle() const noexcept
+    {
+        for (const auto& slice : instruction_queues_)
+            for (const auto& bank : slice)
+                for (const auto& queue : bank)
+                    if (!queue.empty()) return false;
+        for (const auto& slice : instruction_rows_)
+            for (const auto& bank : slice)
+                for (const auto& port : bank)
+                    for (const auto& slot : port)
+                        if (slot) return false;
+        return true;
+    }
+
     void enqueue_instruction(std::size_t mem_slice, MemInstruction instruction)
     {
         enqueue_instruction(mem_slice, 0, std::move(instruction));

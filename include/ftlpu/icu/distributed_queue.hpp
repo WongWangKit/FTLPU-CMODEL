@@ -1587,6 +1587,23 @@ public:
         return tick();
     }
 
+    // Physical response capture remains live while all execution coordinates,
+    // decoder FSMs, loop state and logical deadlines are held.
+    void hold_compute_cycle()
+    {
+        ensure_configured();
+        notify_emitted_ = false;
+        begin_trace(IcuQueueAction::ProgramPaused);
+        if (raw_macro_mode_) {
+            macro_decoder_->hold_cycle();
+        } else {
+            commit_ready_fetch();
+            age_pending_fetches();
+        }
+        age_synchronized_notifications();
+        finish_trace();
+    }
+
     // Arms the configured local i-MEM/IQ state without consuming a cycle.
     // Cross-queue producers use this before delivering a cycle-zero event so
     // lazy queue launch cannot clear a notification that hardware has already
@@ -1663,6 +1680,10 @@ public:
                 "transport-only ticking is defined only for MEM ICU queues");
         } else {
             ensure_configured();
+            if (raw_macro_mode_) {
+                hold_compute_cycle();
+                return std::nullopt;
+            }
             notify_emitted_ = false;
             begin_trace(IcuQueueAction::ProgramPaused);
             commit_ready_fetch();
@@ -1964,6 +1985,7 @@ public:
             ? macro_decoder_->statistics().fetched_words : fetched_count_;
     }
     std::size_t issued_count() const noexcept { return issued_count_; }
+    std::size_t active_macro_count() const noexcept { return active_macro_count_; }
     std::size_t synchronized_issued_count() const noexcept
     {
         return synchronized_issued_count_;

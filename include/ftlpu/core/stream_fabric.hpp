@@ -86,6 +86,11 @@ public:
         return cycle_open_;
     }
 
+    bool empty() const noexcept
+    {
+        return current_cells_.empty() && next_cells_.empty();
+    }
+
     const CycleActivity& last_cycle_activity() const noexcept
     {
         return last_activity_;

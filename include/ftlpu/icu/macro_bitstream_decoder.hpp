@@ -201,6 +201,15 @@ public:
         return disabled_ || (state_ == State::Done && ddb_size_ == 0);
     }
 
+    // A request reserves reservoir credit at issue. Its unbackpressurable
+    // response is captured during HOLD, but parser, delta/DDB expansion and
+    // admission stay frozen. No new request is issued until RUN resumes.
+    void hold_cycle()
+    {
+        commit_ready_fetch();
+        age_pending_fetches();
+    }
+
     // Priming stops only at an actual decode-ahead boundary: the parser has
     // consumed the image or the finite DDB is full.
     bool primed() const noexcept

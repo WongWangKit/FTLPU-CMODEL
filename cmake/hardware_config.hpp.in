@@ -9,6 +9,8 @@
 namespace ftlpu::hw::config {
 
 inline constexpr std::size_t kSchemaVersion = @FTLPU_HW_SCHEMA_VERSION@;
+inline constexpr std::size_t kCommonBarrierEncodingVersion = @FTLPU_HW_COMMON_BARRIER_ENCODING_VERSION@;
+inline constexpr std::size_t kCommonBarrierCapacity = @FTLPU_HW_COMMON_BARRIER_CAPACITY@;
 inline constexpr std::string_view kTargetName = "@FTLPU_HW_TARGET_NAME@";
 
 inline constexpr std::size_t kHemispheres = @FTLPU_HW_HEMISPHERES@;

@@ -115,6 +115,8 @@ ftlpu_add_test(sxm_attention_transpose_test tests/unit/sxm/attention_transpose_t
     unit.sxm.attention_transpose unit sxm fast)
 ftlpu_add_test(icu_barrier_test tests/unit/icu/barrier_test.cpp
     unit.icu.barrier unit icu fast)
+ftlpu_add_test(icu_common_barrier_test tests/unit/icu/common_barrier_test.cpp
+    unit.icu.common_barrier unit icu fast)
 ftlpu_add_test(icu_repeat_2d_test tests/unit/icu/repeat_2d_test.cpp
     unit.icu.repeat_2d unit icu fast)
 ftlpu_add_test(icu_short_packet_test tests/unit/icu/short_packet_test.cpp

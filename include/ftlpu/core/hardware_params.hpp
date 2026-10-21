@@ -8,6 +8,10 @@
 
 namespace ftlpu::hw {
 
+// Common paging controller capability, independently versioned from packed-v1.
+constexpr std::size_t kCommonBarrierEncodingVersion = config::kCommonBarrierEncodingVersion;
+constexpr std::size_t kCommonBarrierCapacity = config::kCommonBarrierCapacity;
+
 constexpr std::size_t kHardwareSchemaVersion = config::kSchemaVersion;
 constexpr std::string_view kTargetName = config::kTargetName;
 constexpr std::size_t kHemispheres = config::kHemispheres;

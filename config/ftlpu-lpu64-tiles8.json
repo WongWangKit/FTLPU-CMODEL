@@ -1,5 +1,10 @@
 {
   "schema_version": 2,
+
+  "icu": {
+    "common_barrier_encoding_version": 1,
+    "common_barrier_capacity": 1024
+  },
   "target": {
     "name": "ftlpu-lpu64-tiles8"
   },

@@ -101,6 +101,15 @@ public:
         return units_.cycle();
     }
 
+    bool idle() const noexcept
+    {
+        if (units_.issued_count() != 0 || permute_instruction_
+            || !fanout_outputs_.empty()) return false;
+        for (const auto& row : transpose_instruction_rows_) if (row) return false;
+        for (const auto ready : transpose_bank_.tile_ready) if (ready) return false;
+        return true;
+    }
+
     bool can_issue(const SxmInstruction& instruction) const
     {
         if (instruction.opcode == SxmOpcode::Transpose) {
