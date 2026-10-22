@@ -184,6 +184,7 @@ private:
         case VxmSpecialAluOpcode::Exp: return 6;
         case VxmSpecialAluOpcode::Reciprocal: return 7;
         case VxmSpecialAluOpcode::Rsqrt: return 8;
+        case VxmSpecialAluOpcode::Log: return 9;
         }
         throw std::invalid_argument("unsupported VXM compact opcode");
     }
@@ -200,6 +201,7 @@ private:
         case 6: return VxmSpecialAluOpcode::Exp;
         case 7: return VxmSpecialAluOpcode::Reciprocal;
         case 8: return VxmSpecialAluOpcode::Rsqrt;
+        case 9: return VxmSpecialAluOpcode::Log;
         default:
             throw std::invalid_argument(
                 "VXM compact instruction has an invalid opcode");

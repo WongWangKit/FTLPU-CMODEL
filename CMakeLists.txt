@@ -127,6 +127,7 @@ ftlpu_add_test(vxm_operator_throughput_test tests/vxm/operator_throughput_test.c
 ftlpu_add_test(vxm_superlane_test tests/vxm/superlane_test.cpp)
 ftlpu_add_test(vxm_slice_test tests/vxm/slice_test.cpp)
 ftlpu_add_test(vxm_special_alu_test tests/vxm/special_alu_test.cpp)
+ftlpu_add_test(vxm_log_test tests/vxm/log_test.cpp)
 ftlpu_add_test(vxm_static_quantizer_test tests/vxm/static_quantizer_test.cpp)
 
 ftlpu_add_test(sxm_test tests/sxm/sxm_test.cpp)

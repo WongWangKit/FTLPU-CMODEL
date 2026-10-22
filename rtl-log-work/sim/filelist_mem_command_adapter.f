@@ -1,0 +1,14 @@
+rtl/srf/ftlpu_sr_superlane_col_dir.sv
+rtl/srf/ftlpu_sr_column_dir.sv
+rtl/srf/ftlpu_sr_direction_fabric.sv
+rtl/srf/ftlpu_sr_hemisphere_fabric.sv
+rtl/mem_native/mem_bank_superlane_leaf.sv
+rtl/mem_native/mem_bank_control_column.sv
+rtl/mem_native/mem_logical_bank_column.sv
+rtl/mem_native/mem_slice.sv
+rtl/mem_native/mem_group.sv
+rtl/mem_native/mem_hemisphere.sv
+rtl/integration/lpu_mem_srf_integration.sv
+rtl/integration/lpu_mem_command_adapter.sv
+rtl/integration/lpu_mem_srf_command_integration.sv
+sim/tb/lpu_mem_command_adapter_tb.sv

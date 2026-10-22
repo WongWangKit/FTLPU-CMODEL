@@ -24,6 +24,9 @@ logs/
 *.log
 tests/integration/results/
 tests/vxm/results/
+tools/log_precision/*.csv
+__pycache__/
+*.pyc
 
 # Generated schedule traces/plots in documentation
 docs/*_schedule.csv

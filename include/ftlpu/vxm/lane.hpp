@@ -847,6 +847,7 @@ public:
             case VxmSpecialAluOpcode::Exp: return "exp_lut";
             case VxmSpecialAluOpcode::Reciprocal: return "reciprocal_lut";
             case VxmSpecialAluOpcode::Rsqrt: return "rsqrt_lut";
+            case VxmSpecialAluOpcode::Log: return "log_lut";
             }
         }
         return "unknown";
@@ -864,7 +865,8 @@ public:
         if (const auto* special = std::get_if<VxmSpecialAluOpcode>(&operation)) {
             return (column == 1 && *special == VxmSpecialAluOpcode::Exp)
                 || (column == 3 && (*special == VxmSpecialAluOpcode::Reciprocal
-                                 || *special == VxmSpecialAluOpcode::Rsqrt));
+                                 || *special == VxmSpecialAluOpcode::Rsqrt
+                                 || *special == VxmSpecialAluOpcode::Log));
         }
         return false;
     }

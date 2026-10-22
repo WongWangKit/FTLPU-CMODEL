@@ -1,0 +1,2 @@
+rtl/c2c_native/c2c_vector_credit_serializer.sv
+sim/tb/lpu_c2c_vector_credit_serializer_tb.sv

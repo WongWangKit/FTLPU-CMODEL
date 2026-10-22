@@ -1,0 +1,17 @@
+rtl/srf/ftlpu_sr_superlane_col_dir.sv
+rtl/srf/ftlpu_sr_column_dir.sv
+rtl/srf/ftlpu_sr_direction_fabric.sv
+rtl/srf/ftlpu_sr_hemisphere_fabric.sv
+rtl/c2c_native/c2c_tx_gather.sv
+rtl/c2c_native/c2c_completed_fifo.sv
+rtl/c2c_native/c2c_vector_credit_serializer.sv
+rtl/c2c_native/c2c_peer_transport.sv
+rtl/c2c_native/c2c_rx_ready_fifo.sv
+rtl/c2c_native/c2c_rx_issue_pair.sv
+rtl/c2c_native/c2c_rx_replay.sv
+rtl/integration/lpu_c2c_tx_srf_adapter.sv
+rtl/integration/lpu_c2c_tx_peer_path.sv
+rtl/integration/lpu_c2c_rx_srf_adapter.sv
+rtl/integration/lpu_c2c_rx_srf_integration.sv
+rtl/integration/lpu_c2c_srf_peer_e2e.sv
+sim/tb/lpu_c2c_srf_peer_e2e_tb.sv

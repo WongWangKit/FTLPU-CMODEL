@@ -1,0 +1,36 @@
+# Simulation outputs
+build/
+obj_dir/
+simv
+simv.exe
+*.vvp
+ucli.key
+*.vcd
+*.fsdb
+*.fst
+*.wlf
+*.log
+
+# FPGA / EDA tool outputs
+.Xil/
+*.jou
+*.pb
+*.str
+*.dcp
+*.rpt
+*.mr
+*.pvk
+*.pvl
+*.svf
+*.syn
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Regenerated instruction-level C3 black-box vectors
+sim/vectors/vxm_c3_pipeline_cases.hex
