@@ -17,16 +17,15 @@ int main()
 try {
     using namespace ftlpu;
     using Queue = DistributedIcuQueue<
-        VxmSrCompactInstruction, 96, 64, 16, 1>;
+        VxmCompactInstruction, 96, 64, 16, 1>;
 
-    VxmSrInstruction lane {};
+    VxmLaneAluInstruction lane {};
     lane.operation = VxmAluOpcode::Multiply;
-    lane.lhs = VxmSrOperand::StreamBFloat16(StreamId::East(0).packed());
-    lane.rhs = VxmSrOperand::Immediate(0.5f);
-    lane.result_sr = static_cast<std::uint8_t>(StreamId::East(0).packed());
-    lane.result_type = VxmCastTarget::BFloat16;
+    lane.lhs = ftlpu::VxmLaneOperand::StreamBFloat16();
+    lane.rhs = VxmLaneOperand::Imm(0.5f);
+    lane.output_type = VxmCastTarget::BFloat16;
     lane.repeat_count = 32;
-    const auto packet = VxmSrCompactInstructionCodec::encode(lane);
+    const auto packet = VxmCompactInstructionCodec::encode(0, VxmChainDepth::Eight, lane);
 
     Queue queue;
     queue.push_vxm_stream_nd(IcuVxmStreamNdSchedule {
@@ -38,8 +37,7 @@ try {
         if (const auto instruction = queue.tick()) {
             require(*instruction == packet,
                 "VXM_STREAM_ND changed the compact config packet");
-            const auto decoded = VxmSrCompactInstructionCodec::decode(
-                *instruction);
+            const auto decoded = VxmCompactInstructionCodec::decode(0, *instruction).instruction;
             require(decoded.repeat_count == 32,
                 "VXM_STREAM_ND expanded the Superlane repeat count");
             require(queue.last_trace().action

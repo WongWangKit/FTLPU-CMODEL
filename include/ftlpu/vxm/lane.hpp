@@ -25,7 +25,6 @@ enum class VxmChainDepth : std::size_t {
     Two = 2,
     Four = 4,
     Eight = 8,
-    Sixteen = 16,
 };
 
 enum class VxmLaneOperandKind {
@@ -39,21 +38,11 @@ enum class VxmLaneOperandKind {
     Feedback = 7,
 };
 
-enum class VxmStreamSource {
-    Local,
-    East,
-    West,
-};
-
 struct VxmLaneOperand {
     VxmLaneOperandKind kind{VxmLaneOperandKind::Immediate};
     float immediate{0.0f};
     float scale{1.0f};
     std::int32_t zero_point{0};
-    // -1 keeps the stage-local fixed input group. Values 0..7 select a group
-    // from the local, absolute-East, or absolute-West SR hemisphere.
-    std::int32_t stream_group{-1};
-    VxmStreamSource stream_source{VxmStreamSource::Local};
 
     static VxmLaneOperand Previous() { return {VxmLaneOperandKind::Previous}; }
     static VxmLaneOperand Original() { return {VxmLaneOperandKind::Original}; }
@@ -61,19 +50,13 @@ struct VxmLaneOperand {
     static VxmLaneOperand Acc() { return {VxmLaneOperandKind::Accumulator}; }
     static VxmLaneOperand Imm(float value) { return {VxmLaneOperandKind::Immediate, value}; }
     static VxmLaneOperand Feedback() { return {VxmLaneOperandKind::Feedback}; }
-    static VxmLaneOperand StreamFloat16(
-        float scale = 1.0f, std::int32_t stream_group = -1,
-        VxmStreamSource stream_source = VxmStreamSource::Local)
+    static VxmLaneOperand StreamFloat16(float scale = 1.0f)
     {
-        return {VxmLaneOperandKind::StreamFloat16, 0.0f, scale, 0,
-            stream_group, stream_source};
+        return {VxmLaneOperandKind::StreamFloat16, 0.0f, scale, 0};
     }
-    static VxmLaneOperand StreamBFloat16(
-        float scale = 1.0f, std::int32_t stream_group = -1,
-        VxmStreamSource stream_source = VxmStreamSource::Local)
+    static VxmLaneOperand StreamBFloat16(float scale = 1.0f)
     {
-        return {VxmLaneOperandKind::StreamBFloat16, 0.0f, scale, 0,
-            stream_group, stream_source};
+        return {VxmLaneOperandKind::StreamBFloat16, 0.0f, scale, 0};
     }
 };
 
@@ -93,10 +76,6 @@ struct VxmLaneAluInstruction {
     bool accumulator_reset{false};
     bool accumulator_write{false};
     bool accumulator_emit{true};
-    // Coarse RUN_2D terminal controls.  The ICU repeat counter gates these
-    // flags so one non-preemptible instruction can express a reduction.
-    bool accumulator_reset_first{false};
-    bool accumulator_emit_last{false};
     std::size_t repeat_count{1};
     // Capture this operation's completed value in the small C1/C3 scalar
     // register.  Unlike accumulator_write this is a one-shot result write and
@@ -111,15 +90,15 @@ struct VxmLaneAluTrace {
     std::optional<float> result{};
 };
 
-inline constexpr std::size_t kVxmAluStageCount = hw::kVxmAluCount;
+inline constexpr std::size_t kVxmAluStageCount = 16;
 using VxmLaneConfigs =
     std::array<std::optional<VxmLaneAluInstruction>, kVxmAluStageCount>;
 using VxmLaneExecutionMask = std::array<bool, kVxmAluStageCount>;
 
 class VxmLane {
 public:
-    static constexpr std::size_t kAluCount = hw::kVxmAluCount;
-    static constexpr std::size_t kBlockCount = hw::kVxmAluCount / 2;
+    static constexpr std::size_t kAluCount = 16;
+    static constexpr std::size_t kBlockCount = 8;
     static constexpr std::size_t kStagesPerBlock = 2;
     static constexpr std::size_t kInputStreams = hw::kStreamsPerDirection;
     static constexpr std::size_t kStreamGroupBytes = 2;
@@ -190,7 +169,7 @@ public:
         std::uint64_t executed_slots{0};
         std::uint64_t useful_slots{0};
         std::array<std::uint64_t, kAluCount> stage_executions{};
-        std::array<Utilization, 4> by_chain_depth{};
+        std::array<Utilization, 3> by_chain_depth{};
         std::vector<CycleActivity> timeline{};
 
         double active_utilization() const
@@ -235,7 +214,6 @@ public:
             case VxmChainDepth::Two: return 0;
             case VxmChainDepth::Four: return 1;
             case VxmChainDepth::Eight: return 2;
-            case VxmChainDepth::Sixteen: return 3;
             }
             return 0;
         }
@@ -286,7 +264,7 @@ public:
 
     void reset()
     {
-        for (auto& token : column_input_registers_) token.reset();
+        for (auto& token : stage_inputs_) token.reset();
         for (auto& pipeline : basic_pipelines_) pipeline.reset();
         for (auto& pipeline : special_pipelines_) pipeline.reset();
         for (auto& accumulator : accumulators_) accumulator.reset();
@@ -315,7 +293,7 @@ public:
     void validate_chain_depth_transition(VxmChainDepth depth) const
     {
         for (std::size_t stage = 0; stage < kAluCount; ++stage) {
-            if (column_input_registers_[stage]
+            if (stage_inputs_[stage]
                 && !is_chain_head_for(stage, depth)) {
                 throw std::logic_error(
                     "VXM chain-depth transition left data outside a new "
@@ -361,9 +339,8 @@ public:
             || tail % 2 == 0 || head % 2 != 0) {
             return false;
         }
-        // The full-width mode connects C7->C8 and provides a C15->C0 return;
-        // shorter modes retain the local 2/4/8-column feedback paths.
-        if (tail == 15 && head == 0) return true;
+        // Feedback never crosses the two physical 8-stage chains.  A tail may
+        // return to the head of the enclosing 2-, 4-, or 8-stage chain.
         if (tail / 8 != head / 8 || head > tail) return false;
         return head == (tail / 2) * 2
             || head == (tail / 4) * 4
@@ -386,31 +363,6 @@ public:
         std::size_t stage, bool rhs_port)
     {
         return block_for_stage(stage) * 2 + (rhs_port ? 1 : 0);
-    }
-
-    static std::size_t input_group_for_operand(std::size_t stage,
-        bool rhs_port, const VxmLaneOperand& operand)
-    {
-        if (operand.stream_group < 0) {
-            if (operand.stream_source != VxmStreamSource::Local) {
-                throw std::invalid_argument(
-                    "absolute VXM stream source requires an explicit group");
-            }
-            return fixed_input_group_for_stage(stage, rhs_port);
-        }
-        if (operand.stream_group >= 8)
-            throw std::out_of_range(
-                "VXM operand stream group is outside one hemisphere");
-        const auto group = static_cast<std::size_t>(operand.stream_group);
-        switch (operand.stream_source) {
-        case VxmStreamSource::Local:
-            return group + (stage >= 8 ? 8 : 0);
-        case VxmStreamSource::East:
-            return group;
-        case VxmStreamSource::West:
-            return group + 8;
-        }
-        throw std::logic_error("unsupported VXM stream source");
     }
 
     void validate_broadcast_instruction(
@@ -493,8 +445,7 @@ public:
             }
         }
         auto consumed = ExecutionMask{};
-        auto next_inputs =
-            std::array<std::optional<ColumnStreamRegister>, kAluCount>{};
+        auto next_inputs = std::array<std::optional<Token>, kAluCount>{};
         auto basic_requests =
             std::array<std::optional<BasicPipeline::Request>, kAluCount>{};
         auto special_requests =
@@ -509,28 +460,27 @@ public:
         // later leaves the internal pipeline.
         for (std::size_t stage = 0; stage < kAluCount; ++stage) {
             if (!issued[stage]) {
-                if (column_input_registers_[stage])
-                    next_inputs[stage] = column_input_registers_[stage];
+                if (stage_inputs_[stage]) next_inputs[stage] = stage_inputs_[stage];
                 continue;
             }
             const auto& instruction = *issued[stage];
-            std::optional<ColumnStreamRegister> source;
+            std::optional<Token> source;
             if (is_chain_head(stage)) {
                 if (!head_operands_ready(instruction, stage)) {
                     waiting_for_input[stage] = true;
                     continue;
                 }
                 if (instruction_uses_feedback(instruction)) {
-                    source = column_input_registers_[stage];
+                    source = stage_inputs_[stage];
                 } else {
                     const auto lhs =
                         read_head_operand(instruction.lhs, stage, false);
                     const auto rhs =
                         read_head_operand(instruction.rhs, stage, true);
-                    source = ColumnStreamRegister {0.0f, lhs, rhs, true};
+                    source = Token {0.0f, lhs, rhs, true};
                 }
             } else {
-                source = column_input_registers_[stage];
+                source = stage_inputs_[stage];
                 if (!source) {
                     waiting_for_input[stage] = true;
                     continue;
@@ -538,10 +488,8 @@ public:
             }
 
             prepare_accumulator(stage, instruction);
-            const auto a = read_operand(
-                instruction.lhs, *source, stage, false);
-            const auto b = read_operand(
-                instruction.rhs, *source, stage, true);
+            const auto a = read_operand(instruction.lhs, *source, stage, false);
+            const auto b = read_operand(instruction.rhs, *source, stage, true);
             auto metadata = ExecutionMetadata{*source, instruction};
             if (const auto* special =
                     std::get_if<VxmSpecialAluOpcode>(&instruction.operation)) {
@@ -558,11 +506,10 @@ public:
                         "VXM configuration changed to Basic while a LUT "
                         "result remained in flight");
                 }
-                auto request = BasicPipeline::Request{
+                basic_requests[stage] = BasicPipeline::Request{
                     {std::get<VxmAluOpcode>(instruction.operation),
                      instruction.precision},
                     a, b, std::move(metadata)};
-                basic_requests[stage] = std::move(request);
             }
             consumed[stage] = true;
         }
@@ -632,7 +579,7 @@ public:
             if (!emit) continue;
 
             const auto& source = completed->metadata.source;
-            auto token = ColumnStreamRegister{
+            auto token = Token{
                 completed->value, source.original, source.auxiliary, true};
             if (is_chain_tail(stage)) {
                 // Fixed tail-to-head feedback bypasses Stream Register and
@@ -714,7 +661,7 @@ public:
             }
         }
 
-        column_input_registers_ = std::move(next_inputs);
+        stage_inputs_ = std::move(next_inputs);
         stream_inputs_valid_ = false;
         for (std::size_t block = 0; block < kBlockCount; ++block) {
             auto requests = std::vector<VxmStaticQuantizer::Request>{};
@@ -773,8 +720,7 @@ public:
 
     bool datapath_idle() const
     {
-        for (const auto& token : column_input_registers_)
-            if (token) return false;
+        for (const auto& token : stage_inputs_) if (token) return false;
         for (const auto& pipeline : basic_pipelines_) {
             if (!pipeline.empty()) return false;
         }
@@ -901,6 +847,7 @@ public:
             case VxmSpecialAluOpcode::Exp: return "exp_lut";
             case VxmSpecialAluOpcode::Reciprocal: return "reciprocal_lut";
             case VxmSpecialAluOpcode::Rsqrt: return "rsqrt_lut";
+            case VxmSpecialAluOpcode::Log: return "log_lut";
             }
         }
         return "unknown";
@@ -918,7 +865,8 @@ public:
         if (const auto* special = std::get_if<VxmSpecialAluOpcode>(&operation)) {
             return (column == 1 && *special == VxmSpecialAluOpcode::Exp)
                 || (column == 3 && (*special == VxmSpecialAluOpcode::Reciprocal
-                                 || *special == VxmSpecialAluOpcode::Rsqrt));
+                                 || *special == VxmSpecialAluOpcode::Rsqrt
+                                 || *special == VxmSpecialAluOpcode::Log));
         }
         return false;
     }
@@ -930,10 +878,7 @@ public:
     }
 
 private:
-    // One statically scheduled register sits in front of every VALU column.
-    // Together these registers are the local VXM stream between adjacent
-    // column slices; they are intentionally not part of the global SR fabric.
-    struct ColumnStreamRegister {
+    struct Token {
         float value{0.0f};
         float original{0.0f};
         float auxiliary{0.0f};
@@ -941,12 +886,12 @@ private:
     };
 
     struct PendingFeedback {
-        ColumnStreamRegister token{};
+        Token token{};
         std::size_t destination_head{0};
     };
 
     struct ExecutionMetadata {
-        ColumnStreamRegister source{};
+        Token source{};
         VxmLaneAluInstruction instruction{};
     };
 
@@ -960,9 +905,7 @@ private:
 
     static void check_stage(std::size_t stage)
     {
-        if (stage >= kAluCount)
-            throw std::out_of_range(
-                "VXM ALU stage exceeds the configured physical column count");
+        if (stage >= kAluCount) throw std::out_of_range("VXM ALU stage is outside 0..15");
     }
 
     static bool is_stream(VxmLaneOperandKind kind)
@@ -991,18 +934,6 @@ private:
         }
         if (instruction.accumulator_reset && !instruction.accumulator_write) {
             throw std::invalid_argument("accumulator reset requires accumulator write");
-        }
-        if (instruction.accumulator_reset_first
-            && (!instruction.accumulator_reset
-                || !instruction.accumulator_write)) {
-            throw std::invalid_argument(
-                "first-repeat accumulator reset requires reset and write");
-        }
-        if (instruction.accumulator_emit_last
-            && (!instruction.accumulator_emit
-                || !instruction.accumulator_write)) {
-            throw std::invalid_argument(
-                "last-repeat accumulator emit requires emit and write");
         }
         if (instruction.local_scalar_write) {
             if (instruction.accumulator_write
@@ -1083,7 +1014,7 @@ private:
 
     void drain_feedback_holding_registers(
         const Configs& issued,
-        std::array<std::optional<ColumnStreamRegister>, kAluCount>& next_inputs)
+        std::array<std::optional<Token>, kAluCount>& next_inputs)
     {
         auto destination_used = std::array<bool, kAluCount>{};
         for (auto& holding : feedback_holding_registers_) {
@@ -1109,7 +1040,7 @@ private:
     {
         const auto feedback_ready =
             !instruction_uses_feedback(instruction)
-            || column_input_registers_[stage].has_value();
+            || stage_inputs_[stage].has_value();
         const auto stream_ready =
             (!is_stream(instruction.lhs.kind)
              && !is_stream(instruction.rhs.kind))
@@ -1124,7 +1055,7 @@ private:
             if (!issued[stage]) continue;
             executes[stage] = is_chain_head(stage)
                 ? head_operands_ready(*issued[stage], stage)
-                : column_input_registers_[stage].has_value();
+                : stage_inputs_[stage].has_value();
         }
         return executes;
     }
@@ -1143,8 +1074,7 @@ private:
             if (!instruction_emits(instruction)) continue;
 
             const auto downstream = stage + 1;
-            if (column_input_registers_[downstream].has_value()
-                && !executes[downstream]) {
+            if (stage_inputs_[downstream].has_value() && !executes[downstream]) {
                 throw std::logic_error(
                     "VXM static schedule collision: ALU"
                     + std::to_string(stage)
@@ -1161,8 +1091,8 @@ private:
         // The only input MUX selects this fixed Stream value or Immediate.
         if (operand.kind == VxmLaneOperandKind::Immediate) return operand.immediate;
         std::array<std::uint8_t, kStreamGroupBytes> bytes{};
-        const auto base = input_group_for_operand(stage, rhs_port, operand)
-            * kStreamGroupBytes;
+        const auto base = fixed_input_group_for_stage(stage, rhs_port)
+                        * kStreamGroupBytes;
         for (std::size_t byte = 0; byte < kStreamGroupBytes; ++byte) {
             bytes[byte] = stream_inputs_[base + byte];
         }
@@ -1193,8 +1123,7 @@ private:
         }
     }
 
-    float read_operand(const VxmLaneOperand& operand,
-                       const ColumnStreamRegister& token,
+    float read_operand(const VxmLaneOperand& operand, const Token& token,
                        std::size_t stage, bool rhs_port) const
     {
         switch (operand.kind) {
@@ -1260,8 +1189,7 @@ private:
 
     VxmChainDepth chain_depth_{VxmChainDepth::Eight};
     std::shared_ptr<VxmSpecialAlu> special_alu_;
-    std::array<std::optional<ColumnStreamRegister>, kAluCount>
-        column_input_registers_{};
+    std::array<std::optional<Token>, kAluCount> stage_inputs_{};
     std::array<BasicPipeline, kAluCount> basic_pipelines_{};
     std::array<SpecialPipeline, kAluCount> special_pipelines_{};
     std::array<std::optional<float>, kAluCount> accumulators_{};

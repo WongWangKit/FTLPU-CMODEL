@@ -127,11 +127,9 @@ function(ftlpu_generate_hardware_config input_json output_header)
         message(FATAL_ERROR
             "mxm.accum_contexts exceeds the supported 256 contexts")
     endif()
-    math(EXPR FTLPU_HW_VXM_COLUMN_REMAINDER "${FTLPU_HW_VXM_COLUMNS} % 8")
-    if(FTLPU_HW_VXM_COLUMNS LESS 16 OR
-       NOT FTLPU_HW_VXM_COLUMN_REMAINDER EQUAL 0)
+    if(NOT FTLPU_HW_VXM_COLUMNS EQUAL 16)
         message(FATAL_ERROR
-            "vxm.alus must be at least 16 and a multiple of 8")
+            "The develop VXM requires vxm.alus = 16 (two mirrored eight-stage chains)")
     endif()
 
     # MEM addresses occupy a contiguous power-of-two field in the ISA.

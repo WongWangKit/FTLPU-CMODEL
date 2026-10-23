@@ -22,9 +22,9 @@ provide a concrete target for dataflow scheduling and future compiler work.
 | MXM | Four 32 x 32 FP16 GEMM arrays, two per hemisphere |
 | MXM weights | Two peer buffers per supercell, selected by `IW`/`Compute` |
 | MXM decode | Selectable `Linear1x16` or activation-stationary `Native4x4` |
-| VXM | One central slice; JSON-configured independently scheduled column slices per lane (16 by default) |
+| VXM | One central slice; 16 physical ALUs per lane, two mirrored eight-stage chains sharing 8 ICU queues |
 | SXM | One four-tile slice per hemisphere for Transpose/Permute |
-| ICU | 208 MEM, 12 MXM, JSON-configured VXM compact-control (16 by default), 4 SXM, and 6 C2C/DMA queues |
+| ICU | 208 MEM, 12 MXM, 8 VXM compact-control, 4 SXM, and 6 C2C/DMA queues |
 
 The fixed full-chip topology is:
 

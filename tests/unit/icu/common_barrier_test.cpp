@@ -184,7 +184,7 @@ void physical_response_and_context_hold()
 struct DispatchFixture {
     InstructionControlUnit icu{};
     std::array<MemArrayModel, hw::kHemispheres> mem{MemArrayModel{}, MemArrayModel{}};
-    VxmSrSlice vxm{};
+    VxmSlice vxm{};
     std::array<SxmSlice, hw::kHemispheres> sxm{
         SxmSlice(SxmStreamPortMap::SameDirection(0, 0)),
         SxmSlice(SxmStreamPortMap::SameDirection(0, 0))};
@@ -252,10 +252,11 @@ void unsafe_boundary_is_rejected()
     auto internal = std::make_unique<TspSliceSystem>();
     internal->icu().configure_common_barriers(1, {{0, 1}}, {{1, {1}}});
     internal->icu().notify_common_mem_commit(1, 1);
-    internal->vxm_unit().datapath().fabric().registers().initialize_cell(
-        3, 0, 0, StreamId::East(0), StreamCell::Valid(1));
+    internal->vxm_unit().configure_input_buffer(0, 1);
+    VxmSlice::InputBuffer::GroupVector bundle{};
+    internal->vxm_unit().capture_stream_group(0, 0, bundle);
     require(!internal->common_barrier_resources_drained(),
-        "resource safety missed data in VXM internal ordinary SR");
+        "resource safety missed a captured VXM input bundle");
     rejects([&] { internal->tick(TspSliceSystem::LogSinks{}); });
 
     auto resume = std::make_unique<TspSliceSystem>();

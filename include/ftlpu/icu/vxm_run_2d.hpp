@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ftlpu/icu/fu_3d_codec.hpp"
-#include "ftlpu/vxm/sr_instruction.hpp"
+#include "ftlpu/vxm/compact_instruction.hpp"
 
 #include <array>
 #include <cstddef>
@@ -12,19 +12,19 @@
 namespace ftlpu {
 
 // A VXM functional instruction already owns its contiguous run length through
-// VxmSrInstruction::repeat_count. The ICU therefore carries only two
+// VxmLaneAluInstruction::repeat_count. The ICU therefore carries only two
 // outer launch counters. The normalized third coordinate is an implementation
 // detail used by the common queue engine and is never encoded as a VXM
 // counter.
 struct VxmIcuRun2DInstruction {
     IcuLoop3D loop{};
-    VxmSrCompactInstruction instruction{};
+    VxmCompactInstruction instruction{};
 
     static VxmIcuRun2DInstruction Run2D(
         std::size_t startCycle,
         std::array<std::size_t, 2> counts,
         std::array<std::size_t, 2> cycleStrides,
-        VxmSrCompactInstruction instruction)
+        VxmCompactInstruction instruction)
     {
         // startCycle remains a schedule coordinate. Physical packets use
         // zero and carry any queue-local launch delay in loop.wait_cycle.
@@ -110,7 +110,7 @@ inline VxmIcuRun2DInstruction decode_vxm_icu_run_2d_instruction(
             static_cast<std::size_t>(codec::read_unsigned(packet, 40, 16)) + 1},
         {static_cast<std::size_t>(codec::read_unsigned(packet, 56, 24)),
             static_cast<std::size_t>(codec::read_unsigned(packet, 80, 24))},
-        VxmSrCompactInstruction {
+        VxmCompactInstruction {
             codec::read_unsigned(packet, 104, 32)
                 | (codec::read_unsigned(packet, 136, 32) << 32),
             static_cast<std::uint32_t>(

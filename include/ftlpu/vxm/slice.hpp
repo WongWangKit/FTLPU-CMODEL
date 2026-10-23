@@ -19,9 +19,8 @@ class VxmSlice {
 public:
     static constexpr std::size_t kTileCount = hw::kTileRows;
     static constexpr std::size_t kRows = hw::kTileRows * hw::kLanesPerTile;
-    // Each physical VXM column owns one independent Slice instruction channel.
-    // A packet configures exactly one column; no implicit C(i+8) mirroring is
-    // performed by the Slice or Superlane decoder.
+    // Eight Slice instruction channels feed eight shared control queues.
+    // Superlane-local decode mirrors logical Ci onto physical C(i+8).
     static constexpr std::size_t kAluQueues =
         VxmSuperlaneInstructionControl::kStageCount;
 
@@ -61,6 +60,22 @@ public:
         input_group_sources_.fill(Hemisphere::East);
         output_block_destinations_.fill(Hemisphere::East);
         cycle_ = 0;
+        prepared_ = false;
+    }
+
+    // Epoch release must wait for queued configs, lane pipelines, and any
+    // captured input bundle, including data that has not launched yet.
+    bool idle() const
+    {
+        for (const auto& queue : instruction_queues_)
+            if (!queue.empty()) return false;
+        for (const auto& rows : instruction_rows_)
+            for (const auto& slot : rows)
+                if (slot) return false;
+        for (std::size_t tile = 0; tile < kTileCount; ++tile)
+            if (!input_buffers_[tile].empty() || !superlanes_[tile].idle())
+                return false;
+        return true;
     }
 
     void issue_south(
@@ -267,7 +282,7 @@ private:
     {
         if (alu >= kAluQueues) {
             throw std::out_of_range(
-                "VXM column control queue exceeds the configured physical column count");
+                "VXM shared ALU control queue is outside 0..7");
         }
     }
 
@@ -365,10 +380,7 @@ private:
                 const auto instruction =
                     superlanes_[tile].next_instruction(alu);
                 if (!instruction
-                    || alu % static_cast<std::size_t>(
-                           superlanes_[tile].chain_depth()) != 0
-                    || !head_configuration_uses_stream(
-                        superlanes_[tile], alu, *instruction)) {
+                    || !instruction_uses_stream(*instruction)) {
                     continue;
                 }
                 stream_consumers[alu] = true;
@@ -402,7 +414,13 @@ private:
                     if (!stream_consumers[alu]) {
                         continue;
                     }
-                    if (!executed[alu]) {
+                    const auto consumed =
+                        executed[alu]
+                        || executed[
+                            alu
+                            + VxmSuperlaneInstructionControl::
+                                kMirroredStageOffset];
+                    if (!consumed) {
                         throw std::logic_error(
                             "VXM compiler/static-schedule error: a scheduled stream consumer did not execute");
                     }
@@ -445,8 +463,7 @@ private:
             && operand.kind != VxmLaneOperandKind::StreamBFloat16) {
             return;
         }
-        const auto group =
-            VxmLane::input_group_for_operand(alu, rhs_port, operand);
+        const auto group = VxmLane::fixed_input_group_for_stage(alu, rhs_port);
         // RequiredStreams describes the fixed logical 32-byte VXM input
         // bundle.  The separately configured group source selects which MEM
         // hemisphere supplies that same-numbered westbound SR group.
@@ -468,14 +485,6 @@ private:
         return operand_uses_stream(instruction.lhs) || operand_uses_stream(instruction.rhs);
     }
 
-    static bool head_configuration_uses_stream(
-        const Superlane& superlane, std::size_t alu,
-        const VxmLaneAluInstruction& instruction)
-    {
-        if (instruction_uses_stream(instruction)) return true;
-        return false;
-    }
-
     void refresh_required_streams()
     {
         for (auto& required : required_streams_) {
@@ -485,10 +494,7 @@ private:
         for (std::size_t tile = 0; tile < kTileCount; ++tile) {
             auto required = RequiredStreams {};
             bool any = false;
-            const auto depth = static_cast<std::size_t>(
-                superlanes_[tile].chain_depth());
             for (std::size_t alu = 0; alu < kAluQueues; ++alu) {
-                if (alu % depth != 0) continue;
                 // A held Current Config takes precedence over a new packet
                 // merely passing this tile toward the shared Superlane queue.
                 auto instruction = superlanes_[tile].next_instruction(alu);
@@ -503,6 +509,12 @@ private:
                 }
                 mark_operand_streams(required, instruction->lhs, alu, false);
                 mark_operand_streams(required, instruction->rhs, alu, true);
+                const auto mirrored =
+                    alu + VxmSuperlaneInstructionControl::kMirroredStageOffset;
+                mark_operand_streams(
+                    required, instruction->lhs, mirrored, false);
+                mark_operand_streams(
+                    required, instruction->rhs, mirrored, true);
                 any = true;
             }
             if (any) {

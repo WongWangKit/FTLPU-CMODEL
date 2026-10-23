@@ -252,10 +252,8 @@ static_assert(kEastStreams + kWestStreams == kStreams);
 static_assert(kMxmRows == kMxmSupercellRows * kMxmSupercellsPerPlane);
 static_assert(kMxmColumns == kMxmSupercellColumns * kMxmSupercellsPerPlane);
 static_assert(kMxmInt8ColumnLoadStreamsPerCycle == 1);
-static_assert(kVxmAluCount >= 16,
-    "VXM must contain at least two eight-column directional chains");
-static_assert(kVxmAluCount % 8 == 0,
-    "VXM directional halves must grow in complete four-column groups");
+static_assert(kVxmAluCount == 16,
+    "The develop VXM uses two mirrored eight-stage chains");
 static_assert(kMxmLoadStreamsPerCycle <= kStreamsPerDirection);
 static_assert(kMxmInt8LoadStreamsPerCycle <= kStreamsPerDirection);
 static_assert(kMxmAccumulatorBlockCount > 0);

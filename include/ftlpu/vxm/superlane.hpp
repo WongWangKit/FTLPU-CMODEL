@@ -1,7 +1,6 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
-#include "ftlpu/vxm/column_slice.hpp"
 #include "ftlpu/vxm/compact_instruction.hpp"
 #include "ftlpu/vxm/lane.hpp"
 
@@ -19,31 +18,26 @@
 
 namespace ftlpu {
 
-// One shared control unit feeds all configured lanes in a Superlane. Every
-// configured physical column is an independently scheduled 8-lane VALU slice
-// with its own instruction FIFO, one-cycle decoder, Next/Current Config
-// Registers, and repeat counter. Chain depth selects the fixed local-register
-// topology used by those columns for a program phase.
+// One shared control unit feeds all configured lanes in a Superlane. The 16 physical
+// ALUs are split into two identical 8-stage datapaths. Physical stages Ci and
+// C(i+8) share one three-entry instruction FIFO, one-cycle decoder, Next/Current
+// Config Registers, and repeat counter. The local decoder mirrors the decoded
+// config; data and pipeline state remain independent in the two datapaths.
 class VxmSuperlaneInstructionControl {
 public:
-    static constexpr std::size_t kColumnCount = kVxmAluStageCount;
-    // Compatibility name used by existing diagnostics and tests. A control
-    // stage is now exactly one independently schedulable physical column.
-    static constexpr std::size_t kStageCount = kColumnCount;
+    static constexpr std::size_t kStageCount = kVxmAluStageCount / 2;
+    static constexpr std::size_t kMirroredStageOffset = kStageCount;
     static constexpr std::size_t kFifoDepth = 3;
     static constexpr std::size_t kDecodeLatency = 1;
     using Configs = VxmLaneConfigs;
     using ExecutionMask = VxmLaneExecutionMask;
 
-    VxmSuperlaneInstructionControl()
-        : VxmSuperlaneInstructionControl(
-            std::make_index_sequence<kColumnCount>{})
-    {
-    }
-
     void reset()
     {
-        for (auto& column : columns_) column.reset();
+        for (auto& queue : queues_) queue.clear();
+        for (auto& decoding : decoding_) decoding.reset();
+        for (auto& next : next_) next.reset();
+        for (auto& current : current_) current.reset();
     }
 
     void enqueue(std::size_t stage, VxmChainDepth depth,
@@ -55,73 +49,181 @@ public:
                 "VXM instruction repeat_count must be non-zero");
         }
 
-        columns_[stage].enqueue(depth, std::move(instruction));
+        auto run = ConfigRun{instruction, instruction.repeat_count, depth};
+        run.instruction.repeat_count = 1;
+        enqueue_pending(stage, std::move(run));
     }
 
     void enqueue_compact(
         std::size_t stage, VxmCompactInstruction instruction)
     {
         check_stage(stage);
-        columns_[stage].enqueue_compact(std::move(instruction));
+        enqueue_pending(stage, std::move(instruction));
     }
 
     Configs issue(VxmChainDepth active_depth)
     {
         auto configs = Configs{};
         for (std::size_t stage = 0; stage < kStageCount; ++stage) {
-            configs[stage] = columns_[stage].issue(active_depth);
+            // A compact packet placed in this Superlane's decoder during the
+            // previous control cycle is expanded here. The wide config never
+            // travels through the Slice instruction pipeline.
+            if (decoding_[stage]) {
+                if (next_[stage]) {
+                    throw std::logic_error(
+                        "VXM decoder completed while Next Config was occupied");
+                }
+                next_[stage] =
+                    decode_pending(stage, std::move(*decoding_[stage]));
+                decoding_[stage].reset();
+            }
+
+            // A prefetched configuration for a future 2/4/8 routing mode may
+            // finish decoding early, but it cannot become Current until the
+            // global chain-depth register switches to that mode.
+            if (!current_[stage] && next_[stage]
+                && next_[stage]->depth == active_depth) {
+                current_[stage] = std::move(next_[stage]);
+                next_[stage].reset();
+            }
+
+            // Prefetch and decode the following compact FIFO entry while
+            // Current executes. A newly-started decode is not visible until
+            // the next issue().
+            if (!decoding_[stage] && !next_[stage]
+                && !queues_[stage].empty()) {
+                decoding_[stage] = std::move(queues_[stage].front());
+                queues_[stage].pop_front();
+            }
+
+            if (current_[stage]) {
+                configs[stage] = current_[stage]->instruction;
+                configs[stage + kMirroredStageOffset] =
+                    instruction_for_physical_stage(
+                        stage + kMirroredStageOffset,
+                        current_[stage]->instruction);
+            }
         }
         return configs;
     }
 
+private:
+    struct ConfigRun {
+        VxmLaneAluInstruction instruction{};
+        std::size_t remaining{0};
+        VxmChainDepth depth{VxmChainDepth::Eight};
+    };
+
+    // Decoded ConfigRun is retained only for the legacy direct-Superlane
+    // helper API. The real Slice path stores VxmCompactInstruction.
+    using PendingInstruction =
+        std::variant<VxmCompactInstruction, ConfigRun>;
+
+    void enqueue_pending(
+        std::size_t stage, PendingInstruction instruction)
+    {
+        if (queues_[stage].size() >= kFifoDepth) {
+            throw std::overflow_error(
+                "VXM Superlane Config FIFO overflow: compiler scheduled "
+                "more than 3 queued entries for one ALU stage");
+        }
+        queues_[stage].push_back(std::move(instruction));
+    }
+
+    static ConfigRun decode_pending(
+        std::size_t stage, PendingInstruction pending)
+    {
+        if (auto* decoded = std::get_if<ConfigRun>(&pending)) {
+            return std::move(*decoded);
+        }
+        auto decoded = VxmCompactInstructionCodec::decode(
+            stage, std::get<VxmCompactInstruction>(pending));
+        const auto repeat_count = decoded.instruction.repeat_count;
+        auto run = ConfigRun{
+            std::move(decoded.instruction),
+            repeat_count,
+            decoded.chain_depth};
+        run.instruction.repeat_count = 1;
+        return run;
+    }
+
+public:
+
     void consume(const ExecutionMask& executed)
     {
         for (std::size_t stage = 0; stage < kStageCount; ++stage) {
-            columns_[stage].consume(executed[stage]);
+            // The pair shares one repeat counter. A cycle consumes one config
+            // entry when either physical copy accepts its token. Normally both
+            // copies execute in lockstep; accepting either also supports a
+            // partially-filled final token wave.
+            if (!executed[stage]
+                && !executed[stage + kMirroredStageOffset]) {
+                continue;
+            }
+            if (!current_[stage] || current_[stage]->remaining == 0) {
+                throw std::logic_error(
+                    "VXM consumed an empty Current Config Register");
+            }
+            if (--current_[stage]->remaining == 0) {
+                current_[stage].reset();
+            }
         }
     }
 
     bool idle() const
     {
-        for (const auto& column : columns_)
-            if (!column.idle()) return false;
+        for (const auto& current : current_) if (current) return false;
+        for (const auto& next : next_) if (next) return false;
+        for (const auto& decoding : decoding_) if (decoding) return false;
+        for (const auto& queue : queues_) if (!queue.empty()) return false;
         return true;
     }
 
     std::size_t remaining_executions(std::size_t stage) const
     {
         check_stage(stage);
-        return columns_[stage].remaining_executions();
+        std::size_t total = current_[stage] ? current_[stage]->remaining : 0;
+        if (next_[stage]) total += next_[stage]->remaining;
+        if (decoding_[stage]) {
+            total += pending_remaining(stage, *decoding_[stage]);
+        }
+        for (const auto& pending : queues_[stage]) {
+            total += pending_remaining(stage, pending);
+        }
+        return total;
     }
 
     std::size_t remaining_in_current(std::size_t stage) const
     {
         check_stage(stage);
-        return columns_[stage].remaining_in_current();
+        return current_[stage] ? current_[stage]->remaining : 0;
     }
 
     std::size_t config_entry_count(std::size_t stage) const
     {
         check_stage(stage);
-        return columns_[stage].config_entry_count();
+        return queues_[stage].size()
+            + (decoding_[stage] ? 1 : 0)
+            + (next_[stage] ? 1 : 0)
+            + (current_[stage] ? 1 : 0);
     }
 
     std::size_t fifo_entry_count(std::size_t stage) const
     {
         check_stage(stage);
-        return columns_[stage].fifo_entry_count();
+        return queues_[stage].size();
     }
 
     bool decoding(std::size_t stage) const
     {
         check_stage(stage);
-        return columns_[stage].decoding();
+        return decoding_[stage].has_value();
     }
 
     bool next_config_ready(std::size_t stage) const
     {
         check_stage(stage);
-        return columns_[stage].next_config_ready();
+        return next_[stage].has_value();
     }
 
     ExecutionMask feedback_capture_mask(VxmChainDepth depth) const
@@ -130,7 +232,18 @@ public:
         const auto length = static_cast<std::size_t>(depth);
         for (std::size_t stage = 0; stage < kStageCount; ++stage) {
             if (stage % length != 0) continue;
-            mask[stage] = columns_[stage].feedback_capture(depth);
+            const ConfigRun* run = nullptr;
+            if (next_[stage] && next_[stage]->depth == depth) {
+                run = &*next_[stage];
+            } else if (current_[stage]
+                       && current_[stage]->depth == depth) {
+                run = &*current_[stage];
+            }
+            mask[stage] =
+                run
+                && run->instruction.lhs.kind
+                    == VxmLaneOperandKind::Feedback;
+            mask[stage + kMirroredStageOffset] = mask[stage];
         }
         return mask;
     }
@@ -139,7 +252,15 @@ public:
         std::size_t stage) const
     {
         check_stage(stage);
-        return columns_[stage].next_instruction();
+        if (current_[stage]) return current_[stage]->instruction;
+        if (next_[stage]) return next_[stage]->instruction;
+        if (decoding_[stage]) {
+            return pending_instruction(stage, *decoding_[stage]);
+        }
+        if (!queues_[stage].empty()) {
+            return pending_instruction(stage, queues_[stage].front());
+        }
+        return std::nullopt;
     }
 
     bool configuration_will_issue(
@@ -147,25 +268,80 @@ public:
         VxmChainDepth active_depth) const
     {
         check_stage(stage);
-        return columns_[stage].configuration_will_issue(active_depth);
+        if (current_[stage]) {
+            return true;
+        }
+        if (next_[stage]) {
+            return next_[stage]->depth == active_depth;
+        }
+        if (decoding_[stage]) {
+            return pending_depth(stage, *decoding_[stage])
+                == active_depth;
+        }
+        return false;
+    }
+
+    static VxmLaneAluInstruction instruction_for_physical_stage(
+        std::size_t physical_stage,
+        VxmLaneAluInstruction instruction)
+    {
+        if (physical_stage >= kVxmAluStageCount) {
+            throw std::out_of_range(
+                "VXM physical ALU stage is outside 0..15");
+        }
+        if (instruction.output_stream) {
+            instruction.output_stream =
+                VxmLane::fixed_output_stream_for_block(
+                    VxmLane::block_for_stage(physical_stage));
+        }
+        return instruction;
     }
 
 private:
-    template<std::size_t... Columns>
-    explicit VxmSuperlaneInstructionControl(
-        std::index_sequence<Columns...>)
-        : columns_ {VxmColumnSlice {Columns}...}
-    {
-    }
-
     static void check_stage(std::size_t stage)
     {
         if (stage >= kStageCount) {
-            throw std::out_of_range("VXM control column exceeds the configured physical column count");
+            throw std::out_of_range("VXM control stage is outside 0..7");
         }
     }
 
-    std::array<VxmColumnSlice, kColumnCount> columns_;
+    static std::size_t pending_remaining(
+        std::size_t stage, const PendingInstruction& pending)
+    {
+        if (const auto* decoded = std::get_if<ConfigRun>(&pending)) {
+            return decoded->remaining;
+        }
+        return VxmCompactInstructionCodec::decode(
+            stage, std::get<VxmCompactInstruction>(pending))
+            .instruction.repeat_count;
+    }
+
+    static VxmChainDepth pending_depth(
+        std::size_t stage,
+        const PendingInstruction& pending)
+    {
+        if (const auto* decoded = std::get_if<ConfigRun>(&pending)) {
+            return decoded->depth;
+        }
+        return VxmCompactInstructionCodec::decode(
+            stage, std::get<VxmCompactInstruction>(pending))
+            .chain_depth;
+    }
+
+    static VxmLaneAluInstruction pending_instruction(
+        std::size_t stage, const PendingInstruction& pending)
+    {
+        if (const auto* decoded = std::get_if<ConfigRun>(&pending)) {
+            return decoded->instruction;
+        }
+        return VxmCompactInstructionCodec::decode(
+            stage, std::get<VxmCompactInstruction>(pending)).instruction;
+    }
+
+    std::array<std::deque<PendingInstruction>, kStageCount> queues_{};
+    std::array<std::optional<PendingInstruction>, kStageCount> decoding_{};
+    std::array<std::optional<ConfigRun>, kStageCount> next_{};
+    std::array<std::optional<ConfigRun>, kStageCount> current_{};
 };
 
 class VxmSuperlane {
@@ -251,6 +427,11 @@ public:
     {
         check_control_stage(alu);
         lanes_[0]->validate_broadcast_instruction(alu, instruction);
+        lanes_[0]->validate_broadcast_instruction(
+            alu + VxmSuperlaneInstructionControl::kMirroredStageOffset,
+            VxmSuperlaneInstructionControl::instruction_for_physical_stage(
+                alu + VxmSuperlaneInstructionControl::kMirroredStageOffset,
+                instruction));
         instruction_control_.enqueue(
             alu, lanes_[0]->chain_depth(), std::move(instruction));
     }
@@ -261,6 +442,12 @@ public:
     {
         check_control_stage(alu);
         lanes_[0]->validate_broadcast_instruction(depth, alu, instruction);
+        lanes_[0]->validate_broadcast_instruction(
+            depth,
+            alu + VxmSuperlaneInstructionControl::kMirroredStageOffset,
+            VxmSuperlaneInstructionControl::instruction_for_physical_stage(
+                alu + VxmSuperlaneInstructionControl::kMirroredStageOffset,
+                instruction));
         instruction_control_.enqueue(alu, depth, std::move(instruction));
     }
 
@@ -268,8 +455,9 @@ public:
         std::size_t alu, VxmCompactInstruction instruction)
     {
         check_control_stage(alu);
-        // Decode once here to validate this physical column. The packet itself
-        // remains compact in the column-local control queue.
+        // Decode once here only to validate the mirrored physical placement.
+        // The packet itself remains compact and is stored only in the shared
+        // logical control queue.
         const auto decoded = VxmCompactInstructionCodec::decode(
             alu, instruction);
         if (decoded.chain_depth != lanes_[0]->chain_depth()
@@ -282,6 +470,12 @@ public:
             // transition may still use the decoded packet for tail feedback.
             set_chain_depth(decoded.chain_depth);
         }
+        const auto mirrored_stage =
+            alu + VxmSuperlaneInstructionControl::kMirroredStageOffset;
+        lanes_[0]->validate_broadcast_instruction(
+            decoded.chain_depth, mirrored_stage,
+            VxmSuperlaneInstructionControl::instruction_for_physical_stage(
+                mirrored_stage, decoded.instruction));
         instruction_control_.enqueue_compact(
             alu, std::move(instruction));
     }
@@ -383,7 +577,6 @@ public:
         return *lanes_[index];
     }
     std::size_t cycle() const { return cycle_; }
-    VxmChainDepth chain_depth() const { return lanes_[0]->chain_depth(); }
     bool idle() const
     {
         if (pending_chain_depth_) return false;
@@ -433,7 +626,8 @@ private:
     {
         if (stage >= VxmSuperlaneInstructionControl::kStageCount) {
             throw std::out_of_range(
-                "VXM Superlane column exceeds the configured physical column count");
+                "VXM Superlane owns logical control stages 0..7; "
+                "Ci is mirrored to physical C(i+8)");
         }
     }
 

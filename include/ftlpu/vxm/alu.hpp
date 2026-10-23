@@ -3,7 +3,6 @@
 #include "ftlpu/vxm/data_format.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <optional>
 #include <stdexcept>

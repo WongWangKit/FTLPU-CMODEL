@@ -176,12 +176,11 @@ slice_depth      = 2 × 8192 = 16384 rows
 
 ### VXM
 
-`vxm.alus` 表示 VXM 每个 lane 的独立可调度物理列总数。构建时会据此生成
-`hw::kVxmAluCount`，并同时确定 VALU/SR 数组、VXM ICU queue 数和路由长度。该值必须
-至少为 16 且为 8 的倍数：每个方向至少保留一条完整 8 列链，链内的
-Basic/Exp/Basic/Reciprocal-Rsqrt 能力按四列一组重复。默认配置为 16，即
-`C0..C15`；改为 24 时物理资源和 ICU queue 自动变为 `C0..C23`。Software 使用同一
-JSON 后，`ftlpu.target` 的 `vxm_alus` 与之保持一致。
+`vxm.alus` 表示每个 lane 的物理 ALU 总数。当前 develop 链式结构固定为 16，
+对应两条镜像八级数据通路和 8 条共享 ICU queue；Ci 与 C(i+8) 共用配置。
+此值不等于 ICU queue 数量。CMake 配置与 C++ 编译均拒绝非 16 配置。
+2/4/8 是硬件 chain depth，不能通过更改此字段改变。原可变物理列数的显式 SR
+VALU 结构已备份至 `valu` 分支。
 
 ## 创建和修改配置
 

@@ -55,10 +55,10 @@ void test_feedback_2_to_8()
                 std::move(event)));
         };
 
-    // Two compact packets are sent on every physical column channel. The old
-    // depth-2 configuration produces four values per 8-column chain; the
-    // following depth-8 configuration consumes those values through the fixed
-    // Feedback network.
+    // Two compact packets are sent on every logical Slice instruction
+    // channel. The old depth-2 configuration produces four values per
+    // physical 8-ALU block; the following depth-8 configuration consumes
+    // those values through the fixed Feedback network.
     for (std::size_t stage = 0; stage < VxmSlice::kAluQueues; ++stage) {
         auto producer = stage % 2 == 0
             ? VxmLaneAluInstruction{
@@ -72,7 +72,7 @@ void test_feedback_2_to_8()
             VxmCompactInstructionCodec::encode(
                 stage, VxmChainDepth::Two, producer));
 
-        auto consumer = stage % 8 == 0
+        auto consumer = stage == 0
             ? VxmLaneAluInstruction{
                 VxmAluOpcode::Bypass,
                 VxmLaneOperand::Feedback()}
@@ -80,10 +80,8 @@ void test_feedback_2_to_8()
                 VxmAluOpcode::Bypass,
                 VxmLaneOperand::Previous()};
         consumer.repeat_count = 4;
-        if (stage % 8 == 7) {
-            consumer.output_stream =
-                VxmLane::fixed_output_stream_for_block(
-                    VxmLane::block_for_stage(stage));
+        if (stage == 7) {
+            consumer.output_stream = 6;
             consumer.output_type = VxmCastTarget::Float32;
         }
         slice.issue_south(
@@ -191,7 +189,6 @@ void test_missing_bundle_is_schedule_error()
     }
     assert(schedule_error);
 }
-
 
 }
 

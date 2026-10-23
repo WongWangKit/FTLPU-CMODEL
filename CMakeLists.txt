@@ -31,6 +31,15 @@ enable_testing()
 function(ftlpu_add_test target source test_name)
     add_executable(${target} ${source})
     target_link_libraries(${target} PRIVATE ftlpu_cmodel)
+    # The imported VXM hardware tests use assert for cycle and numeric checks.
+    # Keep those checks active in the normal Release regression build too.
+    if(target MATCHES "^vxm_")
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${target} PRIVATE -UNDEBUG)
+        endif()
+    endif()
     target_include_directories(
         ${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/support)
     add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${target}>)
@@ -88,18 +97,6 @@ ftlpu_add_test(vxm_alu_test tests/unit/vxm/alu_test.cpp
     unit.vxm.alu unit vxm fast)
 ftlpu_add_test(vxm_lane_test tests/unit/vxm/lane_test.cpp
     unit.vxm.lane unit vxm fast)
-ftlpu_add_test(vxm_column_slice_test tests/unit/vxm/column_slice_test.cpp
-    unit.vxm.column_slice unit vxm fast)
-ftlpu_add_test(vxm_sr_instruction_test tests/unit/vxm/sr_instruction_test.cpp
-    unit.vxm.sr_instruction unit vxm fast)
-ftlpu_add_test(vxm_stream_fabric_test tests/unit/vxm/stream_fabric_test.cpp
-    unit.vxm.stream_fabric unit vxm fast)
-ftlpu_add_test(vxm_sr_datapath_test tests/unit/vxm/sr_datapath_test.cpp
-    unit.vxm.sr_datapath unit vxm fast)
-ftlpu_add_test(vxm_sr_swiglu_replay_test tests/unit/vxm/sr_swiglu_replay_test.cpp
-    unit.vxm.sr_swiglu_replay unit vxm fast)
-ftlpu_add_test(vxm_sr_slice_test tests/unit/vxm/sr_slice_test.cpp
-    unit.vxm.sr_slice unit vxm fast)
 ftlpu_add_test(vxm_superlane_test tests/unit/vxm/superlane_test.cpp
     unit.vxm.superlane unit vxm fast)
 ftlpu_add_test(vxm_slice_test tests/unit/vxm/slice_test.cpp
@@ -114,6 +111,9 @@ ftlpu_add_test(vxm_special_alu_test tests/unit/vxm/special_alu_test.cpp
     unit.vxm.special_alu unit vxm fast)
 ftlpu_add_test(vxm_static_quantizer_test tests/unit/vxm/static_quantizer_test.cpp
     unit.vxm.static_quantizer unit vxm fast)
+
+ftlpu_add_test(vxm_log_test tests/unit/vxm/log_test.cpp
+    unit.vxm.log unit vxm fast)
 
 ftlpu_add_test(sxm_test tests/unit/sxm/slice_test.cpp
     unit.sxm.slice unit sxm fast)

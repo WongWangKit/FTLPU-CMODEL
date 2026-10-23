@@ -14,7 +14,6 @@
 #include "ftlpu/sxm/slice.hpp"
 #include "ftlpu/vxm/compact_instruction.hpp"
 #include "ftlpu/vxm/slice.hpp"
-#include "ftlpu/vxm/sr_slice.hpp"
 
 #include <algorithm>
 #include <array>
@@ -98,7 +97,7 @@ struct IcuMacroQueueFrontendStatistics {
 
 class InstructionControlUnit {
 public:
-    static constexpr std::size_t kVxmQueues = VxmSrSlice::kAluQueues;
+    static constexpr std::size_t kVxmQueues = VxmSlice::kAluQueues;
     static constexpr std::size_t kMemQueuesPerHemisphere =
         hw::kMemSliceColumns * hw::kMemBanksPerSlice;
     static constexpr std::size_t kMxmQueuesPerHemisphere =
@@ -131,7 +130,7 @@ public:
 
     using Repeat = IcuRepeat;
     using VxmIcu = DistributedIcuQueue<
-        VxmSrCompactInstruction,
+        VxmCompactInstruction,
         hw::kIcuVxmInstructionBits,
         hw::kIcuVxmImemDepth,
         hw::kIcuVxmIqDepth,
@@ -422,7 +421,7 @@ public:
     }
     void enqueue_vxm(
         std::size_t alu,
-        VxmSrCompactInstruction instruction)
+        VxmCompactInstruction instruction)
     {
         check_vxm_queue(alu);
         vxm_queues_[alu].push_vxm_run_2d(
@@ -445,9 +444,7 @@ public:
     {
         enqueue_vxm(
             alu,
-            VxmSrCompactInstructionCodec::encode(
-                lower_legacy_vxm_to_explicit_sr(
-                    alu, depth, instruction)));
+            VxmCompactInstructionCodec::encode(alu, depth, instruction));
     }
 
     void enqueue_vxm_nop(std::size_t alu, std::size_t cycles)
@@ -464,7 +461,7 @@ public:
 
     void enqueue_vxm_stream_nd(std::size_t alu,
         IcuVxmStreamNdSchedule schedule,
-        VxmSrCompactInstruction instruction)
+        VxmCompactInstruction instruction)
     {
         check_vxm_queue(alu);
         vxm_queues_[alu].push_vxm_stream_nd(
@@ -1337,11 +1334,11 @@ public:
     {
         return barrier_events_.size();
     }
-    void dispatch_vxm(VxmSrSlice& vxm, std::ostream* os = nullptr)
+    void dispatch_vxm(VxmSlice& vxm, std::ostream* os = nullptr)
     {
         log_cycle_header(os);
         if (common_barriers_.barrier_due()
-            && (!vxm.idle() || !vxm.datapath().fabric().registers().empty()))
+            && !vxm.idle())
             throw StaticScheduleError("unsafe common barrier: VXM has in-flight computation");
         compute_enabled_ = common_barriers_.begin_cycle(program_issue_enabled_);
         bool any = false;
@@ -1364,7 +1361,7 @@ public:
     }
     void dispatch(
         std::array<MemArrayModel, hw::kHemispheres>& mems,
-        VxmSrSlice& vxm,
+        VxmSlice& vxm,
         std::array<SxmSlice, hw::kHemispheres>& sxms,
         std::array<Mxm, kMxmQueues>& mxms,
         std::ostream* os = nullptr,
@@ -1985,15 +1982,18 @@ private:
     }
 
     static std::string describe_vxm(
-        std::size_t,
-        const VxmSrCompactInstruction& packet)
+        std::size_t stage,
+        const VxmCompactInstruction& packet)
     {
-        const auto instruction =
-            VxmSrCompactInstructionCodec::decode(packet);
+        const auto decoded =
+            VxmCompactInstructionCodec::decode(stage, packet);
+        const auto& instruction = decoded.instruction;
         std::ostringstream os;
         os << VxmLane::operation_name(instruction.operation)
-           << " result_sr=" << static_cast<std::size_t>(instruction.result_sr)
-           << " repeat=" << instruction.repeat_count;
+           << " depth=" << static_cast<std::size_t>(decoded.chain_depth);
+        if (instruction.output_stream.has_value()) {
+            os << " output=" << *instruction.output_stream;
+        }
         return os.str();
     }
 

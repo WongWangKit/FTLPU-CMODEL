@@ -31,9 +31,8 @@ inline constexpr std::size_t kMxmsPerHemisphere = @FTLPU_HW_PHYSICAL_MXMS@;
 inline constexpr bool kMxmSupportsNative4x4 = @FTLPU_HW_MXM_SUPPORTS_NATIVE4X4@;
 inline constexpr bool kMxmSupportsLinear1x16 = @FTLPU_HW_MXM_SUPPORTS_LINEAR1X16@;
 
-// JSON `vxm.alus` is the total number of independently schedulable VALU
-// columns. The two directional halves each contain at least eight columns and
-// grow in four-column groups with the same repeating ALU capabilities.
+// JSON `vxm.alus` is the physical ALU count per lane. The restored develop
+// VXM requires 16 physical ALUs; eight ICU queues control the mirrored pairs.
 inline constexpr std::size_t kVxmColumns = @FTLPU_HW_VXM_COLUMNS@;
 
 inline constexpr std::array<std::string_view, @FTLPU_STREAM_FABRIC_COUNT@>

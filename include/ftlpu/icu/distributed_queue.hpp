@@ -760,7 +760,7 @@ public:
                     MxmControlInstruction>)
             || (QueueRole == IcuQueueRole::Vxm
                 && std::is_same_v<FuncInstruction,
-                    VxmSrCompactInstruction>)
+                    VxmCompactInstruction>)
             || (is_sxm_queue_role(QueueRole)
                 && std::is_same_v<FuncInstruction, SxmInstruction>)
             || ((QueueRole == IcuQueueRole::C2cTx
@@ -1389,7 +1389,7 @@ public:
     }
 
     void push_vxm_run_2d(VxmIcuRun2DInstruction instruction)
-        requires (std::is_same_v<FuncInstruction, VxmSrCompactInstruction>
+        requires (std::is_same_v<FuncInstruction, VxmCompactInstruction>
             && QueueRole == IcuQueueRole::Vxm)
     {
         append_3d_packet(
@@ -1491,7 +1491,7 @@ public:
             throw std::invalid_argument(
                 "legacy VXM_STREAM_ND is not encoded on FU raw-word queues");
         } else if constexpr (!std::is_same_v<FuncInstruction,
-                          VxmSrCompactInstruction>) {
+                          VxmCompactInstruction>) {
             throw std::invalid_argument(
                 "VXM_STREAM_ND is valid only on a VXM ICU queue");
         } else {
@@ -3913,7 +3913,7 @@ private:
         constexpr bool isMem =
             std::is_same_v<FuncInstruction, MemInstruction>;
         constexpr bool isVxm =
-            std::is_same_v<FuncInstruction, VxmSrCompactInstruction>;
+            std::is_same_v<FuncInstruction, VxmCompactInstruction>;
         constexpr bool isSxm =
             std::is_same_v<FuncInstruction, SxmInstruction>;
         if (active_stream_nd_.empty()

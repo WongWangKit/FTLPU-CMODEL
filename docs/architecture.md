@@ -234,37 +234,38 @@ GEMM engine or runtime helper.
 
 ## 6. VXM
 
-The central VXM contains four superlanes, eight lanes per superlane, and
-`vxm.alus` physical ALUs per lane (16 by default). Each physical column
-`C0..C(N-1)` is an independently
-schedulable column slice with its own compact ICU queue, decoder, current/next
-configuration registers, and repeat state. The decoded configuration is still
-broadcast across all physical lanes in a superlane. Ordinary stream-register
-columns are interleaved with the VALU columns: eastbound values encounter
-`C0..C(N-1)`, while westbound values encounter them in reverse order. A VALU instruction
-names its source and destination SRs. Values on SRs that the VALU does not
-consume continue through the normal passive SR link.
+The active VXM is imported from develop at `803bc8f`. Each lane contains
+16 physical ALUs organized as two mirrored eight-stage datapaths. Eight ICU
+queues configure the logical stages C0..C7; Ci and C(i+8) share a three-entry
+FIFO, one-cycle decoder, Next/Current Config Registers and repeat counter.
+The decoded configuration is broadcast across the lanes of each superlane;
+the two datapaths retain independent data and pipeline state.
 
-Supported opcodes are:
+The hardware uses selectable 2/4/8-stage chains with Previous, Original,
+Auxiliary, Accumulator, Feedback, immediate and fixed FP16/BF16 stream-group
+operands. These selectors and chain depth are real hardware controls. Ordinary
+SRs are not interleaved between independently scheduled ALU columns. Input
+bundles collect the required fixed stream groups before issue. Group-source
+muxes select the supplying hemisphere, and output-block muxes select the
+destination hemisphere; unconsumed external streams use the one-cycle passive
+bridge across VXM.
 
-```text
-Bypass Add Subtract Multiply Negate Max Exp Reciprocal Rsqrt
-```
+The 96-bit compact config contains operation, operand selectors, precision,
+cast, accumulator flags, chain depth, repeat count and one FP32 immediate.
+The queue identifies the logical stage; there are no explicit operand/result
+SR-number fields. RUN_2D retains two relative launch loops and launches this
+compact config without expanding its repeat into individual FU instructions.
 
-Operands use fixed stream groups, previous/original/auxiliary values,
-accumulator state and FP32 immediates. `Previous`, `Original`, `Auxiliary`,
-`Feedback`, and chain depth are compiler concepts rather than hardware muxes:
-lowering assigns ordinary SR numbers to every dependency before encoding the
-ICU instruction. Each 16-bit operand names the low byte SR of an aligned pair,
-and the result SR names the first byte of the cast result. Each of the sixteen 2-byte input groups can select
-the east or west hemisphere; each two-stage output block has a fixed stream
-pair and a configurable destination hemisphere. Results can remain local or
-be emitted as FP16, BF16, INT8, or FP32 stream data.
+Supported operations are Bypass, Add, Subtract, Multiply, Negate, Max, Exp,
+Reciprocal, Rsqrt and Log. The special operations use programmable LUTs;
+Log uses the reciprocal/rsqrt-capable stages. FMA/FMS remain unsupported.
+Quantization, RMSNorm, Softmax and SwiGLU are instruction graphs.
 
-Quantization, dequantization, SwiGLU, softmax, and RMSNorm are instruction
-graphs rather than monolithic opcodes. The VXM also models LUT-backed Exp,
-Reciprocal, and Rsqrt units, local scalar capture, recurrent accumulation, and
-the static output quantizer used by those graphs.
+`vxm.alus` must equal 16 for this architecture. The previous explicit-SR VALU
+implementation is preserved on branch `valu` at `bc84188`. Programs generated
+for that ISA must be re-lowered for this chain ISA; the identical packet width
+does not imply binary compatibility. Existing Software explicit-SR binaries
+must not be interpreted as chain configs.
 
 ## 7. SXM
 

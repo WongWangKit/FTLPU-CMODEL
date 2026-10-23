@@ -43,20 +43,14 @@ bool same_vxm(const ftlpu::VxmLaneAluInstruction& lhs, const ftlpu::VxmLaneAluIn
     return lhs.operation == rhs.operation
         && lhs.lhs.kind == rhs.lhs.kind
         && lhs.lhs.immediate == rhs.lhs.immediate
-        && lhs.lhs.stream_group == rhs.lhs.stream_group
-        && lhs.lhs.stream_source == rhs.lhs.stream_source
         && lhs.rhs.kind == rhs.rhs.kind
         && lhs.rhs.immediate == rhs.rhs.immediate
-        && lhs.rhs.stream_group == rhs.rhs.stream_group
-        && lhs.rhs.stream_source == rhs.rhs.stream_source
         && lhs.precision == rhs.precision
         && lhs.output_type == rhs.output_type
         && lhs.output_stream == rhs.output_stream
         && lhs.accumulator_reset == rhs.accumulator_reset
         && lhs.accumulator_write == rhs.accumulator_write
         && lhs.accumulator_emit == rhs.accumulator_emit
-        && lhs.accumulator_reset_first == rhs.accumulator_reset_first
-        && lhs.accumulator_emit_last == rhs.accumulator_emit_last
         && lhs.repeat_count == rhs.repeat_count
         && lhs.local_scalar_write == rhs.local_scalar_write;
 }
@@ -321,108 +315,35 @@ bool verify_mxm_codec()
 
 bool verify_vxm_codec()
 {
-    constexpr auto queue = std::size_t {1};
-    constexpr auto depth = ftlpu::VxmChainDepth::Two;
-    auto instruction = ftlpu::VxmLaneAluInstruction {};
-    instruction.operation = ftlpu::VxmAluOpcode::Multiply;
-    instruction.lhs = ftlpu::VxmLaneOperand::Previous();
-    instruction.rhs = ftlpu::VxmLaneOperand::Imm(0.125f);
-    instruction.precision = ftlpu::VxmAluPrecision::Float32;
-    instruction.output_type = ftlpu::VxmCastTarget::BFloat16;
-    instruction.output_stream =
-        ftlpu::VxmLane::fixed_output_stream_for_block(
-            ftlpu::VxmLane::block_for_stage(queue));
-    instruction.repeat_count = 7;
-
-    const auto encoded = ftlpu::isa::encode_vxm_instruction(
-        queue, depth, instruction);
-    const auto decoded = ftlpu::isa::decode_vxm_instruction(queue, encoded);
-    if (!require(
-            std::get<ftlpu::VxmAluOpcode>(decoded.operation)
-                    == ftlpu::VxmAluOpcode::Multiply
-                && decoded.lhs.kind
-                    == ftlpu::VxmSrOperandKind::StreamFloat16
-                && decoded.lhs.sr == ftlpu::StreamId::East(0).packed()
-                && decoded.rhs.kind
-                    == ftlpu::VxmSrOperandKind::Immediate
-                && decoded.rhs.immediate == 0.125f
-                && decoded.result_sr
-                    == ftlpu::StreamId::East(0).packed()
-                && decoded.repeat_count == 7,
-            "VXM explicit-SR instruction legalization failed")) {
-        return false;
+    static_assert(ftlpu::VxmCompactInstructionCodec::kEncodedBits == 96);
+    for (auto depth : {ftlpu::VxmChainDepth::Two,
+                      ftlpu::VxmChainDepth::Four, ftlpu::VxmChainDepth::Eight}) {
+        auto instruction = ftlpu::VxmLaneAluInstruction{};
+        instruction.operation = ftlpu::VxmAluOpcode::Multiply;
+        instruction.lhs = ftlpu::VxmLaneOperand::Previous();
+        instruction.rhs = ftlpu::VxmLaneOperand::Imm(0.125f);
+        instruction.precision = ftlpu::VxmAluPrecision::Float32;
+        instruction.output_type = ftlpu::VxmCastTarget::BFloat16;
+        instruction.repeat_count = 7;
+        const auto packet = ftlpu::isa::encode_vxm_instruction(1, depth, instruction);
+        const auto decoded = ftlpu::isa::decode_vxm_instruction(1, packet);
+        if (!require(decoded.chain_depth == depth
+                && same_vxm(instruction, decoded.instruction),
+                "VXM chain config did not round trip")) return false;
     }
-
-    auto reduction = ftlpu::VxmLaneAluInstruction {};
-    reduction.operation = ftlpu::VxmAluOpcode::Add;
-    reduction.lhs = ftlpu::VxmLaneOperand::Previous();
-    reduction.rhs = ftlpu::VxmLaneOperand::Acc();
-    reduction.precision = ftlpu::VxmAluPrecision::Float32;
-    reduction.output_type = ftlpu::VxmCastTarget::BFloat16;
-    reduction.output_stream =
-        ftlpu::VxmLane::fixed_output_stream_for_block(
-            ftlpu::VxmLane::block_for_stage(queue));
-    reduction.accumulator_reset = true;
-    reduction.accumulator_write = true;
-    reduction.accumulator_emit = true;
-    reduction.accumulator_reset_first = true;
-    reduction.accumulator_emit_last = true;
-    reduction.repeat_count = 32;
-    const auto reductionPacket = ftlpu::isa::encode_vxm_instruction(
-        queue, depth, reduction);
-    const auto decodedReduction =
-        ftlpu::isa::decode_vxm_instruction(queue, reductionPacket);
-    if (!require(decodedReduction.accumulator_reset_first
-            && decodedReduction.accumulator_emit_last
-            && decodedReduction.repeat_count == 32,
-            "VXM terminal accumulator controls were not preserved")) {
-        return false;
-    }
-
-    auto selected_streams = ftlpu::VxmLaneAluInstruction {};
-    selected_streams.operation = ftlpu::VxmAluOpcode::Multiply;
-    selected_streams.lhs =
-        ftlpu::VxmLaneOperand::StreamBFloat16(
-            1.0f, 3, ftlpu::VxmStreamSource::East);
-    selected_streams.rhs =
-        ftlpu::VxmLaneOperand::StreamFloat16(
-            1.0f, 7, ftlpu::VxmStreamSource::West);
-    const auto selected_packet = ftlpu::isa::encode_vxm_instruction(
-        1, depth, selected_streams);
-    const auto selected_decoded = ftlpu::isa::decode_vxm_instruction(
-        1, selected_packet);
-    if (!require(
-            selected_decoded.lhs.kind
-                    == ftlpu::VxmSrOperandKind::StreamBFloat16
-                && selected_decoded.lhs.sr
-                    == ftlpu::StreamId::East(6).packed()
-                && selected_decoded.rhs.kind
-                    == ftlpu::VxmSrOperandKind::StreamFloat16
-                && selected_decoded.rhs.sr
-                    == ftlpu::StreamId::West(14).packed(),
-            "VXM explicit stream selectors were not preserved")) {
-        return false;
-    }
-
-    return require_throws(
-        [] {
-            auto invalid = ftlpu::VxmLaneAluInstruction {};
-                invalid.operation = ftlpu::VxmAluOpcode::Add;
-            invalid.lhs = ftlpu::VxmLaneOperand::Imm(1.0f);
-            invalid.rhs = ftlpu::VxmLaneOperand::Imm(2.0f);
-            ftlpu::isa::encode_vxm_instruction(
-                0, ftlpu::VxmChainDepth::Two, invalid);
-        },
-        "VXM codec should reject two distinct immediate values")
-        && require_throws(
-            [] {
-                auto invalid = ftlpu::VxmLaneAluInstruction {
-                    ftlpu::VxmAluOpcode::Bypass,
-                    ftlpu::VxmLaneOperand::StreamFloat16(1.0f, 8)};
-                ftlpu::isa::encode_vxm_instruction(
-                    0, ftlpu::VxmChainDepth::Two, invalid);
-            },
-            "VXM codec should reject stream groups outside 0..7");
+    auto logarithm = ftlpu::VxmLaneAluInstruction{};
+    logarithm.operation = ftlpu::VxmSpecialAluOpcode::Log;
+    const auto packet = ftlpu::isa::encode_vxm_instruction(
+        3, ftlpu::VxmChainDepth::Eight, logarithm);
+    if (!require(same_vxm(logarithm,
+            ftlpu::isa::decode_vxm_instruction(3, packet).instruction),
+            "VXM Log opcode did not round trip")) return false;
+    return require_throws([] {
+        auto invalid = ftlpu::VxmLaneAluInstruction{};
+        invalid.lhs = ftlpu::VxmLaneOperand::Imm(1.0f);
+        invalid.rhs = ftlpu::VxmLaneOperand::Imm(2.0f);
+        ftlpu::isa::encode_vxm_instruction(0, ftlpu::VxmChainDepth::Two, invalid);
+    }, "VXM codec accepted distinct immediates");
 }
 
 bool verify_icu_command_codec()

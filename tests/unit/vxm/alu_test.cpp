@@ -23,7 +23,8 @@ int main()
     assert(VxmAlu::execute({VxmAluOpcode::Multiply, fp32}, 2.0f, 3.0f) == 6.0f);
     assert(VxmAlu::execute({VxmAluOpcode::Negate, fp32}, 2.0f) == -2.0f);
     assert(VxmAlu::execute({VxmAluOpcode::Max, fp32}, -2.0f, 0.0f) == 0.0f);
-// Compiler lowering examples.
+
+    // Compiler lowering examples.
     assert(VxmAlu::execute({VxmAluOpcode::Multiply, fp32}, 1.5f, 1.5f) == 2.25f);
     assert(VxmAlu::execute({VxmAluOpcode::Max, fp32}, -3.0f, 0.0f) == 0.0f);
 
@@ -62,7 +63,7 @@ int main()
     assert(drained_mul && drained_mul->value == 15.0f
            && drained_mul->metadata == 30);
     assert(pipeline.empty());
-vxm_hardware_test::write_pass_result(
+    vxm_hardware_test::write_pass_result(
         "alu_test_results.txt", "alu_test");
     return 0;
 }

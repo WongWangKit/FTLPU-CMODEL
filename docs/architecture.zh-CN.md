@@ -182,30 +182,29 @@ helper。
 
 ## 6. VXM
 
-中心 VXM 有四个 superlane、每个 superlane 8 lane、每个 lane 有 `vxm.alus` 个物理
-ALU（默认 16）。每个物理列 `C0..C(N-1)` 都是独立可调度的 column slice，分别拥有紧凑 ICU queue、
-decoder、current/next configuration register 和 repeat 状态。解码后的配置仍广播到
-同一 superlane 的所有物理 lane。VALU 列之间穿插的全部是普通 stream register：
-east 数据依次经过 `C0..C(N-1)`，west 数据按相反顺序传播。VALU 指令显式给出
-源 SR 和结果 SR；未被该列 VALU 消费的有效 SR 数据沿普通 link 自然传播。
+当前 VXM 移植自 develop 的 `803bc8f`。每 lane 有 16 个物理 ALU，组成两条镜像
+八级数据通路。8 条 ICU queue 配置逻辑 C0..C7；Ci 与 C(i+8) 共享三项 FIFO、
+一拍 decoder、Next/Current Config Register 和 repeat counter，但数据与流水状态独立。
+每个 superlane 的所有 lane 接收相同配置。
 
-支持的 opcode：
+硬件支持 2/4/8 级链，Previous、Original、Auxiliary、Accumulator、Feedback、
+immediate 及固定 FP16/BF16 stream group 是实际硬件 operand selector。ALU 列间
+不再插入独立调度的普通 SR。输入 bundle 在所需 group 就绪后发射；输入 group mux
+选择来源 hemisphere，output block mux 选择目标 hemisphere，未消费的外部 stream
+通过一拍 passive bridge 穿过 VXM。
 
-```text
-Bypass Add Subtract Multiply Negate Max Exp Reciprocal Rsqrt
-```
+96-bit compact config 包含 operation、operand selector、precision、cast、
+accumulator flags、chain depth、repeat count 和一个 FP32 immediate；逻辑 stage
+由队列确定，不含显式源/结果 SR 号。RUN_2D 保留两个相对 launch 循环，不把 config
+内部 repeat 展开成逐拍 FU 指令。
 
-operand 使用固定 stream group、previous/original/auxiliary 值、accumulator 或 feedback
-状态和 FP32 immediate。`Previous`、`Original`、`Auxiliary`、`Feedback` 与链深只保留为
-编译器 lowering 概念，不对应硬件 mux；在编码 ICU 指令前，所有依赖都必须分配为
-普通 SR 号。16-bit operand 指向对齐 SR pair 的低字节，result SR 指向 cast 结果的
-首字节。16 个 2-byte 输入 group
-分别选择 east 或 west hemisphere；每个两级 output block 使用固定 stream pair，并可
-配置目标 hemisphere。结果可保留在本地，也可输出 FP16、BF16、INT8 或 FP32 stream。
+支持 Bypass、Add、Subtract、Multiply、Negate、Max、Exp、Reciprocal、Rsqrt、Log。
+特殊操作采用可配置 LUT；Log 位于 reciprocal/rsqrt 能力级。FMA/FMS 仍不支持。
+RMSNorm、Softmax、SwiGLU 与量化由指令图实现。
 
-量化、反量化、SwiGLU、softmax 和 RMSNorm 都是指令图，而不是整体 opcode。VXM
-还建模了基于 LUT 的 Exp、Reciprocal、Rsqrt 单元、local scalar 捕获、反馈累加和这些
-指令图使用的静态输出量化器。
+本结构要求 `vxm.alus = 16`。原显式 SR VALU 实现在 `valu` 分支的 `bc84188` 保留。
+两种 config 虽同为 96-bit，字段和执行语义不同；原 Software 生成的显式 SR 二进制
+不能作为链指令运行，必须重新 lowering 到当前 ISA。
 
 ## 7. SXM
 
