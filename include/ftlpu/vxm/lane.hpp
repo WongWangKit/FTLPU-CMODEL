@@ -198,11 +198,11 @@ public:
             result.executed_slots = executed_slots;
             result.useful_slots = useful_slots;
             result.stage_executions = stage_executions;
-            for (const auto& activity : timeline) {
+            for (const auto& depth : by_chain_depth) {
                 result.peak_executed_slots = std::max<std::uint64_t>(
-                    result.peak_executed_slots, activity.active_slots());
+                    result.peak_executed_slots, depth.peak_executed_slots);
                 result.peak_useful_slots = std::max<std::uint64_t>(
-                    result.peak_useful_slots, activity.useful_slots());
+                    result.peak_useful_slots, depth.peak_useful_slots);
             }
             return result;
         }
@@ -695,7 +695,10 @@ public:
                 ++depth_statistics.stage_executions[stage];
             }
         }
-        statistics_.timeline.push_back(activity);
+        if (retain_statistics_timeline_ || statistics_.timeline.empty())
+            statistics_.timeline.push_back(activity);
+        else
+            statistics_.timeline.back() = activity;
         ++cycle_;
         return consumed;
     }
@@ -706,6 +709,15 @@ public:
     std::size_t last_trace_cycle() const { return cycle_ == 0 ? 0 : cycle_ - 1; }
     std::size_t cycle() const { return cycle_; }
     const Statistics& statistics() const { return statistics_; }
+    // Full per-cycle history is useful for small unit tests. Long-running
+    // simulations need only the latest activity and cumulative counters.
+    void set_statistics_timeline_retention(bool retain) {
+        retain_statistics_timeline_ = retain;
+        if (!retain && statistics_.timeline.size() > 1) {
+            const auto latest = statistics_.timeline.back();
+            std::vector<CycleActivity>{latest}.swap(statistics_.timeline);
+        }
+    }
     void reset_statistics() { statistics_ = {}; }
     bool idle() const
     {
@@ -1211,6 +1223,7 @@ private:
         quantizer_requests_{};
     std::array<VxmLaneAluTrace, kAluCount> last_trace_{};
     Statistics statistics_{};
+    bool retain_statistics_timeline_{true};
     std::size_t cycle_{0};
     std::size_t last_feedback_capture_count_{0};
 };
