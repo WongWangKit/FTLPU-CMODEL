@@ -291,3 +291,60 @@ vxm_alus = 16
 一个 context 保存一个完整的 FP32 MXM tile：4-tile 时为 32×32，
 每个 MXM 共 16 KiB；8-tile 时为 64×64，共 64 KiB。
 编译器按配置分配 ACC 行地址，已生成的旧程序不能直接复用于缩小容量后的硬件。
+
+## DMA 程序装载模型（首版）
+
+共享 JSON 另外接受以下仿真参数。旧配置缺省时使用表中默认值；CMake 生成
+`hw::config` 常量，`C2cDmaSystem`、程序 DMA 和 `ProgramLoadConfig` 使用这些值初始化。
+修改 JSON 后重新 configure/build 即可改变模型时序；这些参数不进入指令 ABI。
+
+| 字段 | 默认值 |
+| --- | ---: |
+| `external_memory.dma_fifo_depth_vectors` | 16 |
+| `program_load.bus_bytes_per_cycle` | 32 |
+| `program_load.route_latency_cycles` | 1 |
+| `program_load.imem_write_ii_cycles` | 1 |
+| `program_load.imem_write_commit_latency_cycles` | 1 |
+
+五项均为 `[1, 2147483647]` 范围内的整数。带宽以 bytes/cycle 计，其余三项时序以物理周期计。
+也可以在构造 C2cDmaSystem 时传入 FIFO 深度及第四个参数 ProgramLoadConfig，或在没有
+活动装载时调用 `program_loader().configure(config)`。DDR 仍是系统原有的同一个实例，
+程序读取与权重/数据读取共同受其请求容量和带宽限制。
+
+32 bytes/cycle 和两个 1-cycle 延迟是首版建模假设，不表示已经确认的 RTL 位宽和延迟。
+装载器固定单活动程序、单活动目标，并按 runtime 提交清单的顺序处理；上一个目标最后
+一次写入提交后才允许下一个目标开始 DDR 读取。
+
+硬件接口位于 `include/ftlpu/system/program_loader.hpp`：
+
+```cpp
+auto& loader = system.program_loader();
+loader.submit(images, system.cycle()); // images 是已经解析的 ProgramImage 清单
+loader.start();                       // 可以提前请求；请求会保留
+loader.set_dependencies_ready(inputs_and_initial_weights_ready);
+system.tick();                       // 每调用一次，物理时钟和共享 DDR 前进一拍
+```
+
+首版物理格式仅接受 MEM 96-bit、MXM load/compute/dequant 128-bit Macro 映像。
+长度包含物理控制 word、物理 word 尾部填充，不包含 DMA 32-byte vector 的尾部填充。
+每个 word 内 lane 0 对应最低 32 bit，每个 lane 按 little-endian 字节顺序传输。
+不使用语义指令数量估算传输长度；未实现的 Native/VXM/SXM 格式明确报错。
+
+接收 FIFO 与 outstanding 共用同一 DMA credit 上限；64-byte 重组缓存、每拍最多接收
+一个 packet 的弹性传输流水线、提交延迟决定容量的写流水线都是有限资源。完整 word
+才会请求写入，每拍最多接受一个；内容在接受周期加 commit latency 时才可见。
+传输流水线末端受阻时逐级反压，最终停止发出新的 DDR 请求。
+
+`all_images_committed()` 后，各 Macro 前端每个物理周期并行预取一拍。
+`ready_to_start()` 表示程序映像和本地前端已经就绪；统一启动还要求外部依赖门控为真。
+`statistics().program_start` 记录统一启动且本次 kernel 逻辑周期 0 发射的物理周期。
+程序切换仅重置计算队列，不复位 DDR、权重 DMA、传输队列或物理时钟。
+
+`statistics()` 提供逐队列 source_done、最后提交、首笔请求/返回，以及全程序提交、
+预取完成、启动时间戳、有效映像/DMA 字节数、word 数、DMA credit/总线/写端等待周期。
+`statistics().print(os)` 输出这些数据，装载和预取时间直接由时间戳相减得到。
+总线等待统计部分 vector 由于带宽限制仍需后续拍传输的周期；写端等待统计已有完整
+word 但写端尚不能接受的周期；DMA credit 等待统计仍有请求且 FIFO 加 outstanding
+已满的周期。这些等待可以重叠，不能相加作为总装载时间。
+
+验收测试：`subsystem.program.loader` 和 `subsystem.program.configuration`。

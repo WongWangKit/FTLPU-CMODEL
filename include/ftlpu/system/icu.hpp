@@ -299,6 +299,47 @@ public:
             ++cycles;
         }
     }
+    // One physical prefetch cycle. Call only after every image has committed.
+    bool raw_macro_frontends_ready() const
+    {
+        const auto ready = [](const auto& queues) {
+            return std::all_of(queues.begin(), queues.end(), [](const auto& queue) {
+                return !queue.raw_macro_mode() || queue.raw_macro_ready();
+            });
+        };
+        return ready(mem_queues_) && ready(mxm_load_queues_)
+            && ready(mxm_dequant_queues_) && ready(mxm_compute_queues_);
+    }
+
+    void tick_raw_macro_frontends()
+    {
+        const auto tick = [](auto& queues) {
+            for (auto& queue : queues)
+                if (queue.raw_macro_mode() && !queue.raw_macro_ready())
+                    queue.prefetch_raw_macro();
+        };
+        tick(mem_queues_);
+        tick(mxm_load_queues_);
+        tick(mxm_dequant_queues_);
+        tick(mxm_compute_queues_);
+    }
+
+    // A kernel switch must not reset transport queues, DDR or physical time.
+    void reset_compute_program()
+    {
+        for (auto& queue : vxm_queues_) queue.reset();
+        for (auto& queue : mem_queues_) queue.reset();
+        for (auto& queue : mxm_load_queues_) queue.reset();
+        for (auto& queue : mxm_dequant_queues_) queue.reset();
+        for (auto& queue : mxm_compute_queues_) queue.reset();
+        for (auto& queue : sxm_transpose_queues_) queue.reset();
+        for (auto& queue : sxm_permute_queues_) queue.reset();
+        barrier_events_.clear();
+        common_barriers_.reset();
+        compute_enabled_ = false;
+        program_loading_ = true;
+        program_issue_enabled_ = false;
+    }
     void reset()
     {
         for (auto& queue : vxm_queues_) queue.reset();
@@ -323,6 +364,7 @@ public:
         pending_c2c_dma_raw_words_.fill(std::nullopt);
         barrier_events_.clear();
         program_issue_enabled_ = true;
+        program_loading_ = false;
         common_barriers_.reset();
         compute_enabled_ = true;
         cycle_ = 0;
@@ -1210,6 +1252,8 @@ public:
         throw std::logic_error("unknown tagged ICU location kind");
     }
 
+    void set_program_loading(bool loading) noexcept { program_loading_ = loading; }
+
     void set_program_issue_enabled(bool enabled) noexcept
     {
         program_issue_enabled_ = enabled;
@@ -1340,7 +1384,7 @@ public:
         if (common_barriers_.barrier_due()
             && !vxm.idle())
             throw StaticScheduleError("unsafe common barrier: VXM has in-flight computation");
-        compute_enabled_ = common_barriers_.begin_cycle(program_issue_enabled_);
+        compute_enabled_ = common_barriers_.begin_cycle(program_issue_enabled_ && !program_loading_);
         bool any = false;
         if (compute_enabled_) {
             for (std::size_t alu = 0; alu < kVxmQueues; ++alu) {
@@ -1354,7 +1398,7 @@ public:
                 }
             }
         }
-        else for (auto& queue : vxm_queues_) queue.hold_compute_cycle();
+        else if (!program_loading_) for (auto& queue : vxm_queues_) queue.hold_compute_cycle();
         log_dispatch_idle(os, any);
         common_barriers_.end_cycle();
         ++cycle_;
@@ -1370,8 +1414,8 @@ public:
     {
         log_cycle_header(os);
 
-        compute_enabled_ = common_barriers_.begin_cycle(program_issue_enabled_);
-        if (!compute_enabled_) {
+        compute_enabled_ = common_barriers_.begin_cycle(program_issue_enabled_ && !program_loading_);
+        if (!compute_enabled_ && !program_loading_) {
             for (auto& queue : vxm_queues_) queue.hold_compute_cycle();
             for (auto& queue : mxm_load_queues_) queue.hold_compute_cycle();
             for (auto& queue : mxm_dequant_queues_) queue.hold_compute_cycle();
@@ -1472,6 +1516,7 @@ public:
             auto instruction = std::optional<MemInstruction>{};
             if (compute_enabled_)
                 instruction = mem_queues_[queue].dispatch_next();
+            else if (program_loading_) {} // No fetch/auto-launch while i-MEM is being written.
             else if (common_barriers_.configured())
                 mem_queues_[queue].hold_compute_cycle();
             else
@@ -2021,6 +2066,7 @@ private:
     std::deque<std::size_t> barrier_events_{};
     bool program_issue_enabled_{true};
     bool compute_enabled_{true};
+    bool program_loading_{false};
     IcuCommonBarrierController common_barriers_{};
     std::size_t cycle_{0};
 };

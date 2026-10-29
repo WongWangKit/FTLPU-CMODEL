@@ -12,6 +12,11 @@ inline constexpr std::size_t kSchemaVersion = @FTLPU_HW_SCHEMA_VERSION@;
 inline constexpr std::size_t kCommonBarrierEncodingVersion = @FTLPU_HW_COMMON_BARRIER_ENCODING_VERSION@;
 inline constexpr std::size_t kCommonBarrierCapacity = @FTLPU_HW_COMMON_BARRIER_CAPACITY@;
 inline constexpr std::string_view kTargetName = "@FTLPU_HW_TARGET_NAME@";
+inline constexpr std::size_t kDmaFifoDepthVectors = @FTLPU_DMA_FIFO_DEPTH@;
+inline constexpr std::size_t kProgramLoadBusBytesPerCycle = @FTLPU_PROGRAM_BUS_BYTES@;
+inline constexpr std::size_t kProgramLoadRouteLatencyCycles = @FTLPU_PROGRAM_ROUTE_LATENCY@;
+inline constexpr std::size_t kProgramLoadImemWriteIiCycles = @FTLPU_PROGRAM_WRITE_II@;
+inline constexpr std::size_t kProgramLoadImemWriteCommitLatencyCycles = @FTLPU_PROGRAM_COMMIT_LATENCY@;
 
 inline constexpr std::size_t kHemispheres = @FTLPU_HW_HEMISPHERES@;
 inline constexpr std::size_t kTilesPerSlice = @FTLPU_HW_TILES_PER_SLICE@;

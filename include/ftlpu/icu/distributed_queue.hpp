@@ -957,6 +957,13 @@ public:
 
     bool raw_macro_mode() const noexcept { return raw_macro_mode_; }
 
+    const RawImemWord& read_raw_imem(std::size_t address) const
+    {
+        if (address >= raw_imem_.size() || !raw_imem_[address])
+            throw std::out_of_range("raw i-MEM word has not committed");
+        return *raw_imem_[address];
+    }
+
     bool raw_macro_ready() const noexcept
     {
         return raw_macro_mode_ && static_cast<bool>(macro_decoder_)

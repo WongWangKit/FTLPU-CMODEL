@@ -30,7 +30,7 @@ public:
 
     explicit C2cDmaEngine(
         Ddr4Model& ddr4,
-        std::size_t fifo_depth_vectors = 4,
+        std::size_t fifo_depth_vectors = hw::config::kDmaFifoDepthVectors,
         std::size_t stream_count = 1,
         std::size_t transport_lane_base = 0)
         : ddr4_(ddr4)
@@ -61,6 +61,8 @@ public:
         completions_.clear();
         pending_completion_notifications_ = 0;
         pending_completion_sync_tags_.clear();
+        last_read_request_.reset();
+        load_credit_wait_ = false;
         cycle_ = 0;
     }
 
@@ -91,6 +93,12 @@ public:
     }
 
     std::size_t cycle() const noexcept { return cycle_; }
+    const std::optional<std::uint64_t>& last_read_request() const noexcept
+    { return last_read_request_; }
+    bool load_credit_wait() const noexcept { return load_credit_wait_; }
+    std::size_t fifo_depth_vectors() const noexcept { return fifo_depth_vectors_; }
+    std::size_t outstanding_reads(std::size_t stream = 0) const noexcept
+    { return stream < stream_count_ ? pending_requests_[stream].size() : 0; }
     const std::optional<BeatTrace>& last_beat() const noexcept
     {
         return last_beat_;
@@ -116,6 +124,8 @@ public:
         pending_completion_sync_tags_.pop_front();
         return tag;
     }
+    // Optional diagnostic history, independent of hardware notification tokens.
+    void clear_completion_history() noexcept { completions_.clear(); }
 
     // C2C TX-facing FIFO.
     bool can_send(std::size_t stream = 0) const noexcept
@@ -155,6 +165,14 @@ public:
         return vector;
     }
 
+    const C2cVector& front_received(std::size_t stream = 0) const
+    {
+        require_stream(stream);
+        if (inbound_[stream].empty())
+            throw std::logic_error("C2C DMA RX FIFO is empty");
+        return inbound_[stream].front();
+    }
+
     std::size_t outbound_queue_size(std::size_t stream = 0) const noexcept
     {
         return stream < stream_count_ ? outbound_[stream].size() : 0;
@@ -163,6 +181,8 @@ public:
     void tick()
     {
         last_beat_.reset();
+        last_read_request_.reset();
+        load_credit_wait_ = false;
         for (std::size_t stream = 0; stream < stream_count_; ++stream) {
             if (!active_[stream].has_value() && !queues_[stream].empty()) {
                 active_[stream] = ActiveTransfer {
@@ -218,6 +238,7 @@ private:
             && pending.size() + inbound_[stream].size() < fifo_depth_vectors_
             && ddr4_.can_accept_request()) {
             const auto vector_index = active.next_vector_index++;
+            last_read_request_ = active.instruction.vector_address(vector_index);
             pending.push_back(PendingRequest {
                 ddr4_.request_read(
                     active.instruction.vector_address(vector_index),
@@ -225,6 +246,9 @@ private:
                 vector_index,
                 0});
         }
+        else if (active.next_vector_index < active.instruction.vector_count
+            && pending.size() + inbound_[stream].size() >= fifo_depth_vectors_)
+            load_credit_wait_ = true;
         finish_transfer_if_complete(stream);
     }
 
@@ -291,7 +315,7 @@ private:
     }
 
     Ddr4Model& ddr4_;
-    std::size_t fifo_depth_vectors_{4};
+    std::size_t fifo_depth_vectors_{hw::config::kDmaFifoDepthVectors};
     std::size_t stream_count_{1};
     std::size_t transport_lane_base_{0};
     std::array<std::deque<C2cVector>, hw::kC2cStreamsPerDirection> outbound_{};
@@ -305,6 +329,8 @@ private:
     std::size_t pending_completion_notifications_{0};
     std::deque<std::uint32_t> pending_completion_sync_tags_{};
     std::size_t cycle_{0};
+    std::optional<std::uint64_t> last_read_request_{};
+    bool load_credit_wait_{false};
 };
 
 } // namespace ftlpu
