@@ -265,6 +265,44 @@ public:
             ++cycles;
         }
     }
+    // One physical prefetch cycle. Call only after every image has committed.
+    bool raw_macro_frontends_ready() const
+    {
+        const auto ready = [](const auto& queues) {
+            return std::all_of(queues.begin(), queues.end(), [](const auto& queue) {
+                return !queue.raw_macro_mode() || queue.raw_macro_ready();
+            });
+        };
+        return ready(mem_queues_) && ready(mxm_load_queues_)
+            && ready(mxm_dequant_queues_) && ready(mxm_compute_queues_);
+    }
+
+    void tick_raw_macro_frontends()
+    {
+        const auto tick = [](auto& queues) {
+            for (auto& queue : queues)
+                if (queue.raw_macro_mode() && !queue.raw_macro_ready())
+                    queue.prefetch_raw_macro();
+        };
+        tick(mem_queues_);
+        tick(mxm_load_queues_);
+        tick(mxm_dequant_queues_);
+        tick(mxm_compute_queues_);
+    }
+
+    // A kernel switch must not reset transport queues, DDR or physical time.
+    void reset_compute_program()
+    {
+        for (auto& queue : vxm_queues_) queue.reset();
+        for (auto& queue : mem_queues_) queue.reset();
+        for (auto& queue : mxm_load_queues_) queue.reset();
+        for (auto& queue : mxm_dequant_queues_) queue.reset();
+        for (auto& queue : mxm_compute_queues_) queue.reset();
+        for (auto& queue : sxm_transpose_queues_) queue.reset();
+        for (auto& queue : sxm_permute_queues_) queue.reset();
+        barrier_events_.clear();
+        program_issue_enabled_ = false;
+    }
     void reset()
     {
         for (auto& queue : vxm_queues_) queue.reset();

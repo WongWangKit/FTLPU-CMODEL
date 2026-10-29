@@ -186,6 +186,7 @@
   },
 
   "external_memory": {
+    "dma_fifo_depth_vectors": 16,
     "lpu_clock_mhz": 500,
     "ddr_peak_bandwidth_mbytes_per_second": 51200,
     "ddr_scheduling_efficiency_percent": 90,
@@ -195,5 +196,11 @@
     "ddr_write_latency_jitter_cycles": 10,
     "ddr_request_queue_depth": 256,
     "ddr_latency_random_seed": 1179929680
+  },
+  "program_load": {
+    "bus_bytes_per_cycle": 32,
+    "route_latency_cycles": 1,
+    "imem_write_ii_cycles": 1,
+    "imem_write_commit_latency_cycles": 1
   }
 }
