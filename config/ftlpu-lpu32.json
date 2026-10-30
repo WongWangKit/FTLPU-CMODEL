@@ -3,7 +3,13 @@
 
   "icu": {
     "common_barrier_encoding_version": 1,
-    "common_barrier_capacity": 1024
+    "common_barrier_capacity": 1024,
+    "common_transport_overlap_version": 1,
+    "queue_control_version": 1,
+    "queue_control_capacity": 256,
+    "queue_control_cache_depth": 8,
+    "queue_control_read_latency": 2,
+    "queue_control_read_ports": 1
   },
 
   "target": {

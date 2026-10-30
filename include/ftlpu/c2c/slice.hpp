@@ -397,7 +397,7 @@ public:
             throw std::out_of_range("invalid shared C2C stream count");
 
         auto output = StreamOutputPort(
-            fabric, endpoint_.column, endpoint_.direction, name_);
+            fabric, endpoint_.column, endpoint_.direction, name_, true);
         for (std::size_t stream = 0; stream < stream_count; ++stream) {
             auto& pipeline = shared_pipelines_[stream];
             for (std::size_t tile = hw::kTileRows - 1; tile > 0; --tile)
@@ -493,7 +493,7 @@ public:
         }
 
         auto output = StreamOutputPort(
-            fabric, endpoint_.column, endpoint_.direction, name_);
+            fabric, endpoint_.column, endpoint_.direction, name_, true);
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
             const auto& stage = pipeline_[tile];
             if (!stage.has_value()) {

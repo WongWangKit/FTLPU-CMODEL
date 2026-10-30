@@ -31,6 +31,7 @@ public:
         std::size_t staged_writes{0};
         std::size_t east_staged_writes{0};
         std::size_t west_staged_writes{0};
+        std::size_t c2c_staged_writes{0};
     };
 
     struct Link {
@@ -89,6 +90,36 @@ public:
     bool empty() const noexcept
     {
         return current_cells_.empty() && next_cells_.empty();
+    }
+
+    bool compute_empty() const noexcept
+    {
+        for (const auto encoded : current_cells_) {
+            const auto p = decode_cell(encoded);
+            if (!select(current_[p.column].lanes[p.tile][p.lane], p.stream).transport)
+                return false;
+        }
+        for (const auto encoded : next_cells_) {
+            const auto p = decode_cell(encoded);
+            if (!select(next_[p.column].lanes[p.tile][p.lane], p.stream).transport)
+                return false;
+        }
+        return true;
+    }
+
+    bool transport_empty() const noexcept
+    {
+        for (const auto encoded : current_cells_) {
+            const auto p = decode_cell(encoded);
+            if (select(current_[p.column].lanes[p.tile][p.lane], p.stream).transport)
+                return false;
+        }
+        for (const auto encoded : next_cells_) {
+            const auto p = decode_cell(encoded);
+            if (select(next_[p.column].lanes[p.tile][p.lane], p.stream).transport)
+                return false;
+        }
+        return true;
     }
 
     const CycleActivity& last_cycle_activity() const noexcept
@@ -182,7 +213,8 @@ public:
         std::size_t lane,
         StreamId stream,
         StreamCell value,
-        const char* producer = "functional slice")
+        const char* producer = "functional slice",
+        bool transport_ingress = false)
     {
         require_open_cycle();
         check_location(column, tile, lane, stream);
@@ -202,6 +234,10 @@ public:
                 + " while staging " + producer + "; existing producer="
                 + producer_name(existing));
         }
+        if (transport_ingress) {
+            value.transport = true;
+            ++current_activity_.c2c_staged_writes;
+        }
         destination = value;
         select(next_producers_[column].lanes[tile][lane], stream) =
             classify_producer(producer);
@@ -219,10 +255,11 @@ public:
         std::size_t tile,
         StreamId stream,
         const StreamTileSegment& values,
-        const char* producer = "functional slice")
+        const char* producer = "functional slice",
+        bool transport_ingress = false)
     {
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            stage_write(column, tile, lane, stream, values[lane], producer);
+            stage_write(column, tile, lane, stream, values[lane], producer, transport_ingress);
         }
     }
 
@@ -232,7 +269,8 @@ public:
         StreamId stream,
         const StreamPayloadTileSegment& values,
         std::uint64_t vector_tag = 0,
-        const char* producer = "functional slice")
+        const char* producer = "functional slice",
+        bool transport_ingress = false)
     {
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             stage_write(
@@ -241,7 +279,7 @@ public:
                 lane,
                 stream,
                 StreamCell::Valid(values[lane], lane + 1 == hw::kLanesPerTile, vector_tag),
-                producer);
+                producer, transport_ingress);
         }
     }
 

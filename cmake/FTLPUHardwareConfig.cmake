@@ -63,14 +63,43 @@ function(ftlpu_generate_hardware_config input_json output_header)
     # An older target without this object explicitly lacks the protocol.
     set(FTLPU_HW_COMMON_BARRIER_ENCODING_VERSION 0)
     set(FTLPU_HW_COMMON_BARRIER_CAPACITY 0)
+    set(FTLPU_HW_COMMON_TRANSPORT_OVERLAP_VERSION 0)
     string(JSON FTLPU_HW_ICU_OBJECT ERROR_VARIABLE FTLPU_ICU_ERROR GET "${FTLPU_HW_JSON}" icu)
     if(NOT FTLPU_ICU_ERROR)
         ftlpu_json_get(FTLPU_HW_COMMON_BARRIER_ENCODING_VERSION icu common_barrier_encoding_version)
         ftlpu_json_get(FTLPU_HW_COMMON_BARRIER_CAPACITY icu common_barrier_capacity)
+        string(JSON FTLPU_HW_OVERLAP_VALUE ERROR_VARIABLE FTLPU_HW_OVERLAP_ERROR
+            GET "${FTLPU_HW_JSON}" icu common_transport_overlap_version)
+        if(NOT FTLPU_HW_OVERLAP_ERROR)
+            if(NOT FTLPU_HW_OVERLAP_VALUE MATCHES "^[01]$")
+                message(FATAL_ERROR "unsupported ICU transport overlap capability")
+            endif()
+            set(FTLPU_HW_COMMON_TRANSPORT_OVERLAP_VERSION ${FTLPU_HW_OVERLAP_VALUE})
+        endif()
         if(NOT FTLPU_HW_COMMON_BARRIER_ENCODING_VERSION EQUAL 1 OR
            NOT FTLPU_HW_COMMON_BARRIER_CAPACITY MATCHES "^[1-9][0-9]*$" OR
            FTLPU_HW_COMMON_BARRIER_CAPACITY GREATER 1024)
             message(FATAL_ERROR "unsupported ICU common barrier capability")
+        endif()
+    endif()
+
+    # Queue-local control partitions have one finite RAM port per queue.
+    foreach(field VERSION CAPACITY CACHE_DEPTH READ_LATENCY READ_PORTS)
+        string(TOLOWER "${field}" key)
+        string(JSON value ERROR_VARIABLE error GET "${FTLPU_HW_JSON}" icu "queue_control_${key}")
+        if(error)
+            set(value 0)
+        endif()
+        set(FTLPU_HW_QUEUE_CONTROL_${field} ${value})
+    endforeach()
+    if(FTLPU_HW_QUEUE_CONTROL_VERSION)
+        if(NOT FTLPU_HW_QUEUE_CONTROL_VERSION EQUAL 1 OR
+           NOT FTLPU_HW_QUEUE_CONTROL_READ_PORTS EQUAL 1 OR
+           FTLPU_HW_QUEUE_CONTROL_CAPACITY LESS 1 OR FTLPU_HW_QUEUE_CONTROL_CAPACITY GREATER 256 OR
+           FTLPU_HW_QUEUE_CONTROL_CACHE_DEPTH LESS 1 OR
+           FTLPU_HW_QUEUE_CONTROL_CACHE_DEPTH GREATER FTLPU_HW_QUEUE_CONTROL_CAPACITY OR
+           FTLPU_HW_QUEUE_CONTROL_READ_LATENCY LESS 1)
+            message(FATAL_ERROR "unsupported ICU queue control geometry")
         endif()
     endif()
 

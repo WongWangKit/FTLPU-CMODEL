@@ -33,6 +33,9 @@ struct MemInstruction {
     std::size_t map_stream{0};
     // A tap write observes the stream without suppressing passive forwarding.
     bool preserve_stream{false};
+    // Control sideband, attached after ISA decode; never encoded in a FU word.
+    std::uint64_t transport_generation{0};
+    std::uint32_t transport_launch{0};
 
     StreamId stream_id() const
     {

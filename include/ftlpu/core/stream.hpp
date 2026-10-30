@@ -102,6 +102,8 @@ struct StreamCell {
     bool valid{false};
     bool last{false};
     std::uint64_t vector_tag{0};
+    // Provenance retained while an asynchronous C2C beat crosses the SRs.
+    bool transport{false};
 
     static constexpr StreamCell Invalid() noexcept
     {

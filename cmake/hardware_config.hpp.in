@@ -9,8 +9,14 @@
 namespace ftlpu::hw::config {
 
 inline constexpr std::size_t kSchemaVersion = @FTLPU_HW_SCHEMA_VERSION@;
+inline constexpr std::size_t kQueueControlVersion = @FTLPU_HW_QUEUE_CONTROL_VERSION@;
+inline constexpr std::size_t kQueueControlCapacity = @FTLPU_HW_QUEUE_CONTROL_CAPACITY@;
+inline constexpr std::size_t kQueueControlCacheDepth = @FTLPU_HW_QUEUE_CONTROL_CACHE_DEPTH@;
+inline constexpr std::size_t kQueueControlReadLatency = @FTLPU_HW_QUEUE_CONTROL_READ_LATENCY@;
+inline constexpr std::size_t kQueueControlReadPorts = @FTLPU_HW_QUEUE_CONTROL_READ_PORTS@;
 inline constexpr std::size_t kCommonBarrierEncodingVersion = @FTLPU_HW_COMMON_BARRIER_ENCODING_VERSION@;
 inline constexpr std::size_t kCommonBarrierCapacity = @FTLPU_HW_COMMON_BARRIER_CAPACITY@;
+inline constexpr std::size_t kCommonTransportOverlapVersion = @FTLPU_HW_COMMON_TRANSPORT_OVERLAP_VERSION@;
 inline constexpr std::string_view kTargetName = "@FTLPU_HW_TARGET_NAME@";
 inline constexpr std::size_t kDmaFifoDepthVectors = @FTLPU_DMA_FIFO_DEPTH@;
 inline constexpr std::size_t kProgramLoadBusBytesPerCycle = @FTLPU_PROGRAM_BUS_BYTES@;

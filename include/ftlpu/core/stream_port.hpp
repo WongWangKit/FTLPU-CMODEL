@@ -106,11 +106,13 @@ public:
         StreamRegisterFabric& fabric,
         std::size_t column,
         StreamDirection direction,
-        std::string producer)
+        std::string producer,
+        bool transport_ingress = false)
         : fabric_(fabric)
         , column_(column)
         , direction_(direction)
         , producer_(std::move(producer))
+        , transport_ingress_(transport_ingress)
     {
         if (column_ >= fabric_.column_count()) {
             throw std::out_of_range("stream output port column is outside fabric");
@@ -135,7 +137,7 @@ public:
     {
         fabric_.stage_write(
             column_, tile, lane, stream_id(stream_index), value,
-            producer_.c_str());
+            producer_.c_str(), transport_ingress_);
     }
 
     void write_segment(
@@ -148,7 +150,7 @@ public:
             tile,
             stream_id(stream_index),
             values,
-            producer_.c_str());
+            producer_.c_str(), transport_ingress_);
     }
 
     void write_payload_segment(
@@ -163,7 +165,7 @@ public:
             stream_id(stream_index),
             values,
             vector_tag,
-            producer_.c_str());
+            producer_.c_str(), transport_ingress_);
     }
 
 private:
@@ -178,6 +180,8 @@ private:
     std::size_t column_{0};
     StreamDirection direction_{StreamDirection::East};
     std::string producer_{};
+    // Physical source sideband; debug names never determine provenance.
+    bool transport_ingress_{false};
 };
 
 } // namespace ftlpu

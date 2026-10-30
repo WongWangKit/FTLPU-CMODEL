@@ -7,6 +7,7 @@
 #include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/icu/distributed_queue.hpp"
 #include "ftlpu/icu/common_barrier.hpp"
+#include "ftlpu/icu/queue_completion.hpp"
 #include "ftlpu/icu/fu_3d_instruction.hpp"
 #include "ftlpu/icu/location.hpp"
 #include "ftlpu/mem/mem_array.hpp"
@@ -21,6 +22,7 @@
 #include <cstdint>
 #include <deque>
 #include <limits>
+#include <map>
 #include <ostream>
 #include <optional>
 #include <sstream>
@@ -336,6 +338,14 @@ public:
         for (auto& queue : sxm_permute_queues_) queue.reset();
         barrier_events_.clear();
         common_barriers_.reset();
+        // The new compute image has no callbacks into the previous QCTL
+        // partitions. Keep transport queues/owners for in-flight packets,
+        // but release their old queue-local activation gates and Native PCs.
+        queue_control_transport_enabled_.fill(false);
+        queue_control_transport_ticked_.fill(false);
+        mem_native_owners_.clear();
+        queue_completion_events_ = {};
+        transport_overlap_enabled_ = false;
         compute_enabled_ = false;
         program_loading_ = true;
         program_issue_enabled_ = false;
@@ -366,6 +376,12 @@ public:
         program_issue_enabled_ = true;
         program_loading_ = false;
         common_barriers_.reset();
+        mem_transport_owners_.clear();
+        mem_native_owners_.clear();
+        queue_completion_events_ = {};
+        mem_transport_owner_count_ = 0;
+        transport_overlap_enabled_ = false;
+        queue_control_transport_enabled_.fill(false);
         compute_enabled_ = true;
         cycle_ = 0;
     }
@@ -647,6 +663,33 @@ public:
         mem_transport_iq(queue).push_encoded_synchronized_packet(
             MemIcu::EncodedSynchronizedPacket{packet.words[0], packet.words[1]});
     }
+
+    void enable_queue_control_transport(std::size_t queue)
+    {
+        auto& transport=mem_transport_iq(queue);
+        if (!mem_iq(queue).raw_macro_mode())
+            throw StaticScheduleError("queue transport ownership requires Raw Macro mode");
+        transport.launch();
+        queue_control_transport_enabled_[queue]=true;
+        mem_iq(queue).set_queue_transport_executor([this,queue](std::uint32_t ordinal) {
+            auto& native=mem_transport_iq(queue);
+            if (native.synchronized_completed_count()+1 != ordinal)
+                throw StaticScheduleError("queue transport packet executed out of order");
+            auto instruction=native.dispatch_next();
+            queue_control_transport_ticked_[queue]=true;
+            const auto pc=native.last_trace().issue_pc;
+            if (instruction && !mem_transport_owners_.empty() && pc
+                && mem_transport_owners_[queue].contains(*pc)) {
+                const auto& owner=mem_transport_owners_[queue].at(*pc);
+                instruction->transport_generation=owner.generation;
+                instruction->transport_launch=owner.launch;
+            }
+            return MemIcu::QueueTransportResult{std::move(instruction),
+                native.synchronized_completed_count()==ordinal,native.last_trace().action,pc};
+        });
+    }
+    bool queue_control_transport_enabled(std::size_t queue) const
+    { check_mem_queue(queue); return queue_control_transport_enabled_[queue]; }
 
     void insert_mem_synchronized_raw(std::size_t queue,
         std::size_t address,
@@ -1284,6 +1327,27 @@ public:
     std::uint64_t common_barrier_wait_cycles() const noexcept { return common_barriers_.wait_cycles(); }
     bool compute_enabled() const noexcept { return compute_enabled_; }
     bool common_barrier_holding() const noexcept { return common_barriers_.holding(); }
+    void set_transport_overlap_enabled(bool enabled) { transport_overlap_enabled_ = enabled; }
+    bool transport_overlap_enabled() const noexcept { return transport_overlap_enabled_; }
+    void configure_mem_transport_owner(std::size_t queue, std::size_t pc,
+        std::uint64_t generation, std::uint32_t launch, bool transport_store = true)
+    {
+        if (queue >= kMemQueues || !generation || !launch
+            || mem_transport_owner_count_ >= 65535)
+            throw std::invalid_argument("invalid or oversized MEM transport owner table");
+        auto& owners=transport_store ? mem_transport_owners_ : mem_native_owners_;
+        if (owners.empty()) owners.resize(kMemQueues);
+        if (!owners[queue].emplace(pc, TransportOwner{generation, launch}).second)
+            throw std::invalid_argument("duplicate MEM transport descriptor owner");
+        ++mem_transport_owner_count_;
+    }
+    void configure_queue_completion_events(std::uint64_t generation,
+        const std::vector<IcuCommonEventBinding>& bindings)
+    { queue_completion_events_.configure(generation,bindings); }
+    void notify_queue_mem_commit(std::uint64_t generation,std::uint32_t instance)
+    { queue_completion_events_.notify_mem_commit(generation,instance); }
+    bool queue_completion_ready(std::uint32_t event) const
+    { return queue_completion_events_.ready(event); }
     bool common_barriers_done() const noexcept { return common_barriers_.done(); }
     bool common_barrier_due() const noexcept { return common_barriers_.barrier_due(); }
 
@@ -1315,6 +1379,7 @@ public:
             static_cast<Hemisphere>(location.unit),
             location.index, location.bank);
         return (!mem_transport_queues_.empty()
+                && (!queue_control_transport_enabled_[queue] || mem_queues_[queue].queue_transport_due())
                 && mem_transport_queues_[queue].accepts_synchronized_notification(synchronization_tag))
             || mem_iq(queue).accepts_synchronized_notification(synchronization_tag);
     }
@@ -1513,6 +1578,7 @@ public:
         }
 
         for (std::size_t queue = 0; queue < kMemQueues; ++queue) {
+            queue_control_transport_ticked_[queue]=false;
             auto instruction = std::optional<MemInstruction>{};
             if (compute_enabled_)
                 instruction = mem_queues_[queue].dispatch_next();
@@ -1521,12 +1587,34 @@ public:
                 mem_queues_[queue].hold_compute_cycle();
             else
                 instruction = mem_queues_[queue].tick_transport_only();
-            const auto transport = mem_transport_queues_.empty()
+            if (instruction && !mem_native_owners_.empty()
+                && mem_queues_[queue].last_trace().action==IcuQueueAction::SynchronizedIssue) {
+                const auto pc=mem_queues_[queue].last_trace().issue_pc;
+                if (pc && mem_native_owners_[queue].contains(*pc)) {
+                    const auto& owner=mem_native_owners_[queue].at(*pc);
+                    instruction->transport_generation=owner.generation;
+                    instruction->transport_launch=owner.launch;
+                }
+            }
+            if (queue_control_transport_enabled_[queue] && !queue_control_transport_ticked_[queue])
+                mem_transport_queues_[queue].prefetch_transport_cycle();
+            auto transport = mem_transport_queues_.empty() || queue_control_transport_enabled_[queue]
                 ? std::optional<MemInstruction>{}
                 : mem_transport_queues_[queue].dispatch_next();
             if (instruction && transport)
                 throw StaticScheduleError("MEM transport and compute contend for the shared bank issue port");
-            if (transport) instruction = transport;
+            if (transport) {
+                const auto pc = mem_transport_queues_[queue].last_trace().issue_pc;
+                if (!mem_transport_owners_.empty() && pc
+                    && mem_transport_owners_[queue].contains(*pc)) {
+                    const auto& owner = mem_transport_owners_[queue].at(*pc);
+                    transport->transport_generation = owner.generation;
+                    transport->transport_launch = owner.launch;
+                } else if (transport_overlap_enabled_) {
+                    throw StaticScheduleError("overlapped MEM transport has no commit owner");
+                }
+                instruction = transport;
+            }
             if (!instruction.has_value()) {
                 continue;
             }
@@ -2051,6 +2139,8 @@ private:
     // Separate bounded native transport control RAM. It shares the physical
     // bank issue port, never the raw Macro decoder or its logical clock.
     std::vector<MemIcu> mem_transport_queues_{};
+    std::array<bool,kMemQueues> queue_control_transport_enabled_{};
+    std::array<bool,kMemQueues> queue_control_transport_ticked_{};
     std::array<MxmLoadIcu, kMxmQueues> mxm_load_queues_{};
     std::array<MxmDequantIcu, kMxmQueues>
         mxm_dequant_queues_{};
@@ -2067,6 +2157,12 @@ private:
     bool program_issue_enabled_{true};
     bool compute_enabled_{true};
     bool program_loading_{false};
+    struct TransportOwner { std::uint64_t generation; std::uint32_t launch; };
+    std::vector<std::map<std::size_t, TransportOwner>> mem_transport_owners_{};
+    std::vector<std::map<std::size_t, TransportOwner>> mem_native_owners_{};
+    IcuQueueCompletionEvents queue_completion_events_{};
+    std::size_t mem_transport_owner_count_{0};
+    bool transport_overlap_enabled_{false};
     IcuCommonBarrierController common_barriers_{};
     std::size_t cycle_{0};
 };

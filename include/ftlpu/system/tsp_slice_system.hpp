@@ -390,6 +390,24 @@ public:
         return true;
     }
 
+    bool common_compute_resources_drained() const noexcept
+    {
+        if (!vxm_.idle()) return false;
+        for (const auto& mxm : mxms_) if (!mxm.idle()) return false;
+        for (std::size_t h = 0; h < hw::kHemispheres; ++h)
+            if (!mems_[h].compute_idle() || !sxms_[h].idle()
+                || !streams_[h].compute_empty()) return false;
+        return true;
+    }
+
+    bool common_transport_resources_drained() const noexcept
+    {
+        for (std::size_t h = 0; h < hw::kHemispheres; ++h)
+            if (!mems_[h].transport_idle() || !streams_[h].transport_empty()
+                || (c2cs_[h] && !c2cs_[h]->rx().idle())) return false;
+        return true;
+    }
+
     std::size_t passive_bridge_transfer_count(
         Hemisphere source, std::size_t stream) const
     {
@@ -483,8 +501,9 @@ private:
                 if (!mxm.idle())
                     throw StaticScheduleError("unsafe common barrier: MXM has in-flight computation");
             for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
-                if (!mems_[hemisphere].idle() || !sxms_[hemisphere].idle()
-                    || !streams_[hemisphere].empty())
+                if (!(icu_.transport_overlap_enabled() ? mems_[hemisphere].compute_idle() : mems_[hemisphere].idle())
+                    || !sxms_[hemisphere].idle()
+                    || !(icu_.transport_overlap_enabled() ? streams_[hemisphere].compute_empty() : streams_[hemisphere].empty()))
                     throw StaticScheduleError("unsafe common barrier: MEM/SXM/SR has in-flight data; schedule a drain window before C");
             }
         }
