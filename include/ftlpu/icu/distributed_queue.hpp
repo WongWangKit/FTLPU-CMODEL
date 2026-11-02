@@ -8,6 +8,7 @@
 #include "ftlpu/icu/vxm_run_2d.hpp"
 #include "ftlpu/icu/active_macro_context.hpp"
 #include "ftlpu/icu/macro_bitstream_decoder.hpp"
+#include "ftlpu/icu/queue_control.hpp"
 #include "ftlpu/mem/slice.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
 #include "ftlpu/sxm/instruction.hpp"
@@ -18,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -706,14 +708,15 @@ template <
     std::size_t InstructionBits,
     std::size_t ImemDepth,
     std::size_t IqDepth,
-    std::size_t FetchLatency = 1,
+    std::size_t FetchLatency = hw::kIcuFetchLatencyCycles,
     std::size_t MacroContextDepth = IqDepth,
     IcuQueueRole QueueRole = IcuQueueRole::Legacy,
-    std::size_t MacroReservoirWords = 3,
-    std::size_t MacroDecodeWindowBits = (InstructionBits < 64 ? InstructionBits : 64),
-    std::size_t MacroDdbDepth = 8,
-    std::size_t MacroAdmissionLookahead = 8,
-    std::size_t MacroDdbRunCapacity = 8,
+    std::size_t MacroReservoirWords = hw::kIcuMacroReservoirWords,
+    std::size_t MacroDecodeWindowBits = (InstructionBits < hw::kIcuMacroDecodeWindowBits
+        ? InstructionBits : hw::kIcuMacroDecodeWindowBits),
+    std::size_t MacroDdbDepth = hw::kIcuMacroDdbDepth,
+    std::size_t MacroAdmissionLookahead = hw::kIcuMacroAdmissionLookahead,
+    std::size_t MacroDdbRunCapacity = hw::kIcuMacroDdbRunCapacity,
     std::size_t MacroImemRequestInitiationInterval =
         hw::kIcuMacroImemRequestInitiationIntervalCycles>
 class DistributedIcuQueue {
@@ -873,6 +876,11 @@ public:
         synchronized_notifications_.clear();
         notify_emitted_ = false;
         fetch_pc_ = 0;
+        queue_controls_ = {};
+        queue_transport_executor_ = {};
+        queue_control_end_cycle_ = 0;
+        queue_control_wait_cycles_ = 0;
+        queue_control_physical_cycles_ = 0;
         program_end_pc_ = 0;
         fetched_count_ = 0;
         issued_count_ = 0;
@@ -962,10 +970,60 @@ public:
 
     bool raw_macro_mode() const noexcept { return raw_macro_mode_; }
 
+    const RawImemWord& read_raw_imem(std::size_t address) const
+    {
+        if (address >= raw_imem_.size() || !raw_imem_[address])
+            throw std::out_of_range("raw i-MEM word has not committed");
+        return *raw_imem_[address];
+    }
+    void configure_queue_controls(std::vector<IcuQueueControl> controls,
+        std::size_t capacity, std::size_t cache_depth, std::size_t read_latency,
+        std::uint32_t end_cycle = 0)
+    {
+        if (!raw_macro_mode_ || cycle_ != 0 || queue_control_physical_cycles_ != 0)
+            throw StaticScheduleError("queue controls require a pre-launch Raw Macro queue");
+        queue_controls_.configure(std::move(controls),capacity,cache_depth,read_latency);
+        queue_control_end_cycle_=end_cycle;
+    }
+    void configure_shared_queue_controls(IcuQueueControlPool& pool, std::vector<IcuQueueControl> controls,
+        std::size_t limit, std::uint32_t end_cycle)
+    {
+        if (!raw_macro_mode_ || cycle_ || queue_control_physical_cycles_)
+            throw StaticScheduleError("shared controls require a pre-launch Raw Macro queue");
+        queue_controls_.configure_shared(pool,std::move(controls),limit);
+        queue_control_end_cycle_=end_cycle;
+    }
+    struct QueueTransportResult {
+        std::optional<FuncInstruction> instruction;
+        bool retired{false};
+        IcuQueueAction action{IcuQueueAction::SynchronizedWait};
+        std::optional<std::size_t> issue_pc{};
+    };
+    void set_queue_transport_executor(std::function<QueueTransportResult(std::uint32_t)> executor)
+    { queue_transport_executor_ = std::move(executor); }
+    bool queue_transport_due() const noexcept
+    {
+        const auto* entry=queue_controls_.cached_due(cycle_);
+        return entry && entry->opcode == kQueueControlMemPacket;
+    }
+    // The inactive Native transport store can fetch and capture responses,
+    // but cannot execute a packet before its queue-local ownership boundary.
+    void prefetch_transport_cycle()
+    {
+        ensure_configured();
+        begin_trace(IcuQueueAction::ProgramPaused);
+        commit_ready_fetch(); begin_fetch_if_possible(); age_pending_fetches();
+        age_synchronized_notifications(); finish_trace();
+    }
+    std::size_t queue_control_wait_cycles() const noexcept { return queue_control_wait_cycles_; }
+    std::size_t queue_control_physical_cycles() const noexcept { return queue_control_physical_cycles_; }
+    std::size_t queue_controls_retired() const noexcept { return queue_controls_.retired(); }
+
     bool raw_macro_ready() const noexcept
     {
         return raw_macro_mode_ && static_cast<bool>(macro_decoder_)
             && macro_decoder_->primed()
+            && queue_controls_.primed()
             && (!macro_decoder_->has_pending_cycle_zero()
                 || active_macro_count_ == MacroContextDepth);
     }
@@ -980,6 +1038,7 @@ public:
         accept_decoded_macro(macro_decoder_->tick(
             0, active_macro_count_, MacroContextDepth,
             earliest_active_macro_release_cycle()), false);
+        queue_controls_.prime_cycle();
     }
 
     const IcuMacroDecoderStatistics& macro_decoder_statistics() const noexcept
@@ -1639,6 +1698,19 @@ public:
         launched_ = true;
     }
 
+    // Read committed physical storage without fetching or executing it.
+    Entry read_committed_imem(std::size_t address) const { return read_imem(address); }
+    bool frontend_ready() const {
+        if (raw_macro_mode_) return raw_macro_ready();
+        return configured_ && pending_fetches_.empty()
+            && (fetch_pc_ == program_end_pc_ || iq_.size() == IqDepth);
+    }
+    void prime_frontend_cycle() {
+        if (raw_macro_mode_) { if (!raw_macro_ready()) prefetch_raw_macro(); return; }
+        if (!configured_ || frontend_ready()) return;
+        commit_ready_fetch(); begin_fetch_if_possible(); age_pending_fetches();
+    }
+
     void configure_all()
     {
         configure(IcuProgramDescriptor {0, imem_.size()});
@@ -1767,6 +1839,12 @@ public:
 
     bool blocked_on_sync() const
     {
+        if (raw_macro_mode_) {
+            const auto* control=queue_controls_.cached_due(cycle_);
+            return control && ((control->opcode == IcuControlOpcode::Sync && !notification_tokens_)
+                || (control->opcode == IcuControlOpcode::WaitEvent
+                    && !has_tagged_notification(control->operand)));
+        }
         if (nop_remaining_ != 0 || repeat_remaining_ != 0
             || repeat_2d_active_
             || active_macro_count_ != 0
@@ -1828,6 +1906,11 @@ public:
     // command would let another ICU run ahead of its data source.
     bool blocked_on_event(std::size_t event_tag) const
     {
+        if (raw_macro_mode_) {
+            const auto* control=queue_controls_.cached_due(cycle_);
+            return control && control->opcode == IcuControlOpcode::WaitEvent
+                && control->operand == event_tag && !has_tagged_notification(event_tag);
+        }
         if (synchronized_instruction_.has_value()
             || nop_remaining_ != 0 || repeat_remaining_ != 0
             || repeat_2d_active_ || (active_macro_count_ != 0)
@@ -1962,7 +2045,8 @@ public:
         }
         if (raw_macro_mode_)
             return static_cast<bool>(macro_decoder_) && macro_decoder_->done()
-                && active_macro_count_ == 0;
+                && active_macro_count_ == 0 && queue_controls_.done()
+                && cycle_ >= queue_control_end_cycle_;
         return fetch_pc_ == program_end_pc_
             && pending_fetches_.empty()
             && iq_.empty()
@@ -2583,6 +2667,38 @@ private:
     {
         notify_emitted_ = false;
         begin_trace(IcuQueueAction::MacroWait);
+        queue_controls_.begin_cycle();
+        while (const auto* boundary=queue_controls_.due(cycle_)) {
+            if (boundary->opcode == kQueueControlMemPacket) {
+                if (!queue_transport_executor_)
+                    throw StaticScheduleError("queue transport boundary has no Native executor");
+                auto transport=queue_transport_executor_(boundary->operand);
+                last_trace_.action=transport.action;
+                last_trace_.issue_pc=transport.issue_pc;
+                if (transport.instruction) {
+                    last_dispatched_=transport.instruction;
+                    last_dispatched_pc_=transport.issue_pc;
+                    ++issued_count_;
+                }
+                if (transport.retired) queue_controls_.retire();
+                macro_decoder_->hold_cycle(); queue_controls_.end_cycle();
+                age_synchronized_notifications(); ++queue_control_physical_cycles_;
+                finish_trace();
+                return std::move(transport.instruction);
+            }
+            IcuControlInstruction control;
+            control.opcode=boundary->opcode; control.event_tag=boundary->operand;
+            const auto result=execute_synchronization(control);
+            if (result != ControlResult::Wait) queue_controls_.retire();
+            if (result == ControlResult::Continue) continue;
+            queue_control_wait_cycles_ += result == ControlResult::Wait;
+            macro_decoder_->hold_cycle();
+            queue_controls_.end_cycle();
+            age_synchronized_notifications();
+            ++queue_control_physical_cycles_;
+            finish_trace();
+            return std::nullopt;
+        }
 
         // Contexts visible at the beginning of the cycle may issue. A context
         // decoded in this cycle is written afterwards and becomes visible on
@@ -2593,6 +2709,9 @@ private:
             earliest_active_macro_release_cycle()), true);
 
         finish_trace();
+        queue_controls_.end_cycle();
+        age_synchronized_notifications();
+        ++queue_control_physical_cycles_;
         ++cycle_;
         return result;
     }
@@ -2876,6 +2995,46 @@ private:
         return result;
     }
 
+    enum class ControlResult { Wait, Retire, Continue };
+
+    bool has_tagged_notification(std::size_t tag) const
+    {
+        return std::ranges::any_of(synchronized_notifications_,
+            [tag](const auto& token) { return token.tag == tag; });
+    }
+
+    // Shared semantics for real IQ control words and public-table controls.
+    // Storage retirement is intentionally outside this function.
+    ControlResult execute_synchronization(const IcuControlInstruction& control)
+    {
+        switch (control.opcode) {
+        case IcuControlOpcode::Sync:
+            if (!notification_tokens_) {
+                last_trace_.action=IcuQueueAction::SyncWait;
+                return ControlResult::Wait;
+            }
+            --notification_tokens_;
+            last_trace_.action=IcuQueueAction::SyncRelease;
+            return ControlResult::Retire;
+        case IcuControlOpcode::WaitEvent: {
+            const auto token=std::ranges::find_if(synchronized_notifications_,
+                [&](const auto& value) { return value.tag == control.event_tag; });
+            if (token == synchronized_notifications_.end()) {
+                last_trace_.action=IcuQueueAction::EventWait;
+                return ControlResult::Wait;
+            }
+            synchronized_notifications_.erase(token);
+            last_trace_.action=IcuQueueAction::EventRelease;
+            return ControlResult::Continue;
+        }
+        case IcuControlOpcode::Notify:
+            notify_emitted_=true;
+            last_trace_.action=IcuQueueAction::Notify;
+            return ControlResult::Retire;
+        default: throw StaticScheduleError("not a synchronization control");
+        }
+    }
+
     std::optional<FuncInstruction> execute_control(
         const IcuControlInstruction& control)
     {
@@ -2895,49 +3054,21 @@ private:
         case IcuControlOpcode::Repeat2D:
             return begin_repeat_2d(control);
         case IcuControlOpcode::Sync:
-            if (notification_tokens_ == 0) {
-                last_trace_.issue_pc = iq_pcs_.front();
-                last_trace_.action = IcuQueueAction::SyncWait;
-                return std::nullopt;
-            }
-            last_trace_.issue_pc = iq_pcs_.front();
-            last_trace_.action = IcuQueueAction::SyncRelease;
-            --notification_tokens_;
-            iq_.pop_front();
-            iq_pcs_.pop_front();
-            return std::nullopt;
+        case IcuControlOpcode::Notify:
         case IcuControlOpcode::WaitEvent: {
-            const auto notification = std::find_if(
-                synchronized_notifications_.begin(),
-                synchronized_notifications_.end(),
-                [&](const TaggedNotification& candidate) {
-                    return candidate.tag == control.event_tag;
-                });
-            if (notification == synchronized_notifications_.end()) {
-                last_trace_.issue_pc = iq_pcs_.front();
-                last_trace_.action = IcuQueueAction::EventWait;
-                return std::nullopt;
-            }
-            synchronized_notifications_.erase(notification);
             last_trace_.issue_pc = iq_pcs_.front();
-            last_trace_.action = IcuQueueAction::EventRelease;
+            const auto result=execute_synchronization(control);
+            if (result == ControlResult::Wait) return std::nullopt;
             iq_.pop_front();
             iq_pcs_.pop_front();
             // WAIT_EVENT gates the following ICU command; it does not own the
             // FU issue port.  When the tagged token is already available and
             // the consumer is prefetched, release and dispatch that consumer
             // in the same cycle.  A missing token still stalls this queue.
-            if (!iq_.empty())
+            if (result == ControlResult::Continue && !iq_.empty())
                 return dispatch_ready_entry();
             return std::nullopt;
         }
-        case IcuControlOpcode::Notify:
-            last_trace_.issue_pc = iq_pcs_.front();
-            last_trace_.action = IcuQueueAction::Notify;
-            iq_.pop_front();
-            iq_pcs_.pop_front();
-            notify_emitted_ = true;
-            return std::nullopt;
         }
         throw std::logic_error("unknown ICU control opcode");
     }
@@ -4183,6 +4314,11 @@ private:
     std::vector<std::optional<Entry>> imem_{};
     std::vector<std::optional<RawImemWord>> raw_imem_{};
     IcuMacroQueueKind raw_macro_kind_{IcuMacroQueueKind::Mem};
+    IcuQueueControlFrontend queue_controls_{};
+    std::uint32_t queue_control_end_cycle_{0};
+    std::function<QueueTransportResult(std::uint32_t)> queue_transport_executor_{};
+    std::size_t queue_control_wait_cycles_{0};
+    std::size_t queue_control_physical_cycles_{0};
     std::size_t raw_macro_word_count_{0};
     bool raw_macro_mode_{false};
     std::unique_ptr<MacroDecoder> macro_decoder_{};

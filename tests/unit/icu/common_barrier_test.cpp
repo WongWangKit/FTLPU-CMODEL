@@ -304,6 +304,55 @@ void transport_commits_visible_sram_before_resume()
     require(icu.logical_cycle() == 1 && icu.common_barriers_done(),
         "visible page commit did not resume raw Macro at C");
 }
+void commits_are_independent_of_compute_and_trace()
+{
+    auto mem = std::make_unique<MemArrayModel>();
+    StreamRegisterFabric fabric(hw::kMemBoundaryStreamRegisterColumns);
+    mem->configure_transport_commit(9, 33, 0, 1, 1);
+    auto write = MemInstruction::Write(30, StreamId::East(0));
+    write.transport_generation = 9;
+    write.transport_launch = 33;
+    mem->enqueue_instruction(0, 1, write);
+    for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
+        if (tile == 1) mem->enqueue_instruction(0, 0,
+            MemInstruction::Read(0, StreamId::East(1)));
+        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+            auto cell = StreamCell::Valid(static_cast<std::uint8_t>(tile + 1));
+            cell.transport = true;
+            fabric.initialize_cell(0, tile, lane, StreamId::East(0), cell);
+        }
+        fabric.begin_cycle();
+        mem->evaluate(fabric, false);
+        fabric.commit_cycle();
+        require(mem->transport_committed_segments(9, 33, 0, 1) == tile + 1,
+            "MEM commit scoreboard is not tied to actual tile writes");
+        require(mem->executed_transfers().empty(),
+            "commit scoreboard unexpectedly required debug trace capture");
+    }
+    require(!mem->compute_idle(), "test failed to keep unrelated compute in flight");
+    require(mem->transport_committed_segments(9, 33, 0, 1) == hw::kTileRows,
+        "unrelated computation prevented page completion");
+    StreamRegisterFabric provenance(2);
+    auto transport = StreamCell::Valid(7);
+    transport.transport = true;
+    provenance.initialize_cell(0, 0, 0, StreamId::West(31), transport);
+    require(!provenance.empty() && provenance.compute_empty(),
+        "transport provenance blocked a safe computation boundary");
+    provenance.initialize_cell(1, 0, 0, StreamId::East(0), StreamCell::Valid(8));
+    require(!provenance.compute_empty(), "computation SR data escaped the safety check");
+
+    StreamRegisterFabric explicitSource(2);
+    explicitSource.begin_cycle();
+    StreamOutputPort rx(explicitSource, 0, StreamDirection::West, "arbitrary debug name", true);
+    rx.write_cell(0, 0, 31, StreamCell::Valid(1));
+    StreamOutputPort compute(explicitSource, 1, StreamDirection::East, "C2C-looking debug name");
+    compute.write_cell(0, 0, 0, StreamCell::Valid(2));
+    explicitSource.commit_cycle();
+    require(explicitSource.cell(0, 0, 0, StreamId::West(31)).transport
+        && !explicitSource.cell(1, 0, 0, StreamId::East(0)).transport
+        && explicitSource.last_cycle_activity().c2c_staged_writes == 1,
+        "debug naming changed physical transport provenance or RX activity");
+}
 } // namespace
 
 int main()
@@ -313,6 +362,7 @@ try {
     independent_transport_and_shared_clock();
     unsafe_boundary_is_rejected();
     transport_commits_visible_sram_before_resume();
+    commits_are_independent_of_compute_and_trace();
     std::cout << "common barriers: event generations, finite frontends, mixed hold/resume, transport and unsafe boundary passed\n";
 } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

@@ -63,15 +63,56 @@ function(ftlpu_generate_hardware_config input_json output_header)
     # An older target without this object explicitly lacks the protocol.
     set(FTLPU_HW_COMMON_BARRIER_ENCODING_VERSION 0)
     set(FTLPU_HW_COMMON_BARRIER_CAPACITY 0)
+    set(FTLPU_HW_COMMON_TRANSPORT_OVERLAP_VERSION 0)
     string(JSON FTLPU_HW_ICU_OBJECT ERROR_VARIABLE FTLPU_ICU_ERROR GET "${FTLPU_HW_JSON}" icu)
     if(NOT FTLPU_ICU_ERROR)
         ftlpu_json_get(FTLPU_HW_COMMON_BARRIER_ENCODING_VERSION icu common_barrier_encoding_version)
         ftlpu_json_get(FTLPU_HW_COMMON_BARRIER_CAPACITY icu common_barrier_capacity)
+        string(JSON FTLPU_HW_OVERLAP_VALUE ERROR_VARIABLE FTLPU_HW_OVERLAP_ERROR
+            GET "${FTLPU_HW_JSON}" icu common_transport_overlap_version)
+        if(NOT FTLPU_HW_OVERLAP_ERROR)
+            if(NOT FTLPU_HW_OVERLAP_VALUE MATCHES "^[01]$")
+                message(FATAL_ERROR "unsupported ICU transport overlap capability")
+            endif()
+            set(FTLPU_HW_COMMON_TRANSPORT_OVERLAP_VERSION ${FTLPU_HW_OVERLAP_VALUE})
+        endif()
         if(NOT FTLPU_HW_COMMON_BARRIER_ENCODING_VERSION EQUAL 1 OR
            NOT FTLPU_HW_COMMON_BARRIER_CAPACITY MATCHES "^[1-9][0-9]*$" OR
            FTLPU_HW_COMMON_BARRIER_CAPACITY GREATER 1024)
             message(FATAL_ERROR "unsupported ICU common barrier capability")
         endif()
+    endif()
+
+    # Queue-local caches use either private RAM or one shared finite RAM pool.
+    foreach(field VERSION CAPACITY CACHE_DEPTH READ_LATENCY READ_PORTS STORAGE_VERSION POOL_CAPACITY POOL_READ_II)
+        string(TOLOWER "${field}" key)
+        string(JSON value ERROR_VARIABLE error GET "${FTLPU_HW_JSON}" icu "queue_control_${key}")
+        if(error)
+            set(value 0)
+        endif()
+        set(FTLPU_HW_QUEUE_CONTROL_${field} ${value})
+    endforeach()
+    if(FTLPU_HW_QUEUE_CONTROL_VERSION)
+        if(NOT FTLPU_HW_QUEUE_CONTROL_VERSION EQUAL 1 OR
+           NOT FTLPU_HW_QUEUE_CONTROL_READ_PORTS EQUAL 1 OR
+           FTLPU_HW_QUEUE_CONTROL_CAPACITY LESS 1 OR FTLPU_HW_QUEUE_CONTROL_CAPACITY GREATER 256 OR
+           FTLPU_HW_QUEUE_CONTROL_CACHE_DEPTH LESS 1 OR
+           FTLPU_HW_QUEUE_CONTROL_CACHE_DEPTH GREATER FTLPU_HW_QUEUE_CONTROL_CAPACITY OR
+           FTLPU_HW_QUEUE_CONTROL_READ_LATENCY LESS 1)
+            message(FATAL_ERROR "unsupported ICU queue control geometry")
+        endif()
+    endif()
+
+    if(FTLPU_HW_QUEUE_CONTROL_STORAGE_VERSION)
+        if(NOT FTLPU_HW_QUEUE_CONTROL_STORAGE_VERSION EQUAL 1 OR
+           NOT FTLPU_HW_QUEUE_CONTROL_VERSION EQUAL 1 OR
+           NOT FTLPU_HW_QUEUE_CONTROL_POOL_CAPACITY MATCHES "^[1-9][0-9]*$" OR
+           FTLPU_HW_QUEUE_CONTROL_POOL_CAPACITY GREATER 65535 OR
+           NOT FTLPU_HW_QUEUE_CONTROL_POOL_READ_II MATCHES "^[1-9][0-9]*$")
+            message(FATAL_ERROR "unsupported shared QCTL pool geometry")
+        endif()
+    elseif(FTLPU_HW_QUEUE_CONTROL_POOL_CAPACITY OR FTLPU_HW_QUEUE_CONTROL_POOL_READ_II)
+        message(FATAL_ERROR "shared QCTL geometry requires storage version 1")
     endif()
 
     # A transport beat is independent of the on-chip vector/row width.
@@ -91,6 +132,39 @@ function(ftlpu_generate_hardware_config input_json output_header)
        FTLPU_HW_C2C_BEAT_BYTES GREATER FTLPU_HW_VECTOR_BYTES)
         message(FATAL_ERROR "c2c.beat_bytes must be positive and fit within one physical vector")
     endif()
+
+    # Simulation timing knobs are optional for older target files. They are
+    # independent of the executable ISA/ABI.
+    macro(ftlpu_timing_parameter output default_value section field)
+        string(JSON FTLPU_TIMING_TYPE ERROR_VARIABLE FTLPU_SECTION_ERROR
+            TYPE "${FTLPU_HW_JSON}" ${section})
+        if(FTLPU_SECTION_ERROR)
+            set(${output} ${default_value})
+        elseif(NOT FTLPU_TIMING_TYPE STREQUAL "OBJECT")
+            message(FATAL_ERROR "${section} must be an object")
+        else()
+            string(JSON FTLPU_PARAMETER_TYPE ERROR_VARIABLE FTLPU_FIELD_ERROR
+                TYPE "${FTLPU_HW_JSON}" ${section} ${field})
+            if(FTLPU_FIELD_ERROR)
+                set(${output} ${default_value})
+            elseif(NOT FTLPU_PARAMETER_TYPE STREQUAL "NUMBER")
+                message(FATAL_ERROR "${section}.${field} must be an integer")
+            else()
+                ftlpu_json_get(${output} ${section} ${field})
+            endif()
+        endif()
+        if(NOT "${${output}}" MATCHES "^[1-9][0-9]*$"
+            OR "${${output}}" GREATER 2147483647)
+            message(FATAL_ERROR "${section}.${field} must be a positive integer <= 2147483647")
+        endif()
+    endmacro()
+    ftlpu_timing_parameter(FTLPU_DMA_FIFO_DEPTH 16 external_memory dma_fifo_depth_vectors)
+    ftlpu_timing_parameter(FTLPU_PROGRAM_BUS_BYTES 32 program_load bus_bytes_per_cycle)
+    ftlpu_timing_parameter(FTLPU_PROGRAM_ROUTE_LATENCY 1 program_load route_latency_cycles)
+    ftlpu_timing_parameter(FTLPU_PROGRAM_WRITE_II 1 program_load imem_write_ii_cycles)
+    ftlpu_timing_parameter(FTLPU_PROGRAM_COMMIT_LATENCY 1 program_load imem_write_commit_latency_cycles)
+
+    include("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/FTLPUIcuGeometry.cmake")
 
     set(FTLPU_POSITIVE_INTEGER_FIELDS
         FTLPU_HW_HEMISPHERES

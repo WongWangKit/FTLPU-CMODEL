@@ -6,12 +6,14 @@
 #include "ftlpu/mem/slice.hpp"
 #include "ftlpu/mem/sram.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <ostream>
 #include <string>
@@ -145,6 +147,7 @@ public:
         }
         executed_mem_.clear();
         executed_instructions_.clear();
+        transport_commits_.clear();
     }
 
     void set_sram_depth_rows(std::size_t rows)
@@ -174,6 +177,65 @@ public:
                     for (const auto& slot : port)
                         if (slot) return false;
         return true;
+    }
+
+    bool compute_idle() const noexcept
+    {
+        for (const auto& slice : instruction_queues_)
+            for (const auto& bank : slice)
+                for (const auto& queue : bank)
+                    for (const auto& instruction : queue)
+                        if (!instruction.transport_generation) return false;
+        for (const auto& slice : instruction_rows_)
+            for (const auto& bank : slice)
+                for (const auto& port : bank)
+                    for (const auto& slot : port)
+                        if (slot && !slot->transport_generation) return false;
+        return true;
+    }
+
+    bool transport_idle() const noexcept
+    {
+        for (const auto& slice : instruction_queues_)
+            for (const auto& bank : slice)
+                for (const auto& queue : bank)
+                    for (const auto& instruction : queue)
+                        if (instruction.transport_generation) return false;
+        for (const auto& slice : instruction_rows_)
+            for (const auto& bank : slice)
+                for (const auto& port : bank)
+                    for (const auto& slot : port)
+                        if (slot && slot->transport_generation) return false;
+        return true;
+    }
+
+    void configure_transport_commit(std::uint64_t generation, std::uint32_t launch,
+        std::size_t slice, std::size_t bank, std::size_t vectors)
+    {
+        check_mem_slice(slice); check_bank(bank);
+        if (!generation || !launch || !vectors || transport_commits_.size() >= 65535
+            || vectors > std::numeric_limits<std::uint64_t>::max() / hw::kTileRows)
+            throw std::invalid_argument("invalid or oversized MEM commit scoreboard");
+        for (const auto& s : transport_commits_)
+            if (s.launch == launch && s.slice == slice && s.bank == bank)
+                throw std::invalid_argument("duplicate MEM commit scoreboard owner");
+        transport_commits_.push_back({generation, launch, slice, bank,
+            static_cast<std::uint64_t>(vectors) * hw::kTileRows, 0});
+    }
+
+    std::uint64_t transport_committed_segments(std::uint64_t generation,
+        std::uint32_t launch, std::size_t slice, std::size_t bank) const
+    {
+        for (const auto& s : transport_commits_)
+            if (s.generation == generation && s.launch == launch
+                && s.slice == slice && s.bank == bank) return s.committed;
+        throw std::invalid_argument("unregistered MEM commit scoreboard owner");
+    }
+
+    // Physical SRAM writes, independent of optional debug trace capture.
+    std::size_t last_transport_commit_segments() const noexcept
+    {
+        return last_transport_commit_segments_;
     }
 
     void enqueue_instruction(std::size_t mem_slice, MemInstruction instruction)
@@ -322,6 +384,7 @@ public:
 
         executed_mem_.clear();
         executed_instructions_.clear();
+        last_transport_commit_segments_ = 0;
         dispatch_from_queues();
         capture_trace_ = capture_trace;
         execute_current_instructions(fabric);
@@ -518,9 +581,15 @@ private:
                 ? input.peek_segment(tile, stream.index())
                 : input.consume_segment(tile, stream.index());
             vector_tag = segment.front().vector_tag;
+            if (instruction.transport_generation
+                && !std::all_of(segment.begin(), segment.end(),
+                    [](const auto& cell) { return cell.transport; }))
+                throw std::logic_error("transport MEM write consumed computation SR data");
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                 bytes[lane] = segment[lane].data;
             }
+        } else if (instruction.transport_generation) {
+            throw std::logic_error("transport MEM commit has no valid C2C payload");
         } else if (instruction.preserve_stream) {
             // A tap is a conditional observation of an existing stream.  The
             // ICU command traverses every tile, but only the tile carrying the
@@ -620,6 +689,16 @@ private:
 
         sram_.bank(mem_slice, bank).write_segment(
             tile, instruction.address, bytes);
+        if (instruction.transport_generation) {
+            auto found = std::find_if(transport_commits_.begin(), transport_commits_.end(),
+                [&](const auto& s) { return s.generation == instruction.transport_generation
+                    && s.launch == instruction.transport_launch
+                    && s.slice == mem_slice && s.bank == bank; });
+            if (found == transport_commits_.end() || found->committed >= found->expected)
+                throw std::logic_error("unbound or duplicate transport SRAM commit");
+            ++found->committed;
+            ++last_transport_commit_segments_;
+        }
         if (capture_trace_) {
             executed_mem_.push_back(MemTransfer {
                 MemTransfer::Kind::StoreStreamToSram,
@@ -735,6 +814,14 @@ private:
     std::vector<InstructionTrace> executed_instructions_{};
     std::size_t cycle_{0};
     bool capture_trace_{true};
+    struct TransportCommitState {
+        std::uint64_t generation;
+        std::uint32_t launch;
+        std::size_t slice, bank;
+        std::uint64_t expected, committed;
+    };
+    std::vector<TransportCommitState> transport_commits_{};
+    std::size_t last_transport_commit_segments_{0};
 };
 
 } // namespace ftlpu

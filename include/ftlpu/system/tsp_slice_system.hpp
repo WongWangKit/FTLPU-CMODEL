@@ -396,6 +396,44 @@ public:
         return true;
     }
 
+    bool program_resources_drained() const noexcept {
+        if (!common_barrier_resources_drained()) return false;
+        for (std::size_t h=0;h<hw::kHemispheres;++h) {
+            if (c2cs_[h] && (!c2cs_[h]->tx().idle() || !c2cs_[h]->rx().idle())) return false;
+            if (c2c_dmas_[h] && !c2c_dmas_[h]->drained()) return false;
+        }
+        return true;
+    }
+    bool can_load_program() const {return phase_==CyclePhase::Idle && icu_.program_queues_done() && program_resources_drained();}
+    // Only task execution state changes; SRAM, DDR/DMA and device time survive.
+    void reset_program() {
+        require_phase(CyclePhase::Idle, "switching program");
+        if (!can_load_program()) throw std::logic_error("previous kernel has not drained");
+        for(auto* dma:c2c_dmas_) if(dma) {
+            while(dma->take_completion_sync_tag()) {}
+            while(dma->take_completion_notification()) {}
+        }
+        icu_.reset_program();
+    }
+
+    bool common_compute_resources_drained() const noexcept
+    {
+        if (!vxm_.idle()) return false;
+        for (const auto& mxm : mxms_) if (!mxm.idle()) return false;
+        for (std::size_t h = 0; h < hw::kHemispheres; ++h)
+            if (!mems_[h].compute_idle() || !sxms_[h].idle()
+                || !streams_[h].compute_empty()) return false;
+        return true;
+    }
+
+    bool common_transport_resources_drained() const noexcept
+    {
+        for (std::size_t h = 0; h < hw::kHemispheres; ++h)
+            if (!mems_[h].transport_idle() || !streams_[h].transport_empty()
+                || (c2cs_[h] && !c2cs_[h]->rx().idle())) return false;
+        return true;
+    }
+
     std::size_t passive_bridge_transfer_count(
         Hemisphere source, std::size_t stream) const
     {
@@ -489,8 +527,9 @@ private:
                 if (!mxm.idle())
                     throw StaticScheduleError("unsafe common barrier: MXM has in-flight computation");
             for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
-                if (!mems_[hemisphere].idle() || !sxms_[hemisphere].idle()
-                    || !streams_[hemisphere].empty())
+                if (!(icu_.transport_overlap_enabled() ? mems_[hemisphere].compute_idle() : mems_[hemisphere].idle())
+                    || !sxms_[hemisphere].idle()
+                    || !(icu_.transport_overlap_enabled() ? streams_[hemisphere].compute_empty() : streams_[hemisphere].empty()))
                     throw StaticScheduleError("unsafe common barrier: MEM/SXM/SR has in-flight data; schedule a drain window before C");
             }
         }
@@ -585,11 +624,11 @@ private:
             if (dma == nullptr) continue;
             dma->tick();
             if (const auto tag = dma->take_completion_sync_tag()) {
-                icu_.notify_tagged(IcuLocation::C2cDma(
+                if(!icu_.program_loading()) icu_.notify_tagged(IcuLocation::C2cDma(
                     static_cast<Hemisphere>(hemisphere)), *tag);
             }
             if (dma->take_completion_notification()) {
-                icu_.notify(IcuLocation::C2cDma(
+                if(!icu_.program_loading()) icu_.notify(IcuLocation::C2cDma(
                     static_cast<Hemisphere>(hemisphere)));
             }
         }

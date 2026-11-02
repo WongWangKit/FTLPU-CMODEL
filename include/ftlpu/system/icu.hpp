@@ -1,12 +1,14 @@
 #pragma once
 
 #include "ftlpu/c2c/dma.hpp"
+#include "ftlpu/system/program_image.hpp"
 #include "ftlpu/c2c/icu_instruction.hpp"
 #include "ftlpu/c2c/slice.hpp"
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/icu/distributed_queue.hpp"
 #include "ftlpu/icu/common_barrier.hpp"
+#include "ftlpu/icu/queue_completion.hpp"
 #include "ftlpu/icu/fu_3d_instruction.hpp"
 #include "ftlpu/icu/location.hpp"
 #include "ftlpu/mem/mem_array.hpp"
@@ -21,6 +23,7 @@
 #include <cstdint>
 #include <deque>
 #include <limits>
+#include <map>
 #include <ostream>
 #include <optional>
 #include <sstream>
@@ -281,23 +284,245 @@ public:
     // Runs all raw Macro frontends in parallel while the program cycle remains
     // stopped. Runtime can call this after writing/committing all raw images
     // and before enabling the global program issue clock.
+    void configure_queue_control_pool(std::size_t capacity,std::size_t cache,std::size_t latency,std::size_t ii) {
+        queue_control_pool_.configure(capacity,kMemQueues+3*kMxmQueues,cache,latency,ii);
+    }
+    IcuQueueControlPool& queue_control_pool() noexcept {return queue_control_pool_;}
+    const IcuQueueControlPool& queue_control_pool() const noexcept {return queue_control_pool_;}
     std::size_t prime_raw_macro_frontends()
     {
-        std::size_t cycles = 0;
-        for (;;) {
-            bool pending = false;
-            const auto prime_queue = [&](auto& queue) {
-                if (!queue.raw_macro_mode() || queue.raw_macro_ready()) return;
-                queue.prefetch_raw_macro();
-                pending = true;
-            };
-            for (auto& queue : mem_queues_) prime_queue(queue);
-            for (auto& queue : mxm_load_queues_) prime_queue(queue);
-            for (auto& queue : mxm_dequant_queues_) prime_queue(queue);
-            for (auto& queue : mxm_compute_queues_) prime_queue(queue);
-            if (!pending) return cycles;
-            ++cycles;
+        std::size_t cycles=0;
+        while(!raw_macro_frontends_ready()) {tick_raw_macro_frontends();++cycles;}
+        return cycles;
+    }
+    // One physical prefetch cycle. Call only after every image has committed.
+    bool raw_macro_frontends_ready() const
+    {
+        const auto ready = [](const auto& queues) {
+            return std::all_of(queues.begin(), queues.end(), [](const auto& queue) {
+                return !queue.raw_macro_mode() || queue.raw_macro_ready();
+            });
+        };
+        return ready(mem_queues_) && ready(mxm_load_queues_)
+            && ready(mxm_dequant_queues_) && ready(mxm_compute_queues_);
+    }
+
+    void tick_raw_macro_frontends()
+    {
+        queue_control_pool_.begin_cycle();
+        const auto tick = [](auto& queues) {
+            for (auto& queue : queues)
+                if (queue.raw_macro_mode() && !queue.raw_macro_ready())
+                    queue.prefetch_raw_macro();
+        };
+        tick(mem_queues_);
+        tick(mxm_load_queues_);
+        tick(mxm_dequant_queues_);
+        tick(mxm_compute_queues_);
+        queue_control_pool_.end_cycle(true);
+    }
+
+    template<class Fn> void visit_program_queue(IcuMacroQueueKind kind, std::size_t index,
+        bool transport, Fn&& fn) {
+        if (transport) {
+            if (kind!=IcuMacroQueueKind::Mem || index>=kMemQueues)
+                throw std::invalid_argument("invalid transport i-MEM target");
+            fn(mem_transport_iq(index)); return;
         }
+        switch(kind) {
+        case IcuMacroQueueKind::Mem: if(index>=kMemQueues) break; fn(mem_iq(index)); return;
+        case IcuMacroQueueKind::MxmLoad: if(index>=kMxmQueues) break; fn(mxm_load_iq(index)); return;
+        case IcuMacroQueueKind::MxmCompute: if(index>=kMxmQueues) break; fn(mxm_compute_iq(index)); return;
+        case IcuMacroQueueKind::MxmDequant: if(index>=kMxmQueues) break; fn(mxm_dequant_iq(index)); return;
+        case IcuMacroQueueKind::Vxm: if(index>=kVxmQueues) break; fn(vxm_iq(index)); return;
+        case IcuMacroQueueKind::SxmTranspose: if(index>=hw::kHemispheres) break; fn(sxm_transpose_iq(static_cast<Hemisphere>(index))); return;
+        case IcuMacroQueueKind::SxmPermute: if(index>=hw::kHemispheres) break; fn(sxm_permute_iq(static_cast<Hemisphere>(index))); return;
+        case IcuMacroQueueKind::C2cDma: if(index>=hw::kHemispheres) break; fn(c2c_dma_iq(static_cast<Hemisphere>(index))); return;
+        case IcuMacroQueueKind::C2cTx: if(index>=hw::kHemispheres) break; fn(c2c_tx_iq(static_cast<Hemisphere>(index))); return;
+        case IcuMacroQueueKind::C2cRx: if(index>=hw::kHemispheres) break; fn(c2c_rx_iq(static_cast<Hemisphere>(index))); return;
+        }
+        throw std::invalid_argument("invalid program queue target");
+    }
+    void validate_program_image(const ProgramImage& image) {
+        if (image.word_bytes()>64 || image.byte_count%image.word_bytes())
+            throw std::invalid_argument("invalid program word width or length");
+        switch(image.storage) {
+        case ProgramStorage::Imem: case ProgramStorage::TransportImem:
+            if (image.mode!=IcuQueueMode::Native && image.mode!=IcuQueueMode::Macro)
+                throw std::invalid_argument("invalid program encoding mode");
+            if (image.storage==ProgramStorage::TransportImem
+                && (image.kind!=IcuMacroQueueKind::Mem || image.mode!=IcuQueueMode::Native))
+                throw std::invalid_argument("transport requires Native MEM words");
+            if (image.mode==IcuQueueMode::Macro && static_cast<unsigned>(image.kind)>3)
+                throw std::invalid_argument("queue has no packed Macro codec");
+            // Query the main queue geometry without allocating a transport store.
+            visit_program_queue(image.kind,image.queue_index,false,[&](auto& q) {
+                using Q=std::decay_t<decltype(q)>;
+                const typename Q::Entry native{};
+                if(image.mode==IcuQueueMode::Native && image.word_bytes()!=native.lanes.size()*4)
+                    throw std::invalid_argument("Native codec does not define this physical word width");
+                if(image.word_bytes()!=Q::instruction_bits/8 || image.word_count()>Q::imem_depth
+                    || (image.mode==IcuQueueMode::Macro && !image.byte_count))
+                    throw std::invalid_argument("program exceeds physical i-MEM geometry");
+            }); break;
+        case ProgramStorage::Qctl:
+            if(image.word_bytes()!=12 || image.word_count()>hw::kQueueControlCapacity
+                || static_cast<unsigned>(image.kind)>3 || !image.generation)
+                throw std::invalid_argument("invalid QCTL image");
+            visit_program_queue(image.kind,image.queue_index,false,[](auto&){}); break;
+        case ProgramStorage::Barr:
+            if(image.word_bytes()!=8 || image.word_count()>hw::kCommonBarrierCapacity || !image.generation
+                || image.kind!=IcuMacroQueueKind::Mem || image.queue_index!=0)
+                throw std::invalid_argument("invalid BARR image"); break;
+        case ProgramStorage::QueueEvents: case ProgramStorage::BarrierEvents:
+            // Finite event headers and at most 65535 concrete completion instances.
+            if(image.word_bytes()!=4 || image.word_count()>4*65535 || !image.generation
+                || image.kind!=IcuMacroQueueKind::Mem || image.queue_index!=0)
+                throw std::invalid_argument("event configuration capacity exceeded"); break;
+        default: throw std::invalid_argument("unknown program storage");
+        }
+    }
+    void write_program_word(const ProgramImage& image,std::size_t address,const std::uint8_t* bytes) {
+        if(address>=image.word_count()) throw std::out_of_range("program word address");
+        if(image.storage==ProgramStorage::Imem || image.storage==ProgramStorage::TransportImem) {
+            visit_program_queue(image.kind,image.queue_index,image.storage==ProgramStorage::TransportImem,[&](auto& q) {
+                using Q=std::decay_t<decltype(q)>;
+                if(image.mode==IcuQueueMode::Macro) {
+                    typename Q::RawImemWord word{};
+                    for(std::size_t b=0;b<image.word_bytes();++b) word.lanes[b/4]|=std::uint32_t(bytes[b])<<(8*(b%4));
+                    q.write_raw_imem(address,word);
+                } else {
+                    typename Q::Entry word{};
+                    for(std::size_t b=0;b<image.word_bytes();++b) word.lanes[b/4]|=std::uint32_t(bytes[b])<<(8*(b%4));
+                    q.write_imem(address,word);
+                }
+            });
+        } else {
+            auto& ram=program_control_stores_[image.key()];
+            if(ram.size()!=address*image.word_bytes()) throw std::logic_error("nonsequential control RAM write");
+            ram.insert(ram.end(),bytes,bytes+image.word_bytes());
+        }
+    }
+    std::vector<std::uint8_t> read_program_image(const ProgramImage& image) {
+        if(image.storage!=ProgramStorage::Imem && image.storage!=ProgramStorage::TransportImem) {
+            const auto it=program_control_stores_.find(image.key());
+            return it==program_control_stores_.end()?std::vector<std::uint8_t>{}:it->second;
+        }
+        std::vector<std::uint8_t> bytes;
+        visit_program_queue(image.kind,image.queue_index,image.storage==ProgramStorage::TransportImem,[&](auto& q) {
+            for(std::size_t address=0;address<image.word_count();++address) {
+                const auto append=[&](const auto& word) {
+                    for(std::size_t b=0;b<image.word_bytes();++b) bytes.push_back(static_cast<std::uint8_t>(word.lanes[b/4]>>(8*(b%4))));
+                };
+                if(image.mode==IcuQueueMode::Macro) append(q.read_raw_imem(address));
+                else append(q.read_committed_imem(address));
+            }
+        }); return bytes;
+    }
+    void seal_program_image(const ProgramImage& image) {
+        if(image.storage==ProgramStorage::Imem || image.storage==ProgramStorage::TransportImem) {
+            visit_program_queue(image.kind,image.queue_index,image.storage==ProgramStorage::TransportImem,[&](auto& q) {
+                if(image.mode==IcuQueueMode::Macro) q.configure_raw_macro(image.kind,image.word_count());
+                else q.configure({0,image.word_count()}); // No synchronous IQ prefill.
+            }); return;
+        }
+        const auto& bytes=program_control_stores_[image.key()];
+        if(bytes.size()!=image.byte_count) throw std::logic_error("incomplete control RAM image");
+        const auto u32=[&](std::size_t p) {
+            if(p+4>bytes.size()) throw std::invalid_argument("truncated control RAM record");
+            std::uint32_t v=0;for(std::size_t b=0;b<4;++b) v|=std::uint32_t(bytes[p+b])<<(8*b);return v;
+        };
+        if(image.storage==ProgramStorage::Qctl) {
+            std::vector<IcuQueueControl> entries;
+            bool transport=false;
+            for(std::size_t p=0;p<bytes.size();p+=12) {
+                if(u32(p+4)>8) throw std::invalid_argument("invalid QCTL opcode width");
+                auto opcode=static_cast<IcuControlOpcode>(u32(p+4));
+                entries.push_back({u32(p),opcode,u32(p+8)});
+                transport|=opcode==kQueueControlMemPacket;
+            }
+            visit_program_queue(image.kind,image.queue_index,false,[&](auto& q) {
+                if constexpr(hw::kQueueControlStorageVersion != 0)
+                    q.configure_shared_queue_controls(queue_control_pool_,entries,hw::kQueueControlCapacity,image.end_cycle);
+                else q.configure_queue_controls(entries,hw::kQueueControlCapacity,hw::kQueueControlCacheDepth,
+                    hw::kQueueControlReadLatency,image.end_cycle);
+            });
+            if(transport) enable_queue_control_transport(image.queue_index);
+        } else if(image.storage==ProgramStorage::Barr) {
+            committed_barriers_.clear();
+            for(std::size_t p=0;p<bytes.size();p+=8) committed_barriers_.push_back({u32(p),u32(p+4)});
+        } else {
+            std::vector<IcuCommonEventBinding> bindings;
+            for(std::size_t p=0;p<bytes.size();) {
+                const auto event=u32(p);p+=4;
+                const auto source=image.storage==ProgramStorage::QueueEvents?u32(p):2;
+                if(image.storage==ProgramStorage::QueueEvents) p+=4;
+                const auto count=u32(p);p+=4;
+                if(count>65535 || count>(bytes.size()-p)/4) throw std::invalid_argument("invalid event instance count");
+                IcuCommonEventBinding binding{event,{}};
+                for(std::size_t i=0;i<count;++i,p+=4) binding.completion_instances.push_back(u32(p));
+                if(source==2) bindings.push_back(std::move(binding));
+                else if(source!=1 || count) throw std::invalid_argument("invalid event source");
+            }
+            if(image.storage==ProgramStorage::QueueEvents) configure_queue_completion_events(image.generation,bindings);
+            else configure_common_barriers(image.generation,committed_barriers_,bindings);
+        }
+    }
+    template<class Fn> void for_each_program_queue(Fn&& fn) {
+        for(auto& q:mem_queues_)fn(q);for(auto& q:mem_transport_queues_)fn(q);
+        for(auto& q:mxm_load_queues_)fn(q);for(auto& q:mxm_compute_queues_)fn(q);
+        for(auto& q:mxm_dequant_queues_)fn(q);for(auto& q:vxm_queues_)fn(q);
+        for(auto& q:sxm_transpose_queues_)fn(q);for(auto& q:sxm_permute_queues_)fn(q);
+        for(auto& q:c2c_dma_queues_)fn(q);for(auto& q:c2c_tx_queues_)fn(q);for(auto& q:c2c_rx_queues_)fn(q);
+    }
+    bool program_queues_done() const {
+        bool done=common_barriers_.done();
+        const_cast<InstructionControlUnit*>(this)->for_each_program_queue([&](const auto& q){done &= q.done();});
+        for(const auto& packet:pending_c2c_dma_raw_words_) done &= !packet.has_value();
+        return done;
+    }
+    void tick_program_frontends() {
+        queue_control_pool_.begin_cycle();
+        for_each_program_queue([](auto& q){q.prime_frontend_cycle();});
+        queue_control_pool_.end_cycle(true);
+    }
+    bool program_frontends_ready() {
+        bool ready=true;for_each_program_queue([&](auto& q){ready &= q.imem_occupancy()==0 || q.frontend_ready();});return ready;
+    }
+    void reset_program() {
+        const auto physical=cycle_;
+        reset(); cycle_=physical;
+        if constexpr(hw::kQueueControlStorageVersion != 0)
+            configure_queue_control_pool(hw::kQueueControlPoolCapacity,hw::kQueueControlCacheDepth,
+                hw::kQueueControlReadLatency,hw::kQueueControlPoolReadIi);
+        program_control_stores_.clear();committed_barriers_.clear();
+        program_loading_=true;program_issue_enabled_=false;compute_enabled_=false;
+    }
+
+    // A kernel switch must not reset transport queues, DDR or physical time.
+    void reset_compute_program()
+    {
+        for (auto& queue : vxm_queues_) queue.reset();
+        for (auto& queue : mem_queues_) queue.reset();
+        for (auto& queue : mxm_load_queues_) queue.reset();
+        for (auto& queue : mxm_dequant_queues_) queue.reset();
+        for (auto& queue : mxm_compute_queues_) queue.reset();
+        for (auto& queue : sxm_transpose_queues_) queue.reset();
+        for (auto& queue : sxm_permute_queues_) queue.reset();
+        barrier_events_.clear();
+        common_barriers_.reset();
+        // The new compute image has no callbacks into the previous QCTL
+        // partitions. Keep transport queues/owners for in-flight packets,
+        // but release their old queue-local activation gates and Native PCs.
+        queue_control_transport_enabled_.fill(false);
+        queue_control_transport_ticked_.fill(false);
+        mem_native_owners_.clear();
+        queue_completion_events_ = {};
+        queue_control_pool_.reset();
+        transport_overlap_enabled_ = false;
+        compute_enabled_ = false;
+        program_loading_ = true;
+        program_issue_enabled_ = false;
     }
     void reset()
     {
@@ -321,11 +546,21 @@ public:
         for (auto& queue : c2c_dma_queues_) queue.reset();
         for (auto& queue : c2c_rx_queues_) queue.reset();
         pending_c2c_dma_raw_words_.fill(std::nullopt);
+        program_control_stores_.clear();committed_barriers_.clear();
         barrier_events_.clear();
         program_issue_enabled_ = true;
+        program_loading_ = false;
         common_barriers_.reset();
+        mem_transport_owners_.clear();
+        mem_native_owners_.clear();
+        queue_completion_events_ = {};
+        queue_control_pool_.reset();
+        mem_transport_owner_count_ = 0;
+        transport_overlap_enabled_ = false;
+        queue_control_transport_enabled_.fill(false);
         compute_enabled_ = true;
         cycle_ = 0;
+        program_generation_=0;
     }
 
     void enqueue_nop(std::size_t cycles)
@@ -605,6 +840,33 @@ public:
         mem_transport_iq(queue).push_encoded_synchronized_packet(
             MemIcu::EncodedSynchronizedPacket{packet.words[0], packet.words[1]});
     }
+
+    void enable_queue_control_transport(std::size_t queue)
+    {
+        auto& transport=mem_transport_iq(queue);
+        if (!mem_iq(queue).raw_macro_mode())
+            throw StaticScheduleError("queue transport ownership requires Raw Macro mode");
+        transport.launch();
+        queue_control_transport_enabled_[queue]=true;
+        mem_iq(queue).set_queue_transport_executor([this,queue](std::uint32_t ordinal) {
+            auto& native=mem_transport_iq(queue);
+            if (native.synchronized_completed_count()+1 != ordinal)
+                throw StaticScheduleError("queue transport packet executed out of order");
+            auto instruction=native.dispatch_next();
+            queue_control_transport_ticked_[queue]=true;
+            const auto pc=native.last_trace().issue_pc;
+            if (instruction && !mem_transport_owners_.empty() && pc
+                && mem_transport_owners_[queue].contains(*pc)) {
+                const auto& owner=mem_transport_owners_[queue].at(*pc);
+                instruction->transport_generation=owner.generation;
+                instruction->transport_launch=owner.launch;
+            }
+            return MemIcu::QueueTransportResult{std::move(instruction),
+                native.synchronized_completed_count()==ordinal,native.last_trace().action,pc};
+        });
+    }
+    bool queue_control_transport_enabled(std::size_t queue) const
+    { check_mem_queue(queue); return queue_control_transport_enabled_[queue]; }
 
     void insert_mem_synchronized_raw(std::size_t queue,
         std::size_t address,
@@ -1210,6 +1472,9 @@ public:
         throw std::logic_error("unknown tagged ICU location kind");
     }
 
+    bool program_loading() const noexcept {return program_loading_;}
+    void set_program_loading(bool loading) noexcept { program_loading_ = loading; }
+
     void set_program_issue_enabled(bool enabled) noexcept
     {
         program_issue_enabled_ = enabled;
@@ -1220,18 +1485,22 @@ public:
         return program_issue_enabled_;
     }
 
+    std::uint64_t program_generation() const noexcept {return program_generation_;}
+    void set_program_generation(std::uint64_t generation) noexcept {program_generation_=generation;}
     void configure_common_barriers(std::uint64_t generation,
         std::vector<IcuCommonBarrierEntry> entries,
         const std::vector<IcuCommonEventBinding>& bindings)
     {
-        if (cycle_ != 0)
+        if (cycle_ != 0 && !program_loading_)
             throw StaticScheduleError("common barrier RAM must be prepared before execution");
         common_barriers_.configure(generation, std::move(entries), bindings);
+        program_generation_=generation;
     }
 
     void notify_common_mem_commit(std::uint64_t generation,
         std::uint32_t completion_instance)
     {
+        if(generation<program_generation_) return;
         common_barriers_.notify_mem_commit(generation, completion_instance);
     }
 
@@ -1240,6 +1509,27 @@ public:
     std::uint64_t common_barrier_wait_cycles() const noexcept { return common_barriers_.wait_cycles(); }
     bool compute_enabled() const noexcept { return compute_enabled_; }
     bool common_barrier_holding() const noexcept { return common_barriers_.holding(); }
+    void set_transport_overlap_enabled(bool enabled) { transport_overlap_enabled_ = enabled; }
+    bool transport_overlap_enabled() const noexcept { return transport_overlap_enabled_; }
+    void configure_mem_transport_owner(std::size_t queue, std::size_t pc,
+        std::uint64_t generation, std::uint32_t launch, bool transport_store = true)
+    {
+        if (queue >= kMemQueues || !generation || !launch
+            || mem_transport_owner_count_ >= 65535)
+            throw std::invalid_argument("invalid or oversized MEM transport owner table");
+        auto& owners=transport_store ? mem_transport_owners_ : mem_native_owners_;
+        if (owners.empty()) owners.resize(kMemQueues);
+        if (!owners[queue].emplace(pc, TransportOwner{generation, launch}).second)
+            throw std::invalid_argument("duplicate MEM transport descriptor owner");
+        ++mem_transport_owner_count_;
+    }
+    void configure_queue_completion_events(std::uint64_t generation,
+        const std::vector<IcuCommonEventBinding>& bindings)
+    { queue_completion_events_.configure(generation,bindings);program_generation_=generation; }
+    void notify_queue_mem_commit(std::uint64_t generation,std::uint32_t instance)
+    { if(generation<program_generation_) return;queue_completion_events_.notify_mem_commit(generation,instance); }
+    bool queue_completion_ready(std::uint32_t event) const
+    { return queue_completion_events_.ready(event); }
     bool common_barriers_done() const noexcept { return common_barriers_.done(); }
     bool common_barrier_due() const noexcept { return common_barriers_.barrier_due(); }
 
@@ -1271,6 +1561,7 @@ public:
             static_cast<Hemisphere>(location.unit),
             location.index, location.bank);
         return (!mem_transport_queues_.empty()
+                && (!queue_control_transport_enabled_[queue] || mem_queues_[queue].queue_transport_due())
                 && mem_transport_queues_[queue].accepts_synchronized_notification(synchronization_tag))
             || mem_iq(queue).accepts_synchronized_notification(synchronization_tag);
     }
@@ -1340,7 +1631,7 @@ public:
         if (common_barriers_.barrier_due()
             && !vxm.idle())
             throw StaticScheduleError("unsafe common barrier: VXM has in-flight computation");
-        compute_enabled_ = common_barriers_.begin_cycle(program_issue_enabled_);
+        compute_enabled_ = (!program_loading_ && common_barriers_.begin_cycle(program_issue_enabled_));
         bool any = false;
         if (compute_enabled_) {
             for (std::size_t alu = 0; alu < kVxmQueues; ++alu) {
@@ -1354,9 +1645,9 @@ public:
                 }
             }
         }
-        else for (auto& queue : vxm_queues_) queue.hold_compute_cycle();
+        else if (!program_loading_) for (auto& queue : vxm_queues_) queue.hold_compute_cycle();
         log_dispatch_idle(os, any);
-        common_barriers_.end_cycle();
+        if(!program_loading_) common_barriers_.end_cycle();
         ++cycle_;
     }
     void dispatch(
@@ -1369,9 +1660,10 @@ public:
         std::array<C2cDmaEngine*, hw::kHemispheres> c2c_dmas = {})
     {
         log_cycle_header(os);
+        if(!program_loading_) queue_control_pool_.begin_cycle();
 
-        compute_enabled_ = common_barriers_.begin_cycle(program_issue_enabled_);
-        if (!compute_enabled_) {
+        compute_enabled_ = (!program_loading_ && common_barriers_.begin_cycle(program_issue_enabled_));
+        if (!compute_enabled_ && !program_loading_) {
             for (auto& queue : vxm_queues_) queue.hold_compute_cycle();
             for (auto& queue : mxm_load_queues_) queue.hold_compute_cycle();
             for (auto& queue : mxm_dequant_queues_) queue.hold_compute_cycle();
@@ -1384,7 +1676,7 @@ public:
         for (std::size_t hemisphere = 0;
              hemisphere < hw::kHemispheres;
              ++hemisphere) {
-            const auto c2c_tx = c2c_tx_queues_[hemisphere].dispatch_next();
+            const auto c2c_tx = program_loading_ ? decltype(c2c_tx_queues_[hemisphere].dispatch_next()){} : c2c_tx_queues_[hemisphere].dispatch_next();
             if (c2c_tx.has_value()) {
                 if (c2cs[hemisphere] == nullptr) {
                     throw std::logic_error(
@@ -1413,7 +1705,7 @@ public:
                 }
             }
 
-            const auto c2c_rx = c2c_rx_queues_[hemisphere].dispatch_next();
+            const auto c2c_rx = program_loading_ ? decltype(c2c_rx_queues_[hemisphere].dispatch_next()){} : c2c_rx_queues_[hemisphere].dispatch_next();
             if (c2c_rx.has_value()) {
                 if (c2cs[hemisphere] == nullptr) {
                     throw std::logic_error(
@@ -1433,7 +1725,7 @@ public:
             }
 
             const auto c2c_dma =
-                c2c_dma_queues_[hemisphere].dispatch_next();
+                program_loading_ ? decltype(c2c_dma_queues_[hemisphere].dispatch_next()){} : c2c_dma_queues_[hemisphere].dispatch_next();
             if (c2c_dma.has_value()) {
                 if (c2c_dmas[hemisphere] == nullptr) {
                     throw std::logic_error(
@@ -1469,19 +1761,43 @@ public:
         }
 
         for (std::size_t queue = 0; queue < kMemQueues; ++queue) {
+            queue_control_transport_ticked_[queue]=false;
             auto instruction = std::optional<MemInstruction>{};
             if (compute_enabled_)
                 instruction = mem_queues_[queue].dispatch_next();
+            else if (program_loading_) {} // No fetch/auto-launch while i-MEM is being written.
             else if (common_barriers_.configured())
                 mem_queues_[queue].hold_compute_cycle();
             else
                 instruction = mem_queues_[queue].tick_transport_only();
-            const auto transport = mem_transport_queues_.empty()
+            if (instruction && !mem_native_owners_.empty()
+                && mem_queues_[queue].last_trace().action==IcuQueueAction::SynchronizedIssue) {
+                const auto pc=mem_queues_[queue].last_trace().issue_pc;
+                if (pc && mem_native_owners_[queue].contains(*pc)) {
+                    const auto& owner=mem_native_owners_[queue].at(*pc);
+                    instruction->transport_generation=owner.generation;
+                    instruction->transport_launch=owner.launch;
+                }
+            }
+            if (!program_loading_ && queue_control_transport_enabled_[queue] && !queue_control_transport_ticked_[queue])
+                mem_transport_queues_[queue].prefetch_transport_cycle();
+            auto transport = program_loading_ || mem_transport_queues_.empty() || queue_control_transport_enabled_[queue]
                 ? std::optional<MemInstruction>{}
                 : mem_transport_queues_[queue].dispatch_next();
             if (instruction && transport)
                 throw StaticScheduleError("MEM transport and compute contend for the shared bank issue port");
-            if (transport) instruction = transport;
+            if (transport) {
+                const auto pc = mem_transport_queues_[queue].last_trace().issue_pc;
+                if (!mem_transport_owners_.empty() && pc
+                    && mem_transport_owners_[queue].contains(*pc)) {
+                    const auto& owner = mem_transport_owners_[queue].at(*pc);
+                    transport->transport_generation = owner.generation;
+                    transport->transport_launch = owner.launch;
+                } else if (transport_overlap_enabled_) {
+                    throw StaticScheduleError("overlapped MEM transport has no commit owner");
+                }
+                instruction = transport;
+            }
             if (!instruction.has_value()) {
                 continue;
             }
@@ -1567,7 +1883,8 @@ public:
         }
 
         log_dispatch_idle(os, any);
-        common_barriers_.end_cycle();
+        if(!program_loading_) common_barriers_.end_cycle();
+        if(!program_loading_) queue_control_pool_.end_cycle();
         ++cycle_;
     }
 
@@ -2006,6 +2323,8 @@ private:
     // Separate bounded native transport control RAM. It shares the physical
     // bank issue port, never the raw Macro decoder or its logical clock.
     std::vector<MemIcu> mem_transport_queues_{};
+    std::array<bool,kMemQueues> queue_control_transport_enabled_{};
+    std::array<bool,kMemQueues> queue_control_transport_ticked_{};
     std::array<MxmLoadIcu, kMxmQueues> mxm_load_queues_{};
     std::array<MxmDequantIcu, kMxmQueues>
         mxm_dequant_queues_{};
@@ -2021,6 +2340,17 @@ private:
     std::deque<std::size_t> barrier_events_{};
     bool program_issue_enabled_{true};
     bool compute_enabled_{true};
+    std::map<std::tuple<ProgramStorage,IcuMacroQueueKind,std::size_t>,std::vector<std::uint8_t>> program_control_stores_{};
+    std::vector<IcuCommonBarrierEntry> committed_barriers_{};
+    std::uint64_t program_generation_{0};
+    bool program_loading_{false};
+    struct TransportOwner { std::uint64_t generation; std::uint32_t launch; };
+    std::vector<std::map<std::size_t, TransportOwner>> mem_transport_owners_{};
+    std::vector<std::map<std::size_t, TransportOwner>> mem_native_owners_{};
+    IcuQueueCompletionEvents queue_completion_events_{};
+    IcuQueueControlPool queue_control_pool_{};
+    std::size_t mem_transport_owner_count_{0};
+    bool transport_overlap_enabled_{false};
     IcuCommonBarrierController common_barriers_{};
     std::size_t cycle_{0};
 };

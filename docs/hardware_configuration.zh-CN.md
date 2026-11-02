@@ -7,7 +7,7 @@ CMake 配置阶段读取它并生成编译期常量，Software 编译器也可�
 
 默认配置为 [`config/ftlpu-lpu32.json`](../config/ftlpu-lpu32.json)。未指定
 `FTLPU_HARDWARE_CONFIG` 时，CModel 使用该文件；Software 使用
-`${FTLPU_CMODEL_DIR}/config/ftlpu-lpu32.json`。默认内容如下：
+`${FTLPU_CMODEL_DIR}/config/ftlpu-lpu32.json`。以下为基础结构示意，完整字段及当前默认值以配置文件为准：
 
 ```json
 {
@@ -38,10 +38,54 @@ CMake 配置阶段读取它并生成编译期常量，Software 编译器也可�
     ]
   },
   "vxm": {
-    "alus": 8
+    "alus": 16
   }
 }
 ```
+
+### `icu`：存储、队列与 Macro 前端
+
+ICU 参数也由同一 JSON 生成，CModel 的实际队列模板与 SOFTWARE 的调度、容量分析共用生成值。2026-11-02 将原 C++ 默认值显式写入配置，数值未改；当时 QCTL 为每队列 16 条 RAM＋8 条缓存；后续 main 已接入 512 条共享池、每队列最多 16 条及 4 条缓存。旧 schema v2 文件省略新增字段时沿用原默认值。
+
+以下深度均为每队列；`mem/mxm/vxm/sxm/c2c` 是字段名前缀，不是五份独立配置文件。
+
+| 字段 | MEM | MXM | VXM | SXM | C2C |
+|---|---:|---:|---:|---:|---:|
+| `*_instruction_bits` | 96 | 128 | 96 | 96 | 96 |
+| `*_imem_depth` | 131072 | 65536 | 2048 | 2048 | 32768 |
+| `*_iq_depth` | 16 | 16 | 16 | 16 | 16 |
+| `*_macro_contexts` | 32 | 40 | 4 | 4 | 4 |
+
+| 公共字段 | 默认值 | 含义 |
+|---|---:|---|
+| `mem_macro_context_bits` / `mxm_macro_context_bits` | 256 | packed-v1 活跃 Context 位宽 |
+| `fetch_latency_cycles` | 1 | i-MEM 读响应延迟 |
+| `macro_imem_request_ii_cycles` | 1 | Macro 取指请求间隔 |
+| `barrier_latency_cycles` | 35 | 原生同步通知传播延迟 |
+| `macro_reservoir_words` | 3 | 保留的 i-MEM 字数 |
+| `macro_decode_window_bits` | 64 | 解码窗口位宽 |
+| `macro_ddb_depth` | 8 | DDB 项数 |
+| `macro_admission_lookahead` | 8 | Context admission 的前视窗口 |
+| `macro_ddb_run_capacity` | 8 | 每 DDB 项可保留的展开 run 数 |
+| `queue_control_capacity` / `queue_control_cache_depth` | 16 / 4 | 每队列控制上限 / 缓存条数 |
+| `queue_control_read_latency` / `queue_control_read_ports` | 2 / 1 | 控制 RAM 读取延迟 / 端口数 |
+| `queue_control_storage_version` | 1 | 共享池模式；0 为独立 RAM 兼容模式 |
+| `queue_control_pool_capacity` / `queue_control_pool_read_ii` | 512 / 1 | 全片共享池容量 / 请求间隔 |
+| `common_barrier_capacity` | 1024 | 旧 BARR 的全片表容量 |
+
+修改物理配置后，两工程须使用同一文件重新配置和构建（CMake 参数 `-DFTLPU_HARDWARE_CONFIG=<JSON绝对路径>`），再以该文件作为 SOFTWARE 的 `--target-config` 重新编译程序。配置文件变化会触发 CMake 重新生成头文件；不必再修改 `hardware_params.hpp` 或队列模板。
+
+校验包括正整数及范围、IQ 不大于 i-MEM、reservoir 至少 2 字、解码窗口至多 64 bit；C++ 还按实际 codec 检查 IQ 能容纳完整包。指令字宽与 256-bit Context 是当前编码约束，虽列在配置中，但不允许任意改值。Native FU3D/Run2D 的单 Context 执行语义、包字段布局和固定单发射能力仍是实现约束，增加 JSON 数字不会增加这些能力。同类队列共用深度，尚无逐队列编号覆盖。
+
+现有容器已保存的 i-MEM 和 MEM/MXM Context 几何继续参与原 ABI/容量校验。本次不改变 v39 布局；IQ、C2C 存储、Macro 前端及相关时序仍是构建期参数，未新增容器字段。编译器会拒绝 `--target-config` 中与当前构建不一致的这些参数，并提示重建，避免无效覆盖被忽略。跨前端配置搬运旧二进制不能作为已验证用法，应配套重建并重新编译、验证程序。
+
+配置回归入口为 `subsystem.icu.configuration`：验证缺省兼容、非默认值传递及非法值拒绝；默认控制行为沿用 `unit.icu.queue_control`。2026-11-02 配置化复验结果：
+
+- 配置生成测试、CModel 控制测试及 SOFTWARE QCTL 容器测试通过；新增字段全部省略时，与显式默认值生成的完整头文件相同。
+- 非默认配置的实际队列编译/执行探针通过：MEM i-MEM 512、IQ 8、Context 16；MXM i-MEM 256、IQ 8、Context 24；取指延迟/间隔 2；reservoir 4、窗口 32、DDB 4、前视 6、run 容量 4。末地址可读写，超出新容量的写入拒绝。
+- 默认 seq32 Native 与 Raw Macro 重新编译后，分别为 358,482 B 和 487,546 B，与上一轮已完成数值验证的文件逐字节相同；4 类不匹配的构建期参数覆盖被编译器拒绝。
+
+本次未重复完整 decoder 数值仿真；上一轮 seq32 证据见 SOFTWARE 的 `docs/queue_control_16x8_validation.zh-CN.md`。本次小型日志、探针及二进制哈希归档在 SOFTWARE 的 `docs/evidence/icu-configuration/`，构建日志保留在 `out/icu-config/`。非默认几何的小测试不代表该配置已通过完整 decoder 验收。
 
 ### `stream_topology`（schema v2）
 
@@ -292,3 +336,60 @@ vxm_alus = 16
 一个 context 保存一个完整的 FP32 MXM tile：4-tile 时为 32×32，
 每个 MXM 共 16 KiB；8-tile 时为 64×64，共 64 KiB。
 编译器按配置分配 ACC 行地址，已生成的旧程序不能直接复用于缩小容量后的硬件。
+
+## DMA 程序装载模型（首版）
+
+共享 JSON 另外接受以下仿真参数。旧配置缺省时使用表中默认值；CMake 生成
+`hw::config` 常量，`C2cDmaSystem`、程序 DMA 和 `ProgramLoadConfig` 使用这些值初始化。
+修改 JSON 后重新 configure/build 即可改变模型时序；这些参数不进入指令 ABI。
+
+| 字段 | 默认值 |
+| --- | ---: |
+| `external_memory.dma_fifo_depth_vectors` | 16 |
+| `program_load.bus_bytes_per_cycle` | 32 |
+| `program_load.route_latency_cycles` | 1 |
+| `program_load.imem_write_ii_cycles` | 1 |
+| `program_load.imem_write_commit_latency_cycles` | 1 |
+
+五项均为 `[1, 2147483647]` 范围内的整数。带宽以 bytes/cycle 计，其余三项时序以物理周期计。
+也可以在构造 C2cDmaSystem 时传入 FIFO 深度及第四个参数 ProgramLoadConfig，或在没有
+活动装载时调用 `program_loader().configure(config)`。DDR 仍是系统原有的同一个实例，
+程序读取与权重/数据读取共同受其请求容量和带宽限制。
+
+32 bytes/cycle 和两个 1-cycle 延迟是首版建模假设，不表示已经确认的 RTL 位宽和延迟。
+装载器固定单活动程序、单活动目标，并按 runtime 提交清单的顺序处理；上一个目标最后
+一次写入提交后才允许下一个目标开始 DDR 读取。
+
+硬件接口位于 `include/ftlpu/system/program_loader.hpp`：
+
+```cpp
+auto& loader = system.program_loader();
+loader.submit(images, system.cycle()); // images 是已经解析的 ProgramImage 清单
+loader.start();                       // 可以提前请求；请求会保留
+loader.set_dependencies_ready(inputs_and_initial_weights_ready);
+system.tick();                       // 每调用一次，物理时钟和共享 DDR 前进一拍
+```
+
+首版物理格式仅接受 MEM 96-bit、MXM load/compute/dequant 128-bit Macro 映像。
+长度包含物理控制 word、物理 word 尾部填充，不包含 DMA 32-byte vector 的尾部填充。
+每个 word 内 lane 0 对应最低 32 bit，每个 lane 按 little-endian 字节顺序传输。
+不使用语义指令数量估算传输长度；未实现的 Native/VXM/SXM 格式明确报错。
+
+接收 FIFO 与 outstanding 共用同一 DMA credit 上限；64-byte 重组缓存、每拍最多接收
+一个 packet 的弹性传输流水线、提交延迟决定容量的写流水线都是有限资源。完整 word
+才会请求写入，每拍最多接受一个；内容在接受周期加 commit latency 时才可见。
+传输流水线末端受阻时逐级反压，最终停止发出新的 DDR 请求。
+
+`all_images_committed()` 后，各 Macro 前端每个物理周期并行预取一拍。
+`ready_to_start()` 表示程序映像和本地前端已经就绪；统一启动还要求外部依赖门控为真。
+`statistics().program_start` 记录统一启动且本次 kernel 逻辑周期 0 发射的物理周期。
+程序切换仅重置计算队列，不复位 DDR、权重 DMA、传输队列或物理时钟。
+
+`statistics()` 提供逐队列 source_done、最后提交、首笔请求/返回，以及全程序提交、
+预取完成、启动时间戳、有效映像/DMA 字节数、word 数、DMA credit/总线/写端等待周期。
+`statistics().print(os)` 输出这些数据，装载和预取时间直接由时间戳相减得到。
+总线等待统计部分 vector 由于带宽限制仍需后续拍传输的周期；写端等待统计已有完整
+word 但写端尚不能接受的周期；DMA credit 等待统计仍有请求且 FIFO 加 outstanding
+已满的周期。这些等待可以重叠，不能相加作为总装载时间。
+
+验收测试：`subsystem.program.loader` 和 `subsystem.program.configuration`。

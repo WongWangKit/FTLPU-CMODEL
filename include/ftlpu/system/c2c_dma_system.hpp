@@ -2,6 +2,7 @@
 
 #include "ftlpu/c2c/c2c.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
+#include "ftlpu/system/program_loader.hpp"
 
 #include <array>
 #include <cstddef>
@@ -14,8 +15,9 @@ class C2cDmaSystem {
 public:
     explicit C2cDmaSystem(
         Ddr4Config ddr4_config = {},
-        std::size_t dma_fifo_depth_vectors = 16,
+        std::size_t dma_fifo_depth_vectors = hw::config::kDmaFifoDepthVectors,
         SystemHardwareConfiguration hardware = {},
+        ProgramLoadConfig program_load = {},
         SxmTransposeArchitecture sxm_architecture = SxmTransposeArchitecture::LocalBlocks)
         : ddr4_(ddr4_config)
         , dmas_ {
@@ -24,12 +26,20 @@ public:
             C2cDmaEngine(ddr4_, dma_fifo_depth_vectors,
                 hardware.c2c_streams_per_direction,hw::kC2cStreamsPerDirection)}
         , chip_(hardware, sxm_architecture)
+        , program_loader_(ddr4_, chip_.icu(), dma_fifo_depth_vectors, program_load)
     {
+        program_loader_.set_drain_checker([this]{return chip_.can_load_program();});
+        program_loader_.set_program_reset([this]{chip_.reset_program();});
         for (std::size_t index = 0; index < hw::kHemispheres; ++index) {
             const auto hemisphere = static_cast<Hemisphere>(index);
             chip_.attach_c2c_dma(hemisphere, dmas_[index]);
         }
     }
+
+    C2cDmaSystem(Ddr4Config ddr4_config, std::size_t dma_fifo_depth_vectors,
+        SystemHardwareConfiguration hardware, SxmTransposeArchitecture sxm_architecture)
+        : C2cDmaSystem(ddr4_config, dma_fifo_depth_vectors, hardware,
+              ProgramLoadConfig{}, sxm_architecture) {}
 
     TspSliceSystem& chip() noexcept { return chip_; }
     const TspSliceSystem& chip() const noexcept { return chip_; }
@@ -47,16 +57,33 @@ public:
     }
 
     std::size_t cycle() const noexcept { return cycle_; }
+    ProgramLoader& program_loader() noexcept { return program_loader_; }
+    const ProgramLoader& program_loader() const noexcept { return program_loader_; }
 
     void tick(TspSliceSystem::LogSinks sinks = {})
     {
+        program_loader_.tick(cycle_);
         chip_.tick(sinks);
         ddr4_.tick();
         ++cycle_;
+        program_loader_.observe_completion(cycle_);
+    }
+
+    bool kernel_done() const {return program_loader_.kernel_done();}
+    bool can_load_program() const {return program_loader_.can_load_program();}
+
+    // Prepare a standalone direct transport program after the previous task
+    // drained. Device and shared DMA/DDR clocks are deliberately preserved.
+    void clear_completed_program() {
+        if(!can_load_program()) throw std::logic_error("previous program has not drained");
+        chip_.reset_program();
+        chip_.icu().set_program_loading(false);
+        chip_.icu().set_program_issue_enabled(true);
     }
 
     void reset_execution_state()
     {
+        program_loader_.reset();
         chip_.reset_execution_state();
         ddr4_.reset_execution_state();
         cycle_ = 0;
@@ -66,6 +93,7 @@ private:
     Ddr4Model ddr4_;
     std::array<C2cDmaEngine, hw::kHemispheres> dmas_;
     TspSliceSystem chip_{};
+    ProgramLoader program_loader_;
     std::size_t cycle_{0};
 };
 

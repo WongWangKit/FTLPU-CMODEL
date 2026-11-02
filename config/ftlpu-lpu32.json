@@ -2,8 +2,47 @@
   "schema_version": 2,
 
   "icu": {
+    "mem_instruction_bits": 96,
+    "mem_imem_depth": 131072,
+    "mem_iq_depth": 16,
+    "mem_macro_contexts": 32,
+    "mxm_instruction_bits": 128,
+    "mxm_imem_depth": 65536,
+    "mxm_iq_depth": 16,
+    "mxm_macro_contexts": 40,
+    "vxm_instruction_bits": 96,
+    "vxm_imem_depth": 2048,
+    "vxm_iq_depth": 16,
+    "vxm_macro_contexts": 4,
+    "sxm_instruction_bits": 96,
+    "sxm_imem_depth": 2048,
+    "sxm_iq_depth": 16,
+    "sxm_macro_contexts": 4,
+    "c2c_instruction_bits": 96,
+    "c2c_imem_depth": 32768,
+    "c2c_iq_depth": 16,
+    "c2c_macro_contexts": 4,
+    "mem_macro_context_bits": 256,
+    "mxm_macro_context_bits": 256,
+    "fetch_latency_cycles": 1,
+    "macro_imem_request_ii_cycles": 1,
+    "barrier_latency_cycles": 35,
+    "macro_reservoir_words": 3,
+    "macro_decode_window_bits": 64,
+    "macro_ddb_depth": 8,
+    "macro_admission_lookahead": 8,
+    "macro_ddb_run_capacity": 8,
     "common_barrier_encoding_version": 1,
-    "common_barrier_capacity": 1024
+    "common_barrier_capacity": 1024,
+    "common_transport_overlap_version": 1,
+    "queue_control_version": 1,
+    "queue_control_capacity": 16,
+    "queue_control_cache_depth": 4,
+    "queue_control_read_latency": 2,
+    "queue_control_read_ports": 1,
+    "queue_control_storage_version": 1,
+    "queue_control_pool_capacity": 512,
+    "queue_control_pool_read_ii": 1
   },
 
   "target": {
@@ -199,6 +238,7 @@
   },
 
   "external_memory": {
+    "dma_fifo_depth_vectors": 16,
     "lpu_clock_mhz": 500,
     "ddr_peak_bandwidth_mbytes_per_second": 51200,
     "ddr_scheduling_efficiency_percent": 90,
@@ -208,5 +248,11 @@
     "ddr_write_latency_jitter_cycles": 10,
     "ddr_request_queue_depth": 256,
     "ddr_latency_random_seed": 1179929680
+  },
+  "program_load": {
+    "bus_bytes_per_cycle": 32,
+    "route_latency_cycles": 1,
+    "imem_write_ii_cycles": 1,
+    "imem_write_commit_latency_cycles": 1
   }
 }

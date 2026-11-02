@@ -125,6 +125,8 @@ ftlpu_add_test(icu_barrier_test tests/unit/icu/barrier_test.cpp
     unit.icu.barrier unit icu fast)
 ftlpu_add_test(icu_common_barrier_test tests/unit/icu/common_barrier_test.cpp
     unit.icu.common_barrier unit icu fast)
+ftlpu_add_test(icu_queue_control_test tests/unit/icu/queue_control_test.cpp
+    unit.icu.queue_control unit icu fast)
 ftlpu_add_test(icu_repeat_2d_test tests/unit/icu/repeat_2d_test.cpp
     unit.icu.repeat_2d unit icu fast)
 ftlpu_add_test(icu_short_packet_test tests/unit/icu/short_packet_test.cpp
@@ -186,6 +188,14 @@ ftlpu_add_test(vxm_repeated_distributed_input_test
     subsystem.topology.vxm_repeated_distributed_input subsystem topology vxm fast)
 ftlpu_add_test(hardware_configuration_test tests/subsystem/system/hardware_configuration_test.cpp
     subsystem.hardware.configuration subsystem hardware fast)
+ftlpu_add_test(program_loader_test tests/subsystem/system/program_loader_test.cpp
+    subsystem.program.loader subsystem program dma fast)
+add_test(NAME subsystem.program.configuration COMMAND "${CMAKE_COMMAND}"
+    "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/subsystem/system/program_load_configuration_test.cmake")
+add_test(NAME subsystem.icu.configuration COMMAND "${CMAKE_COMMAND}"
+    "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/subsystem/system/icu_configuration_test.cmake")
 
 ftlpu_add_test(mxm_bf16_test tests/subsystem/mxm/bf16_test.cpp
     subsystem.mxm.bf16 subsystem mxm fast)

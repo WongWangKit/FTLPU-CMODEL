@@ -131,6 +131,9 @@ public:
     {
         return requests_.empty() && active_.empty();
     }
+    bool drained() const noexcept {
+        return idle() && read_completions_.empty() && write_completions_.empty();
+    }
     const std::optional<BeatTrace>& last_beat() const noexcept
     {
         return last_beat_;

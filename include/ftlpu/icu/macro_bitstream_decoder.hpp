@@ -30,6 +30,7 @@ enum class IcuMacroQueueKind : std::uint8_t {
     MxmLoad,
     MxmCompute,
     MxmDequant,
+    Vxm, SxmTranspose, SxmPermute, C2cDma, C2cTx, C2cRx,
 };
 
 template <std::size_t Bits>
@@ -126,13 +127,14 @@ struct IcuMacroDdbLayout {
 // current and next word because DecodeWindowBits <= WordBits.
 template <typename FuncInstruction,
           std::size_t WordBits,
-          std::size_t ImemReadLatency = 1,
-          std::size_t ReservoirWords = 3,
-          std::size_t DecodeWindowBits = (WordBits < 64 ? WordBits : 64),
-          std::size_t DdbDepth = 8,
-          std::size_t AdmissionLookahead = 8,
-          std::size_t DdbRunCapacity = 8,
-          std::size_t ImemRequestInitiationInterval = 1>
+          std::size_t ImemReadLatency = hw::kIcuFetchLatencyCycles,
+          std::size_t ReservoirWords = hw::kIcuMacroReservoirWords,
+          std::size_t DecodeWindowBits = (WordBits < hw::kIcuMacroDecodeWindowBits
+              ? WordBits : hw::kIcuMacroDecodeWindowBits),
+          std::size_t DdbDepth = hw::kIcuMacroDdbDepth,
+          std::size_t AdmissionLookahead = hw::kIcuMacroAdmissionLookahead,
+          std::size_t DdbRunCapacity = hw::kIcuMacroDdbRunCapacity,
+          std::size_t ImemRequestInitiationInterval = hw::kIcuMacroImemRequestInitiationIntervalCycles>
 class IcuMacroV1Decoder {
 public:
     using RawWord = IcuRawImemWord<WordBits>;
