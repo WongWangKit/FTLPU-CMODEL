@@ -35,7 +35,7 @@ bool same_mxm(const ftlpu::MxmControlInstruction& lhs, const ftlpu::MxmControlIn
         && lhs.data_format == rhs.data_format
         && lhs.accumulator_output_format == rhs.accumulator_output_format
         && lhs.decode_operation == rhs.decode_operation
-        && lhs.decode_layout == rhs.decode_layout;
+        && lhs.is_mode == rhs.is_mode;
 }
 
 bool same_vxm(const ftlpu::VxmLaneAluInstruction& lhs, const ftlpu::VxmLaneAluInstruction& rhs)
@@ -147,24 +147,26 @@ bool verify_mxm_codec()
             true,
             ftlpu::MxmAccumulatorOutputFormat::BFloat16,
             ftlpu::MxmAccumulatorDestination::Sram),
-        ftlpu::MxmControlInstruction::DecodeLoadActivation(
+        ftlpu::MxmControlInstruction::IsLoadActivation(
             1,
             4,
-            ftlpu::MxmDataFormat::BFloat16),
-        ftlpu::MxmControlInstruction::DecodeStreamCompute(
+            ftlpu::MxmDataFormat::BFloat16,
+            ftlpu::MxmIsMode::Vector),
+        ftlpu::MxmControlInstruction::IsStreamCompute(
             1,
             8,
             ftlpu::MxmDataFormat::BFloat16,
             ftlpu::hw::kMxmAccumulatorRows / 3,
             2,
             ftlpu::MxmAccumulatorDestination::Sram,
-            false),
-        ftlpu::MxmControlInstruction::DecodeLoadActivation(
+            false,
+            ftlpu::MxmIsMode::Vector),
+        ftlpu::MxmControlInstruction::IsLoadActivation(
             0,
             30,
             ftlpu::MxmDataFormat::BFloat16,
-            ftlpu::MxmDecodeLayout::Native4x4),
-        ftlpu::MxmControlInstruction::DecodeStreamCompute(
+            ftlpu::MxmIsMode::Block),
+        ftlpu::MxmControlInstruction::IsStreamCompute(
             0,
             4,
             ftlpu::MxmDataFormat::BFloat16,
@@ -172,7 +174,7 @@ bool verify_mxm_codec()
             0,
             ftlpu::MxmAccumulatorDestination::Stream,
             true,
-            ftlpu::MxmDecodeLayout::Native4x4),
+            ftlpu::MxmIsMode::Block),
     };
 
     for (const auto& instruction : instructions) {

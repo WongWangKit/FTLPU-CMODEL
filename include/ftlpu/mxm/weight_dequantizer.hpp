@@ -72,7 +72,7 @@ public:
         }
 
         auto output = Output {};
-        if (load_mode == MxmWeightLoadMode::Column) {
+        if (load_mode == MxmWeightLoadMode::Vector) {
             check_column(inner_column);
             convert_column(
                 input,
@@ -81,7 +81,7 @@ public:
                 output);
             return output;
         }
-        if (load_mode != MxmWeightLoadMode::Supercell) {
+        if (load_mode != MxmWeightLoadMode::Block) {
             throw std::invalid_argument("MXM weight load mode is invalid");
         }
         for (std::size_t column = 0;

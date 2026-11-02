@@ -85,15 +85,18 @@ int main() try
                 && isa::encode_mxm_dequant_instruction(isa::decode_mxm_dequant_icu_3d_instruction(rescaled).instruction) == 0x3f00,
             "MXM relocation changed length or failed to clear previous scale bits");
         MxmComputeIcuInstruction decodeCompute{};
-        decodeCompute.opcode = MxmComputeIcuOpcode::DecodeStreamCompute3D;
+        decodeCompute.opcode = MxmComputeIcuOpcode::IsStreamCompute3D;
         decodeCompute.loop = loop;
         decodeCompute.accumulator_address_strides = {1, 8, 32};
         decodeCompute.weight_buffer_mode = MxmIcuBufferMode::ToggleDimension2;
+        for (auto mode : {MxmIsMode::Vector, MxmIsMode::Block}) {
+        decodeCompute.is_mode = mode;
         const auto decodedCompute = isa::decode_mxm_compute_icu_3d_instruction(
             isa::encode_mxm_compute_icu_shortest_instruction(decodeCompute));
         require(timeline(decodeCompute, detail::expand_mxm_compute_icu_instruction, isa::encode_mxm_instruction)
                 == timeline(decodedCompute, detail::expand_mxm_compute_icu_instruction, isa::encode_mxm_instruction),
             "decode MXM short codec changed FU words");
+        }
         MxmLoadIcuInstruction load{};
         load.loop = loop;
         load.weight_column_strides = {0, 0, 0};

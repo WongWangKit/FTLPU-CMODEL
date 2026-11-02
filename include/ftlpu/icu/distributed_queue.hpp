@@ -587,9 +587,9 @@ inline MxmControlInstruction apply_icu_repeat_stride(
         * static_cast<std::int64_t>(repeat_index);
     if (instruction.opcode == MxmControlOpcode::Compute
         || instruction.opcode == MxmControlOpcode::AccumulatorRead
-        || (instruction.opcode == MxmControlOpcode::Decode
+        || (instruction.opcode == MxmControlOpcode::IS
             && instruction.decode_operation
-                == MxmDecodeOperation::StreamCompute)) {
+                == MxmIsOperation::StreamCompute)) {
         const auto address = static_cast<std::int64_t>(
             instruction.accumulator_address) + delta;
         if (address < 0)
@@ -658,21 +658,26 @@ inline MxmControlInstruction apply_icu_repeat_2d_stride(
         if (instruction.opcode != MxmControlOpcode::IW)
             throw std::invalid_argument(
                 "ICU Repeat2D weight-column induction requires an MXM IW instruction");
-        const auto column =
-            static_cast<std::int64_t>(instruction.weight_column) + delta;
-        if (column < 0
-            || column >= static_cast<std::int64_t>(hw::kMxmColumns))
-            throw std::out_of_range(
-                "ICU Repeat2D MXM weight-column induction is outside the MXM");
-        instruction.weight_column = static_cast<std::size_t>(column);
+        // Column loads use a five-bit linear column counter. Supercell
+        // loads retain their original two-bit counter. Both are real native
+        // IW fields; advancing a column propagates the inner-column carry.
+        const bool linear = instruction.weight_load_mode == MxmWeightLoadMode::Vector;
+        const auto column = static_cast<std::int64_t>(linear
+            ? instruction.weight_column * hw::kLanesPerTile + instruction.weight_inner_column
+            : instruction.weight_column) + delta;
+        const auto limit = linear ? hw::kMxmColumns : hw::kMxmSupercellsPerPlane;
+        if (column < 0 || column >= static_cast<std::int64_t>(limit))
+            throw std::out_of_range("ICU Repeat2D MXM weight-column induction is outside the MXM");
+        instruction.weight_column = static_cast<std::size_t>(linear ? column / hw::kLanesPerTile : column);
+        if (linear) instruction.weight_inner_column = column % hw::kLanesPerTile;
         return instruction;
     }
     if (target == IcuInductionTarget::MxmAccumulatorAddress) {
         if (instruction.opcode != MxmControlOpcode::Compute
             && instruction.opcode != MxmControlOpcode::AccumulatorRead
-            && !(instruction.opcode == MxmControlOpcode::Decode
+            && !(instruction.opcode == MxmControlOpcode::IS
                 && instruction.decode_operation
-                    == MxmDecodeOperation::StreamCompute))
+                    == MxmIsOperation::StreamCompute))
             throw std::invalid_argument(
                 "ICU Repeat2D accumulator induction requires an MXM compute, accumulator-read, or decode-stream-compute instruction");
         const auto address =
@@ -1307,9 +1312,9 @@ public:
                     && instruction.opcode != MxmControlOpcode::Compute
                     && instruction.opcode
                         != MxmControlOpcode::AccumulatorRead
-                    && !(instruction.opcode == MxmControlOpcode::Decode
+                    && !(instruction.opcode == MxmControlOpcode::IS
                         && instruction.decode_operation
-                            == MxmDecodeOperation::StreamCompute))
+                            == MxmIsOperation::StreamCompute))
                     throw std::invalid_argument(
                         "MXM compute STREAM_ND induction requires compute, accumulator-read, or decode-stream-compute");
             }
@@ -2171,25 +2176,25 @@ private:
         if constexpr (QueueRole == IcuQueueRole::MxmLoad) {
             const auto isLoadInstruction =
                 instruction.opcode == MxmControlOpcode::IW
-                || (instruction.opcode == MxmControlOpcode::Decode
+                || (instruction.opcode == MxmControlOpcode::IS
                     && instruction.decode_operation
-                        == MxmDecodeOperation::LoadActivation);
+                        == MxmIsOperation::LoadActivation);
             if (!isLoadInstruction) {
                 throw std::invalid_argument(
                     "MXM LOAD ICU native queue accepts only IW and "
-                    "DecodeLoadActivation instructions");
+                    "IsLoadActivation instructions");
             }
         } else if constexpr (QueueRole == IcuQueueRole::MxmCompute) {
             const auto isComputeInstruction =
                 instruction.opcode == MxmControlOpcode::Compute
                 || instruction.opcode == MxmControlOpcode::AccumulatorRead
-                || (instruction.opcode == MxmControlOpcode::Decode
+                || (instruction.opcode == MxmControlOpcode::IS
                     && instruction.decode_operation
-                        == MxmDecodeOperation::StreamCompute);
+                        == MxmIsOperation::StreamCompute);
             if (!isComputeInstruction) {
                 throw std::invalid_argument(
                     "MXM COMPUTE ICU native queue accepts only Compute, "
-                    "AccumulatorRead, and DecodeStreamCompute instructions");
+                    "AccumulatorRead, and IsStreamCompute instructions");
             }
         }
     }

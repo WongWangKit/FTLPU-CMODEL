@@ -110,8 +110,17 @@ constexpr std::size_t kMxmAccumulatorStrideBits = kMxmAccumulatorAddressBits + 1
 constexpr std::size_t kMxmAccumulatorBytes =
     kMxmAccumulatorRows * kMxmColumns * sizeof(float);
 
-constexpr bool kMxmSupportsNative4x4 = config::kMxmSupportsNative4x4;
-constexpr bool kMxmSupportsLinear1x16 = config::kMxmSupportsLinear1x16;
+constexpr std::size_t kMxmIsColumns = config::kMxmIsColumns;
+constexpr bool kMxmSupportsWsVector = config::kMxmSupportsWsVector;
+constexpr bool kMxmSupportsWsBlock = config::kMxmSupportsWsBlock;
+constexpr bool kMxmSupportsIsVector = config::kMxmSupportsIsVector;
+constexpr bool kMxmSupportsIsBlock = config::kMxmSupportsIsBlock;
+static_assert(kMxmIsColumns > 0 && kMxmIsColumns <= kMxmSupercellsPerPlane);
+static_assert(kMxmIsColumns > 0 && kTileRows % kMxmIsColumns == 0,
+    "IS supercell column count must divide the supercell row count");
+static_assert(!kMxmSupportsIsBlock || kMxmIsColumns * kLanesPerTile <= kEastStreams,
+    "IS-block column inputs exceed the available SR streams");
+static_assert(!kMxmSupportsIsVector || kMxmIsColumns <= kEastStreams);
 
 constexpr std::size_t kVxmAluCount = config::kVxmColumns;
 constexpr std::size_t kVxmColumnsPerDirection = kVxmAluCount / 2;

@@ -417,13 +417,13 @@ try {
     for (const auto& instruction : std::array {
              MxmControlInstruction::Compute(),
              MxmControlInstruction::AccumulatorRead(0),
-             MxmControlInstruction::DecodeStreamCompute(0)}) {
+             MxmControlInstruction::IsStreamCompute(0)}) {
         require_mxm_native_enqueue_rejected<MxmLoadQueue>(
             instruction, "MXM LOAD ICU");
     }
     for (const auto& instruction : std::array {
              MxmControlInstruction::IW(),
-             MxmControlInstruction::DecodeLoadActivation()}) {
+             MxmControlInstruction::IsLoadActivation()}) {
         require_mxm_native_enqueue_rejected<MxmComputeQueue>(
             instruction, "MXM COMPUTE ICU");
     }
@@ -431,26 +431,26 @@ try {
     require_mxm_native_raw_rejected<MxmLoadQueue>(
         MxmControlInstruction::Compute(), "MXM LOAD ICU");
     require_mxm_native_raw_rejected<MxmLoadQueue>(
-        MxmControlInstruction::DecodeStreamCompute(0), "MXM LOAD ICU");
+        MxmControlInstruction::IsStreamCompute(0), "MXM LOAD ICU");
     require_mxm_native_raw_rejected<MxmComputeQueue>(
         MxmControlInstruction::IW(), "MXM COMPUTE ICU");
     require_mxm_native_raw_rejected<MxmComputeQueue>(
-        MxmControlInstruction::DecodeLoadActivation(), "MXM COMPUTE ICU");
+        MxmControlInstruction::IsLoadActivation(), "MXM COMPUTE ICU");
 
     {
         MxmLoadQueue queue;
         queue.push_instruction(MxmControlInstruction::IW(1, 2));
         queue.push_instruction(
-            MxmControlInstruction::DecodeLoadActivation());
+            MxmControlInstruction::IsLoadActivation());
         prefetch_program(queue, 2);
         const auto iw = queue.tick();
         const auto decode = queue.tick();
         require(iw.has_value() && decode.has_value()
                 && iw->opcode == MxmControlOpcode::IW
                 && iw->weight_buffer == 1 && iw->weight_column == 2
-                && decode->opcode == MxmControlOpcode::Decode
+                && decode->opcode == MxmControlOpcode::IS
                 && decode->decode_operation
-                    == MxmDecodeOperation::LoadActivation
+                    == MxmIsOperation::LoadActivation
                 && queue.done(),
             "valid MXM LOAD native words did not round-trip through its IQ");
     }
@@ -458,7 +458,7 @@ try {
         MxmComputeQueue queue;
         queue.push_instruction(MxmControlInstruction::Compute());
         queue.push_instruction(MxmControlInstruction::AccumulatorRead(0));
-        queue.push_instruction(MxmControlInstruction::DecodeStreamCompute(0));
+        queue.push_instruction(MxmControlInstruction::IsStreamCompute(0));
         prefetch_program(queue, 3);
         const auto compute = queue.tick();
         const auto accumulator_read = queue.tick();
@@ -468,9 +468,9 @@ try {
                 && compute->opcode == MxmControlOpcode::Compute
                 && accumulator_read->opcode
                     == MxmControlOpcode::AccumulatorRead
-                && decode->opcode == MxmControlOpcode::Decode
+                && decode->opcode == MxmControlOpcode::IS
                 && decode->decode_operation
-                    == MxmDecodeOperation::StreamCompute
+                    == MxmIsOperation::StreamCompute
                 && queue.done(),
             "valid MXM COMPUTE native words did not round-trip through its IQ");
     }

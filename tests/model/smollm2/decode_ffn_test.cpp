@@ -160,11 +160,11 @@ public:
         });
         icu_.enqueue_mxm(
             mxm,
-            ftlpu::MxmControlInstruction::DecodeLoadActivation(
+            ftlpu::MxmControlInstruction::IsLoadActivation(
                 buffer,
                 0,
                 ftlpu::MxmDataFormat::BFloat16,
-                ftlpu::MxmDecodeLayout::Native4x4));
+                ftlpu::MxmIsMode::Block));
         advance(mxm_load_[mxm], cycle + 1);
     }
 
@@ -188,7 +188,7 @@ public:
         });
         icu_.enqueue_mxm(
             mxm,
-            ftlpu::MxmControlInstruction::DecodeStreamCompute(
+            ftlpu::MxmControlInstruction::IsStreamCompute(
                 buffer,
                 0,
                 ftlpu::MxmDataFormat::BFloat16,
@@ -196,7 +196,7 @@ public:
                 accumulator_column,
                 ftlpu::MxmAccumulatorDestination::Sram,
                 false,
-                ftlpu::MxmDecodeLayout::Native4x4));
+                ftlpu::MxmIsMode::Block));
         advance(mxm_compute_[mxm], cycle + 1);
     }
 

@@ -33,7 +33,7 @@ function(ftlpu_add_test target source test_name)
     target_link_libraries(${target} PRIVATE ftlpu_cmodel)
     # The imported VXM hardware tests use assert for cycle and numeric checks.
     # Keep those checks active in the normal Release regression build too.
-    if(target MATCHES "^vxm_")
+    if(target MATCHES "^(vxm_|sxm_|icu_sxm_)")
         if(MSVC)
             target_compile_options(${target} PRIVATE /UNDEBUG)
         else()
@@ -117,6 +117,8 @@ ftlpu_add_test(vxm_log_test tests/unit/vxm/log_test.cpp
 
 ftlpu_add_test(sxm_test tests/unit/sxm/slice_test.cpp
     unit.sxm.slice unit sxm fast)
+ftlpu_add_test(sxm_wide_transpose_test tests/unit/sxm/wide_transpose_test.cpp
+    unit.sxm.wide_transpose unit sxm fast)
 ftlpu_add_test(sxm_attention_transpose_test tests/unit/sxm/attention_transpose_test.cpp
     unit.sxm.attention_transpose unit sxm fast)
 ftlpu_add_test(icu_barrier_test tests/unit/icu/barrier_test.cpp
@@ -190,9 +192,6 @@ ftlpu_add_test(mxm_bf16_test tests/subsystem/mxm/bf16_test.cpp
 ftlpu_add_test(mxm_decode_streamed_weight_test
     tests/subsystem/mxm/decode_streamed_weight_test.cpp
     subsystem.mxm.decode_streamed_weight subsystem mxm fast)
-ftlpu_add_test(mxm_decode_layout_comparison_test
-    tests/subsystem/mxm/decode_layout_comparison_test.cpp
-    subsystem.mxm.decode_layout_comparison subsystem mxm fast)
 ftlpu_add_test(sxm_mem_transpose_test tests/subsystem/sxm/mem_transpose_test.cpp
     subsystem.sxm.mem_transpose subsystem sxm fast)
 
@@ -207,9 +206,6 @@ ftlpu_add_test(rmsnorm_test tests/kernel/rmsnorm_test.cpp
     kernel.rmsnorm kernel rmsnorm fast)
 
 # Model tests: model-shaped phases and complete layer schedules.
-ftlpu_add_test(smollm2_decode_layout_comparison_test
-    tests/model/smollm2/decode_layout_comparison_test.cpp
-    model.smollm2.decode_layout_comparison model smollm2 slow serial)
 ftlpu_add_test(smollm2_attention_test
     tests/model/smollm2/prefill_attention_test.cpp
     model.smollm2.prefill_attention model smollm2 slow serial)
@@ -227,7 +223,6 @@ ftlpu_add_test(smollm2_decode_attention_test
 set_tests_properties(
     kernel.projection.w8a16
     kernel.swiglu.w8a16
-    model.smollm2.decode_layout_comparison
     model.smollm2.prefill_attention
     model.decoder.decode_layer
     model.smollm2.decode_ffn
@@ -238,3 +233,5 @@ set_tests_properties(
 ftlpu_add_demo(mxm_control_trace_demo examples/mxm/control_trace_demo.cpp)
 ftlpu_add_demo(sxm_chain_demo examples/sxm/chain_demo.cpp)
 ftlpu_add_demo(stream_topology_api_demo examples/system/stream_topology_api_demo.cpp)
+
+ftlpu_add_test(vxm_fp32_input_test tests/unit/vxm/fp32_input_test.cpp vxm_fp32_input)

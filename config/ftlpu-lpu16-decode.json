@@ -183,9 +183,12 @@
   },
   "mxm": {
     "accum_contexts": 4,
+    "is_columns": 2,
     "supported_modes": [
-      "native4x4",
-      "linear1x16"
+      "ws-vector",
+      "ws-block",
+      "is-vector",
+      "is-block"
     ],
     "instances_per_hemisphere": 1
   },

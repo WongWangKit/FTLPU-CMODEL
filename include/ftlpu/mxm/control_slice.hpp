@@ -23,17 +23,17 @@ enum class MxmControlOpcode {
     IW = 0,
     Compute = 1,
     AccumulatorRead = 2,
-    Decode = 3,
+    IS = 3,
 };
 
-enum class MxmDecodeOperation {
+enum class MxmIsOperation {
     LoadActivation = 0,
     StreamCompute = 1,
 };
 
-enum class MxmDecodeLayout {
-    Linear1x16 = 0,
-    Native4x4 = 1,
+enum class MxmIsMode {
+    Vector = 0,
+    Block = 1,
 };
 
 enum class MxmAccumulatorDestination {
@@ -58,15 +58,15 @@ struct MxmControlInstruction {
     MxmAccumulatorDestination accumulator_destination{
         MxmAccumulatorDestination::Stream};
     bool accumulator_clear{true};
-    MxmWeightLoadMode weight_load_mode{MxmWeightLoadMode::Supercell};
+    MxmWeightLoadMode weight_load_mode{MxmWeightLoadMode::Block};
     MxmWeightInputMode weight_input_mode{
         MxmWeightInputMode::Int8DequantBf16};
     std::size_t weight_inner_column{0};
     MxmDataFormat data_format{MxmDataFormat::Float16};
     MxmAccumulatorOutputFormat accumulator_output_format{
         MxmAccumulatorOutputFormat::Float32};
-    MxmDecodeOperation decode_operation{MxmDecodeOperation::LoadActivation};
-    MxmDecodeLayout decode_layout{MxmDecodeLayout::Linear1x16};
+    MxmIsOperation decode_operation{MxmIsOperation::LoadActivation};
+    MxmIsMode is_mode{MxmIsMode::Block};
 
     static MxmControlInstruction IW(
         std::size_t weight_buffer = 0,
@@ -78,7 +78,7 @@ struct MxmControlInstruction {
         check_weight_buffer(weight_buffer);
         check_column(weight_column);
         check_weight_stream_base(weight_stream_base, weight_input_mode,
-            MxmWeightLoadMode::Supercell);
+            MxmWeightLoadMode::Block);
         auto instruction = MxmControlInstruction {};
         instruction.opcode = MxmControlOpcode::IW;
         instruction.weight_buffer = weight_buffer;
@@ -115,11 +115,11 @@ struct MxmControlInstruction {
             weight_buffer,
             weight_column,
             weight_input_mode);
-        instruction.weight_load_mode = MxmWeightLoadMode::Column;
+        instruction.weight_load_mode = MxmWeightLoadMode::Vector;
         instruction.weight_inner_column = weight_inner_column;
         instruction.weight_stream_base = weight_stream_base;
         check_weight_stream_base(weight_stream_base, weight_input_mode,
-            MxmWeightLoadMode::Column);
+            MxmWeightLoadMode::Vector);
         return instruction;
     }
 
@@ -189,28 +189,28 @@ struct MxmControlInstruction {
         return instruction;
     }
 
-    static MxmControlInstruction DecodeLoadActivation(
+    static MxmControlInstruction IsLoadActivation(
         std::size_t activation_buffer = 0,
         std::size_t activation_stream_base = 0,
         MxmDataFormat data_format = MxmDataFormat::BFloat16,
-        MxmDecodeLayout decode_layout = MxmDecodeLayout::Linear1x16)
+        MxmIsMode is_mode = MxmIsMode::Block)
     {
         check_weight_buffer(activation_buffer);
         check_data_format(data_format);
-        check_decode_layout(decode_layout);
+        check_is_mode(is_mode);
         check_decode_activation_stream_base(
-            activation_stream_base, decode_layout);
+            activation_stream_base, is_mode);
         auto instruction = MxmControlInstruction {};
-        instruction.opcode = MxmControlOpcode::Decode;
-        instruction.decode_operation = MxmDecodeOperation::LoadActivation;
+        instruction.opcode = MxmControlOpcode::IS;
+        instruction.decode_operation = MxmIsOperation::LoadActivation;
         instruction.weight_buffer = activation_buffer;
         instruction.activation_stream_base = activation_stream_base;
         instruction.data_format = data_format;
-        instruction.decode_layout = decode_layout;
+        instruction.is_mode = is_mode;
         return instruction;
     }
 
-    static MxmControlInstruction DecodeStreamCompute(
+    static MxmControlInstruction IsStreamCompute(
         std::size_t activation_buffer,
         std::size_t output_stream_base = 0,
         MxmDataFormat data_format = MxmDataFormat::BFloat16,
@@ -219,20 +219,24 @@ struct MxmControlInstruction {
         MxmAccumulatorDestination accumulator_destination =
             MxmAccumulatorDestination::Stream,
         bool accumulator_clear = true,
-        MxmDecodeLayout decode_layout = MxmDecodeLayout::Linear1x16)
+        MxmIsMode is_mode = MxmIsMode::Block)
     {
         check_weight_buffer(activation_buffer);
         check_data_format(data_format);
-        check_decode_layout(decode_layout);
+        check_is_mode(is_mode);
         check_accumulator_address(accumulator_address);
         check_column(accumulator_column);
+        check_accumulator_address(accumulator_address
+            + (accumulator_column + hw::kMxmIsColumns - 1) / hw::kMxmSupercellsPerPlane);
         if (accumulator_destination
             == MxmAccumulatorDestination::Stream) {
+            if (hw::kMxmIsColumns != hw::kMxmSupercellsPerPlane || accumulator_column != 0)
+                throw std::invalid_argument("partial IS results must remain in ACC; use AccumulatorRead after assembling a complete vector");
             check_decode_output_stream_base(output_stream_base);
         }
         auto instruction = MxmControlInstruction {};
-        instruction.opcode = MxmControlOpcode::Decode;
-        instruction.decode_operation = MxmDecodeOperation::StreamCompute;
+        instruction.opcode = MxmControlOpcode::IS;
+        instruction.decode_operation = MxmIsOperation::StreamCompute;
         instruction.weight_buffer = activation_buffer;
         instruction.stream_base = output_stream_base;
         instruction.data_format = data_format;
@@ -240,7 +244,7 @@ struct MxmControlInstruction {
         instruction.weight_column = accumulator_column;
         instruction.accumulator_destination = accumulator_destination;
         instruction.accumulator_clear = accumulator_clear;
-        instruction.decode_layout = decode_layout;
+        instruction.is_mode = is_mode;
         return instruction;
     }
 
@@ -271,13 +275,17 @@ struct MxmControlInstruction {
         std::size_t inner_column)
     {
         switch (mode) {
-        case MxmWeightLoadMode::Supercell:
+        case MxmWeightLoadMode::Block:
+            if (!hw::kMxmSupportsWsBlock)
+                throw std::invalid_argument("WS-block is disabled by the hardware configuration");
             if (inner_column != 0) {
                 throw std::invalid_argument(
                     "MXM full-supercell IW cannot select an inner column");
             }
             return;
-        case MxmWeightLoadMode::Column:
+        case MxmWeightLoadMode::Vector:
+            if (!hw::kMxmSupportsWsVector)
+                throw std::invalid_argument("WS-vector is disabled by the hardware configuration");
             check_inner_column(inner_column);
             return;
         }
@@ -298,7 +306,7 @@ struct MxmControlInstruction {
         MxmWeightInputMode input_mode, MxmWeightLoadMode load_mode)
     {
         check_weight_input_mode(input_mode);
-        const auto stream_count = load_mode == MxmWeightLoadMode::Column
+        const auto stream_count = load_mode == MxmWeightLoadMode::Vector
             ? input_mode == MxmWeightInputMode::Int8DequantBf16 ? 1 : 2
             : input_mode == MxmWeightInputMode::Int8DequantBf16
             ? hw::kMxmInt8LoadStreamsPerCycle
@@ -368,16 +376,16 @@ struct MxmControlInstruction {
         }
     }
 
-    static void check_decode_layout(MxmDecodeLayout layout)
+    static void check_is_mode(MxmIsMode layout)
     {
-        if (layout != MxmDecodeLayout::Linear1x16
-            && layout != MxmDecodeLayout::Native4x4) {
+        if (layout != MxmIsMode::Vector
+            && layout != MxmIsMode::Block) {
             throw std::out_of_range("MXM decode layout is invalid");
         }
-        if ((layout == MxmDecodeLayout::Linear1x16
-                && !hw::kMxmSupportsLinear1x16)
-            || (layout == MxmDecodeLayout::Native4x4
-                && !hw::kMxmSupportsNative4x4)) {
+        if ((layout == MxmIsMode::Vector
+                && !hw::kMxmSupportsIsVector)
+            || (layout == MxmIsMode::Block
+                && !hw::kMxmSupportsIsBlock)) {
             throw std::invalid_argument(
                 "MXM decode layout is disabled by the hardware configuration");
         }
@@ -385,12 +393,10 @@ struct MxmControlInstruction {
 
     static void check_decode_activation_stream_base(
         std::size_t activation_stream_base,
-        MxmDecodeLayout layout = MxmDecodeLayout::Linear1x16)
+        MxmIsMode layout = MxmIsMode::Block)
     {
-        check_decode_layout(layout);
-        const auto kActivationStreams = layout == MxmDecodeLayout::Native4x4
-            ? sizeof(std::uint16_t)
-            : hw::kMxmSupercellsPerPlane * sizeof(std::uint16_t);
+        check_is_mode(layout);
+        const auto kActivationStreams = sizeof(std::uint16_t);
         if (activation_stream_base + kActivationStreams
             > hw::kEastStreams) {
             throw std::out_of_range(
@@ -434,10 +440,10 @@ public:
         std::size_t activation_buffer{0};
         std::size_t stream_base{0};
         MxmDataFormat data_format{MxmDataFormat::BFloat16};
-        MxmDecodeLayout layout{MxmDecodeLayout::Linear1x16};
+        MxmIsMode layout{MxmIsMode::Block};
     };
 
-    struct DecodeStreamComputePulse {
+    struct IsStreamComputePulse {
         std::size_t activation_buffer{0};
         std::size_t output_stream_base{0};
         MxmDataFormat data_format{MxmDataFormat::BFloat16};
@@ -448,7 +454,7 @@ public:
         bool accumulator_clear{true};
         MxmDequantInstruction dequant{};
         std::uint64_t wave_id{0};
-        MxmDecodeLayout layout{MxmDecodeLayout::Linear1x16};
+        MxmIsMode layout{MxmIsMode::Block};
     };
 
     struct AccumulatorReadPulse {
@@ -523,9 +529,9 @@ public:
     {
         check_instruction(instruction);
         if (instruction.opcode == MxmControlOpcode::IW
-            || (instruction.opcode == MxmControlOpcode::Decode
+            || (instruction.opcode == MxmControlOpcode::IS
                 && instruction.decode_operation
-                    == MxmDecodeOperation::LoadActivation)) {
+                    == MxmIsOperation::LoadActivation)) {
             load_instruction_queue_.push_back(instruction);
         } else {
             compute_instruction_queue_.push_back(instruction);
@@ -634,7 +640,7 @@ public:
         return decode_activation_load_pulse_details_[tile];
     }
 
-    std::optional<DecodeStreamComputePulse> decode_stream_compute_pulse(
+    std::optional<IsStreamComputePulse> decode_stream_compute_pulse(
         std::size_t tile) const
     {
         check_tile(tile);
@@ -697,24 +703,31 @@ private:
                 throw std::invalid_argument(
                     "MXM accumulator row stride must be at least one");
             }
-        } else if (instruction.opcode == MxmControlOpcode::Decode) {
+        } else if (instruction.opcode == MxmControlOpcode::IS) {
             MxmControlInstruction::check_data_format(
                 instruction.data_format);
-            MxmControlInstruction::check_decode_layout(
-                instruction.decode_layout);
+            MxmControlInstruction::check_is_mode(
+                instruction.is_mode);
             if (instruction.decode_operation
-                == MxmDecodeOperation::LoadActivation) {
+                == MxmIsOperation::LoadActivation) {
                 MxmControlInstruction::check_decode_activation_stream_base(
                     instruction.activation_stream_base,
-                    instruction.decode_layout);
+                    instruction.is_mode);
             } else if (instruction.decode_operation
-                == MxmDecodeOperation::StreamCompute) {
+                == MxmIsOperation::StreamCompute) {
                 MxmControlInstruction::check_accumulator_address(
                     instruction.accumulator_address);
                 MxmControlInstruction::check_column(
                     instruction.weight_column);
+                MxmControlInstruction::check_accumulator_address(
+                    instruction.accumulator_address
+                    + (instruction.weight_column + hw::kMxmIsColumns - 1)
+                        / hw::kMxmSupercellsPerPlane);
                 if (instruction.accumulator_destination
                     == MxmAccumulatorDestination::Stream) {
+                    if (hw::kMxmIsColumns != hw::kMxmSupercellsPerPlane
+                        || instruction.weight_column != 0)
+                        throw std::invalid_argument("partial IS results must remain in ACC; use AccumulatorRead after assembling a complete vector");
                     MxmControlInstruction::check_decode_output_stream_base(
                         instruction.stream_base);
                 }
@@ -852,7 +865,7 @@ private:
                         os << "IW b" << instruction->weight_buffer
                            << " col=" << instruction->weight_column;
                         if (instruction->weight_load_mode
-                            == MxmWeightLoadMode::Column) {
+                            == MxmWeightLoadMode::Vector) {
                             os << " inner=" << instruction->weight_inner_column;
                         }
                         if (needs_dequant) {
@@ -872,7 +885,7 @@ private:
                         dequant_instruction.value_or(
                             MxmDequantInstruction {}));
                     const auto load = instruction->weight_load_mode
-                            == MxmWeightLoadMode::Column
+                            == MxmWeightLoadMode::Vector
                         ? MxmInstruction::IWColumn(
                               instruction->weight_buffer,
                               instruction->weight_inner_column)
@@ -885,7 +898,7 @@ private:
                         os << "  tile " << tile << " weight b" << instruction->weight_buffer
                            << " col=" << column;
                         if (instruction->weight_load_mode
-                            == MxmWeightLoadMode::Column) {
+                            == MxmWeightLoadMode::Vector) {
                             os << " inner=" << instruction->weight_inner_column;
                         }
                         os << " ";
@@ -904,11 +917,11 @@ private:
                         = array_.cell(tile, column).weight_buffer_valid(
                             instruction->weight_buffer);
                 } else if (
-                    instruction->opcode == MxmControlOpcode::Decode
+                    instruction->opcode == MxmControlOpcode::IS
                     && instruction->decode_operation
-                        == MxmDecodeOperation::LoadActivation) {
+                        == MxmIsOperation::LoadActivation) {
                     if (should_log) {
-                        os << "DecodeLoadActivation b"
+                        os << "IsLoadActivation b"
                            << instruction->weight_buffer
                            << " stream="
                            << instruction->activation_stream_base
@@ -916,10 +929,10 @@ private:
                            << mxm_data_format_name(
                                   instruction->data_format)
                            << " layout="
-                           << (instruction->decode_layout
-                                       == MxmDecodeLayout::Native4x4
-                                   ? "4x4"
-                                   : "1x16")
+                           << (instruction->is_mode
+                                       == MxmIsMode::Block
+                                   ? "is-block"
+                                   : "is-vector")
                            << '\n';
                     }
                     decode_activation_load_pulse_details_[tile] =
@@ -927,7 +940,7 @@ private:
                             instruction->weight_buffer,
                             instruction->activation_stream_base,
                             instruction->data_format,
-                            instruction->decode_layout};
+                            instruction->is_mode};
                 }
             }
 
@@ -962,9 +975,9 @@ private:
                         compute_instruction->accumulator_output_format,
                     };
                 } else if (
-                    compute_instruction->opcode == MxmControlOpcode::Decode
+                    compute_instruction->opcode == MxmControlOpcode::IS
                     && compute_instruction->decode_operation
-                        == MxmDecodeOperation::StreamCompute) {
+                        == MxmIsOperation::StreamCompute) {
                     if (!dequant_instruction.has_value()) {
                         throw std::logic_error(
                             "MXM decode StreamCompute reached tile without a matching Dequant instruction");
@@ -972,16 +985,16 @@ private:
                     dequant_consumed = true;
                     if (should_log) {
                         os << "  tile " << tile
-                           << " DecodeStreamCompute b"
+                           << " IsStreamCompute b"
                            << compute_instruction->weight_buffer
                            << " weight_streams=E0..E31"
                            << " scale="
                            << dequant_instruction->scale()
                            << " layout="
-                           << (compute_instruction->decode_layout
-                                       == MxmDecodeLayout::Native4x4
-                                   ? "4x4"
-                                   : "1x16")
+                           << (compute_instruction->is_mode
+                                       == MxmIsMode::Block
+                                   ? "is-block"
+                                   : "is-vector")
                            << " acc="
                            << compute_instruction->accumulator_address
                            << ':' << compute_instruction->weight_column
@@ -1000,7 +1013,7 @@ private:
                         os << '\n';
                     }
                     decode_stream_compute_pulse_details_[tile] =
-                        DecodeStreamComputePulse {
+                        IsStreamComputePulse {
                             compute_instruction->weight_buffer,
                             compute_instruction->stream_base,
                             compute_instruction->data_format,
@@ -1010,7 +1023,7 @@ private:
                             compute_instruction->accumulator_clear,
                             *dequant_instruction,
                             cycle_ - tile,
-                            compute_instruction->decode_layout};
+                            compute_instruction->is_mode};
                 } else if (
                     compute_instruction->opcode
                     == MxmControlOpcode::AccumulatorRead) {
@@ -1102,7 +1115,7 @@ private:
         hw::kMxmSupercellsPerPlane>
         decode_activation_load_pulse_details_{};
     std::array<
-        std::optional<DecodeStreamComputePulse>,
+        std::optional<IsStreamComputePulse>,
         hw::kMxmSupercellsPerPlane>
         decode_stream_compute_pulse_details_{};
     std::array<

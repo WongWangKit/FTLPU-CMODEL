@@ -50,7 +50,8 @@ public:
     };
 
     explicit TspSliceSystem(
-        SystemHardwareConfiguration hardware = {})
+        SystemHardwareConfiguration hardware = {},
+        SxmTransposeArchitecture sxm_architecture = SxmTransposeArchitecture::LocalBlocks)
         : hardware_configuration_(hardware)
         , stream_layout_(make_configured_stream_layout())
         , active_stream_routes_ {
@@ -66,8 +67,8 @@ public:
             StreamRegisterFabric(stream_layout_.topology.column_count()),
         }
         , sxms_ {
-            SxmSlice(stream_layout_.sxm_ports),
-            SxmSlice(stream_layout_.sxm_ports),
+            SxmSlice(stream_layout_.sxm_ports,sxm_architecture),
+            SxmSlice(stream_layout_.sxm_ports,sxm_architecture),
         }
     {
         if (stream_layout_.fabric_names.size() != hw::kHemispheres) {
@@ -292,6 +293,11 @@ public:
     const VxmSlice& vxm_unit() const noexcept
     {
         return vxm_;
+    }
+
+    const SxmSlice& sxm_unit(Hemisphere hemisphere) const noexcept
+    {
+        return sxms_[hemisphere_index(hemisphere)];
     }
 
     VxmSlice& vxm_unit() noexcept
@@ -764,7 +770,7 @@ private:
             == MxmWeightInputMode::Int8DequantBf16) {
             const auto stream_base = instruction->weight_stream_base;
             if (instruction->weight_load_mode
-                == MxmWeightLoadMode::Column) {
+                == MxmWeightLoadMode::Vector) {
                 const auto column = instruction->weight_inner_column;
                 for (std::size_t lane = 0;
                      lane < hw::kLanesPerTile;
@@ -820,7 +826,7 @@ private:
             != MxmWeightInputMode::Direct16) {
             throw std::invalid_argument("MXM weight input mode is invalid");
         }
-        if (instruction->weight_load_mode == MxmWeightLoadMode::Column) {
+        if (instruction->weight_load_mode == MxmWeightLoadMode::Vector) {
             const auto low = stream_base;
             const auto high =
                 stream_base + hw::kMxmColumnLoadStreamsPerCycle - 1;

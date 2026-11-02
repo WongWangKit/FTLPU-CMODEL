@@ -268,7 +268,7 @@ try {
     require_invalid([&] {
         ComputeQueue unsupported;
         unsupported.push_mxm_stream_nd(IcuMxmStreamNdSchedule {},
-            MxmControlInstruction::DecodeLoadActivation());
+            MxmControlInstruction::IsLoadActivation());
     }, "raw MXM compute adapter accepted Decode");
     require_invalid([&] {
         MemQueue unsupported;

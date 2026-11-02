@@ -159,9 +159,12 @@
 
   "mxm": {
     "accum_contexts": 4,
+    "is_columns": 4,
     "supported_modes": [
-      "native4x4",
-      "linear1x16"
+      "ws-vector",
+      "ws-block",
+      "is-vector",
+      "is-block"
     ]
   },
 
@@ -185,6 +188,7 @@
   },
 
   "throughput": {
+    "mxm_prefill_weight_streams": 1,
     "mxms_per_hemisphere": 1,
     "mxm_weight_buffers": 2,
     "mxm_local_dequant_enabled": 1,

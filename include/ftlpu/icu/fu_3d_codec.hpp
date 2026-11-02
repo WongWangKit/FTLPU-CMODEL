@@ -35,8 +35,8 @@ struct MxmIcuEncodingLayout {
     static constexpr unsigned kDecodeDestination = kDecodeColumn + kColumnBits;
     static constexpr unsigned kDecodeClear = kDecodeDestination + 1;
     static constexpr unsigned kDecodeFormat = kDecodeClear + 1;
-    static constexpr unsigned kDecodeLayout = kDecodeFormat + 1;
-    static constexpr unsigned kDecodeEnd = kDecodeLayout + 1;
+    static constexpr unsigned kIsMode = kDecodeFormat + 1;
+    static constexpr unsigned kDecodeEnd = kIsMode + 1;
     static_assert(kDecodeEnd <= kComputeEnd);
 };
 
@@ -688,7 +688,7 @@ inline EncodedMxmLoadIcu3DPacket encode_mxm_load_icu_3d_instruction(
         static_cast<std::uint8_t>(instruction.opcode));
     codec::encode_loop(packet, instruction.loop);
     if (instruction.opcode
-        == MxmLoadIcuOpcode::DecodeLoadActivation3D) {
+        == MxmLoadIcuOpcode::IsLoadActivation3D) {
         codec::validate_buffer_mode(instruction.weight_buffer_mode);
         codec::write_unsigned(packet, 144, 1,
             instruction.weight_buffer_base,
@@ -703,7 +703,7 @@ inline EncodedMxmLoadIcu3DPacket encode_mxm_load_icu_3d_instruction(
             static_cast<std::uint8_t>(instruction.data_format),
             "MXM DECODE_LOAD_ACTIVATION_3D data format does not fit 1 bit");
         codec::write_unsigned(packet, 153, 1,
-            static_cast<std::uint8_t>(instruction.decode_layout),
+            static_cast<std::uint8_t>(instruction.is_mode),
             "MXM DECODE_LOAD_ACTIVATION_3D layout does not fit 1 bit");
         return packet;
     }
@@ -750,10 +750,10 @@ inline MxmLoadIcuInstruction decode_mxm_load_icu_3d_instruction(
         "encoded MXM LOAD_3D packet has an invalid word header");
     const auto loop = codec::decode_loop(packet);
     if (local_operation == static_cast<std::uint8_t>(
-            MxmLoadIcuOpcode::DecodeLoadActivation3D)) {
+            MxmLoadIcuOpcode::IsLoadActivation3D)) {
         codec::require_reserved_zero(packet, 154,
             "encoded MXM DECODE_LOAD_ACTIVATION_3D packet has non-zero reserved bits");
-        auto instruction = MxmLoadIcuInstruction::DecodeLoadActivation3D(
+        auto instruction = MxmLoadIcuInstruction::IsLoadActivation3D(
             loop,
             static_cast<std::size_t>(
                 codec::read_unsigned(packet, 144, 1)),
@@ -763,7 +763,7 @@ inline MxmLoadIcuInstruction decode_mxm_load_icu_3d_instruction(
                 codec::read_unsigned(packet, 147, 5)),
             static_cast<MxmDataFormat>(
                 codec::read_unsigned(packet, 152, 1)),
-            static_cast<MxmDecodeLayout>(
+            static_cast<MxmIsMode>(
                 codec::read_unsigned(packet, 153, 1)));
         codec::validate_buffer_mode(instruction.weight_buffer_mode);
         ::ftlpu::detail::validate_mxm_load_icu_instruction(instruction);
@@ -912,7 +912,7 @@ encode_mxm_compute_icu_3d_instruction(
         return packet;
     }
     if (instruction.opcode
-        == MxmComputeIcuOpcode::DecodeStreamCompute3D) {
+        == MxmComputeIcuOpcode::IsStreamCompute3D) {
         codec::validate_buffer_mode(instruction.weight_buffer_mode);
         codec::write_unsigned(packet, 144, 1,
             instruction.weight_buffer_base,
@@ -943,8 +943,8 @@ encode_mxm_compute_icu_3d_instruction(
         codec::write_unsigned(packet, MxmIcuEncodingLayout::kDecodeFormat, 1,
             static_cast<std::uint8_t>(instruction.data_format),
             "MXM DECODE_STREAM_COMPUTE_3D data format does not fit 1 bit");
-        codec::write_unsigned(packet, MxmIcuEncodingLayout::kDecodeLayout, 1,
-            static_cast<std::uint8_t>(instruction.decode_layout),
+        codec::write_unsigned(packet, MxmIcuEncodingLayout::kIsMode, 1,
+            static_cast<std::uint8_t>(instruction.is_mode),
             "MXM DECODE_STREAM_COMPUTE_3D layout does not fit 1 bit");
         return packet;
     }
@@ -995,7 +995,7 @@ inline MxmComputeIcuInstruction decode_mxm_compute_icu_3d_instruction(
     const auto local_operation = codec::decode_word0_local_operation(packet,
         "encoded MXM compute ICU 3-D packet has an invalid word-0 header");
     if (local_operation > static_cast<std::uint8_t>(
-            MxmComputeIcuOpcode::DecodeStreamCompute3D))
+            MxmComputeIcuOpcode::IsStreamCompute3D))
         throw std::logic_error(
             "encoded MXM compute ICU 3-D packet has an invalid local operation");
     codec::validate_word_headers(packet, local_operation,
@@ -1030,7 +1030,7 @@ inline MxmComputeIcuInstruction decode_mxm_compute_icu_3d_instruction(
         return instruction;
     }
     if (local_operation == static_cast<std::uint8_t>(
-            MxmComputeIcuOpcode::DecodeStreamCompute3D)) {
+            MxmComputeIcuOpcode::IsStreamCompute3D)) {
         codec::require_reserved_zero(packet, MxmIcuEncodingLayout::kDecodeEnd,
             "encoded MXM DECODE_STREAM_COMPUTE_3D packet has non-zero reserved bits");
         std::array<std::int64_t, 3> strides{};
@@ -1038,7 +1038,7 @@ inline MxmComputeIcuInstruction decode_mxm_compute_icu_3d_instruction(
             strides[dimension] =
                 codec::read_signed(packet, MxmIcuEncodingLayout::kDecodeStrides + MxmIcuEncodingLayout::kStrideBits * dimension, MxmIcuEncodingLayout::kStrideBits);
         auto instruction =
-            MxmComputeIcuInstruction::DecodeStreamCompute3D(
+            MxmComputeIcuInstruction::IsStreamCompute3D(
                 loop,
                 static_cast<std::size_t>(
                     codec::read_unsigned(packet, 144, 1)),
@@ -1056,8 +1056,8 @@ inline MxmComputeIcuInstruction decode_mxm_compute_icu_3d_instruction(
                 static_cast<MxmAccumulatorDestination>(
                     codec::read_unsigned(packet, MxmIcuEncodingLayout::kDecodeDestination, 1)),
                 codec::read_unsigned(packet, MxmIcuEncodingLayout::kDecodeClear, 1) != 0,
-                static_cast<MxmDecodeLayout>(
-                    codec::read_unsigned(packet, MxmIcuEncodingLayout::kDecodeLayout, 1)));
+                static_cast<MxmIsMode>(
+                    codec::read_unsigned(packet, MxmIcuEncodingLayout::kIsMode, 1)));
         codec::validate_buffer_mode(instruction.weight_buffer_mode);
         ::ftlpu::detail::validate_mxm_compute_icu_instruction(instruction);
         return instruction;

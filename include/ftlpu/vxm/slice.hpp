@@ -460,15 +460,16 @@ private:
                               std::size_t alu, bool rhs_port) const
     {
         if (operand.kind != VxmLaneOperandKind::StreamFloat16
-            && operand.kind != VxmLaneOperandKind::StreamBFloat16) {
+            && operand.kind != VxmLaneOperandKind::StreamBFloat16
+            && operand.kind != VxmLaneOperandKind::StreamFloat32) {
             return;
         }
-        const auto group = VxmLane::fixed_input_group_for_stage(alu, rhs_port);
+
         // RequiredStreams describes the fixed logical 32-byte VXM input
         // bundle.  The separately configured group source selects which MEM
         // hemisphere supplies that same-numbered westbound SR group.
-        const auto base = group * VxmLane::kStreamGroupBytes;
-        for (std::size_t byte = 0; byte < VxmLane::kStreamGroupBytes; ++byte) {
+        const auto base = VxmLane::fixed_input_base_for_stage(alu, rhs_port, operand.kind);
+        for (std::size_t byte = 0; byte < VxmLane::stream_operand_bytes(operand.kind); ++byte) {
             required[base + byte] = true;
         }
     }
@@ -476,7 +477,8 @@ private:
     static bool operand_uses_stream(const VxmLaneOperand& operand)
     {
         return operand.kind == VxmLaneOperandKind::StreamFloat16
-            || operand.kind == VxmLaneOperandKind::StreamBFloat16;
+            || operand.kind == VxmLaneOperandKind::StreamBFloat16
+            || operand.kind == VxmLaneOperandKind::StreamFloat32;
     }
 
     static bool instruction_uses_stream(

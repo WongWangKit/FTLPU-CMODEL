@@ -89,7 +89,7 @@ inline void validate_sxm_transpose_icu_run_2d_instruction(
         throw std::invalid_argument(
             "SXM transpose RUN_2D cannot carry permute output selectors");
     const auto sourceCount =
-        instruction.input_row == SxmInstruction::kAllInputRows
+        instruction.input_row == SxmInstruction::kAllInputRows && instruction.dst_streams.size()!=2
         ? 2 * hw::kLanesPerTile : std::size_t {2};
     if (instruction.input_row != SxmInstruction::kAllInputRows
         && instruction.input_row != SxmInstruction::kBroadcastInputRows
@@ -99,7 +99,7 @@ inline void validate_sxm_transpose_icu_run_2d_instruction(
     validate_sxm_stream_range(
         instruction.src_streams, sourceCount, "transpose source");
     validate_sxm_stream_range(
-        instruction.dst_streams, 2 * hw::kLanesPerTile,
+        instruction.dst_streams, instruction.input_row == SxmInstruction::kAllInputRows && instruction.src_streams.size()==2 ? 2 : 2 * hw::kLanesPerTile,
         "transpose destination");
 }
 
@@ -280,7 +280,7 @@ encode_sxm_transpose_icu_run_2d_instruction(
         "SXM transpose destination stream base");
     const auto inputRow =
         instruction.instruction.input_row == SxmInstruction::kAllInputRows
-        ? hw::kLanesPerTile : instruction.instruction.input_row;
+        ? (instruction.instruction.dst_streams.size()==2 ? 15 : hw::kLanesPerTile) : instruction.instruction.input_row;
     codec::write_unsigned(packet, 116, 4, inputRow,
         "SXM transpose input row");
     return packet;
@@ -296,7 +296,8 @@ inline SxmIcuRun2DInstruction decode_sxm_transpose_icu_run_2d_instruction(
         packet, 120, "SXM transpose RUN_2D reserved field is non-zero");
     const auto inputRow = static_cast<std::size_t>(
         codec::read_unsigned(packet, 116, 4));
-    if (inputRow > hw::kLanesPerTile && inputRow != SxmInstruction::kBroadcastInputRows)
+    const bool wide = inputRow == 15;
+    if (inputRow > hw::kLanesPerTile && inputRow != SxmInstruction::kBroadcastInputRows && !wide)
         throw std::logic_error("encoded SXM transpose input row is invalid");
     const auto sourceCount = inputRow == hw::kLanesPerTile
         ? 2 * hw::kLanesPerTile : std::size_t {2};
@@ -306,8 +307,8 @@ inline SxmIcuRun2DInstruction decode_sxm_transpose_icu_run_2d_instruction(
             sourceCount),
         sxm_run_2d_codec_detail::stream_range(
             static_cast<std::size_t>(codec::read_unsigned(packet, 110, 6)),
-            2 * hw::kLanesPerTile));
-    instruction.input_row = inputRow == hw::kLanesPerTile
+            wide ? 2 : 2 * hw::kLanesPerTile));
+    instruction.input_row = inputRow == hw::kLanesPerTile || wide
         ? SxmInstruction::kAllInputRows : inputRow;
     auto result = sxm_run_2d_codec_detail::decode_loop(
         packet, std::move(instruction));

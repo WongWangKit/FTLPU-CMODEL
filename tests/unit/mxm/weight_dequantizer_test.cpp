@@ -37,7 +37,7 @@ int main()
     const auto input = quantized_input();
     const auto converted = ftlpu::MxmWeightDequantizer {}.convert(
         input,
-        ftlpu::MxmWeightLoadMode::Supercell,
+        ftlpu::MxmWeightLoadMode::Block,
         0,
         ftlpu::MxmWeightInputMode::Int8DequantBf16,
         dequant);

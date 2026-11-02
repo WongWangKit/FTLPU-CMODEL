@@ -21,14 +21,14 @@ enum class MxmOpcode {
 };
 
 enum class MxmWeightLoadMode {
-    Supercell,
-    Column,
+    Block,
+    Vector,
 };
 
 struct MxmInstruction {
     MxmOpcode opcode{MxmOpcode::IW};
     std::size_t weight_buffer{0};
-    MxmWeightLoadMode weight_load_mode{MxmWeightLoadMode::Supercell};
+    MxmWeightLoadMode weight_load_mode{MxmWeightLoadMode::Block};
     std::size_t weight_inner_column{0};
 
     static MxmInstruction IW(std::size_t weight_buffer = 0)
@@ -36,7 +36,7 @@ struct MxmInstruction {
         return MxmInstruction {
             MxmOpcode::IW,
             weight_buffer,
-            MxmWeightLoadMode::Supercell,
+            MxmWeightLoadMode::Block,
             0};
     }
 
@@ -47,7 +47,7 @@ struct MxmInstruction {
         return MxmInstruction {
             MxmOpcode::IW,
             weight_buffer,
-            MxmWeightLoadMode::Column,
+            MxmWeightLoadMode::Vector,
             inner_column};
     }
 };
@@ -320,7 +320,7 @@ private:
     void write_buffer_from_input()
     {
         const auto buffer = instruction_->weight_buffer;
-        if (instruction_->weight_load_mode == MxmWeightLoadMode::Column) {
+        if (instruction_->weight_load_mode == MxmWeightLoadMode::Vector) {
             const auto column = instruction_->weight_inner_column;
             check_column(column);
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
@@ -338,7 +338,7 @@ private:
                 [](bool valid) { return valid; });
             return;
         }
-        if (instruction_->weight_load_mode != MxmWeightLoadMode::Supercell) {
+        if (instruction_->weight_load_mode != MxmWeightLoadMode::Block) {
             throw std::invalid_argument("MXM weight load mode is invalid");
         }
 

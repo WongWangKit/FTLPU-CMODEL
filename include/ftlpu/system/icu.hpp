@@ -620,9 +620,9 @@ public:
     {
         check_mxm_queue(mxm);
         if (instruction.opcode == MxmControlOpcode::IW
-            || (instruction.opcode == MxmControlOpcode::Decode
+            || (instruction.opcode == MxmControlOpcode::IS
                 && instruction.decode_operation
-                    == MxmDecodeOperation::LoadActivation)) {
+                    == MxmIsOperation::LoadActivation)) {
             mxm_load_queues_[mxm].push_instruction(instruction);
         } else {
             mxm_compute_queues_[mxm].push_instruction(instruction);
@@ -680,9 +680,9 @@ public:
     {
         check_mxm_queue(mxm);
         if (instruction.opcode != MxmControlOpcode::IW
-            && !(instruction.opcode == MxmControlOpcode::Decode
+            && !(instruction.opcode == MxmControlOpcode::IS
                 && instruction.decode_operation
-                    == MxmDecodeOperation::LoadActivation))
+                    == MxmIsOperation::LoadActivation))
             throw std::invalid_argument(
                 "MXM load macro requires an IW/load-activation instruction");
         mxm_load_queues_[mxm].push_macro(
@@ -695,9 +695,9 @@ public:
     {
         check_mxm_queue(mxm);
         if (instruction.opcode != MxmControlOpcode::IW
-            && !(instruction.opcode == MxmControlOpcode::Decode
+            && !(instruction.opcode == MxmControlOpcode::IS
                 && instruction.decode_operation
-                    == MxmDecodeOperation::LoadActivation))
+                    == MxmIsOperation::LoadActivation))
             throw std::invalid_argument(
                 "MXM load STREAM_ND requires IW/load-activation");
         mxm_load_queues_[mxm].push_mxm_stream_nd(
@@ -726,9 +726,9 @@ public:
     {
         check_mxm_queue(mxm);
         if (instruction.opcode == MxmControlOpcode::IW
-            || (instruction.opcode == MxmControlOpcode::Decode
+            || (instruction.opcode == MxmControlOpcode::IS
                 && instruction.decode_operation
-                    == MxmDecodeOperation::LoadActivation))
+                    == MxmIsOperation::LoadActivation))
             throw std::invalid_argument(
                 "MXM compute macro cannot carry a load instruction");
         mxm_compute_queues_[mxm].push_macro(
@@ -741,9 +741,9 @@ public:
     {
         check_mxm_queue(mxm);
         if (instruction.opcode == MxmControlOpcode::IW
-            || (instruction.opcode == MxmControlOpcode::Decode
+            || (instruction.opcode == MxmControlOpcode::IS
                 && instruction.decode_operation
-                    == MxmDecodeOperation::LoadActivation))
+                    == MxmIsOperation::LoadActivation))
             throw std::invalid_argument(
                 "MXM compute STREAM_ND cannot carry a load instruction");
         mxm_compute_queues_[mxm].push_mxm_stream_nd(
@@ -1922,7 +1922,7 @@ private:
             os << "IW b" << instruction.weight_buffer
                << " col=" << instruction.weight_column
                << " stream=" << instruction.weight_stream_base;
-            if (instruction.weight_load_mode == MxmWeightLoadMode::Column) {
+            if (instruction.weight_load_mode == MxmWeightLoadMode::Vector) {
                 os << " inner=" << instruction.weight_inner_column
                    << " streams="
                    << (instruction.weight_input_mode
@@ -1939,16 +1939,16 @@ private:
                << " stream=" << instruction.activation_stream_base
                << " acc=" << instruction.accumulator_address
                << " out=" << instruction.stream_base;
-        } else if (instruction.opcode == MxmControlOpcode::Decode) {
+        } else if (instruction.opcode == MxmControlOpcode::IS) {
             if (instruction.decode_operation
-                == MxmDecodeOperation::LoadActivation) {
-                os << "DecodeLoadActivation b"
+                == MxmIsOperation::LoadActivation) {
+                os << "IsLoadActivation b"
                    << instruction.weight_buffer
                    << " stream=" << instruction.activation_stream_base
                    << " format="
                    << mxm_data_format_name(instruction.data_format);
             } else {
-                os << "DecodeStreamCompute b"
+                os << "IsStreamCompute b"
                    << instruction.weight_buffer
                    << " out=" << instruction.stream_base
                    << " weight_streams=E0..E31";

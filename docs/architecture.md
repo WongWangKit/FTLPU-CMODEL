@@ -426,21 +426,11 @@ The nonlinear composition follows the FP16 boundaries already validated by the
 dedicated RMSNorm, VXM, attention, and SwiGLU tests. Scaling to the SmolLM2
 576/1536/9-head shape repeats these tile mappings across four MXMs.
 
-Decode control supports two explicitly encoded layouts:
-
-- `Linear1x16` retains the original 16-supercell serial reduction. Each tile
-  loads four independent activation vectors from eight BF16 streams, and one
-  wave produces eight outputs after 16 cell stages.
-- `Native4x4` treats the physical array as four columns of four cells. Each
-  tile loads one 8-element activation vector from two BF16 streams and
-  broadcasts it across its row. Weight column `c` is scheduled `c` cycles
-  after column 0, so `(tile,column)` executes at `launch + tile + column`.
-  Four 8-output vertical reductions complete together after seven stages.
-
-`mxm_decode_layout_comparison_test` executes the same `K=128, N=32` GEMV in
-both layouts and requires bit-identical BF16 results. The full decode FFN uses
-`Native4x4`; decode attention keeps `Linear1x16` until its RoPE and cache
-resident layouts are migrated as a unit.
+MXM supports WS-vector, WS-block, IS-vector and IS-block. Linear1x16 is removed.
+The former native4 path is IS-block; IS-vector retains the same column-parallel
+reduction and receives one weight vector per column per cycle. IS active columns
+are configured with `mxm.is_columns`. See [MXM modes](mxm_modes.md) for timing,
+stream mapping, ABI migration and configurable-column constraints.
 
 ### Multi-executable boundaries
 

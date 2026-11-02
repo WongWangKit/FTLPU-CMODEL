@@ -28,8 +28,11 @@ inline constexpr std::size_t kC2cBeatBytes = @FTLPU_HW_C2C_BEAT_BYTES@;
 
 inline constexpr std::size_t kMxmAccumulatorContexts = @FTLPU_HW_MXM_ACCUM_CONTEXTS@;
 inline constexpr std::size_t kMxmsPerHemisphere = @FTLPU_HW_PHYSICAL_MXMS@;
-inline constexpr bool kMxmSupportsNative4x4 = @FTLPU_HW_MXM_SUPPORTS_NATIVE4X4@;
-inline constexpr bool kMxmSupportsLinear1x16 = @FTLPU_HW_MXM_SUPPORTS_LINEAR1X16@;
+inline constexpr std::size_t kMxmIsColumns = @FTLPU_HW_MXM_IS_COLUMNS@;
+inline constexpr bool kMxmSupportsWsVector = @FTLPU_HW_MXM_SUPPORTS_WS_VECTOR@;
+inline constexpr bool kMxmSupportsWsBlock = @FTLPU_HW_MXM_SUPPORTS_WS_BLOCK@;
+inline constexpr bool kMxmSupportsIsVector = @FTLPU_HW_MXM_SUPPORTS_IS_VECTOR@;
+inline constexpr bool kMxmSupportsIsBlock = @FTLPU_HW_MXM_SUPPORTS_IS_BLOCK@;
 
 // JSON `vxm.alus` is the physical ALU count per lane. The restored develop
 // VXM requires 16 physical ALUs; eight ICU queues control the mirrored pairs.

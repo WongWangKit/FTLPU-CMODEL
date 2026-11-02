@@ -6,11 +6,14 @@
 #include "ftlpu/sxm/shift.hpp"
 #include "ftlpu/sxm/transpose.hpp"
 #include "ftlpu/sxm/unit_group.hpp"
+#include "ftlpu/sxm/transpose_architecture.hpp"
+#include "ftlpu/sxm/wide_transpose.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <optional>
+#include <memory>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
@@ -82,14 +85,18 @@ public:
     static constexpr std::size_t kTransposeBytePlanes = 2;
     using UnitGroup = SxmUnitGroup<std::uint8_t>;
 
-    explicit SxmSlice(SxmStreamPortMap ports)
+    explicit SxmSlice(SxmStreamPortMap ports,
+        SxmTransposeArchitecture architecture = SxmTransposeArchitecture::LocalBlocks)
         : ports_(std::move(ports))
+        , architecture_(architecture)
+        , wide_(architecture == SxmTransposeArchitecture::WideStreaming ? std::make_unique<SxmWideTranspose>() : nullptr)
     {
     }
 
     void reset()
     {
         units_.reset();
+        if(wide_)wide_->reset();
         for (auto& instruction : transpose_instruction_rows_) instruction.reset();
         permute_instruction_.reset();
         transpose_bank_ = TransposeBank {};
@@ -101,8 +108,14 @@ public:
         return units_.cycle();
     }
 
+    SxmTransposeArchitecture transpose_architecture() const noexcept
+    {
+        return architecture_;
+    }
+
     bool idle() const noexcept
     {
+        if (wide_ && !wide_->idle()) return false;
         if (units_.issued_count() != 0 || permute_instruction_
             || !fanout_outputs_.empty()) return false;
         for (const auto& row : transpose_instruction_rows_) if (row) return false;
@@ -112,6 +125,12 @@ public:
 
     bool can_issue(const SxmInstruction& instruction) const
     {
+        if (architecture_ == SxmTransposeArchitecture::WideStreaming) {
+            if (instruction.opcode == SxmOpcode::Transpose)
+                return wide_->can_issue(instruction,cycle())
+                    && units_.issued_count()==0 && !permute_instruction_;
+            if (wide_ && !wide_->idle()) return false;
+        }
         if (instruction.opcode == SxmOpcode::Transpose) {
             return is_streaming_transpose(instruction)
                 && !transpose_instruction_rows_[0].has_value();
@@ -125,6 +144,12 @@ public:
 
     void issue(SxmInstruction instruction)
     {
+        if (architecture_ == SxmTransposeArchitecture::WideStreaming) {
+            if (!can_issue(instruction)) throw std::logic_error("wide SXM instruction cannot issue");
+            if (instruction.opcode == SxmOpcode::Transpose) {
+                wide_->issue(instruction,cycle());return;
+            }
+        }
         if (instruction.opcode == SxmOpcode::Transpose) {
             if (!is_streaming_transpose(instruction)) {
                 throw std::invalid_argument(
@@ -180,6 +205,14 @@ public:
         }
 
         cycle_events_.clear();
+        if (auto instruction=wide_ ? wide_->active_instruction() : std::nullopt) {
+            wide_->evaluate(fabric,cycle(),
+                ports_.input_column(uniform_direction(instruction->src_streams,"wide source")),
+                ports_.output_column(uniform_direction(instruction->dst_streams,"wide destination")));
+            if(trace_enabled_)cycle_events_.push_back("wide transpose input_fifo_bytes="
+                +std::to_string(wide_->input_buffer_bytes())+" output_fifo_bytes="
+                +std::to_string(wide_->output_buffer_bytes()));
+        }
 
         // Fanout traverses the same four superlane pipeline positions as a
         // MEM vector. Keep its output beat skew explicit rather than making
@@ -654,6 +687,8 @@ private:
     }
 
     SxmStreamPortMap ports_;
+    SxmTransposeArchitecture architecture_;
+    std::unique_ptr<SxmWideTranspose> wide_;
     UnitGroup units_{};
     struct FanoutOutput {
         std::size_t cycle;

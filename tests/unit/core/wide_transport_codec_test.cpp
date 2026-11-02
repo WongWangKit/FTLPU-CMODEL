@@ -41,8 +41,8 @@ int main() try
     const auto read = MxmControlInstruction::AccumulatorRead(address,0,false);
     require(isa::decode_mxm_instruction(isa::encode_mxm_instruction(read)).accumulator_address == address,
         "FU accumulator-read lost its highest address");
-    const auto stream = MxmControlInstruction::DecodeStreamCompute(0,0,
-        MxmDataFormat::BFloat16,address,column,MxmAccumulatorDestination::Stream,false,MxmDecodeLayout::Native4x4);
+    const auto stream = MxmControlInstruction::IsStreamCompute(0,0,
+        MxmDataFormat::BFloat16,address,column,MxmAccumulatorDestination::Stream,false,MxmIsMode::Block);
     const auto decodedStream = isa::decode_mxm_instruction(isa::encode_mxm_instruction(stream));
     require(decodedStream.accumulator_address == address && decodedStream.weight_column == column
         && decodedStream.data_format == MxmDataFormat::BFloat16 && !decodedStream.accumulator_clear,
@@ -76,9 +76,9 @@ int main() try
     require(isa::decode_mxm_compute_icu_3d_instruction(
         isa::encode_mxm_compute_icu_3d_instruction(readRun)).accumulator_address_base == address,
         "ICU accumulator-read lost its highest address");
-    const auto streamRun = MxmComputeIcuInstruction::DecodeStreamCompute3D(
+    const auto streamRun = MxmComputeIcuInstruction::IsStreamCompute3D(
         {0,{1,1,1},{1,1,1}},0,MxmIcuBufferMode::Fixed,0,MxmDataFormat::BFloat16,
-        address,{0,0,0},column,MxmAccumulatorDestination::Stream,false,MxmDecodeLayout::Native4x4);
+        address,{0,0,0},column,MxmAccumulatorDestination::Stream,false,MxmIsMode::Block);
     const auto decodedStreamRun = isa::decode_mxm_compute_icu_3d_instruction(
         isa::encode_mxm_compute_icu_3d_instruction(streamRun));
     require(decodedStreamRun.accumulator_column == column && decodedStreamRun.accumulator_address_base == address,

@@ -32,9 +32,9 @@ CMake 配置阶段读取它并生成编译期常量，Software 编译器也可�
   },
   "mxm": {
     "accum_contexts": 4,
+    "is_columns": 4,
     "supported_modes": [
-      "native4x4",
-      "linear1x16"
+      "ws-vector", "ws-block", "is-vector", "is-block"
     ]
   },
   "vxm": {
@@ -169,9 +169,10 @@ slice_depth      = 2 × 8192 = 16384 rows
 | 字段 | 含义 | 默认值 |
 | --- | --- | ---: |
 | `mxm.accum_contexts` | 每个 MXM 的完整 MXM tile FP32 accumulator context 数 | 4 |
-| `mxm.supported_modes` | target 支持的 MXM decode layout | `native4x4`、`linear1x16` |
+| `mxm.is_columns` | IS 启用的 supercell 列数，必须为 supercell 行数的正因数；4 行仅允许 1、2、4 列 | 4 |
+| `mxm.supported_modes` | target 支持的 MXM 数据流和权重输入粒度 | `ws-vector`、`ws-block`、`is-vector`、`is-block` |
 
-`Block8` 已删除，不能再写入 `supported_modes`。模式列表不能为空，不能重复，也不能包含
+`Linear1x16` 已删除，旧模式名称不能再写入 `supported_modes`。模式列表不能为空，不能重复，也不能包含
 未知模式。Software 直接读取 JSON 时还会检查模式集合是否与 Software 构建配置一致。
 
 ### VXM

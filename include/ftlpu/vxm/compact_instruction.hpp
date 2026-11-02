@@ -57,9 +57,9 @@ public:
         auto control = std::uint64_t{0};
         insert(control, encode_opcode(instruction.operation),
                kOpcodeShift, kOpcodeMask);
-        insert(control, encode_operand(instruction.lhs.kind),
+        insert(control, encode_operand(instruction.lhs.kind) & kOperandMask,
                kLhsShift, kOperandMask);
-        insert(control, encode_operand(instruction.rhs.kind),
+        insert(control, encode_operand(instruction.rhs.kind) & kOperandMask,
                kRhsShift, kOperandMask);
         insert(control,
                instruction.precision == VxmAluPrecision::Float32 ? 1 : 0,
@@ -80,6 +80,8 @@ public:
         insert(control, instruction.local_scalar_write ? 1 : 0,
                kLocalScalarWriteShift, 0x1);
 
+        insert(control, encode_operand(instruction.lhs.kind) >> 3, kLhsExtensionShift, 0x1);
+        insert(control, encode_operand(instruction.rhs.kind) >> 3, kRhsExtensionShift, 0x1);
         auto immediate = 0.0f;
         if (instruction.lhs.kind == VxmLaneOperandKind::Immediate) {
             immediate = instruction.lhs.immediate;
@@ -104,9 +106,9 @@ public:
         instruction.operation = decode_opcode(extract(
             packet.control, kOpcodeShift, kOpcodeMask));
         instruction.lhs = decode_operand(extract(
-            packet.control, kLhsShift, kOperandMask), immediate);
+            packet.control, kLhsShift, kOperandMask) | (extract(packet.control, kLhsExtensionShift, 1) << 3), immediate);
         instruction.rhs = decode_operand(extract(
-            packet.control, kRhsShift, kOperandMask), immediate);
+            packet.control, kRhsShift, kOperandMask) | (extract(packet.control, kRhsExtensionShift, 1) << 3), immediate);
         instruction.precision = extract(
             packet.control, kPrecisionShift, 0x1)
             ? VxmAluPrecision::Float32 : VxmAluPrecision::Float16;
@@ -151,6 +153,8 @@ private:
     static constexpr unsigned kDepthShift = 17;
     static constexpr unsigned kRepeatShift = 19;
     static constexpr unsigned kLocalScalarWriteShift = 51;
+    static constexpr unsigned kLhsExtensionShift = 52;
+    static constexpr unsigned kRhsExtensionShift = 53;
 
     static void insert(std::uint64_t& word, std::uint64_t value,
                        unsigned shift, std::uint64_t mask)
@@ -217,7 +221,7 @@ private:
         std::uint64_t encoded, float immediate)
     {
         if (encoded > static_cast<std::uint64_t>(
-                          VxmLaneOperandKind::Feedback)) {
+                          VxmLaneOperandKind::StreamFloat32)) {
             throw std::invalid_argument(
                 "VXM compact instruction has an invalid operand selector");
         }
@@ -227,6 +231,8 @@ private:
         case VxmLaneOperandKind::Original: return VxmLaneOperand::Original();
         case VxmLaneOperandKind::Auxiliary: return VxmLaneOperand::Aux();
         case VxmLaneOperandKind::Accumulator: return VxmLaneOperand::Acc();
+        case VxmLaneOperandKind::StreamFloat32:
+            return VxmLaneOperand::StreamFloat32();
         case VxmLaneOperandKind::StreamFloat16:
             return VxmLaneOperand::StreamFloat16();
         case VxmLaneOperandKind::StreamBFloat16:
@@ -278,7 +284,8 @@ private:
     static void validate_compact_operand(const VxmLaneOperand& operand)
     {
         if ((operand.kind == VxmLaneOperandKind::StreamFloat16
-             || operand.kind == VxmLaneOperandKind::StreamBFloat16)
+             || operand.kind == VxmLaneOperandKind::StreamBFloat16
+             || operand.kind == VxmLaneOperandKind::StreamFloat32)
             && (operand.scale != 1.0f || operand.zero_point != 0)) {
             throw std::invalid_argument(
                 "VXM compact packet requires separately configured "

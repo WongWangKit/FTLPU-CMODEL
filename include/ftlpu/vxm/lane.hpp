@@ -36,6 +36,7 @@ enum class VxmLaneOperandKind {
     StreamBFloat16 = 5,
     Immediate = 6,
     Feedback = 7,
+    StreamFloat32 = 8,
 };
 
 struct VxmLaneOperand {
@@ -50,6 +51,7 @@ struct VxmLaneOperand {
     static VxmLaneOperand Acc() { return {VxmLaneOperandKind::Accumulator}; }
     static VxmLaneOperand Imm(float value) { return {VxmLaneOperandKind::Immediate, value}; }
     static VxmLaneOperand Feedback() { return {VxmLaneOperandKind::Feedback}; }
+    static VxmLaneOperand StreamFloat32() { return {VxmLaneOperandKind::StreamFloat32}; }
     static VxmLaneOperand StreamFloat16(float scale = 1.0f)
     {
         return {VxmLaneOperandKind::StreamFloat16, 0.0f, scale, 0};
@@ -363,6 +365,20 @@ public:
         std::size_t stage, bool rhs_port)
     {
         return block_for_stage(stage) * 2 + (rhs_port ? 1 : 0);
+    }
+
+    // FP32 ports are fixed 4-byte bundles shared by adjacent depth-2
+    // heads. No new SR indices or crossbar: C0/C2 use 0..3 and 4..7,
+    // C4/C6 use 8..11 and 12..15; the other hemisphere uses +16.
+    static constexpr std::size_t stream_operand_bytes(VxmLaneOperandKind kind)
+    { return kind == VxmLaneOperandKind::StreamFloat32 ? 4 : 2; }
+
+    static constexpr std::size_t fixed_input_base_for_stage(
+        std::size_t stage, bool rhs, VxmLaneOperandKind kind)
+    {
+        return kind == VxmLaneOperandKind::StreamFloat32
+            ? (stage / 4) * 8 + (rhs ? 4 : 0)
+            : fixed_input_group_for_stage(stage, rhs) * kStreamGroupBytes;
     }
 
     void validate_broadcast_instruction(
@@ -923,7 +939,8 @@ private:
     static bool is_stream(VxmLaneOperandKind kind)
     {
         return kind == VxmLaneOperandKind::StreamFloat16
-            || kind == VxmLaneOperandKind::StreamBFloat16;
+            || kind == VxmLaneOperandKind::StreamBFloat16
+            || kind == VxmLaneOperandKind::StreamFloat32;
     }
 
     static bool is_chain_head_for(std::size_t stage, VxmChainDepth depth)
@@ -1102,9 +1119,13 @@ private:
         // No Stream selector: the physical group is fixed by stage and port.
         // The only input MUX selects this fixed Stream value or Immediate.
         if (operand.kind == VxmLaneOperandKind::Immediate) return operand.immediate;
+        const auto base = fixed_input_base_for_stage(stage, rhs_port, operand.kind);
+        if (operand.kind == VxmLaneOperandKind::StreamFloat32) {
+            std::array<std::uint8_t, 4> full{};
+            for (std::size_t byte=0; byte<4; ++byte) full[byte]=stream_inputs_[base+byte];
+            return unpack_float32(full);
+        }
         std::array<std::uint8_t, kStreamGroupBytes> bytes{};
-        const auto base = fixed_input_group_for_stage(stage, rhs_port)
-                        * kStreamGroupBytes;
         for (std::size_t byte = 0; byte < kStreamGroupBytes; ++byte) {
             bytes[byte] = stream_inputs_[base + byte];
         }
@@ -1151,6 +1172,7 @@ private:
         case VxmLaneOperandKind::Immediate: return operand.immediate;
         case VxmLaneOperandKind::StreamFloat16:
         case VxmLaneOperandKind::StreamBFloat16:
+        case VxmLaneOperandKind::StreamFloat32:
             return read_head_operand(operand, stage, rhs_port);
         }
         throw std::logic_error("unsupported VXM operand");

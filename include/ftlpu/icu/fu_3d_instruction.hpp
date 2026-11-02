@@ -138,7 +138,7 @@ enum class MxmIcuBufferMode : std::uint8_t {
 
 enum class MxmLoadIcuOpcode : std::uint8_t {
     Load3D = 0,
-    DecodeLoadActivation3D = 1,
+    IsLoadActivation3D = 1,
     // Affine column coordinates address individual columns, not supercells.
     LoadColumn3D = 2,
 };
@@ -156,7 +156,7 @@ struct MxmLoadIcuInstruction {
     MxmWeightInputMode weight_input_mode{
         MxmWeightInputMode::Int8DequantBf16};
     MxmDataFormat data_format{MxmDataFormat::BFloat16};
-    MxmDecodeLayout decode_layout{MxmDecodeLayout::Linear1x16};
+    MxmIsMode is_mode{MxmIsMode::Block};
 
     static MxmLoadIcuInstruction Load3D(
         IcuLoop3D loop,
@@ -180,22 +180,22 @@ struct MxmLoadIcuInstruction {
         return instruction;
     }
 
-    static MxmLoadIcuInstruction DecodeLoadActivation3D(
+    static MxmLoadIcuInstruction IsLoadActivation3D(
         IcuLoop3D loop,
         std::size_t activation_buffer_base,
         MxmIcuBufferMode activation_buffer_mode,
         std::size_t activation_stream_base,
         MxmDataFormat data_format,
-        MxmDecodeLayout decode_layout)
+        MxmIsMode is_mode)
     {
         auto instruction = MxmLoadIcuInstruction {};
-        instruction.opcode = MxmLoadIcuOpcode::DecodeLoadActivation3D;
+        instruction.opcode = MxmLoadIcuOpcode::IsLoadActivation3D;
         instruction.loop = loop;
         instruction.weight_buffer_base = activation_buffer_base;
         instruction.weight_buffer_mode = activation_buffer_mode;
         instruction.weight_stream_base = activation_stream_base;
         instruction.data_format = data_format;
-        instruction.decode_layout = decode_layout;
+        instruction.is_mode = is_mode;
         return instruction;
     }
 };
@@ -226,7 +226,7 @@ struct MxmComputeIcuMode {
 enum class MxmComputeIcuOpcode : std::uint8_t {
     Compute3D = 0,
     AccumulatorRead3D = 1,
-    DecodeStreamCompute3D = 2,
+    IsStreamCompute3D = 2,
 };
 
 struct MxmComputeIcuInstruction {
@@ -243,7 +243,7 @@ struct MxmComputeIcuInstruction {
     std::size_t accumulator_row_stride{1};
     MxmDataFormat data_format{MxmDataFormat::BFloat16};
     std::size_t accumulator_column{0};
-    MxmDecodeLayout decode_layout{MxmDecodeLayout::Linear1x16};
+    MxmIsMode is_mode{MxmIsMode::Block};
     MxmComputeIcuMode regular_mode{};
     std::size_t terminal_dimension{kNoTerminalDimension};
     MxmComputeIcuMode terminal_mode{};
@@ -304,7 +304,7 @@ struct MxmComputeIcuInstruction {
         return instruction;
     }
 
-    static MxmComputeIcuInstruction DecodeStreamCompute3D(
+    static MxmComputeIcuInstruction IsStreamCompute3D(
         IcuLoop3D loop,
         std::size_t activation_buffer_base,
         MxmIcuBufferMode activation_buffer_mode,
@@ -315,10 +315,10 @@ struct MxmComputeIcuInstruction {
         std::size_t accumulator_column,
         MxmAccumulatorDestination accumulator_destination,
         bool accumulator_clear,
-        MxmDecodeLayout decode_layout)
+        MxmIsMode is_mode)
     {
         auto instruction = MxmComputeIcuInstruction {};
-        instruction.opcode = MxmComputeIcuOpcode::DecodeStreamCompute3D;
+        instruction.opcode = MxmComputeIcuOpcode::IsStreamCompute3D;
         instruction.loop = loop;
         instruction.weight_buffer_base = activation_buffer_base;
         instruction.weight_buffer_mode = activation_buffer_mode;
@@ -330,7 +330,7 @@ struct MxmComputeIcuInstruction {
         instruction.regular_mode.accumulator_destination =
             accumulator_destination;
         instruction.regular_mode.accumulator_clear = accumulator_clear;
-        instruction.decode_layout = decode_layout;
+        instruction.is_mode = is_mode;
         return instruction;
     }
 };
@@ -713,10 +713,10 @@ inline void validate_mxm_load_icu_instruction(
 {
     validate_icu_loop_3d(instruction.loop);
     if (instruction.opcode
-        == MxmLoadIcuOpcode::DecodeLoadActivation3D) {
+        == MxmLoadIcuOpcode::IsLoadActivation3D) {
         MxmControlInstruction::check_data_format(instruction.data_format);
-        MxmControlInstruction::check_decode_layout(
-            instruction.decode_layout);
+        MxmControlInstruction::check_is_mode(
+            instruction.is_mode);
         for (std::size_t mask = 0; mask < 8; ++mask) {
             const IcuCoordinate3D coordinate {{
                 (mask & 1U) != 0 ? instruction.loop.counts[0] - 1 : 0,
@@ -727,11 +727,11 @@ inline void validate_mxm_load_icu_instruction(
                 instruction.weight_buffer_base,
                 instruction.weight_buffer_mode, coordinate));
         }
-        static_cast<void>(MxmControlInstruction::DecodeLoadActivation(
+        static_cast<void>(MxmControlInstruction::IsLoadActivation(
             instruction.weight_buffer_base,
             instruction.weight_stream_base,
             instruction.data_format,
-            instruction.decode_layout));
+            instruction.is_mode));
         return;
     }
     if (instruction.opcode != MxmLoadIcuOpcode::Load3D
@@ -777,13 +777,13 @@ inline MxmControlInstruction expand_mxm_load_icu_instruction(
     const IcuCoordinate3D& coordinate)
 {
     if (instruction.opcode
-        == MxmLoadIcuOpcode::DecodeLoadActivation3D)
-        return MxmControlInstruction::DecodeLoadActivation(
+        == MxmLoadIcuOpcode::IsLoadActivation3D)
+        return MxmControlInstruction::IsLoadActivation(
             mxm_icu_buffer_3d(instruction.weight_buffer_base,
                 instruction.weight_buffer_mode, coordinate),
             instruction.weight_stream_base,
             instruction.data_format,
-            instruction.decode_layout);
+            instruction.is_mode);
     if (instruction.opcode != MxmLoadIcuOpcode::Load3D
         && instruction.opcode != MxmLoadIcuOpcode::LoadColumn3D)
         throw std::logic_error("MXM load ICU 3-D opcode is invalid");
@@ -877,11 +877,11 @@ inline void validate_mxm_compute_icu_instruction(
         return;
     }
     if (instruction.opcode
-        == MxmComputeIcuOpcode::DecodeStreamCompute3D) {
+        == MxmComputeIcuOpcode::IsStreamCompute3D) {
         validate_mxm_compute_mode(instruction.regular_mode);
         MxmControlInstruction::check_data_format(instruction.data_format);
-        MxmControlInstruction::check_decode_layout(
-            instruction.decode_layout);
+        MxmControlInstruction::check_is_mode(
+            instruction.is_mode);
         MxmControlInstruction::check_column(
             instruction.accumulator_column);
         for (std::size_t mask = 0; mask < 8; ++mask) {
@@ -904,7 +904,7 @@ inline void validate_mxm_compute_icu_instruction(
             MxmControlInstruction::check_accumulator_address(
                 static_cast<std::size_t>(address));
         }
-        static_cast<void>(MxmControlInstruction::DecodeStreamCompute(
+        static_cast<void>(MxmControlInstruction::IsStreamCompute(
             instruction.weight_buffer_base,
             instruction.result_stream_base,
             instruction.data_format,
@@ -912,7 +912,7 @@ inline void validate_mxm_compute_icu_instruction(
             instruction.accumulator_column,
             instruction.regular_mode.accumulator_destination,
             instruction.regular_mode.accumulator_clear,
-            instruction.decode_layout));
+            instruction.is_mode));
         return;
     }
     if (instruction.opcode != MxmComputeIcuOpcode::Compute3D)
@@ -998,8 +998,8 @@ inline MxmControlInstruction expand_mxm_compute_icu_instruction(
             instruction.regular_mode.accumulator_output_format,
             instruction.regular_mode.accumulator_destination);
     if (instruction.opcode
-        == MxmComputeIcuOpcode::DecodeStreamCompute3D)
-        return MxmControlInstruction::DecodeStreamCompute(
+        == MxmComputeIcuOpcode::IsStreamCompute3D)
+        return MxmControlInstruction::IsStreamCompute(
             mxm_icu_buffer_3d(instruction.weight_buffer_base,
                 instruction.weight_buffer_mode, coordinate),
             instruction.result_stream_base,
@@ -1008,7 +1008,7 @@ inline MxmControlInstruction expand_mxm_compute_icu_instruction(
             instruction.accumulator_column,
             instruction.regular_mode.accumulator_destination,
             instruction.regular_mode.accumulator_clear,
-            instruction.decode_layout);
+            instruction.is_mode);
     if (instruction.opcode != MxmComputeIcuOpcode::Compute3D)
         throw std::logic_error("MXM compute ICU 3-D opcode is invalid");
     const auto mode = mxm_compute_mode_3d(instruction, coordinate);

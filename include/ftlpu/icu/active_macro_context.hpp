@@ -374,11 +374,11 @@ private:
             * outerStride;
         const auto base = induction_operand(state.instruction,
             state.induction_target);
-        validate_operand(base, state.induction_target);
-        validate_operand(base + innerDelta, state.induction_target);
-        validate_operand(base + outerDelta, state.induction_target);
+        validate_operand(base, state.induction_target, state.instruction);
+        validate_operand(base + innerDelta, state.induction_target, state.instruction);
+        validate_operand(base + outerDelta, state.induction_target, state.instruction);
         validate_operand(base + innerDelta + outerDelta,
-            state.induction_target);
+            state.induction_target, state.instruction);
     }
 
     static void validate_mutable_state_induction(const State& state)
@@ -392,7 +392,7 @@ private:
         }
         const auto operand = induction_operand(
             state.instruction, state.induction_target);
-        validate_operand(operand, state.induction_target);
+        validate_operand(operand, state.induction_target, state.instruction);
     }
 
     static void validate_mutable_state_fields(const State& state)
@@ -422,15 +422,17 @@ private:
                 if (instruction.opcode != MxmControlOpcode::IW)
                     throw StaticScheduleError(
                         "MXM weight-column induction requires IW");
-                return static_cast<std::int64_t>(instruction.weight_column);
+                return static_cast<std::int64_t>(instruction.weight_load_mode == MxmWeightLoadMode::Vector
+                    ? instruction.weight_column * hw::kLanesPerTile + instruction.weight_inner_column
+                    : instruction.weight_column);
             }
             if (target == IcuInductionTarget::MxmAccumulatorAddress) {
                 if (instruction.opcode != MxmControlOpcode::Compute
                     && instruction.opcode
                         != MxmControlOpcode::AccumulatorRead
-                    && !(instruction.opcode == MxmControlOpcode::Decode
+                    && !(instruction.opcode == MxmControlOpcode::IS
                         && instruction.decode_operation
-                            == MxmDecodeOperation::StreamCompute))
+                            == MxmIsOperation::StreamCompute))
                     throw StaticScheduleError(
                         "MXM accumulator induction requires a compute instruction");
                 return static_cast<std::int64_t>(
@@ -445,7 +447,7 @@ private:
     }
 
     static void validate_operand(
-        std::int64_t operand, IcuInductionTarget target)
+        std::int64_t operand, IcuInductionTarget target, const FuncInstruction& instruction)
     {
         std::int64_t limit = 0;
         switch (target) {
@@ -454,6 +456,9 @@ private:
             break;
         case IcuInductionTarget::MxmWeightColumn:
             limit = static_cast<std::int64_t>(hw::kMxmSupercellsPerPlane);
+            if constexpr (std::is_same_v<FuncInstruction, MxmControlInstruction>)
+                if (instruction.weight_load_mode == MxmWeightLoadMode::Vector)
+                    limit = hw::kMxmColumns;
             break;
         case IcuInductionTarget::MxmAccumulatorAddress:
             limit = static_cast<std::int64_t>(hw::kMxmAccumulatorRows);
@@ -473,16 +478,17 @@ private:
         const auto current = induction_operand(
             state.instruction, state.induction_target);
         const auto next = current + step;
-        validate_operand(next, state.induction_target);
+        validate_operand(next, state.induction_target, state.instruction);
         if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
             state.instruction.address = static_cast<std::size_t>(next);
         } else if constexpr (std::is_same_v<FuncInstruction,
                                  MxmControlInstruction>) {
             if (state.induction_target
-                == IcuInductionTarget::MxmWeightColumn)
-                state.instruction.weight_column =
-                    static_cast<std::size_t>(next);
-            else
+                == IcuInductionTarget::MxmWeightColumn) {
+                const bool linear = state.instruction.weight_load_mode == MxmWeightLoadMode::Vector;
+                state.instruction.weight_column = static_cast<std::size_t>(linear ? next / hw::kLanesPerTile : next);
+                if (linear) state.instruction.weight_inner_column = next % hw::kLanesPerTile;
+            } else
                 state.instruction.accumulator_address =
                     static_cast<std::size_t>(next);
         }

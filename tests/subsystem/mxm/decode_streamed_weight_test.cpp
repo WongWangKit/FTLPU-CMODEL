@@ -8,7 +8,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
+#include <string>
 
 namespace {
 constexpr std::size_t kActivationAddress = 32;
@@ -24,14 +26,15 @@ static_assert(ftlpu::hw::kMxmColumns <= ftlpu::hw::kEastStreams,
     "this streamed-weight fixture requires one stream per output column");
 constexpr std::size_t kDecodeStages =
     ftlpu::hw::kTileRows
-    + ftlpu::hw::kMxmSupercellsPerPlane - 1;
+    + ftlpu::hw::kMxmIsColumns - 1;
 constexpr std::size_t kDecodeK =
     ftlpu::hw::kTileRows * ftlpu::hw::kLanesPerTile;
 constexpr std::size_t kDecodeN =
-    ftlpu::hw::kMxmColumns;
+    ftlpu::hw::kMxmIsColumns * ftlpu::hw::kLanesPerTile;
 constexpr std::size_t kOutputBlocks =
-    kDecodeN / ftlpu::hw::kMxmColumns;
-constexpr std::size_t kWeightWaves = kOutputBlocks;
+    2;
+constexpr std::size_t kOutputWidth = kDecodeK;
+constexpr std::size_t kWeightWaves = kOutputBlocks * kOutputWidth / kDecodeN;
 
 std::size_t east_latency(std::size_t slice)
 {
@@ -95,8 +98,22 @@ public:
     void compute_at(std::size_t cycle, ftlpu::MxmControlInstruction instruction)
     {
         if (cycle < compute_) throw std::logic_error("overlapping compute queue");
-        icu_.enqueue_mxm_compute_nop(0, cycle - compute_);
-        icu_.enqueue_mxm(0, instruction);
+        auto loop = ftlpu::IcuLoop3D {};
+        loop.wait_cycle = cycle - compute_;
+        // Exercise the hardware-visible raw macro fields, including the
+        // destination segment and the separate whole-row read instruction.
+        const auto macro = instruction.opcode == ftlpu::MxmControlOpcode::IS
+            ? ftlpu::MxmComputeIcuInstruction::IsStreamCompute3D(
+                loop, instruction.weight_buffer, ftlpu::MxmIcuBufferMode::Fixed,
+                instruction.stream_base, instruction.data_format,
+                instruction.accumulator_address, {0, 0, 0}, instruction.weight_column,
+                instruction.accumulator_destination, instruction.accumulator_clear,
+                instruction.is_mode)
+            : ftlpu::MxmComputeIcuInstruction::AccumulatorRead3D(
+                loop, instruction.stream_base, instruction.accumulator_address,
+                {0, 0, 0}, instruction.accumulator_clear,
+                instruction.accumulator_output_format, instruction.accumulator_destination);
+        icu_.enqueue_mxm_compute_3d(0, macro);
         compute_ = cycle + 1;
         end_ = std::max(end_, compute_);
     }
@@ -122,7 +139,7 @@ private:
     std::size_t end_{0};
 };
 
-void initialize(ftlpu::TspSliceSystem& system)
+void initialize(ftlpu::TspSliceSystem& system, bool vector)
 {
     for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
@@ -152,14 +169,14 @@ void initialize(ftlpu::TspSliceSystem& system)
                     const auto weight_k =
                         tile * ftlpu::hw::kLanesPerTile + lane;
                     const auto output =
-                        output_block * ftlpu::hw::kMxmColumns
+                        output_block * kDecodeN
                         + column * ftlpu::hw::kMxmSupercellColumns
                         + output_lane;
                     const auto quantized = quantized_weight(weight_k, output);
                     system.initialize_mem_sram_lane_byte(
-                        stream,
+                        vector ? column : stream,
                         tile,
-                        kWeightAddress + output_block,
+                        kWeightAddress + (vector ? output_block * ftlpu::hw::kLanesPerTile + output_lane : output_block),
                         lane,
                         static_cast<std::uint8_t>(quantized));
                 }
@@ -187,8 +204,9 @@ ftlpu::Bf16 reference(std::size_t output)
     return ftlpu::Bf16::from_float(sum);
 }
 
-void program(Schedule& schedule)
+void program(Schedule& schedule, bool vector, bool incomplete = false)
 {
+    const auto waves = incomplete ? 1 : kWeightWaves;
     for (std::size_t byte = 0; byte < kActivationSlices.size(); ++byte) {
         const auto slice = kActivationSlices[byte];
         schedule.mem_at(
@@ -198,19 +216,19 @@ void program(Schedule& schedule)
     }
     schedule.load_at(
         kActivationCycle,
-        ftlpu::MxmControlInstruction::DecodeLoadActivation(
+        ftlpu::MxmControlInstruction::IsLoadActivation(
             0,
             0,
             ftlpu::MxmDataFormat::BFloat16,
-            ftlpu::MxmDecodeLayout::Native4x4));
+            vector ? ftlpu::MxmIsMode::Vector : ftlpu::MxmIsMode::Block));
 
     for (std::size_t column = 0;
-         column < ftlpu::hw::kMxmSupercellsPerPlane;
+         column < ftlpu::hw::kMxmIsColumns;
          ++column) {
         for (std::size_t output_block = 0;
-             output_block < kWeightWaves;
+             output_block < waves;
              ++output_block) {
-            const auto cycle = kComputeCycle + output_block + column;
+            const auto cycle = kComputeCycle + output_block * (vector ? ftlpu::hw::kLanesPerTile : 1) + column;
             for (std::size_t output_lane = 0;
                  output_lane < ftlpu::hw::kMxmSupercellColumns;
                  ++output_lane) {
@@ -218,44 +236,50 @@ void program(Schedule& schedule)
                     column * ftlpu::hw::kMxmSupercellColumns
                     + output_lane;
                 schedule.mem_at(
-                    stream,
-                    cycle - east_latency(stream),
+                    vector ? column : stream,
+                    cycle + (vector ? output_lane : 0) - east_latency(vector ? column : stream),
                     ftlpu::MemInstruction::Read(
-                        kWeightAddress + output_block,
-                        ftlpu::StreamId::East(stream)));
+                        kWeightAddress + (vector ? output_block * ftlpu::hw::kLanesPerTile + output_lane : output_block),
+                        ftlpu::StreamId::East(vector ? column : stream)));
             }
         }
     }
 
     for (std::size_t output_block = 0;
-         output_block < kOutputBlocks;
+         output_block < waves;
          ++output_block) {
-        const auto cycle = kComputeCycle + output_block;
+        const auto cycle = kComputeCycle + output_block * (vector ? ftlpu::hw::kLanesPerTile : 1);
         schedule.dequant_at(cycle);
         schedule.compute_at(
             cycle,
-            ftlpu::MxmControlInstruction::DecodeStreamCompute(
+            ftlpu::MxmControlInstruction::IsStreamCompute(
                 0,
                 0,
                 ftlpu::MxmDataFormat::BFloat16,
-                0,
-                0,
-                ftlpu::MxmAccumulatorDestination::Stream,
-                true,
-                ftlpu::MxmDecodeLayout::Native4x4));
+                output_block * ftlpu::hw::kMxmIsColumns / ftlpu::hw::kTileRows,
+                incomplete ? 1 : output_block * ftlpu::hw::kMxmIsColumns % ftlpu::hw::kTileRows,
+                ftlpu::MxmAccumulatorDestination::Sram,
+                false,
+                vector ? ftlpu::MxmIsMode::Vector : ftlpu::MxmIsMode::Block));
     }
 
+    // No SR output until every segment in each ACC row has been filled.
+    const auto read_start = kComputeCycle
+        + (waves - 1) * (vector ? ftlpu::hw::kLanesPerTile : 1)
+        + kDecodeStages + (vector ? ftlpu::hw::kLanesPerTile - 1 : 0);
     for (std::size_t output_block = 0;
-         output_block < kOutputBlocks;
+         output_block < (incomplete ? 1 : kOutputBlocks);
          ++output_block) {
+        schedule.compute_at(read_start + output_block,
+            ftlpu::MxmControlInstruction::AccumulatorRead(output_block, 0, true,
+                ftlpu::MxmAccumulatorOutputFormat::BFloat16));
         for (std::size_t stream = 0;
              stream < kOutputSlices.size();
              ++stream) {
             const auto slice = kOutputSlices[stream];
             schedule.mem_at(
                 slice,
-                kComputeCycle + output_block + kDecodeStages - 1
-                    + west_latency(slice),
+                read_start + output_block + west_latency(slice),
                 ftlpu::MemInstruction::Write(
                     kOutputAddress + output_block,
                     ftlpu::StreamId::West(stream)));
@@ -265,10 +289,10 @@ void program(Schedule& schedule)
 
 bool verify(const ftlpu::TspSliceSystem& system)
 {
-    for (std::size_t output = 0; output < kDecodeN; ++output) {
-        const auto output_block = output / ftlpu::hw::kMxmColumns;
+    for (std::size_t output = 0; output < kOutputWidth * kOutputBlocks; ++output) {
+        const auto output_block = output / kOutputWidth;
         const auto output_tile =
-            (output % ftlpu::hw::kMxmColumns)
+            (output % kOutputWidth)
             / ftlpu::hw::kMxmSupercellColumns;
         const auto lane = output % ftlpu::hw::kMxmSupercellColumns;
         const auto low = system.read_mem_sram_lane_byte(
@@ -309,10 +333,11 @@ try {
         throw std::runtime_error("cannot open decode streamed-weight logs");
     }
 
+    for (bool vector : {false, true}) {
     auto system = ftlpu::TspSliceSystem {};
-    initialize(system);
+    initialize(system, vector);
     auto schedule = Schedule(system.icu());
-    program(schedule);
+    program(schedule, vector);
     for (std::size_t cycle = 0; cycle < schedule.end_cycle() + 8; ++cycle) {
         system.tick({
             .icu = &icu_log,
@@ -322,6 +347,23 @@ try {
         });
     }
     if (!verify(system)) return 1;
+    std::cout << (vector ? "IS-vector" : "IS-block") << " columns=" << ftlpu::hw::kMxmIsColumns << " passed\n";
+
+    // A retained partial row must not leak zero-filled lanes onto SR.
+    auto partial_system = std::make_unique<ftlpu::TspSliceSystem>();
+    initialize(*partial_system, vector);
+    auto partial_schedule = Schedule(partial_system->icu());
+    program(partial_schedule, vector, true);
+    bool rejected = false;
+    try {
+        for (std::size_t cycle = 0; cycle < partial_schedule.end_cycle() + 8; ++cycle)
+            partial_system->tick({});
+    } catch (const std::logic_error& error) {
+        rejected = std::string(error.what()).find("incomplete IS result vector") != std::string::npos;
+        if (!rejected) throw;
+    }
+    if (!rejected) throw std::runtime_error("incomplete IS ACC read was accepted");
+    }
     std::cout << "MXM decode streamed-weight passed: K=" << kDecodeK
               << " N=" << kDecodeN << ", " << ftlpu::hw::kTileRows
               << " activation vectors, " << kDecodeN

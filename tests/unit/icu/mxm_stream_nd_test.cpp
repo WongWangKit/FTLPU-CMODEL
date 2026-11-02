@@ -24,11 +24,11 @@ try {
     load.push_mxm_stream_nd(IcuMxmStreamNdSchedule {
         2, 3, {2, 2, 2}, {2, 8, 20}, {1, 4, 8},
         IcuInductionTarget::MxmWeightColumn},
-        MxmControlInstruction::IW(0, 0));
+        MxmControlInstruction::IWColumn(0, 0, 0));
     std::vector<std::pair<std::size_t, std::size_t>> loadIssues;
     for (std::size_t cycle = 0; cycle <= 32; ++cycle) {
         if (const auto instruction = load.tick())
-            loadIssues.emplace_back(cycle, instruction->weight_column);
+            loadIssues.emplace_back(cycle, instruction->weight_column * hw::kLanesPerTile + instruction->weight_inner_column);
     }
     require(loadIssues
             == std::vector<std::pair<std::size_t, std::size_t>> {
@@ -77,30 +77,30 @@ try {
     decodeLoad.push_mxm_stream_nd(IcuMxmStreamNdSchedule {
         2, 3, {1, 1, 3}, {1, 1, 7}, {0, 0, 0},
         IcuInductionTarget::None},
-        MxmControlInstruction::DecodeLoadActivation(
-            1, 0, MxmDataFormat::BFloat16, MxmDecodeLayout::Native4x4));
+        MxmControlInstruction::IsLoadActivation(
+            1, 0, MxmDataFormat::BFloat16, MxmIsMode::Block));
     DecodeComputeQueue decodeCompute;
     decodeCompute.push_mxm_stream_nd(IcuMxmStreamNdSchedule {
         6, 3, {3, 1, 3}, {1, 1, 7}, {1, 0, 0},
         IcuInductionTarget::MxmAccumulatorAddress},
-        MxmControlInstruction::DecodeStreamCompute(
+        MxmControlInstruction::IsStreamCompute(
             1, 0, MxmDataFormat::BFloat16, 0, 0,
             MxmAccumulatorDestination::Sram, false,
-            MxmDecodeLayout::Native4x4));
+            MxmIsMode::Block));
     std::vector<std::size_t> decodeLoadCycles;
     std::vector<std::pair<std::size_t, std::size_t>> decodeComputeIssues;
     for (std::size_t cycle = 0; cycle <= 22; ++cycle) {
         if (const auto instruction = decodeLoad.tick()) {
             require(instruction->decode_operation
-                    == MxmDecodeOperation::LoadActivation
-                    && instruction->decode_layout == MxmDecodeLayout::Native4x4,
+                    == MxmIsOperation::LoadActivation
+                    && instruction->is_mode == MxmIsMode::Block,
                 "Native4 K-loop load changed its FU operation");
             decodeLoadCycles.push_back(cycle);
         }
         if (const auto instruction = decodeCompute.tick()) {
             require(instruction->decode_operation
-                    == MxmDecodeOperation::StreamCompute
-                    && instruction->decode_layout == MxmDecodeLayout::Native4x4,
+                    == MxmIsOperation::StreamCompute
+                    && instruction->is_mode == MxmIsMode::Block,
                 "Native4 K-loop compute changed its FU operation");
             decodeComputeIssues.emplace_back(
                 cycle, instruction->accumulator_address);
