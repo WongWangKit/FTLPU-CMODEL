@@ -83,6 +83,13 @@ public:
         return true;
     }
 
+    bool drained() const noexcept {
+        if (!idle()) return false;
+        for (std::size_t stream=0;stream<stream_count_;++stream)
+            if (!inbound_[stream].empty() || !outbound_[stream].empty()) return false;
+        return true;
+    }
+
     std::size_t queued_instruction_count() const noexcept
     {
         std::size_t count = 0;

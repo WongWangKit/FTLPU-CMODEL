@@ -390,6 +390,26 @@ public:
         return true;
     }
 
+    bool program_resources_drained() const noexcept {
+        if (!common_barrier_resources_drained()) return false;
+        for (std::size_t h=0;h<hw::kHemispheres;++h) {
+            if (c2cs_[h] && (!c2cs_[h]->tx().idle() || !c2cs_[h]->rx().idle())) return false;
+            if (c2c_dmas_[h] && !c2c_dmas_[h]->drained()) return false;
+        }
+        return true;
+    }
+    bool can_load_program() const {return phase_==CyclePhase::Idle && icu_.program_queues_done() && program_resources_drained();}
+    // Only task execution state changes; SRAM, DDR/DMA and device time survive.
+    void reset_program() {
+        require_phase(CyclePhase::Idle, "switching program");
+        if (!can_load_program()) throw std::logic_error("previous kernel has not drained");
+        for(auto* dma:c2c_dmas_) if(dma) {
+            while(dma->take_completion_sync_tag()) {}
+            while(dma->take_completion_notification()) {}
+        }
+        icu_.reset_program();
+    }
+
     bool common_compute_resources_drained() const noexcept
     {
         if (!vxm_.idle()) return false;
@@ -598,11 +618,11 @@ private:
             if (dma == nullptr) continue;
             dma->tick();
             if (const auto tag = dma->take_completion_sync_tag()) {
-                icu_.notify_tagged(IcuLocation::C2cDma(
+                if(!icu_.program_loading()) icu_.notify_tagged(IcuLocation::C2cDma(
                     static_cast<Hemisphere>(hemisphere)), *tag);
             }
             if (dma->take_completion_notification()) {
-                icu_.notify(IcuLocation::C2cDma(
+                if(!icu_.program_loading()) icu_.notify(IcuLocation::C2cDma(
                     static_cast<Hemisphere>(hemisphere)));
             }
         }

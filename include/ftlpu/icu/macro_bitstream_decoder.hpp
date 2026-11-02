@@ -30,6 +30,7 @@ enum class IcuMacroQueueKind : std::uint8_t {
     MxmLoad,
     MxmCompute,
     MxmDequant,
+    Vxm, SxmTranspose, SxmPermute, C2cDma, C2cTx, C2cRx,
 };
 
 template <std::size_t Bits>

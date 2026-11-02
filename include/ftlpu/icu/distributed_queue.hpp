@@ -1684,6 +1684,19 @@ public:
         launched_ = true;
     }
 
+    // Read committed physical storage without fetching or executing it.
+    Entry read_committed_imem(std::size_t address) const { return read_imem(address); }
+    bool frontend_ready() const {
+        if (raw_macro_mode_) return raw_macro_ready();
+        return configured_ && pending_fetches_.empty()
+            && (fetch_pc_ == program_end_pc_ || iq_.size() == IqDepth);
+    }
+    void prime_frontend_cycle() {
+        if (raw_macro_mode_) { if (!raw_macro_ready()) prefetch_raw_macro(); return; }
+        if (!configured_ || frontend_ready()) return;
+        commit_ready_fetch(); begin_fetch_if_possible(); age_pending_fetches();
+    }
+
     void configure_all()
     {
         configure(IcuProgramDescriptor {0, imem_.size()});

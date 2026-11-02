@@ -122,10 +122,47 @@ ProgramLoadStatistics sweep(ProgramLoadConfig config, std::size_t depth = 16,
     require(loader.started() && loader.statistics().program_start == start, "unified start failed");
     return stats;
 }
+void barrier_storage_and_activation() {
+    auto system=std::make_unique<C2cDmaSystem>(ddr_config(),1);
+    auto encoded=std::make_unique<InstructionControlUnit>();encoded->mem_iq(0).append_control(IcuControlInstruction::Nop(8));
+    ProgramImage native{0x1000,IcuMacroQueueKind::Mem,0,12,IcuQueueMode::Native};
+    ProgramImage barr;barr.source_address=0x2000;barr.storage=ProgramStorage::Barr;barr.byte_count=8;barr.generation=20;
+    ProgramImage events;events.source_address=0x3000;events.storage=ProgramStorage::BarrierEvents;events.byte_count=12;events.generation=20;
+    const std::vector<std::uint8_t> table{1,0,0,0,5,0,0,0},bindings{5,0,0,0,1,0,0,0,42,0,0,0};
+    stage(*system,native.source_address,encoded->read_program_image(native));stage(*system,barr.source_address,table);stage(*system,events.source_address,bindings);
+    auto& loader=system->program_loader();loader.submit({native,barr,events},0);loader.start();loader.set_dependencies_ready(true);
+    while(!loader.ready_to_start()) {
+        system->tick();require(system->cycle()<2000,"BARR prime timed out");
+        const auto& stats=loader.statistics();
+        require(system->chip().icu().mem_iq(0).cycle()==0,"BARR program ran before control commit");
+        if(stats.images[2].first_write_accepted && !stats.images[2].first_write_committed)
+            require(system->chip().icu().read_program_image(events).empty(),"event RAM changed before commit");
+    }
+    require(system->chip().icu().read_program_image(barr)==table && system->chip().icu().read_program_image(events)==bindings,"BARR/config RAM mismatch");
+    system->tick();system->tick();
+    require(system->chip().icu().common_barrier_holding() && !loader.kernel_done(),"BARR did not wait for committed binding");
+    system->chip().icu().notify_common_mem_commit(19,42);system->tick();
+    require(system->chip().icu().common_barrier_holding(),"old generation released BARR");
+    system->chip().icu().notify_common_mem_commit(20,42);
+    for(std::size_t n=0;!loader.kernel_done();++n) {require(n<100,"BARR kernel did not complete");system->tick();}
+    require(loader.statistics().stores[static_cast<std::size_t>(ProgramStorage::Barr)].written_words==1,"missing per-storage accounting");
+    auto bad=native;bad.storage=static_cast<ProgramStorage>(99);rejects([&]{loader.submit({bad},system->cycle());});
+    bad=native;bad.byte_count=12*(hw::kIcuMemImemDepth+1);rejects([&]{loader.submit({bad},system->cycle());});
+    require(loader.can_load_program(),"invalid image changed completed device");
+    rejects([&]{loader.submit({native,barr,events},system->cycle());});
+    barr.generation=events.generation=21;barr.byte_count=events.byte_count=0;
+    loader.submit({barr,events},system->cycle());
+    system->chip().icu().notify_common_mem_commit(20,42); // Before new event RAM commits.
+    wait_ready(*system);loader.start();loader.set_dependencies_ready(true);system->tick();
+    require(loader.kernel_done(),"empty control task retained old generation");
+
+}
+
 }
 
 int main() try
 {
+    barrier_storage_and_activation();
     ProgramLoadConfig config;
     config.bus_bytes_per_cycle = 32;
     config.route_latency_cycles = config.imem_write_ii_cycles
@@ -169,10 +206,14 @@ int main() try
     const ProgramImage a{0x1000, IcuMacroQueueKind::Mem, 0, mem.size()};
     const ProgramImage b{0x2000, IcuMacroQueueKind::MxmLoad, 0, mxm.size()};
     rejects([&] { auto invalid = a; invalid.byte_count = 13; loader.submit({invalid},0); });
-    rejects([&] { auto invalid = a; invalid.mode = IcuQueueMode::Native; loader.submit({invalid},0); });
+    rejects([&] { auto invalid = a; invalid.mode = static_cast<IcuQueueMode>(3); loader.submit({invalid},0); });
     rejects([&] { auto invalid = a; invalid.queue_index = InstructionControlUnit::kMemQueues;
         loader.submit({invalid},0); });
     rejects([&] { loader.submit({a,a},0); });
+    ProgramImage qctl;qctl.storage=ProgramStorage::Qctl;qctl.generation=1;
+    rejects([&]{loader.submit({a,qctl},0);});
+    auto mixed=a;mixed.storage=ProgramStorage::Barr;mixed.byte_count=0;mixed.generation=1;
+    rejects([&]{loader.submit({a,qctl,mixed},0);});
     require(system->cycle() == 0, "validation advanced physical time");
     loader.submit({a,b}, system->cycle());
     rejects([&] { loader.submit({a}, system->cycle()); });
@@ -188,20 +229,40 @@ int main() try
     require(*previous.images[1].first_ddr_request > *previous.images[0].image_committed,
         "queue switch preceded the last commit");
     compare(*system, a, mem); compare(*system, b, mxm);
-    loader.start(); loader.set_dependencies_ready(true); system->tick();
-    const auto nextCycle = system->cycle();
-    const auto shortMem = image_bytes(true, 3);
-    stage(*system, 0x3000, shortMem);
-    loader.submit({{0x3000,IcuMacroQueueKind::Mem,0,shortMem.size()}}, nextCycle);
-    require(!loader.all_images_committed() && !loader.statistics().program_start,
-        "old completion leaked into next program");
-    rejects([&] { system->chip().icu().mem_iq(0).read_raw_imem(8); });
-    wait_ready(*system);
-    require(loader.statistics().request_accepted == nextCycle
-        && system->ddr4().cycle() == system->cycle(), "physical time was reset on switch");
-    require(loader.statistics().written_words == 3, "long image leaked into short program");
-    std::ostringstream report; loader.statistics().print(report);
-    require(report.str().find("source_done=") != std::string::npos, "missing load report");
+    // A fresh, executable Native program exercises safe long/short switching.
+    system=std::make_unique<C2cDmaSystem>(ddr_config(),1,SystemHardwareConfiguration{},config);
+    auto& safe=system->program_loader();
+    auto native=std::make_unique<InstructionControlUnit>();
+    for(unsigned i=0;i<5;++i) native->mem_iq(0).append_control(IcuControlInstruction::Nop(4));
+    ProgramImage longImage{0x3000,IcuMacroQueueKind::Mem,0,60,IcuQueueMode::Native};
+    const auto nativeBytes=native->read_program_image(longImage);
+    stage(*system,longImage.source_address,nativeBytes);safe.submit({longImage},system->cycle());
+    wait_ready(*system);safe.start();safe.set_dependencies_ready(true);system->tick();
+    const auto accepted=safe.statistics().request_accepted;
+    rejects([&]{safe.submit({longImage},system->cycle());});
+    require(safe.statistics().request_accepted==accepted && safe.started(),"unsafe resubmit changed old task");
+    for(std::size_t n=0;!safe.kernel_done();++n) {require(n<100,"Native kernel failed to drain");system->tick();}
+    require(!safe.busy() && safe.can_load_program(),"completed kernel cannot switch");
+    const auto done=safe.statistics().kernel_done_cycle;
+    // Returned DMA vectors and unconsumed DDR responses remain live resources.
+    auto& data=system->dma(Hemisphere::East);data.issue(C2cDmaInstruction::Load(0x8000,1));
+    while(!data.idle()) system->tick();
+    require(!safe.can_load_program() && safe.kernel_done(),"DMA FIFO was excluded from drain");
+    rejects([&]{safe.submit({},system->cycle());});data.pop_received();
+    const auto request=system->ddr4().request_read(0x9000);
+    while(!system->ddr4().idle()) system->tick();
+    require(!safe.can_load_program(),"DDR response was excluded from drain");
+    system->ddr4().pop_read_completion(request);
+    require(safe.can_load_program() && safe.statistics().kernel_done_cycle==done,"completion latch changed");
+    const auto nextCycle=system->cycle();
+    auto shortImage=longImage;shortImage.source_address=0x4000;shortImage.byte_count=12;
+    stage(*system,shortImage.source_address,std::vector<std::uint8_t>(nativeBytes.begin(),nativeBytes.begin()+12));
+    safe.submit({shortImage},nextCycle);wait_ready(*system);
+    require(safe.statistics().request_accepted==nextCycle && system->ddr4().cycle()==system->cycle(),
+        "program switch reset physical time");
+    rejects([&]{system->chip().icu().mem_iq(0).read_committed_imem(4);});
+    std::ostringstream report; safe.statistics().print(report);
+    require(report.str().find("kernel_done=") != std::string::npos, "missing load report");
 
     for (int field = 0; field < 4; ++field) {
         auto invalid = config;
