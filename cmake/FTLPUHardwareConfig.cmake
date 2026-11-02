@@ -83,8 +83,8 @@ function(ftlpu_generate_hardware_config input_json output_header)
         endif()
     endif()
 
-    # Queue-local control partitions have one finite RAM port per queue.
-    foreach(field VERSION CAPACITY CACHE_DEPTH READ_LATENCY READ_PORTS)
+    # Queue-local caches use either private RAM or one shared finite RAM pool.
+    foreach(field VERSION CAPACITY CACHE_DEPTH READ_LATENCY READ_PORTS STORAGE_VERSION POOL_CAPACITY POOL_READ_II)
         string(TOLOWER "${field}" key)
         string(JSON value ERROR_VARIABLE error GET "${FTLPU_HW_JSON}" icu "queue_control_${key}")
         if(error)
@@ -101,6 +101,18 @@ function(ftlpu_generate_hardware_config input_json output_header)
            FTLPU_HW_QUEUE_CONTROL_READ_LATENCY LESS 1)
             message(FATAL_ERROR "unsupported ICU queue control geometry")
         endif()
+    endif()
+
+    if(FTLPU_HW_QUEUE_CONTROL_STORAGE_VERSION)
+        if(NOT FTLPU_HW_QUEUE_CONTROL_STORAGE_VERSION EQUAL 1 OR
+           NOT FTLPU_HW_QUEUE_CONTROL_VERSION EQUAL 1 OR
+           NOT FTLPU_HW_QUEUE_CONTROL_POOL_CAPACITY MATCHES "^[1-9][0-9]*$" OR
+           FTLPU_HW_QUEUE_CONTROL_POOL_CAPACITY GREATER 65535 OR
+           NOT FTLPU_HW_QUEUE_CONTROL_POOL_READ_II MATCHES "^[1-9][0-9]*$")
+            message(FATAL_ERROR "unsupported shared QCTL pool geometry")
+        endif()
+    elseif(FTLPU_HW_QUEUE_CONTROL_POOL_CAPACITY OR FTLPU_HW_QUEUE_CONTROL_POOL_READ_II)
+        message(FATAL_ERROR "shared QCTL geometry requires storage version 1")
     endif()
 
     # A transport beat is independent of the on-chip vector/row width.
@@ -151,6 +163,8 @@ function(ftlpu_generate_hardware_config input_json output_header)
     ftlpu_timing_parameter(FTLPU_PROGRAM_ROUTE_LATENCY 1 program_load route_latency_cycles)
     ftlpu_timing_parameter(FTLPU_PROGRAM_WRITE_II 1 program_load imem_write_ii_cycles)
     ftlpu_timing_parameter(FTLPU_PROGRAM_COMMIT_LATENCY 1 program_load imem_write_commit_latency_cycles)
+
+    include("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/FTLPUIcuGeometry.cmake")
 
     set(FTLPU_POSITIVE_INTEGER_FIELDS
         FTLPU_HW_HEMISPHERES

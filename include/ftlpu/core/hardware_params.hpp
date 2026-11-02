@@ -14,6 +14,9 @@ constexpr std::size_t kQueueControlCapacity = config::kQueueControlCapacity;
 constexpr std::size_t kQueueControlCacheDepth = config::kQueueControlCacheDepth;
 constexpr std::size_t kQueueControlReadLatency = config::kQueueControlReadLatency;
 constexpr std::size_t kQueueControlReadPorts = config::kQueueControlReadPorts;
+constexpr std::size_t kQueueControlStorageVersion = config::kQueueControlStorageVersion;
+constexpr std::size_t kQueueControlPoolCapacity = config::kQueueControlPoolCapacity;
+constexpr std::size_t kQueueControlPoolReadIi = config::kQueueControlPoolReadIi;
 constexpr std::size_t kCommonBarrierEncodingVersion = config::kCommonBarrierEncodingVersion;
 constexpr std::size_t kCommonBarrierCapacity = config::kCommonBarrierCapacity;
 constexpr std::size_t kCommonTransportOverlapVersion = config::kCommonTransportOverlapVersion;
@@ -126,47 +129,52 @@ constexpr std::size_t kSxmConcurrentStreamOps = 2 * kLanesPerTile;
 // Distributed ICU geometry. Every functional queue owns local instruction
 // memory and a finite prefetch IQ; instruction fetch never consumes MEM/SR
 // bandwidth.
-// Initial physical baseline. Keep response latency and request initiation
-// interval independent so post-RTL simulation can tune either parameter.
-constexpr std::size_t kIcuFetchLatencyCycles = 1;
-constexpr std::size_t kIcuMacroImemRequestInitiationIntervalCycles = 1;
-constexpr std::size_t kIcuBarrierLatencyCycles = 35;
-constexpr std::size_t kIcuVxmInstructionBits = 96;
-constexpr std::size_t kIcuMemInstructionBits = 96;
-constexpr std::size_t kIcuMxmInstructionBits = 128;
-constexpr std::size_t kIcuSxmInstructionBits = 96;
-constexpr std::size_t kIcuC2cInstructionBits = 96;
+// Shared JSON supplies storage and frontend geometry at build time. Keep
+// response latency and request initiation interval independently configurable.
+constexpr std::size_t kIcuFetchLatencyCycles = config::kIcuFetchLatencyCycles;
+constexpr std::size_t kIcuMacroImemRequestInitiationIntervalCycles = config::kIcuMacroImemRequestInitiationIntervalCycles;
+constexpr std::size_t kIcuMacroReservoirWords = config::kIcuMacroReservoirWords;
+constexpr std::size_t kIcuMacroDecodeWindowBits = config::kIcuMacroDecodeWindowBits;
+constexpr std::size_t kIcuMacroDdbDepth = config::kIcuMacroDdbDepth;
+constexpr std::size_t kIcuMacroAdmissionLookahead = config::kIcuMacroAdmissionLookahead;
+constexpr std::size_t kIcuMacroDdbRunCapacity = config::kIcuMacroDdbRunCapacity;
+constexpr std::size_t kIcuBarrierLatencyCycles = config::kIcuBarrierLatencyCycles;
+constexpr std::size_t kIcuVxmInstructionBits = config::kIcuVxmInstructionBits;
+constexpr std::size_t kIcuMemInstructionBits = config::kIcuMemInstructionBits;
+constexpr std::size_t kIcuMxmInstructionBits = config::kIcuMxmInstructionBits;
+constexpr std::size_t kIcuSxmInstructionBits = config::kIcuSxmInstructionBits;
+constexpr std::size_t kIcuC2cInstructionBits = config::kIcuC2cInstructionBits;
 constexpr std::size_t kIcuC2cDmaInstructionBits = 192;
-constexpr std::size_t kIcuVxmImemDepth = 2048;
+constexpr std::size_t kIcuVxmImemDepth = config::kIcuVxmImemDepth;
 // Existing whole-layer schedules are emitted as one flat program image. The
-// runtime frontend still exposes only a 16-entry IQ and one fetch per cycle.
-constexpr std::size_t kIcuMemImemDepth = 131072;
+// default profile exposes a 16-entry IQ and one fetch per cycle.
+constexpr std::size_t kIcuMemImemDepth = config::kIcuMemImemDepth;
 // A Qwen2.5-1.5B seq128 decoder layer needs just over 32K compressed
-// compute commands in each MXM queue. Keep the next power-of-two capacity so
-// one complete layer can remain resident without runtime i-MEM paging.
-constexpr std::size_t kIcuMxmImemDepth = 65536;
-constexpr std::size_t kIcuSxmImemDepth = 2048;
-constexpr std::size_t kIcuC2cImemDepth = 32768;
-constexpr std::size_t kIcuVxmIqDepth = 16;
-constexpr std::size_t kIcuMemIqDepth = 16;
-constexpr std::size_t kIcuMxmIqDepth = 16;
-constexpr std::size_t kIcuSxmIqDepth = 16;
-constexpr std::size_t kIcuC2cIqDepth = 16;
+// compute commands in each MXM queue. The default reserves the next power of
+// two so one complete layer remains resident without runtime i-MEM paging.
+constexpr std::size_t kIcuMxmImemDepth = config::kIcuMxmImemDepth;
+constexpr std::size_t kIcuSxmImemDepth = config::kIcuSxmImemDepth;
+constexpr std::size_t kIcuC2cImemDepth = config::kIcuC2cImemDepth;
+constexpr std::size_t kIcuVxmIqDepth = config::kIcuVxmIqDepth;
+constexpr std::size_t kIcuMemIqDepth = config::kIcuMemIqDepth;
+constexpr std::size_t kIcuMxmIqDepth = config::kIcuMxmIqDepth;
+constexpr std::size_t kIcuSxmIqDepth = config::kIcuSxmIqDepth;
+constexpr std::size_t kIcuC2cIqDepth = config::kIcuC2cIqDepth;
 // Macro descriptors expand independently of the fetch IQ. These finite
-// context files are physical scheduler capacities. MXM uses a 40-entry flat
-// next-issue compare array: 32 contexts cover the largest current seq128
-// compiler result and eight entries cover the admission-lookahead window.
-constexpr std::size_t kIcuMemMacroContextDepth = 32;
-constexpr std::size_t kIcuMxmMacroContextDepth = 40;
-constexpr std::size_t kIcuVxmMacroContextDepth = 4;
-constexpr std::size_t kIcuSxmMacroContextDepth = 4;
-constexpr std::size_t kIcuC2cMacroContextDepth = 4;
+// context files are physical scheduler capacities. The default MXM profile
+// uses a 40-entry flat next-issue compare array: 32 contexts cover the current
+// seq128 compiler result and eight cover the admission-lookahead window.
+constexpr std::size_t kIcuMemMacroContextDepth = config::kIcuMemMacroContextDepth;
+constexpr std::size_t kIcuMxmMacroContextDepth = config::kIcuMxmMacroContextDepth;
+constexpr std::size_t kIcuVxmMacroContextDepth = config::kIcuVxmMacroContextDepth;
+constexpr std::size_t kIcuSxmMacroContextDepth = config::kIcuSxmMacroContextDepth;
+constexpr std::size_t kIcuC2cMacroContextDepth = config::kIcuC2cMacroContextDepth;
 // Eight 32-bit words hold the native instruction, 16-bit loop counters,
 // normalized cycle/operand steps, and absolute next/final issue cycles. The
 // bitstream remains packed in i-MEM; contexts are the independently
 // addressable expansion state.
-constexpr std::size_t kIcuMemMacroContextBits = 256;
-constexpr std::size_t kIcuMxmMacroContextBits = 256;
+constexpr std::size_t kIcuMemMacroContextBits = config::kIcuMemMacroContextBits;
+constexpr std::size_t kIcuMxmMacroContextBits = config::kIcuMxmMacroContextBits;
 
 // Each physical FU ICU owns one decoded loop state. Each context retains the
 // decoded static fields, loop counters, and packet PC.

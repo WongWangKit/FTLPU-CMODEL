@@ -14,9 +14,19 @@ inline constexpr std::size_t kQueueControlCapacity = @FTLPU_HW_QUEUE_CONTROL_CAP
 inline constexpr std::size_t kQueueControlCacheDepth = @FTLPU_HW_QUEUE_CONTROL_CACHE_DEPTH@;
 inline constexpr std::size_t kQueueControlReadLatency = @FTLPU_HW_QUEUE_CONTROL_READ_LATENCY@;
 inline constexpr std::size_t kQueueControlReadPorts = @FTLPU_HW_QUEUE_CONTROL_READ_PORTS@;
+inline constexpr std::size_t kQueueControlStorageVersion = @FTLPU_HW_QUEUE_CONTROL_STORAGE_VERSION@;
+inline constexpr std::size_t kQueueControlPoolCapacity = @FTLPU_HW_QUEUE_CONTROL_POOL_CAPACITY@;
+inline constexpr std::size_t kQueueControlPoolReadIi = @FTLPU_HW_QUEUE_CONTROL_POOL_READ_II@;
 inline constexpr std::size_t kCommonBarrierEncodingVersion = @FTLPU_HW_COMMON_BARRIER_ENCODING_VERSION@;
 inline constexpr std::size_t kCommonBarrierCapacity = @FTLPU_HW_COMMON_BARRIER_CAPACITY@;
 inline constexpr std::size_t kCommonTransportOverlapVersion = @FTLPU_HW_COMMON_TRANSPORT_OVERLAP_VERSION@;
+
+@FTLPU_ICU_GEOMETRY_DECLARATIONS@
+// These frontend parameters are build-time settings, not v39 container fields.
+struct IcuBuildParameter { std::string_view name; std::size_t value; };
+inline constexpr std::array<IcuBuildParameter, @FTLPU_ICU_BUILD_PARAMETER_COUNT@> kIcuBuildParameters{{
+@FTLPU_ICU_BUILD_PARAMETER_ENTRIES@}};
+
 inline constexpr std::string_view kTargetName = "@FTLPU_HW_TARGET_NAME@";
 inline constexpr std::size_t kDmaFifoDepthVectors = @FTLPU_DMA_FIFO_DEPTH@;
 inline constexpr std::size_t kProgramLoadBusBytesPerCycle = @FTLPU_PROGRAM_BUS_BYTES@;

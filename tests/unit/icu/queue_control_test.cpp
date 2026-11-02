@@ -23,14 +23,19 @@ std::vector<IcuRawImemWord96> image()
     put(6,11);put(2,8);put(1,10); // 7 reads at local 20,23,...38
     return words;
 }
-void compare(bool late)
+void compare(bool late, bool shared=false)
 {
     Queue raw,native,independent;
     raw.load_raw_macro(IcuMacroQueueKind::Mem,image());
-    raw.configure_queue_controls({{26,IcuControlOpcode::WaitEvent,7},
+    IcuQueueControlPool pool;
+    std::vector<IcuQueueControl> controls{{26,IcuControlOpcode::WaitEvent,7},
         {26,IcuControlOpcode::WaitEvent,8},{29,IcuControlOpcode::Sync,0},
-        {29,IcuControlOpcode::Notify,0}},64,8,2);
-    while(!raw.raw_macro_ready()) raw.prefetch_raw_macro();
+        {29,IcuControlOpcode::Notify,0}};
+    if(shared) {
+        pool.configure(512,1,4,2);
+        raw.configure_shared_queue_controls(pool,controls,16,39);
+    } else raw.configure_queue_controls(controls,16,8,2);
+    while(!raw.raw_macro_ready()) {pool.begin_cycle();raw.prefetch_raw_macro();pool.end_cycle(true);}
     native.push_nop(20);
     for(unsigned i=0;i<7;++i) {
         if(i==2) {native.append_control(IcuControlInstruction::WaitEvent(7));native.append_control(IcuControlInstruction::WaitEvent(8));}
@@ -43,6 +48,7 @@ void compare(bool late)
     std::vector<std::pair<unsigned,std::size_t>> a,b;
     unsigned independentCycle=0,notifyA=0,notifyB=0;
     for(unsigned p=0;p<90;++p) {
+        pool.begin_cycle();
         if(p==(late?32u:1u)) {raw.notify(7);native.notify(7);}
         if(p==(late?35u:2u)) {raw.notify(8);native.notify(8);}
         if(p==(late?43u:3u)) {raw.notify();native.notify();}
@@ -52,6 +58,7 @@ void compare(bool late)
         const bool ar=raw.take_notify(),br=native.take_notify();
         require(ar==br,"NOTIFY differs by physical cycle");notifyA+=ar;notifyB+=br;
         if(p==27 && late) require(raw.blocked_on_event(7),"active Macro hid its pseudo WAIT");
+        pool.end_cycle();
     }
     require(a==b && a.size()==7,"pseudo controls changed physical FU issue trace");
     require(independentCycle==27,"waiting queue stopped independent computation");
@@ -61,6 +68,9 @@ void compare(bool late)
 void finite_frontend()
 {
     IcuQueueControlFrontend f;
+    f.configure(std::vector<IcuQueueControl>(16),16,8,2);
+    require(f.size()==16,"16-entry control RAM lost a resident entry");
+    rejects([&]{f.configure(std::vector<IcuQueueControl>(17),16,8,2);});
     rejects([&]{f.configure({{4,IcuControlOpcode::WaitEvent,1},{3,IcuControlOpcode::Sync,0}},4,2,2);});
     rejects([&]{f.configure({{0,IcuControlOpcode::Nop,0}},4,2,2);});
     rejects([&]{f.configure({{0,IcuControlOpcode::Sync,1}},4,2,2);});
@@ -75,7 +85,7 @@ void transport_order()
 {
     Queue raw,native,transport;
     raw.load_raw_macro(IcuMacroQueueKind::Mem,image());
-    raw.configure_queue_controls({{23,kQueueControlMemPacket,1}},64,8,2);
+    raw.configure_queue_controls({{23,kQueueControlMemPacket,1}},16,8,2);
     transport.push_synchronized(2,19,2,1,MemInstruction::Write(900,1));
     transport.launch();
     bool ticked=false;
@@ -120,7 +130,7 @@ void trailing_nops()
 {
     Queue raw,native;
     raw.load_raw_macro(IcuMacroQueueKind::Mem,image());
-    raw.configure_queue_controls({},64,8,2,47);
+    raw.configure_queue_controls({},16,8,2,47);
     while(!raw.raw_macro_ready()) raw.prefetch_raw_macro();
     native.push_nop(20);
     for(unsigned i=0;i<7;++i) {
@@ -152,7 +162,7 @@ void overlapping_contexts()
     }
     Queue raw,native;
     raw.load_raw_macro(IcuMacroQueueKind::Mem,words);
-    raw.configure_queue_controls({{26,IcuControlOpcode::WaitEvent,7}},64,8,2);
+    raw.configure_queue_controls({{26,IcuControlOpcode::WaitEvent,7}},16,8,2);
     while(!raw.raw_macro_ready())raw.prefetch_raw_macro();
     native.push_nop(20);
     for(unsigned i=0;i<14;++i) {
@@ -200,7 +210,7 @@ void issued_data_keeps_flowing(bool transport)
     std::vector<IcuQueueControl> controls;
     if(transport) controls.push_back({0,kQueueControlMemPacket,1});
     controls.push_back({0,IcuControlOpcode::WaitEvent,7});
-    raw.configure_queue_controls(std::move(controls),64,8,2);
+    raw.configure_queue_controls(std::move(controls),16,8,2);
     const std::size_t slice=transport ? 0 : 1;
     const auto writer=InstructionControlUnit::mem_queue(Hemisphere::East,slice,0);
     if(transport) {
@@ -262,9 +272,49 @@ void issued_data_keeps_flowing(bool transport)
         require(!icu.queue_completion_ready(7),"kernel switch reused old page completion");
     }
 }
+void shared_pool_refill() {
+    IcuQueueControlPool pool;pool.configure(512,4,4,2);
+    std::vector<IcuQueueControlPool::Handle> handles;
+    for(unsigned q=0;q<4;++q) {
+        std::vector<IcuQueueControl> entries;
+        for(unsigned i=0;i<16;++i)entries.push_back({5+20*i+q,IcuControlOpcode::WaitEvent,i+1});
+        handles.push_back(pool.add_partition(entries,16));
+    }
+    const auto ready=[&]{return std::all_of(handles.begin(),handles.end(),[&](auto h){return pool.primed(h);});};
+    while(!ready()) {pool.begin_cycle();pool.end_cycle(true);}
+    for(unsigned p=0;p<330;++p) {
+        const auto reads=pool.statistics().reads;
+        pool.begin_cycle();
+        for(unsigned q=0;q<4;++q) {
+            const auto* control=pool.due(handles[q],p);
+            if(p>=5+q && (p-5-q)%20==0 && p<=305+q) {
+                require(control && control->operand==(p-5-q)/20+1,"shared refill lost or reordered control");
+                pool.retire(handles[q]);
+            } else require(!control,"shared control issued on wrong physical cycle");
+        }
+        pool.end_cycle();require(pool.statistics().reads-reads<=1,"shared RAM silently gained read ports");
+    }
+    require(pool.statistics().prime_reads==16 && pool.statistics().run_reads==48,"runtime refill was not exercised");
+    require(pool.statistics().peak_cached<=4 && pool.statistics().peak_pending<=2,"shared finite storage exceeded");
+    require(std::all_of(handles.begin(),handles.end(),[&](auto h){return pool.done(h);}),"shared control omitted");
+    pool.configure(2,1,1,2);
+    std::vector<IcuQueueControl> burst{{0,IcuControlOpcode::WaitEvent,1},{0,IcuControlOpcode::WaitEvent,2}};
+    auto h=pool.add_partition(burst,16);
+    require(!pool.primed(h),"shared RAM has zero latency");
+    pool.begin_cycle();pool.end_cycle(true);
+    require(!pool.primed(h),"shared RAM returned before read latency");
+    while(!pool.primed(h)){pool.begin_cycle();pool.end_cycle(true);}
+    pool.retire(h);rejects([&]{pool.due(h,0);});
+    pool.begin_cycle();pool.end_cycle(); // second response is in flight at reset
+    pool.reset();rejects([&]{pool.due(h,0);});
+    pool.configure(1,1,1,2);rejects([&]{pool.add_partition(burst,16);});
+    std::vector<IcuQueueControl> overflow(17);
+    pool.configure(512,1,4,2);rejects([&]{pool.add_partition(overflow,16);});
+}
 int main() try {
+    shared_pool_refill();compare(false,true);compare(true,true);
     finite_frontend();compare(false);compare(true);transport_order();completion_generation();trailing_nops();
     overlapping_contexts();response_during_wait();
     issued_data_keeps_flowing(false);issued_data_keeps_flowing(true);
-    std::cout<<"queue controls passed: native physical issue equivalence, same-cycle WAIT chain, SYNC/NOTIFY slots, active Macro, independent queue, finite RAM\n";
+    std::cout<<"queue controls passed: native physical issue equivalence, same-cycle WAIT chain, SYNC/NOTIFY slots, active Macro, independent queue, finite RAM, shared 4-entry caches and runtime refill\n";
 } catch(const std::exception& e) { std::cerr<<e.what()<<'\n';return 1; }

@@ -191,6 +191,9 @@ ftlpu_add_test(program_loader_test tests/subsystem/system/program_loader_test.cp
 add_test(NAME subsystem.program.configuration COMMAND "${CMAKE_COMMAND}"
     "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/subsystem/system/program_load_configuration_test.cmake")
+add_test(NAME subsystem.icu.configuration COMMAND "${CMAKE_COMMAND}"
+    "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/subsystem/system/icu_configuration_test.cmake")
 
 ftlpu_add_test(mxm_bf16_test tests/subsystem/mxm/bf16_test.cpp
     subsystem.mxm.bf16 subsystem mxm fast)

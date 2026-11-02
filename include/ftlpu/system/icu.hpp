@@ -284,23 +284,16 @@ public:
     // Runs all raw Macro frontends in parallel while the program cycle remains
     // stopped. Runtime can call this after writing/committing all raw images
     // and before enabling the global program issue clock.
+    void configure_queue_control_pool(std::size_t capacity,std::size_t cache,std::size_t latency,std::size_t ii) {
+        queue_control_pool_.configure(capacity,kMemQueues+3*kMxmQueues,cache,latency,ii);
+    }
+    IcuQueueControlPool& queue_control_pool() noexcept {return queue_control_pool_;}
+    const IcuQueueControlPool& queue_control_pool() const noexcept {return queue_control_pool_;}
     std::size_t prime_raw_macro_frontends()
     {
-        std::size_t cycles = 0;
-        for (;;) {
-            bool pending = false;
-            const auto prime_queue = [&](auto& queue) {
-                if (!queue.raw_macro_mode() || queue.raw_macro_ready()) return;
-                queue.prefetch_raw_macro();
-                pending = true;
-            };
-            for (auto& queue : mem_queues_) prime_queue(queue);
-            for (auto& queue : mxm_load_queues_) prime_queue(queue);
-            for (auto& queue : mxm_dequant_queues_) prime_queue(queue);
-            for (auto& queue : mxm_compute_queues_) prime_queue(queue);
-            if (!pending) return cycles;
-            ++cycles;
-        }
+        std::size_t cycles=0;
+        while(!raw_macro_frontends_ready()) {tick_raw_macro_frontends();++cycles;}
+        return cycles;
     }
     // One physical prefetch cycle. Call only after every image has committed.
     bool raw_macro_frontends_ready() const
@@ -316,6 +309,7 @@ public:
 
     void tick_raw_macro_frontends()
     {
+        queue_control_pool_.begin_cycle();
         const auto tick = [](auto& queues) {
             for (auto& queue : queues)
                 if (queue.raw_macro_mode() && !queue.raw_macro_ready())
@@ -325,6 +319,7 @@ public:
         tick(mxm_load_queues_);
         tick(mxm_dequant_queues_);
         tick(mxm_compute_queues_);
+        queue_control_pool_.end_cycle(true);
     }
 
     template<class Fn> void visit_program_queue(IcuMacroQueueKind kind, std::size_t index,
@@ -447,7 +442,9 @@ public:
                 transport|=opcode==kQueueControlMemPacket;
             }
             visit_program_queue(image.kind,image.queue_index,false,[&](auto& q) {
-                q.configure_queue_controls(entries,hw::kQueueControlCapacity,hw::kQueueControlCacheDepth,
+                if constexpr(hw::kQueueControlStorageVersion != 0)
+                    q.configure_shared_queue_controls(queue_control_pool_,entries,hw::kQueueControlCapacity,image.end_cycle);
+                else q.configure_queue_controls(entries,hw::kQueueControlCapacity,hw::kQueueControlCacheDepth,
                     hw::kQueueControlReadLatency,image.end_cycle);
             });
             if(transport) enable_queue_control_transport(image.queue_index);
@@ -484,13 +481,20 @@ public:
         for(const auto& packet:pending_c2c_dma_raw_words_) done &= !packet.has_value();
         return done;
     }
-    void tick_program_frontends() {for_each_program_queue([](auto& q){q.prime_frontend_cycle();});}
+    void tick_program_frontends() {
+        queue_control_pool_.begin_cycle();
+        for_each_program_queue([](auto& q){q.prime_frontend_cycle();});
+        queue_control_pool_.end_cycle(true);
+    }
     bool program_frontends_ready() {
         bool ready=true;for_each_program_queue([&](auto& q){ready &= q.imem_occupancy()==0 || q.frontend_ready();});return ready;
     }
     void reset_program() {
         const auto physical=cycle_;
         reset(); cycle_=physical;
+        if constexpr(hw::kQueueControlStorageVersion != 0)
+            configure_queue_control_pool(hw::kQueueControlPoolCapacity,hw::kQueueControlCacheDepth,
+                hw::kQueueControlReadLatency,hw::kQueueControlPoolReadIi);
         program_control_stores_.clear();committed_barriers_.clear();
         program_loading_=true;program_issue_enabled_=false;compute_enabled_=false;
     }
@@ -514,6 +518,7 @@ public:
         queue_control_transport_ticked_.fill(false);
         mem_native_owners_.clear();
         queue_completion_events_ = {};
+        queue_control_pool_.reset();
         transport_overlap_enabled_ = false;
         compute_enabled_ = false;
         program_loading_ = true;
@@ -549,6 +554,7 @@ public:
         mem_transport_owners_.clear();
         mem_native_owners_.clear();
         queue_completion_events_ = {};
+        queue_control_pool_.reset();
         mem_transport_owner_count_ = 0;
         transport_overlap_enabled_ = false;
         queue_control_transport_enabled_.fill(false);
@@ -1654,6 +1660,7 @@ public:
         std::array<C2cDmaEngine*, hw::kHemispheres> c2c_dmas = {})
     {
         log_cycle_header(os);
+        if(!program_loading_) queue_control_pool_.begin_cycle();
 
         compute_enabled_ = (!program_loading_ && common_barriers_.begin_cycle(program_issue_enabled_));
         if (!compute_enabled_ && !program_loading_) {
@@ -1877,6 +1884,7 @@ public:
 
         log_dispatch_idle(os, any);
         if(!program_loading_) common_barriers_.end_cycle();
+        if(!program_loading_) queue_control_pool_.end_cycle();
         ++cycle_;
     }
 
@@ -2340,6 +2348,7 @@ private:
     std::vector<std::map<std::size_t, TransportOwner>> mem_transport_owners_{};
     std::vector<std::map<std::size_t, TransportOwner>> mem_native_owners_{};
     IcuQueueCompletionEvents queue_completion_events_{};
+    IcuQueueControlPool queue_control_pool_{};
     std::size_t mem_transport_owner_count_{0};
     bool transport_overlap_enabled_{false};
     IcuCommonBarrierController common_barriers_{};

@@ -703,14 +703,15 @@ template <
     std::size_t InstructionBits,
     std::size_t ImemDepth,
     std::size_t IqDepth,
-    std::size_t FetchLatency = 1,
+    std::size_t FetchLatency = hw::kIcuFetchLatencyCycles,
     std::size_t MacroContextDepth = IqDepth,
     IcuQueueRole QueueRole = IcuQueueRole::Legacy,
-    std::size_t MacroReservoirWords = 3,
-    std::size_t MacroDecodeWindowBits = (InstructionBits < 64 ? InstructionBits : 64),
-    std::size_t MacroDdbDepth = 8,
-    std::size_t MacroAdmissionLookahead = 8,
-    std::size_t MacroDdbRunCapacity = 8,
+    std::size_t MacroReservoirWords = hw::kIcuMacroReservoirWords,
+    std::size_t MacroDecodeWindowBits = (InstructionBits < hw::kIcuMacroDecodeWindowBits
+        ? InstructionBits : hw::kIcuMacroDecodeWindowBits),
+    std::size_t MacroDdbDepth = hw::kIcuMacroDdbDepth,
+    std::size_t MacroAdmissionLookahead = hw::kIcuMacroAdmissionLookahead,
+    std::size_t MacroDdbRunCapacity = hw::kIcuMacroDdbRunCapacity,
     std::size_t MacroImemRequestInitiationInterval =
         hw::kIcuMacroImemRequestInitiationIntervalCycles>
 class DistributedIcuQueue {
@@ -977,6 +978,14 @@ public:
         if (!raw_macro_mode_ || cycle_ != 0 || queue_control_physical_cycles_ != 0)
             throw StaticScheduleError("queue controls require a pre-launch Raw Macro queue");
         queue_controls_.configure(std::move(controls),capacity,cache_depth,read_latency);
+        queue_control_end_cycle_=end_cycle;
+    }
+    void configure_shared_queue_controls(IcuQueueControlPool& pool, std::vector<IcuQueueControl> controls,
+        std::size_t limit, std::uint32_t end_cycle)
+    {
+        if (!raw_macro_mode_ || cycle_ || queue_control_physical_cycles_)
+            throw StaticScheduleError("shared controls require a pre-launch Raw Macro queue");
+        queue_controls_.configure_shared(pool,std::move(controls),limit);
         queue_control_end_cycle_=end_cycle;
     }
     struct QueueTransportResult {
