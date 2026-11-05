@@ -103,6 +103,46 @@ ftlpu::IcuMacroDecoderStatistics decode_statistics(
 int main()
 try {
     using namespace ftlpu;
+    // One compressed run, two task snapshots. Binding must not feed back into
+    // the original operand delta chain, and every binding scan costs cycles.
+    const auto original=decode_mem_image(kMemImage);
+    for(const auto rows:{32u,5u}) {
+        IcuMacroV1Decoder<MemInstruction,96> bound(IcuMacroQueueKind::Mem,kMemImage);
+        MacroTaskParameters p;p.values[0]=rows;p.values[1]=rows==32?100:200;
+        bound.configure_task_bindings(p,{
+          {0,MacroBindingTarget::InnerCount,MacroTaskParameter::Rows,1,0,false},
+          {0,MacroBindingTarget::OuterCount,MacroTaskParameter::Zero,0,1,false},
+          {0,MacroBindingTarget::Operand,MacroTaskParameter::InputBase,1,0,true},
+          {1,MacroBindingTarget::Operand,MacroTaskParameter::InputBase,1,0,true}});
+        std::vector<DecodedIcuMacroContext<MemInstruction>> result;
+        for(std::size_t n=0;!bound.done();++n) {
+          require(n<256,"bound decoder stalled");
+          if(auto context=bound.tick(true))result.push_back(*context);
+        }
+        require(result.size()==original.size() && result[0].schedule.inner_count==rows &&
+          result[0].instruction.address==original[0].instruction.address+p.values[1] &&
+          result[1].instruction.address==original[1].instruction.address+p.values[1] &&
+          result[1].schedule.start_cycle==original[1].schedule.start_cycle && bound.binding_cycles()==10,
+          "pre-DDB binding changed deltas, timing, or reused an old snapshot");
+    }
+    {
+      auto device=std::make_unique<InstructionControlUnit>();
+      auto &q=device->vxm_iq(0);
+      VxmLaneAluInstruction config;config.lhs=VxmLaneOperand::Imm(1.f);config.rhs=VxmLaneOperand::Imm(1.f);config.repeat_count=32;
+      const auto compact=VxmCompactInstructionCodec::encode(0,VxmChainDepth::Two,config);
+      q.push_vxm_run_2d(VxmIcuRun2DInstruction::Run2D(0,{1,1},{1,1},compact));
+      q.reserve_task_queue();
+      for(const auto rows:{5u,32u}) {
+        MacroTaskParameters p;p.values[0]=rows;
+        q.begin_task(p,{{0,MacroBindingTarget::NativeRepeatCount,MacroTaskParameter::Rows,1,0,false}});
+        for(std::size_t n=0;!q.task_ready();++n){require(n<64,"native task prime timeout");q.prepare_task_cycle();}
+        q.launch_task();std::optional<VxmCompactInstruction> issued;
+        for(std::size_t n=0;!q.done();++n){require(n<64,"native task issue timeout");if(auto value=q.dispatch_next())issued=value;}
+        require(issued && VxmCompactInstructionCodec::decode(0,*issued).instruction.repeat_count==rows,
+                "VXM RUN_2D continuation binding did not update repeat_count");
+        q.finish_task();
+      }
+    }
     // Shift the golden stream's initial absolute start from 3 to 0. Priming
     // must install its first context before the global issue clock starts.
     auto zeroStartImage = kMemImage;

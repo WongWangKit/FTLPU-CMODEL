@@ -5,6 +5,7 @@
 #include "ftlpu/core/stream_port.hpp"
 #include "ftlpu/mem/slice.hpp"
 #include "ftlpu/mem/sram.hpp"
+#include "ftlpu/icu/instruction.hpp"
 
 #include <algorithm>
 #include <array>
@@ -87,6 +88,13 @@ private:
 
 class MemArrayModel {
 public:
+    static constexpr std::uint64_t kResidentWeightOwner=UINT64_MAX-1;
+    void begin_expert_output(std::uint64_t generation,std::uint64_t task) {
+        expert_output_generation_=generation;expert_output_task_=task;expert_output_segments_=0;
+    }
+    std::uint64_t expert_output_segments(std::uint64_t generation,std::uint64_t task) const {
+        return generation==expert_output_generation_ && task==expert_output_task_ ? expert_output_segments_ : 0;
+    }
     using InstructionSlot = std::optional<MemInstruction>;
 
     enum class MissingStreamPolicy {
@@ -148,6 +156,10 @@ public:
         executed_mem_.clear();
         executed_instructions_.clear();
         transport_commits_.clear();
+        expert_output_generation_=expert_output_task_=expert_output_segments_=0;
+        control_pending_.reset(); control_response_.reset(); routing_commits_.clear();
+        for(auto& s:routing_owners_)s.fill(0);
+        for(auto& s:gather_addresses_)for(auto& b:s)b.clear();
     }
 
     void set_sram_depth_rows(std::size_t rows)
@@ -167,6 +179,8 @@ public:
 
     bool idle() const noexcept
     {
+        if(control_pending_ || control_response_) return false;
+        for(const auto& s:gather_addresses_)for(const auto& b:s)if(!b.empty())return false;
         for (const auto& slice : instruction_queues_)
             for (const auto& bank : slice)
                 for (const auto& queue : bank)
@@ -251,7 +265,11 @@ public:
         check_mem_slice(mem_slice);
         check_bank(bank);
         const std::size_t port = instruction.opcode == MemOpcode::Write
+            // Owned banks are issued only by the routing adapter.
             || instruction.opcode == MemOpcode::Scatter ? 1 : 0;
+        const bool resident_read=routing_owners_[mem_slice][bank]==kResidentWeightOwner && instruction.opcode==MemOpcode::Read;
+        if(routing_owners_[mem_slice][bank] && instruction.routing_owner!=routing_owners_[mem_slice][bank] && !resident_read)
+            throw StaticScheduleError("MEM issue conflicts with routing bank ownership; wait at a drained boundary");
         instruction_queues_[mem_slice][bank][port].push_back(
             std::move(instruction));
     }
@@ -372,6 +390,67 @@ public:
         return executed_instructions_;
     }
 
+    struct ControlResponse { StreamPayloadTileSegment bytes{}; };
+    struct ControlTrace {std::size_t slice{},bank{},tile{},row{};bool write{};StreamPayloadTileSegment bytes{};};
+    const std::optional<ControlTrace>& last_control_transfer() const {return last_control_trace_;}
+    bool routing_bank_idle(std::size_t slice,std::size_t bank) const {
+        check_mem_slice(slice);check_bank(bank);
+        for(const auto& q:instruction_queues_[slice][bank])if(!q.empty())return false;
+        for(const auto& p:instruction_rows_[slice][bank])for(const auto& i:p)if(i)return false;
+        return !control_pending_ || control_pending_->slice!=slice || control_pending_->bank!=bank;
+    }
+    bool routing_bank_owned(std::size_t slice,std::size_t bank) const {check_mem_slice(slice);check_bank(bank);return routing_owners_[slice][bank]!=0 && routing_owners_[slice][bank]!=kResidentWeightOwner;}
+    void retain_weight_bank(std::size_t slice,std::size_t bank,std::uint64_t owner) {
+        if(routing_owners_[slice][bank]!=owner || !routing_bank_idle(slice,bank))throw std::logic_error("retain undrained weight bank");
+        routing_owners_[slice][bank]=kResidentWeightOwner;
+    }
+    void release_weight_bank(std::size_t slice,std::size_t bank) {
+        if(routing_owners_[slice][bank]!=kResidentWeightOwner || !routing_bank_idle(slice,bank))throw std::logic_error("release active weight readers");
+        routing_owners_[slice][bank]=0;
+    }
+    bool routing_bank_available(std::size_t slice,std::size_t bank) const {
+        check_mem_slice(slice);check_bank(bank);
+        return !routing_owners_[slice][bank] && routing_bank_idle(slice,bank);
+    }
+    bool acquire_routing_bank(std::size_t slice,std::size_t bank,std::uint64_t owner) {
+        check_mem_slice(slice);check_bank(bank);
+        if(!owner)throw std::invalid_argument("routing owner is zero");
+        if(routing_owners_[slice][bank])return routing_owners_[slice][bank]==owner;
+        if(!routing_bank_idle(slice,bank))return false;
+        routing_owners_[slice][bank]=owner;return true;
+    }
+    void release_routing_bank(std::size_t slice,std::size_t bank,std::uint64_t owner) {
+        if(routing_owners_[slice][bank]!=owner || !routing_bank_idle(slice,bank) || !gather_addresses_[slice][bank].empty())
+            throw std::logic_error("routing bank released before drain");
+        routing_owners_[slice][bank]=0;
+    }
+    // One finite control request/response slot. A request uses the existing
+    // single-port bank and accesses one physical tile segment, not a tensor.
+    bool issue_control(std::size_t slice,std::size_t bank,std::size_t tile,std::size_t row,
+        std::uint64_t owner,bool write,StreamPayloadTileSegment bytes,std::size_t latency) {
+        check_mem_slice(slice);check_bank(bank);check_tile(tile);
+        if(!owner || routing_owners_[slice][bank]!=owner || !latency)throw std::logic_error("control request without bank ownership");
+        if(row>=sram_.bank(slice,bank).active_rows())throw std::out_of_range("routing control SRAM row");
+        if(control_pending_ || control_response_ || !routing_bank_idle(slice,bank))return false;
+        control_pending_=ControlPending{slice,bank,tile,row,latency,write,bytes};return true;
+    }
+    std::optional<ControlResponse> take_control_response() {
+        auto r=control_response_;control_response_.reset();return r;
+    }
+    bool push_gather_address(std::size_t slice,std::size_t bank,std::size_t row,
+        std::uint64_t owner,std::uint64_t tag) {
+        check_mem_slice(slice);check_bank(bank);
+        if(routing_owners_[slice][bank]!=owner || !owner || row>=sram_.bank(slice,bank).active_rows())throw std::invalid_argument("invalid Gather address owner/range");
+        auto& fifo=gather_addresses_[slice][bank];if(fifo.size()==8)return false;
+        fifo.push_back({row,owner,tag});return true;
+    }
+    std::size_t routing_commit_count(std::uint64_t owner,std::uint64_t tag) const {
+        for(const auto& c:routing_commits_)if(c.owner==owner && c.tag==tag)return c.count;return 0;
+    }
+    void retire_routing_commit(std::uint64_t owner,std::uint64_t tag) {
+        std::erase_if(routing_commits_,[&](const auto& c){return c.owner==owner && c.tag==tag;});
+    }
+
     // Evaluate one MEM cycle against the current SR state.  This method never
     // propagates or commits the SR fabric: the owning system performs one
     // global fabric commit after all functional slices have evaluated.
@@ -385,9 +464,19 @@ public:
         executed_mem_.clear();
         executed_instructions_.clear();
         last_transport_commit_segments_ = 0;
+        last_control_trace_.reset();
         dispatch_from_queues();
         capture_trace_ = capture_trace;
         execute_current_instructions(fabric);
+        if(control_pending_) {
+            auto& p=*control_pending_;
+            if(--p.remaining==0) {
+                if(p.write)sram_.bank(p.slice,p.bank).write_segment(p.tile,p.row,p.bytes);
+                control_response_=ControlResponse{p.write?p.bytes:sram_.bank(p.slice,p.bank).read_segment(p.tile,p.row)};
+                last_control_trace_=ControlTrace{p.slice,p.bank,p.tile,p.row,p.write,control_response_->bytes};
+                control_pending_.reset();
+            }
+        }
         advance_instructions();
         ++cycle_;
     }
@@ -476,7 +565,15 @@ private:
                         || instruction_queues_[mem_slice][bank][port].empty())
                         continue;
                     instruction_rows_[mem_slice][bank][port][0] =
+                        // A missing address stalls this indirect command only.
                         instruction_queues_[mem_slice][bank][port].front();
+                    auto& slot=instruction_rows_[mem_slice][bank][port][0];
+                    if(slot->opcode==MemOpcode::Gather) {
+                        auto& fifo=gather_addresses_[mem_slice][bank];
+                        if(fifo.empty()){slot.reset();continue;}
+                        if(slot->routing_owner!=fifo.front().owner)throw std::logic_error("Gather address/instruction owner mismatch");
+                        slot->address=fifo.front().row;slot->routing_transfer=fifo.front().tag;fifo.pop_front();
+                    }
                     instruction_queues_[mem_slice][bank][port].pop_front();
                 }
             }
@@ -511,8 +608,10 @@ private:
                                 *instruction);
                             break;
                         case MemOpcode::Gather:
+                            execute_read(fabric,mem_slice,bank,tile,*instruction);
+                            break;
                         case MemOpcode::Scatter:
-                            throw std::logic_error("Gather/Scatter require a separate address-stream datapath model");
+                            throw std::logic_error("lane-wise Scatter is not implemented");
                         }
                     }
             }
@@ -531,7 +630,8 @@ private:
         const auto physical_address = instruction.address;
         const auto bytes =
             sram_.bank(mem_slice, bank).read_segment(tile, physical_address);
-        const auto vector_tag = static_cast<std::uint64_t>(cycle_) * hw::kTileRows + tile;
+        const auto vector_tag = instruction.routing_transfer ? instruction.routing_transfer
+            : static_cast<std::uint64_t>(cycle_) * hw::kTileRows + tile;
 
         StreamOutputPort output(
             fabric,
@@ -687,8 +787,18 @@ private:
                 + last_stream_column_cycles);
         }
 
+        if(instruction.routing_owner && vector_tag!=instruction.routing_transfer)
+            throw std::logic_error("indirect MEM write consumed a different vector tag");
+        if(instruction.expert_task_id && (instruction.expert_task_generation!=expert_output_generation_ || instruction.expert_task_id!=expert_output_task_))
+            throw std::logic_error("stale expert output SRAM commit");
         sram_.bank(mem_slice, bank).write_segment(
             tile, instruction.address, bytes);
+        if(instruction.expert_task_id)++expert_output_segments_;
+        if(instruction.routing_owner) {
+            auto it=std::find_if(routing_commits_.begin(),routing_commits_.end(),[&](const auto& c){return c.owner==instruction.routing_owner && c.tag==instruction.routing_transfer;});
+            if(it==routing_commits_.end()){if(routing_commits_.size()==8)throw std::logic_error("routing commit scoreboard full");routing_commits_.push_back({instruction.routing_owner,instruction.routing_transfer,1});}
+            else ++it->count;
+        }
         if (instruction.transport_generation) {
             auto found = std::find_if(transport_commits_.begin(), transport_commits_.end(),
                 [&](const auto& s) { return s.generation == instruction.transport_generation
@@ -822,6 +932,16 @@ private:
     };
     std::vector<TransportCommitState> transport_commits_{};
     std::size_t last_transport_commit_segments_{0};
+    std::uint64_t expert_output_generation_{},expert_output_task_{},expert_output_segments_{};
+    struct ControlPending {std::size_t slice,bank,tile,row,remaining;bool write;StreamPayloadTileSegment bytes;};
+    std::optional<ControlPending> control_pending_{};
+    std::optional<ControlResponse> control_response_{};
+    std::optional<ControlTrace> last_control_trace_{};
+    std::array<std::array<std::uint64_t,hw::kMemBanksPerSlice>,hw::kMemSliceColumns> routing_owners_{};
+    struct GatherAddress {std::size_t row;std::uint64_t owner,tag;};
+    std::array<std::array<std::deque<GatherAddress>,hw::kMemBanksPerSlice>,hw::kMemSliceColumns> gather_addresses_{};
+    struct RoutingCommit {std::uint64_t owner,tag;std::size_t count;};
+    std::vector<RoutingCommit> routing_commits_{};
 };
 
 } // namespace ftlpu

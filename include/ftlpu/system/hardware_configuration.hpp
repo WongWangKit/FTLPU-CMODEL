@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
+#include "ftlpu/routing/instruction.hpp"
 
 #include <cstddef>
 #include <stdexcept>
@@ -11,6 +12,7 @@ namespace ftlpu {
 // static constants in hw:: remain the compiled physical capacity and ISA
 // geometry; each test may select a supported subset without rebuilding.
 struct SystemHardwareConfiguration {
+    RoutingConfig routing{};
     std::size_t sram_depth_rows{hw::kSramDepthRows};
     std::size_t mxms_per_hemisphere{hw::kMxmsPerHemisphere};
     std::size_t mxm_weight_buffers{2};
@@ -21,6 +23,7 @@ struct SystemHardwareConfiguration {
 
     void validate() const
     {
+        routing.validate();
         if (sram_depth_rows == 0
             || sram_depth_rows > hw::kSramDepthRows)
             throw std::invalid_argument(

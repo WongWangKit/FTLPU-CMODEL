@@ -7,6 +7,8 @@
 #include <string_view>
 
 namespace ftlpu::hw::config {
+inline constexpr bool kRoutingEnabled = @FTLPU_HW_ROUTING_ENABLED@;
+inline constexpr std::size_t kRoutingControlLatency = @FTLPU_HW_ROUTING_CONTROL_LATENCY@;
 
 inline constexpr std::size_t kSchemaVersion = @FTLPU_HW_SCHEMA_VERSION@;
 inline constexpr std::size_t kQueueControlVersion = @FTLPU_HW_QUEUE_CONTROL_VERSION@;

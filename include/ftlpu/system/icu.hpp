@@ -1,4 +1,5 @@
 #pragma once
+#include <set>
 
 #include "ftlpu/c2c/dma.hpp"
 #include "ftlpu/system/program_image.hpp"
@@ -131,6 +132,31 @@ public:
         return hemisphere_index(hemisphere) * kMxmQueuesPerHemisphere + local_mxm;
     }
 
+    using RoutingIcu=DistributedIcuQueue<RoutingInstruction,96,256,4,1,1,IcuQueueRole::Routing>;
+    RoutingIcu& routing_iq() {return routing_queue_;}
+    const RoutingIcu& routing_iq() const {return routing_queue_;}
+    const std::vector<RoutingDescriptor>& routing_descriptors() const {return routing_descriptors_;}
+    void install_routing_descriptors(std::vector<RoutingDescriptor> descriptors) {
+        validate_routing_descriptor_references(descriptors,5);
+        if(descriptors.size()>RoutingConfig::descriptor_depth)throw std::invalid_argument("routing descriptor capacity");
+        (void)encode_routing_descriptors(descriptors);routing_descriptors_=std::move(descriptors);
+        for(const auto &d:routing_descriptors_)if(d.opcode==RoutingOpcode::ExpertTemplate)
+            for(const auto &q:d.expert_template.queues) {
+                bool output=false;
+                if(q.kind==0)for(std::size_t p=0;p<d.expert_template.output.bytes();++p) {
+                    const auto plane=d.expert_template.output.planes[p];
+                    output|=q.index==mem_queue(static_cast<Hemisphere>(plane.hemisphere),plane.slice,plane.bank);
+                }
+                visit_program_queue(static_cast<IcuMacroQueueKind>(q.kind),q.index,false,[&](auto &queue){queue.reserve_task_queue(output);});
+            }
+    }
+    std::uint64_t routing_generation() const {return program_generation_?program_generation_:1;}
+    void routing_completion(std::uint64_t generation,std::uint32_t instance) {
+        if(generation<routing_generation())return;
+        if(generation!=routing_generation())throw std::logic_error("future routing completion");
+        if(routing_event_instances_.contains(instance))queue_completion_events_.notify_mem_commit(generation,instance|0x80000000u);
+    }
+    void register_routing_event_instance(std::uint32_t instance) {if(!instance || instance>=0x80000000u)throw std::invalid_argument("routing completion instance");routing_event_instances_.insert(instance);}
     using Repeat = IcuRepeat;
     using VxmIcu = DistributedIcuQueue<
         VxmCompactInstruction,
@@ -330,6 +356,7 @@ public:
             fn(mem_transport_iq(index)); return;
         }
         switch(kind) {
+        case IcuMacroQueueKind::Routing: if(index) break; fn(routing_iq()); return;
         case IcuMacroQueueKind::Mem: if(index>=kMemQueues) break; fn(mem_iq(index)); return;
         case IcuMacroQueueKind::MxmLoad: if(index>=kMxmQueues) break; fn(mxm_load_iq(index)); return;
         case IcuMacroQueueKind::MxmCompute: if(index>=kMxmQueues) break; fn(mxm_compute_iq(index)); return;
@@ -365,6 +392,8 @@ public:
                     || (image.mode==IcuQueueMode::Macro && !image.byte_count))
                     throw std::invalid_argument("program exceeds physical i-MEM geometry");
             }); break;
+        case ProgramStorage::RoutingDescriptors:
+            if(image.word_bytes()!=4 || image.word_count()>4096)throw std::invalid_argument("routing descriptor image capacity");break;
         case ProgramStorage::Qctl:
             if(image.word_bytes()!=12 || image.word_count()>hw::kQueueControlCapacity
                 || static_cast<unsigned>(image.kind)>3 || !image.generation)
@@ -432,6 +461,10 @@ public:
             if(p+4>bytes.size()) throw std::invalid_argument("truncated control RAM record");
             std::uint32_t v=0;for(std::size_t b=0;b<4;++b) v|=std::uint32_t(bytes[p+b])<<(8*b);return v;
         };
+        if(image.storage==ProgramStorage::RoutingDescriptors) {
+            std::vector<std::uint32_t> words;for(std::size_t p=0;p<bytes.size();p+=4)words.push_back(u32(p));
+            install_routing_descriptors(decode_routing_descriptors(words));return;
+        }
         if(image.storage==ProgramStorage::Qctl) {
             std::vector<IcuQueueControl> entries;
             bool transport=false;
@@ -461,7 +494,8 @@ public:
                 if(count>65535 || count>(bytes.size()-p)/4) throw std::invalid_argument("invalid event instance count");
                 IcuCommonEventBinding binding{event,{}};
                 for(std::size_t i=0;i<count;++i,p+=4) binding.completion_instances.push_back(u32(p));
-                if(source==2) bindings.push_back(std::move(binding));
+                if(source==3){routing_event_ids_.insert(event);for(auto& instance:binding.completion_instances){register_routing_event_instance(instance);instance|=0x80000000u;}bindings.push_back(std::move(binding));}
+                else if(source==2) bindings.push_back(std::move(binding));
                 else if(source!=1 || count) throw std::invalid_argument("invalid event source");
             }
             if(image.storage==ProgramStorage::QueueEvents) configure_queue_completion_events(image.generation,bindings);
@@ -469,6 +503,7 @@ public:
         }
     }
     template<class Fn> void for_each_program_queue(Fn&& fn) {
+        fn(routing_queue_);
         for(auto& q:mem_queues_)fn(q);for(auto& q:mem_transport_queues_)fn(q);
         for(auto& q:mxm_load_queues_)fn(q);for(auto& q:mxm_compute_queues_)fn(q);
         for(auto& q:mxm_dequant_queues_)fn(q);for(auto& q:vxm_queues_)fn(q);
@@ -517,6 +552,7 @@ public:
         queue_control_transport_enabled_.fill(false);
         queue_control_transport_ticked_.fill(false);
         mem_native_owners_.clear();
+        routing_queue_.reset();routing_descriptors_.clear();routing_event_instances_.clear();routing_event_ids_.clear();
         queue_completion_events_ = {};
         queue_control_pool_.reset();
         transport_overlap_enabled_ = false;
@@ -553,6 +589,7 @@ public:
         common_barriers_.reset();
         mem_transport_owners_.clear();
         mem_native_owners_.clear();
+        routing_queue_.reset();routing_descriptors_.clear();routing_event_instances_.clear();routing_event_ids_.clear();
         queue_completion_events_ = {};
         queue_control_pool_.reset();
         mem_transport_owner_count_ = 0;
@@ -590,6 +627,7 @@ public:
         IcuControlInstruction instruction)
     {
         switch (location.kind) {
+        case IcuLocationKind::Routing: routing_queue_.append_control(instruction); return;
         case IcuLocationKind::Mem:
             check_mem_location(location);
             mem_queues_[mem_queue(
@@ -1333,6 +1371,7 @@ public:
     void notify(IcuLocation location)
     {
         switch (location.kind) {
+        case IcuLocationKind::Routing:routing_queue_.notify();return;
         case IcuLocationKind::Mem:
             check_mem_location(location);
             mem_iq(mem_queue(
@@ -1395,6 +1434,7 @@ public:
     void notify_tagged(IcuLocation location, std::size_t event_tag)
     {
         switch (location.kind) {
+        case IcuLocationKind::Routing: routing_queue_.notify(event_tag); return;
         case IcuLocationKind::Mem:
             check_mem_location(location);
             mem_iq(mem_queue(static_cast<Hemisphere>(location.unit),
@@ -1468,6 +1508,8 @@ public:
         case IcuLocationKind::C2cDma:
             return c2c_dma_queues_.at(location.unit)
                 .blocked_on_event(event_tag);
+        case IcuLocationKind::Routing:
+            return routing_queue_.blocked_on_event(event_tag);
         }
         throw std::logic_error("unknown tagged ICU location kind");
     }
@@ -1525,7 +1567,9 @@ public:
     }
     void configure_queue_completion_events(std::uint64_t generation,
         const std::vector<IcuCommonEventBinding>& bindings)
-    { queue_completion_events_.configure(generation,bindings);program_generation_=generation; }
+    { queue_completion_events_.configure(generation,bindings);program_generation_=generation;
+        for_each_program_queue([this](auto& q){q.set_external_event_probe([this](std::size_t tag){return routing_event_ids_.contains(static_cast<std::uint32_t>(tag)) && queue_completion_events_.ready(static_cast<std::uint32_t>(tag));});});
+    }
     void notify_queue_mem_commit(std::uint64_t generation,std::uint32_t instance)
     { if(generation<program_generation_) return;queue_completion_events_.notify_mem_commit(generation,instance); }
     bool queue_completion_ready(std::uint32_t event) const
@@ -1599,6 +1643,7 @@ public:
         for (auto& queue : c2c_tx_queues_) queue.notify();
         for (auto& queue : c2c_rx_queues_) queue.notify();
         for (auto& queue : c2c_dma_queues_) queue.notify();
+        routing_queue_.notify();
     }
 
     // Fan out one tagged hardware event to every local ICU.  Page-ready
@@ -1614,6 +1659,7 @@ public:
         for (auto& queue : mxm_compute_queues_) queue.notify(event_tag);
         for (auto& queue : sxm_transpose_queues_) queue.notify(event_tag);
         for (auto& queue : sxm_permute_queues_) queue.notify(event_tag);
+        routing_queue_.notify(event_tag);
     }
 
     std::size_t barrier_latency_cycles() const noexcept
@@ -1762,6 +1808,15 @@ public:
 
         for (std::size_t queue = 0; queue < kMemQueues; ++queue) {
             queue_control_transport_ticked_[queue]=false;
+            const auto owner_h=queue/kMemQueuesPerHemisphere;
+            const auto owner_local=queue%kMemQueuesPerHemisphere;
+            if(mems[owner_h].routing_bank_owned(owner_local/hw::kMemBanksPerSlice,owner_local%hw::kMemBanksPerSlice)) {
+                // Keep instruction/control prefetch alive without consuming
+                // commands until this single-port bank is returned.
+                mem_queues_[queue].hold_and_prefetch_cycle();
+                if(!mem_transport_queues_.empty())mem_transport_queues_[queue].hold_and_prefetch_cycle();
+                continue;
+            }
             auto instruction = std::optional<MemInstruction>{};
             if (compute_enabled_)
                 instruction = mem_queues_[queue].dispatch_next();
@@ -2094,6 +2149,7 @@ public:
         collect_queues(c2c_tx_queues_);
         collect_queues(c2c_dma_queues_);
         collect_queues(c2c_rx_queues_);
+        collect_queue(routing_queue_);
         return statistics;
     }
 
@@ -2117,6 +2173,7 @@ private:
         collect(c2c_tx_queues_);
         collect(c2c_rx_queues_);
         collect(c2c_dma_queues_);
+        count += routing_queue_.take_notify() ? 1U : 0U;
         return count;
     }
     static void check_mem_queue(std::size_t column)
@@ -2314,6 +2371,9 @@ private:
         return os.str();
     }
 
+    RoutingIcu routing_queue_{};
+    std::vector<RoutingDescriptor> routing_descriptors_{};
+    std::set<std::uint32_t> routing_event_instances_{},routing_event_ids_{};
     std::array<VxmIcu, kVxmQueues> vxm_queues_{};
     // Legacy VXM/SXM builders still describe positions in a compiler-side
     // program timeline. These cursors exist only while translating that API:

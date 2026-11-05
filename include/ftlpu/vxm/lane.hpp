@@ -88,6 +88,8 @@ enum class VxmLaneAluTraceState { Idle, Stalled, Executed };
 struct VxmLaneAluTrace {
     VxmLaneAluTraceState state{VxmLaneAluTraceState::Idle};
     std::optional<float> result{};
+    std::optional<VxmLaneOperation> request_operation{},result_operation{};
+    std::optional<float> lhs{},rhs{};
 };
 
 inline constexpr std::size_t kVxmAluStageCount = 16;
@@ -490,6 +492,8 @@ public:
             prepare_accumulator(stage, instruction);
             const auto a = read_operand(instruction.lhs, *source, stage, false);
             const auto b = read_operand(instruction.rhs, *source, stage, true);
+            last_trace_[stage].request_operation=instruction.operation;
+            last_trace_[stage].lhs=a;last_trace_[stage].rhs=b;
             auto metadata = ExecutionMetadata{*source, instruction};
             if (const auto* special =
                     std::get_if<VxmSpecialAluOpcode>(&instruction.operation)) {
@@ -567,6 +571,7 @@ public:
 
             last_trace_[stage].result = completed->value;
             const auto& instruction = completed->metadata.instruction;
+            last_trace_[stage].result_operation=instruction.operation;
             if (instruction.accumulator_write) {
                 accumulators_[stage] = completed->value;
             }

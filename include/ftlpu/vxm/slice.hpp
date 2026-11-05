@@ -34,6 +34,7 @@ public:
 
     void reset()
     {
+        control_owner_=0;
         for (auto& queue : instruction_queues_) {
             queue.clear();
         }
@@ -79,10 +80,19 @@ public:
     }
 
     void issue_south(
-        std::size_t alu, CompactInstruction instruction)
+        std::size_t alu, CompactInstruction instruction, std::uint64_t owner=0)
     {
+        if(control_owner_!=owner)throw std::logic_error("VXM command port owned by another producer");
         check_alu(alu);
         instruction_queues_[alu].push_back(instruction);
+    }
+    bool acquire_control(std::uint64_t owner) {
+        if(!owner || control_owner_ || !idle())return false;
+        control_owner_=owner;return true;
+    }
+    void release_control(std::uint64_t owner) {
+        if(owner!=control_owner_ || !idle())throw std::logic_error("release active VXM command port");
+        control_owner_=0;
     }
 
     void set_chain_depth(VxmChainDepth depth)
@@ -540,6 +550,7 @@ private:
         output_block_destinations_{};
     std::size_t cycle_{0};
     bool prepared_{false};
+    std::uint64_t control_owner_{};
 };
 
 } // namespace ftlpu

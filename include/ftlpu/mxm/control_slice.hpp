@@ -478,6 +478,7 @@ public:
 
     void reset()
     {
+        traced_load_={};traced_compute_={};
         load_instruction_queue_.clear();
         dequant_instruction_queue_.clear();
         compute_instruction_queue_.clear();
@@ -557,6 +558,9 @@ public:
         check_tile(tile);
         return compute_instruction_rows_[tile];
     }
+    void enable_cycle_trace(bool enabled=true){cycle_trace_enabled_=enabled;}
+    const InstructionSlot& last_load_execution(std::size_t tile) const {check_tile(tile);return traced_load_[tile];}
+    const InstructionSlot& last_compute_execution(std::size_t tile) const {check_tile(tile);return traced_compute_[tile];}
 
     const DequantInstructionSlot& dequant_instruction_at(
         std::size_t tile) const
@@ -658,6 +662,7 @@ public:
         dispatch_load_instruction();
         dispatch_dequant_instruction();
         dispatch_compute_instruction();
+        if(cycle_trace_enabled_){traced_load_=load_instruction_rows_;traced_compute_=compute_instruction_rows_;}
         fill_missing_weight_inputs(weight_provider);
         os << "mxm_control cycle " << cycle_ << '\n';
         execute(os, print_matrix, log_tile);
@@ -1089,6 +1094,8 @@ private:
     std::deque<MxmDequantInstruction> dequant_instruction_queue_{};
     std::deque<MxmControlInstruction> compute_instruction_queue_{};
     std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> load_instruction_rows_{};
+    bool cycle_trace_enabled_{};
+    std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> traced_load_{},traced_compute_{};
     std::array<DequantInstructionSlot, hw::kMxmSupercellsPerPlane>
         dequant_instruction_rows_{};
     std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> compute_instruction_rows_{};

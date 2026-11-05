@@ -17,6 +17,7 @@ enum class IcuLocationKind : std::uint8_t {
     C2cTx,
     C2cDma,
     C2cRx,
+    Routing,
 };
 
 struct IcuLocation {
@@ -91,6 +92,8 @@ struct IcuLocation {
     {
         return {IcuLocationKind::C2cDma, hemisphere_index(hemisphere), 0};
     }
+
+    static constexpr IcuLocation Routing() noexcept {return {IcuLocationKind::Routing,0,0};}
 
     friend bool operator==(const IcuLocation&, const IcuLocation&) = default;
 };

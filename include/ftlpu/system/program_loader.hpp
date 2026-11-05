@@ -45,7 +45,7 @@ struct ProgramLoadStatistics {
     std::size_t dma_credit_wait_cycles{0}, bus_wait_cycles{0}, target_wait_cycles{0};
     std::size_t peak_reassembly_bytes{0}, peak_dma_vectors{0};
     std::vector<ProgramImageStatistics> images{};
-    std::array<ProgramStorageStatistics,6> stores{};
+    std::array<ProgramStorageStatistics,7> stores{};
 
     void print(std::ostream& os) const
     {
@@ -105,6 +105,8 @@ public:
         config_ = config;
     }
     const ProgramLoadConfig& config() const noexcept { return config_; }
+    C2cDmaEngine& dma_trace_source() noexcept {return dma_;}
+    const C2cDmaEngine& dma_trace_source() const noexcept {return dma_;}
     void set_program_reset(std::function<void()> reset) {program_reset_=std::move(reset);}
     State state() const noexcept { return state_; }
     bool busy() const noexcept
@@ -155,7 +157,7 @@ public:
     {
         if (!can_load_program()) throw std::logic_error("previous program has not completed and drained");
         const auto group=[](ProgramStorage store) {
-            return store==ProgramStorage::Imem?0:store==ProgramStorage::TransportImem?1:
+            return store==ProgramStorage::Imem?0:(store==ProgramStorage::TransportImem || store==ProgramStorage::RoutingDescriptors)?1:
                 (store==ProgramStorage::Qctl || store==ProgramStorage::Barr)?2:3;
         };
         bool qctl=false,barr=false;

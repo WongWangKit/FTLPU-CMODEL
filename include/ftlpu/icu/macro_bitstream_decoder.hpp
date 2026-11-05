@@ -1,6 +1,8 @@
 #pragma once
 
 #include "ftlpu/core/instruction_codec.hpp"
+#include "ftlpu/icu/macro_task_binding.hpp"
+#include "ftlpu/icu/active_macro_context.hpp"
 
 #include <algorithm>
 #include <array>
@@ -30,7 +32,7 @@ enum class IcuMacroQueueKind : std::uint8_t {
     MxmLoad,
     MxmCompute,
     MxmDequant,
-    Vxm, SxmTranspose, SxmPermute, C2cDma, C2cTx, C2cRx,
+    Vxm, SxmTranspose, SxmPermute, C2cDma, C2cTx, C2cRx, Routing,
 };
 
 template <std::size_t Bits>
@@ -168,6 +170,14 @@ public:
             throw StaticScheduleError(
                 "Macro raw i-MEM image has no control word");
     }
+    void configure_task_bindings(MacroTaskParameters parameters,std::vector<MacroTaskBinding> bindings) {
+        if(statistics_.cycles)throw std::logic_error("binding parameters after macro fetch");
+        validate_macro_task_bindings(bindings);
+        for(const auto &b:bindings)if(b.target==MacroBindingTarget::NativeRepeatCount)
+            throw std::invalid_argument("native repeat binding in macro queue");
+        task_parameters_=parameters;task_bindings_=std::move(bindings);task_binding_enabled_=true;
+    }
+    std::uint64_t binding_cycles() const {return binding_cycles_;}
 
     // Compatibility path for decoder unit tests: an unbounded current cycle
     // disables the timing gate while retaining one-context-per-cycle output.
@@ -200,7 +210,7 @@ public:
 
     bool done() const noexcept
     {
-        return disabled_ || (state_ == State::Done && ddb_size_ == 0);
+        return disabled_ || (state_ == State::Done && ddb_size_ == 0 && !binding_descriptor_);
     }
 
     // A request reserves reservoir credit at issue. Its unbackpressurable
@@ -218,7 +228,7 @@ public:
     {
         return control_latched_
             && (disabled_
-                || state_ == State::Done
+                || (state_ == State::Done && !binding_descriptor_)
                 || ddb_size_ == DdbDepth);
     }
 
@@ -865,8 +875,11 @@ private:
             earliest_active_release_cycle);
         // Delta apply (D1) runs before stream decode (D0), allowing delta_q to
         // pop and refill in one cycle without a bypass into the apply datapath.
-        apply_delta_queue();
-        parser_step();
+        if(binding_descriptor_)tick_binding();
+        else {
+            apply_delta_queue();
+            if(!binding_descriptor_)parser_step();
+        }
         begin_fetch_if_possible();
         age_pending_fetches();
 
@@ -1023,7 +1036,7 @@ private:
             || state_ == State::Done)
             return;
         const bool record_completes_descriptor = state_ == State::Record
-            && (building_descriptor_.run_count + 1 == DdbRunCapacity
+            && (task_binding_enabled_ || building_descriptor_.run_count + 1 == DdbRunCapacity
                 || run_remaining_ == 1);
         if (record_completes_descriptor && ddb_size_ == DdbDepth) {
             ++statistics_.decoder_ddb_stall_cycles;
@@ -1527,13 +1540,14 @@ private:
         ++decoded_count_;
         --run_remaining_;
 
-        if (descriptor.run_count == DdbRunCapacity
+        if (task_binding_enabled_ || descriptor.run_count == DdbRunCapacity
             || run_remaining_ == 0) {
             if (ddb_size_ == DdbDepth)
                 throw std::logic_error(
                     "Macro parser completed a descriptor while the DDB was full");
             descriptor.completes_run = run_remaining_ == 0;
-            commit_descriptor(pack_ddb_slot(building_descriptor_));
+            if(task_binding_enabled_) {binding_descriptor_=building_descriptor_;binding_index_=0;}
+            else commit_descriptor(pack_ddb_slot(building_descriptor_));
             if (run_remaining_ != 0) {
                 begin_descriptor_chunk();
             }
@@ -1554,7 +1568,7 @@ private:
     {
         if (!delta_queue_.has_value()) return;
         const bool completes_descriptor =
-            building_descriptor_.run_count + 1 == DdbRunCapacity
+            task_binding_enabled_ || building_descriptor_.run_count + 1 == DdbRunCapacity
             || run_remaining_ == 1;
         if (completes_descriptor && ddb_size_ == DdbDepth) {
             ++statistics_.decoder_ddb_stall_cycles;
@@ -1571,6 +1585,38 @@ private:
                     "Macro Delta apply outran the stream decoder");
             advance_after_run();
         }
+    }
+
+    void tick_binding() {
+        ++binding_cycles_;
+        auto &d=*binding_descriptor_;
+        if(binding_index_<task_bindings_.size()) {
+            const auto &b=task_bindings_[binding_index_++];
+            if(b.record!=d.first_record_index)return;
+            auto &s=d.descriptor_template.schedule;
+            switch(b.target) {
+            case MacroBindingTarget::InnerCount: s.inner_count=macro_task_binding_value(b,task_parameters_,s.inner_count);break;
+            case MacroBindingTarget::OuterCount: s.outer_count=macro_task_binding_value(b,task_parameters_,s.outer_count);break;
+            case MacroBindingTarget::Operand:
+                if(!operand_bits())throw StaticScheduleError("operand binding on zero-width macro operand");
+                d.next_operand=macro_task_binding_value(b,task_parameters_,static_cast<std::uint64_t>(d.next_operand));break;
+            case MacroBindingTarget::ScaleBf16:
+                if constexpr(std::is_same_v<FuncInstruction,MxmDequantInstruction>) {
+                    const auto value=macro_task_binding_value(b,task_parameters_,d.descriptor_template.instruction.scale_bf16);
+                    if(value>65535)throw StaticScheduleError("scale binding exceeds BF16 field");
+                    d.descriptor_template.instruction.scale_bf16=static_cast<std::uint16_t>(value);
+                } else throw StaticScheduleError("scale binding on non-dequant queue");
+                break;
+            default: throw StaticScheduleError("unsupported macro task field");
+            }
+            return;
+        }
+        if(ddb_size_==DdbDepth)return;
+        auto instruction=d.descriptor_template.instruction;
+        set_operand(instruction,static_cast<std::size_t>(d.next_operand));
+        auto schedule=d.descriptor_template.schedule;schedule.start_cycle=d.next_start_cycle;
+        (void)IcuActiveMacroContextCodec256<FuncInstruction>::pack_initial(schedule,instruction);
+        commit_descriptor(pack_ddb_slot(d));binding_descriptor_.reset();
     }
 
     void validate_current_state() const
@@ -1785,6 +1831,12 @@ private:
     }
 
     IcuMacroQueueKind kind_;
+    MacroTaskParameters task_parameters_{};
+    std::vector<MacroTaskBinding> task_bindings_;
+    std::optional<DecodedDescriptor> binding_descriptor_;
+    std::size_t binding_index_{};
+    std::uint64_t binding_cycles_{};
+    bool task_binding_enabled_{};
     std::vector<RawWord> image_;
     std::deque<PendingFetch> pending_fetches_{};
     std::size_t outstanding_payload_fetches_{0};

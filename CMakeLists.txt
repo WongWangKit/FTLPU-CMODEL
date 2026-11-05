@@ -46,6 +46,9 @@ function(ftlpu_add_test target source test_name)
     set_tests_properties(${test_name} PROPERTIES LABELS "${ARGN}")
 endfunction()
 
+ftlpu_add_test(routing_control_unit_test tests/subsystem/routing/control_unit_test.cpp
+    subsystem.routing.control unit routing mem)
+
 function(ftlpu_add_demo target source)
     add_executable(${target} ${source})
     target_link_libraries(${target} PRIVATE ftlpu_cmodel)
