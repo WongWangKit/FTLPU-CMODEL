@@ -10,3 +10,54 @@ tests/unit/vxm/results/
 *.ilk
 *.dtmp
 .$*
+
+# Rebuildable CMake/compiler outputs (never ignore source profiles or fixtures).
+/cmake-build*/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/CTestTestfile.cmake
+/Testing/
+/compile_commands.json
+*.o
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+__pycache__/
+*.py[cod]
+
+# Local run outputs. Keep curated docs/traces and test fixtures versioned.
+/tmp/
+/temp/
+/results/
+/artifacts/
+/.cache/
+*.vcd
+*.fst
+*.wdb
+*.jou
+*.dcp
+
+# Machine-specific IDE/toolchain settings. Shared VSCode settings stay portable.
+/.vs/
+/.vscode/*
+!/.vscode/settings.json
+!/.vscode/extensions.json
+/CMakeUserPresets.json
+/CMakeSettings.local.json
+
+# Local credentials; examples may be committed after review.
+.env
+.env.*
+!.env.example
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+credentials.local.json
+secrets.local.json

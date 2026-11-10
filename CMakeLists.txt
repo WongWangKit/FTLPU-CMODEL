@@ -31,9 +31,9 @@ enable_testing()
 function(ftlpu_add_test target source test_name)
     add_executable(${target} ${source})
     target_link_libraries(${target} PRIVATE ftlpu_cmodel)
-    # The imported VXM hardware tests use assert for cycle and numeric checks.
+    # VXM/SXM and MEM timing tests use assert for cycle and numeric checks.
     # Keep those checks active in the normal Release regression build too.
-    if(target MATCHES "^(vxm_|sxm_|icu_sxm_)")
+    if(target MATCHES "^(vxm_|sxm_|icu_sxm_|mem_|vector_roundtrip)")
         if(MSVC)
             target_compile_options(${target} PRIVATE /UNDEBUG)
         else()
@@ -79,6 +79,13 @@ ftlpu_add_test(mem_array_separated_test tests/unit/mem/mem_array_test.cpp
     unit.mem.array unit mem fast)
 ftlpu_add_test(mem_replay_copy_test tests/unit/mem/replay_copy_test.cpp
     unit.mem.replay_copy unit mem fast)
+ftlpu_add_test(mem_sync_read_test tests/unit/mem/mem_sync_read_test.cpp
+    unit.mem.sync_read unit mem fast)
+ftlpu_add_test(mem_array_r1_test tests/unit/mem/mem_array_test.cpp
+    unit.mem.array_r1 unit mem fast)
+target_compile_definitions(mem_array_r1_test PRIVATE FTLPU_TEST_MEM_R1=1)
+ftlpu_add_test(mem_read_mode_test tests/unit/mem/mem_read_mode_test.cpp
+    unit.mem.read_mode unit mem fast)
 ftlpu_add_test(vector_roundtrip_test tests/unit/mem/vector_roundtrip_test.cpp
     unit.mem.vector_roundtrip unit mem fast)
 
@@ -121,6 +128,8 @@ ftlpu_add_test(sxm_wide_transpose_test tests/unit/sxm/wide_transpose_test.cpp
     unit.sxm.wide_transpose unit sxm fast)
 ftlpu_add_test(sxm_attention_transpose_test tests/unit/sxm/attention_transpose_test.cpp
     unit.sxm.attention_transpose unit sxm fast)
+ftlpu_add_test(sxm_local_blocks_timing_test tests/unit/sxm/local_blocks_timing_test.cpp
+    unit.sxm.local_blocks_timing unit sxm fast)
 ftlpu_add_test(icu_barrier_test tests/unit/icu/barrier_test.cpp
     unit.icu.barrier unit icu fast)
 ftlpu_add_test(icu_common_barrier_test tests/unit/icu/common_barrier_test.cpp
@@ -204,6 +213,8 @@ ftlpu_add_test(mxm_decode_streamed_weight_test
     subsystem.mxm.decode_streamed_weight subsystem mxm fast)
 ftlpu_add_test(sxm_mem_transpose_test tests/subsystem/sxm/mem_transpose_test.cpp
     subsystem.sxm.mem_transpose subsystem sxm fast)
+add_test(NAME subsystem.sxm.mem_transpose_smoke COMMAND sxm_mem_transpose_test 2)
+set_tests_properties(subsystem.sxm.mem_transpose_smoke PROPERTIES LABELS "subsystem;sxm;fast")
 
 # Kernel tests: one neural-network operator or fused operator pipeline.
 ftlpu_add_test(w8a16_projection_test tests/kernel/w8a16_projection_test.cpp
@@ -245,3 +256,22 @@ ftlpu_add_demo(sxm_chain_demo examples/sxm/chain_demo.cpp)
 ftlpu_add_demo(stream_topology_api_demo examples/system/stream_topology_api_demo.cpp)
 
 ftlpu_add_test(vxm_fp32_input_test tests/unit/vxm/fp32_input_test.cpp vxm_fp32_input)
+
+# Opt-in SXM typed matrix reference. Avoid linking unrelated MXM/System ISA
+# objects so the bounded T=2/4/8 MEM/SXM reference can be tested independently.
+foreach(pair IN ITEMS "sxm_matrix_test|tests/unit/sxm/matrix_test.cpp|unit.sxm.matrix"
+                      "sxm_matrix_mem_vxm_test|tests/subsystem/sxm/matrix_mem_vxm_test.cpp|subsystem.sxm.matrix_mem_vxm")
+    string(REPLACE "|" ";" fields "${pair}")
+    list(GET fields 0 target)
+    list(GET fields 1 source)
+    list(GET fields 2 test_name)
+    add_executable(${target} ${source} src/mem/sram.cpp)
+    target_include_directories(${target} PRIVATE "${FTLPU_GENERATED_INCLUDE_DIR}" include tests/support)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(${target} PRIVATE -UNDEBUG)
+    endif()
+    add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${target}>)
+    set_tests_properties(${test_name} PROPERTIES LABELS "sxm;matrix;fast")
+endforeach()

@@ -94,6 +94,10 @@ public:
         ZeroFill,
     };
 
+    // Main preserves upstream schedules. RegisteredR1 samples at A and stages
+    // that immutable response at the next evaluate(), for fabric commit B.
+    enum class ReadTiming { Main, RegisteredR1 };
+
     struct MemTransfer {
         enum class Kind {
             StoreStreamToSram,
@@ -120,9 +124,11 @@ public:
 
     explicit MemArrayModel(
         MemStreamPortMap ports = MemStreamPortMap::BetweenBoundaries(),
-        MissingStreamPolicy missing_stream_policy = MissingStreamPolicy::Error)
+        MissingStreamPolicy missing_stream_policy = MissingStreamPolicy::Error,
+        ReadTiming read_timing = ReadTiming::Main)
         : ports_(std::move(ports))
         , missing_stream_policy_(missing_stream_policy)
+        , read_timing_(read_timing)
     {
     }
 
@@ -148,6 +154,12 @@ public:
         executed_mem_.clear();
         executed_instructions_.clear();
         transport_commits_.clear();
+        read_responses_.clear();
+        staged_read_responses_.clear();
+        consumed_mem_.clear();
+        pending_compute_read_ = false;
+        pending_transport_read_ = false;
+        last_transport_commit_segments_ = 0;
     }
 
     void set_sram_depth_rows(std::size_t rows)
@@ -167,6 +179,7 @@ public:
 
     bool idle() const noexcept
     {
+        if (has_pending_read_responses()) return false;
         for (const auto& slice : instruction_queues_)
             for (const auto& bank : slice)
                 for (const auto& queue : bank)
@@ -181,6 +194,7 @@ public:
 
     bool compute_idle() const noexcept
     {
+        if (pending_compute_read_) return false;
         for (const auto& slice : instruction_queues_)
             for (const auto& bank : slice)
                 for (const auto& queue : bank)
@@ -196,6 +210,7 @@ public:
 
     bool transport_idle() const noexcept
     {
+        if (pending_transport_read_) return false;
         for (const auto& slice : instruction_queues_)
             for (const auto& bank : slice)
                 for (const auto& queue : bank)
@@ -372,9 +387,40 @@ public:
         return executed_instructions_;
     }
 
+    ReadTiming read_timing() const noexcept { return read_timing_; }
+
+    // RegisteredR1 outputs after the most recent sampling edge A. These
+    // snapshots are independent of trace capture and are staged at the next
+    // evaluate(), for the owning fabric's edge B commit. No SRAM re-read.
+    // Main mode has no pending response queue; both response views stay empty.
+    const std::vector<MemTransfer>& read_responses() const noexcept
+    {
+        return read_responses_;
+    }
+
+    // Observation of the old registered outputs used by this evaluate().
+    // This is not an additional response pipeline stage.
+    const std::vector<MemTransfer>& staged_read_responses() const noexcept
+    {
+        return staged_read_responses_;
+    }
+
+    const std::vector<MemTransfer>& consumed_transfers() const noexcept
+    {
+        return consumed_mem_;
+    }
+
+    bool has_pending_read_responses() const noexcept
+    {
+        return !read_responses_.empty();
+    }
+
     // Evaluate one MEM cycle against the current SR state.  This method never
     // propagates or commits the SR fabric: the owning system performs one
-    // global fabric commit after all functional slices have evaluated.
+    // global fabric commit after all functional slices have evaluated. Main
+    // stages reads immediately, preserving upstream timing. RegisteredR1 first
+    // stages the PRE-edge response, then samples this edge's reads. Writes
+    // consume this cycle's current in both modes.
     void evaluate(StreamRegisterFabric& fabric, bool capture_trace = true)
     {
         ports_.validate_for(fabric);
@@ -385,6 +431,17 @@ public:
         executed_mem_.clear();
         executed_instructions_.clear();
         last_transport_commit_segments_ = 0;
+        consumed_mem_.clear();
+        staged_read_responses_.swap(read_responses_);
+        read_responses_.clear();
+        pending_compute_read_ = false;
+        pending_transport_read_ = false;
+        for (const auto& response : staged_read_responses_) {
+            StreamOutputPort output(fabric, response.sr_column,
+                response.stream.direction(), "MEM Read");
+            output.write_payload_segment(response.tile, response.stream.index(),
+                response.bytes, response.vector_tag);
+        }
         dispatch_from_queues();
         capture_trace_ = capture_trace;
         execute_current_instructions(fabric);
@@ -533,17 +590,21 @@ private:
             sram_.bank(mem_slice, bank).read_segment(tile, physical_address);
         const auto vector_tag = static_cast<std::uint64_t>(cycle_) * hw::kTileRows + tile;
 
-        StreamOutputPort output(
-            fabric,
-            sr_column,
-            stream.direction(),
-            "MEM Read");
-        output.write_payload_segment(
-            tile,
-            stream.index(),
-            bytes,
-            vector_tag);
+        if (read_timing_ == ReadTiming::RegisteredR1) {
+            read_responses_.push_back(MemTransfer {
+                MemTransfer::Kind::LoadSramToStream,
+                mem_slice, bank, tile, sr_column, stream,
+                physical_address, vector_tag, bytes,
+            });
+            if (instruction.transport_generation) pending_transport_read_ = true;
+            else pending_compute_read_ = true;
+        } else {
+            StreamOutputPort output(fabric, sr_column, stream.direction(), "MEM Read");
+            output.write_payload_segment(tile, stream.index(), bytes, vector_tag);
+        }
 
+        // Keep execution trace at the SRAM sampling edge. The response and
+        // staged-response accessors distinguish output and fabric phases.
         if (capture_trace_) {
             executed_mem_.push_back(MemTransfer {
                 MemTransfer::Kind::LoadSramToStream,
@@ -587,6 +648,13 @@ private:
                 throw std::logic_error("transport MEM write consumed computation SR data");
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                 bytes[lane] = segment[lane].data;
+            }
+            if (!instruction.preserve_stream) {
+                consumed_mem_.push_back(MemTransfer {
+                    MemTransfer::Kind::StoreStreamToSram,
+                    mem_slice, bank, tile, sr_column, stream,
+                    instruction.address, vector_tag, bytes,
+                });
             }
         } else if (instruction.transport_generation) {
             throw std::logic_error("transport MEM commit has no valid C2C payload");
@@ -800,6 +868,7 @@ private:
 
     MemStreamPortMap ports_;
     MissingStreamPolicy missing_stream_policy_{MissingStreamPolicy::Error};
+    ReadTiming read_timing_{ReadTiming::Main};
     SramArray sram_{};
     std::array<
         std::array<std::array<std::deque<MemInstruction>, 2>,
@@ -812,6 +881,11 @@ private:
         hw::kMemSliceColumns> instruction_rows_{};
     std::vector<MemTransfer> executed_mem_{};
     std::vector<InstructionTrace> executed_instructions_{};
+    std::vector<MemTransfer> read_responses_{};
+    std::vector<MemTransfer> staged_read_responses_{};
+    std::vector<MemTransfer> consumed_mem_{};
+    bool pending_compute_read_{false};
+    bool pending_transport_read_{false};
     std::size_t cycle_{0};
     bool capture_trace_{true};
     struct TransportCommitState {

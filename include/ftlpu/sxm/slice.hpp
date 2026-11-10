@@ -119,7 +119,10 @@ public:
         if (units_.issued_count() != 0 || permute_instruction_
             || !fanout_outputs_.empty()) return false;
         for (const auto& row : transpose_instruction_rows_) if (row) return false;
-        for (const auto ready : transpose_bank_.tile_ready) if (ready) return false;
+        // A partially captured block still owns its source slot. Match the
+        // VModel compat engine's occupied-row busy rule; drain must not wait
+        // only for tile_ready (all eight rows).
+        for (const auto rows : transpose_bank_.input_row_mask) if (rows != 0) return false;
         return true;
     }
 

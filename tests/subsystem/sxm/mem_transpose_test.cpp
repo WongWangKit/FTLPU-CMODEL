@@ -13,8 +13,7 @@ constexpr std::size_t kMatrixSize = ftlpu::hw::kPhysicalVectorBytes;
 constexpr std::size_t kBlockSize = ftlpu::hw::kLanesPerTile;
 constexpr std::size_t kBlocks = ftlpu::hw::kTileRows;
 constexpr std::size_t kStreams = 2 * kBlockSize;
-constexpr std::size_t kMatrixCount = 96;
-constexpr std::size_t kInputBeats = kMatrixCount * kBlocks;
+constexpr std::size_t kDefaultMatrixCount = 96;
 constexpr std::size_t kRouteStart = 3;
 constexpr std::size_t kMemToSxmLatency =
     ftlpu::hw::kMemGroups
@@ -95,22 +94,26 @@ public:
         mem_[queue] = cycle + count;
     }
 
-    void transpose_at(std::size_t cycle, ftlpu::SxmInstruction instruction)
+    void transpose_run(std::size_t cycle, std::size_t count, ftlpu::SxmInstruction instruction)
     {
         pad(transpose_, cycle, [&](std::size_t n) {
             icu_.enqueue_sxm_transpose_nop(hemisphere_, n);
         });
-        icu_.enqueue_sxm_transpose(hemisphere_, std::move(instruction));
-        transpose_ = cycle + 1;
+        icu_.sxm_transpose_iq(hemisphere_).push_sxm_run_2d(
+            ftlpu::SxmIcuRun2DInstruction::Run2D(
+                0, {count, 1}, {1, 1}, std::move(instruction)));
+        transpose_ = cycle + count;
     }
 
-    void permute_at(std::size_t cycle, ftlpu::SxmInstruction instruction)
+    void permute_run(std::size_t cycle, std::size_t count, ftlpu::SxmInstruction instruction)
     {
         pad(permute_, cycle, [&](std::size_t n) {
             icu_.enqueue_sxm_permute_nop(hemisphere_, n);
         });
-        icu_.enqueue_sxm_permute(hemisphere_, std::move(instruction));
-        permute_ = cycle + 1;
+        icu_.sxm_permute_iq(hemisphere_).push_sxm_run_2d(
+            ftlpu::SxmIcuRun2DInstruction::Run2D(
+                0, {count, 1}, {1, 1}, std::move(instruction), kBlockSize));
+        permute_ = cycle + count;
     }
 
 private:
@@ -129,9 +132,9 @@ private:
 };
 
 void initialize_matrix(
-    ftlpu::TspSliceSystem& system, ftlpu::Hemisphere hemisphere)
+    ftlpu::TspSliceSystem& system, ftlpu::Hemisphere hemisphere, std::size_t matrix_count)
 {
-    for (std::size_t matrix = 0; matrix < kMatrixCount; ++matrix) {
+    for (std::size_t matrix = 0; matrix < matrix_count; ++matrix) {
         for (std::size_t block_row = 0; block_row < kBlocks; ++block_row) {
             for (std::size_t block_column = 0; block_column < kBlocks; ++block_column) {
                 for (std::size_t local_row = 0; local_row < kBlockSize; ++local_row) {
@@ -156,8 +159,9 @@ void initialize_matrix(
     }
 }
 
-void build_schedule(Schedule& schedule)
+void build_schedule(Schedule& schedule, std::size_t matrix_count)
 {
+    const auto input_beats = matrix_count * kBlocks;
     const auto transpose_src = east_streams(16, kStreams);
     const auto transpose_internal = east_streams(0, kStreams);
     const auto transpose_dst = west_streams(0, kStreams);
@@ -175,7 +179,7 @@ void build_schedule(Schedule& schedule)
             read_cycle,
             ftlpu::MemInstruction::Read(
                 0, ftlpu::StreamId::East(16 + stream)),
-            kInputBeats,
+            input_beats,
             1);
 
         const auto write_cycle = kCaptureStart + 1
@@ -186,32 +190,27 @@ void build_schedule(Schedule& schedule)
             write_cycle,
             ftlpu::MemInstruction::Write(
                 kOutputAddressBase, ftlpu::StreamId::West(stream)),
-            kInputBeats,
+            input_beats,
             1);
     }
 
     // A new matrix starts every four beats.  The three-cycle northbound tail
     // overlaps the next matrix, while the Permute map repeats every four waves.
-    constexpr auto kWaveCount = kInputBeats + kBlocks - 1;
-    for (std::size_t wave = 0; wave < kWaveCount; ++wave) {
-        if (wave < kInputBeats) {
-            schedule.transpose_at(
-                kCaptureStart + wave,
-                ftlpu::SxmInstruction::Transpose(transpose_src, transpose_internal));
-        }
-        schedule.permute_at(
-            kCaptureStart + wave + 1,
-            ftlpu::SxmInstruction::Permute(
-                transpose_internal,
-                transpose_dst,
-                wavefront_map(wave)));
-    }
+    // Do not enqueue a singleton descriptor for every beat. At T4, P consumes
+    // four i-MEM words but fetch supplies one per cycle: the prefilled IQ runs
+    // out at cycle 23 while T keeps capturing. One existing RUN_2D context
+    // sustains II=1 and rotates the source tile by eight lanes per wave.
+    schedule.transpose_run(kCaptureStart, input_beats,
+        ftlpu::SxmInstruction::Transpose(transpose_src, transpose_internal));
+    schedule.permute_run(kCaptureStart + 1, input_beats + kBlocks - 1,
+        ftlpu::SxmInstruction::Permute(
+            transpose_internal, transpose_dst, wavefront_map(0)));
 }
 
 bool verify_transpose(const ftlpu::TspSliceSystem& system,
-    ftlpu::Hemisphere hemisphere)
+    ftlpu::Hemisphere hemisphere, std::size_t matrix_count)
 {
-    for (std::size_t matrix = 0; matrix < kMatrixCount; ++matrix) {
+    for (std::size_t matrix = 0; matrix < matrix_count; ++matrix) {
         for (std::size_t row = 0; row < kMatrixSize; ++row) {
             for (std::size_t column = 0; column < kMatrixSize; ++column) {
                 std::uint16_t actual = 0;
@@ -237,30 +236,55 @@ bool verify_transpose(const ftlpu::TspSliceSystem& system,
     return true;
 }
 
-bool run_hemisphere(ftlpu::Hemisphere hemisphere)
+bool run_hemisphere(ftlpu::Hemisphere hemisphere, std::size_t matrix_count)
 {
     auto system = ftlpu::TspSliceSystem {};
-    initialize_matrix(system, hemisphere);
+    if (system.mem_array(hemisphere).read_timing() != ftlpu::MemArrayModel::ReadTiming::Main)
+        throw std::runtime_error("transpose regression must retain default MEM Main timing");
+    initialize_matrix(system, hemisphere, matrix_count);
     auto schedule = Schedule(system.icu(), hemisphere);
-    build_schedule(schedule);
+    build_schedule(schedule, matrix_count);
 
-    constexpr std::size_t kRunCycles =
-        kCaptureStart + kInputBeats + 16 + kBlocks;
-    for (std::size_t cycle = 0; cycle < kRunCycles; ++cycle)
+    const auto input_beats = matrix_count * kBlocks;
+    const auto run_cycles = kCaptureStart + input_beats + 16 + kBlocks;
+    for (std::size_t cycle = 0; cycle < run_cycles; ++cycle) {
         system.tick({});
+        const auto& t = system.icu().sxm_transpose_iq(hemisphere).last_trace();
+        const auto& p = system.icu().sxm_permute_iq(hemisphere).last_trace();
+        const bool expected_t = cycle >= kCaptureStart && cycle < kCaptureStart + input_beats;
+        const bool expected_p = cycle >= kCaptureStart + 1
+            && cycle < kCaptureStart + input_beats + kBlocks;
+        // Cycle 0 issues the initial NOP, not a T/P operation.
+        if (cycle != 0 && (t.issue_pc.has_value() != expected_t || p.issue_pc.has_value() != expected_p))
+            throw std::runtime_error("SXM T/P issue calendar diverged at cycle " + std::to_string(cycle));
+        if (t.action == ftlpu::IcuQueueAction::ThreeDDecodeWait
+            || p.action == ftlpu::IcuQueueAction::ThreeDDecodeWait)
+            throw std::runtime_error("SXM RUN_2D decode starved");
+    }
+    if (!system.icu().program_queues_done() || !system.program_resources_drained())
+        throw std::runtime_error("transpose data matched but ICU/SXM/MEM/SR did not drain");
 
-    return verify_transpose(system, hemisphere);
+    return verify_transpose(system, hemisphere, matrix_count);
 }
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 try {
-    if (!run_hemisphere(ftlpu::Hemisphere::East)
-        || !run_hemisphere(ftlpu::Hemisphere::West))
+    if (argc > 2) throw std::invalid_argument("usage: sxm_mem_transpose_test [matrix-count: 1..96]");
+    std::size_t matrix_count = kDefaultMatrixCount;
+    if (argc == 2) {
+        std::size_t used = 0;
+        matrix_count = std::stoull(argv[1], &used);
+        if (used != std::string(argv[1]).size() || matrix_count == 0 || matrix_count > kDefaultMatrixCount)
+            throw std::invalid_argument("matrix-count must be in 1..96");
+    }
+    if (!run_hemisphere(ftlpu::Hemisphere::East, matrix_count)
+        || !run_hemisphere(ftlpu::Hemisphere::West, matrix_count))
         return 1;
     std::cout << "bidirectional local MEM -> SXM -> MEM continuous 32x32 FP16 transpose passed: matrices="
-              << kMatrixCount << ", initiation_interval=" << kBlocks << '\n';
+              << matrix_count << ", initiation_interval=" << kBlocks
+              << ", exact T/P issue calendar and full drain checked\n";
     return 0;
 } catch (const std::exception& error) {
     std::cerr << "SXM MEM transpose test failed: " << error.what() << '\n';

@@ -3,6 +3,16 @@
 #include <cassert>
 #include <cstdint>
 
+namespace {
+#ifdef FTLPU_TEST_MEM_R1
+constexpr auto kReadTiming = ftlpu::MemArrayModel::ReadTiming::RegisteredR1;
+constexpr std::size_t kReadLatency = 1;
+#else
+constexpr auto kReadTiming = ftlpu::MemArrayModel::ReadTiming::Main;
+constexpr std::size_t kReadLatency = 0;
+#endif
+}
+
 int main()
 {
     constexpr std::size_t kMemSlice = 8; // group 2: east input SR2, east output SR3
@@ -11,8 +21,10 @@ int main()
 
     {
         ftlpu::StreamRegisterFabric fabric(ftlpu::hw::kMemBoundaryStreamRegisterColumns);
-        ftlpu::MemArrayModel mem;
-        constexpr std::size_t kTile = 3;
+        ftlpu::MemArrayModel mem(
+            ftlpu::MemStreamPortMap::BetweenBoundaries(),
+            ftlpu::MemArrayModel::MissingStreamPolicy::Error, kReadTiming);
+        constexpr std::size_t kTile = ftlpu::hw::kTileRows - 1;
 
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
             mem.set_sram_lane_byte(
@@ -23,11 +35,15 @@ int main()
                 static_cast<std::uint8_t>(100 + lane));
         }
 
-        // Instruction takes three cycles to reach tile 3.
+        // Main commits at the sampling edge; explicit R1 adds one response edge.
         mem.enqueue_instruction(kMemSlice, ftlpu::MemInstruction::Read(kAddress, stream));
-        for (std::size_t cycle = 0; cycle <= kTile; ++cycle) {
+        for (std::size_t cycle = 0; cycle <= kTile + kReadLatency; ++cycle) {
             fabric.begin_cycle();
             mem.evaluate(fabric);
+            if (kReadLatency != 0 && cycle == kTile) {
+                assert(mem.read_responses().back().tile == kTile);
+                assert(!fabric.staged_segment_valid(3, kTile, stream));
+            }
             fabric.stage_linear_links();
             fabric.commit_cycle();
         }
@@ -44,7 +60,9 @@ int main()
 
     {
         ftlpu::StreamRegisterFabric fabric(ftlpu::hw::kMemBoundaryStreamRegisterColumns);
-        ftlpu::MemArrayModel mem;
+        ftlpu::MemArrayModel mem(
+            ftlpu::MemStreamPortMap::BetweenBoundaries(),
+            ftlpu::MemArrayModel::MissingStreamPolicy::Error, kReadTiming);
         constexpr std::size_t kWriteAddress = 128;
         constexpr std::size_t kWriteIssueCycle = 3; // source SR boundary is column 2
 
@@ -89,7 +107,9 @@ int main()
 
     {
         ftlpu::StreamRegisterFabric fabric(ftlpu::hw::kMemBoundaryStreamRegisterColumns);
-        ftlpu::MemArrayModel mem;
+        ftlpu::MemArrayModel mem(
+            ftlpu::MemStreamPortMap::BetweenBoundaries(),
+            ftlpu::MemArrayModel::MissingStreamPolicy::Error, kReadTiming);
         constexpr std::size_t kWriteAddress = 160;
         constexpr std::size_t kWriteIssueCycle = 3;
         constexpr std::size_t kLastTile = ftlpu::hw::kTileRows - 1;
@@ -135,7 +155,9 @@ int main()
 
     {
         ftlpu::StreamRegisterFabric fabric(ftlpu::hw::kMemBoundaryStreamRegisterColumns);
-        ftlpu::MemArrayModel mem;
+        ftlpu::MemArrayModel mem(
+            ftlpu::MemStreamPortMap::BetweenBoundaries(),
+            ftlpu::MemArrayModel::MissingStreamPolicy::Error, kReadTiming);
         constexpr std::size_t kReadAddress = 192;
         constexpr std::size_t kWriteAddress = 193;
         constexpr std::size_t kIssueCycle = 3;
@@ -177,6 +199,16 @@ int main()
         }
 
         const auto output_column = mem.ports().output_column(kMemSlice, read_stream.direction());
+        if (kReadLatency != 0) {
+            // No issue or Write schedule changes: drain the already sampled last
+            // Read response through the existing SR commit boundary once.
+            assert(mem.read_responses().back().tile == kLastTile);
+            assert(!fabric.cell(output_column, kLastTile, 0, read_stream).valid);
+            fabric.begin_cycle();
+            mem.evaluate(fabric);
+            fabric.stage_linear_links();
+            fabric.commit_cycle();
+        }
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
             const auto& read_cell = fabric.cell(output_column, kLastTile, lane, read_stream);
             assert(read_cell.valid);
@@ -192,7 +224,9 @@ int main()
 
     {
         ftlpu::StreamRegisterFabric fabric(ftlpu::hw::kMemBoundaryStreamRegisterColumns);
-        ftlpu::MemArrayModel mem;
+        ftlpu::MemArrayModel mem(
+            ftlpu::MemStreamPortMap::BetweenBoundaries(),
+            ftlpu::MemArrayModel::MissingStreamPolicy::Error, kReadTiming);
         constexpr std::size_t kReadAddress = 224;
         constexpr std::size_t kWriteAddress = 225;
         constexpr std::size_t kIssueCycle = 3;
@@ -253,7 +287,7 @@ int main()
             ftlpu::hw::kMemBoundaryStreamRegisterColumns);
         ftlpu::MemArrayModel mem(
             ftlpu::MemStreamPortMap::BetweenBoundaries(),
-            ftlpu::MemArrayModel::MissingStreamPolicy::ZeroFill);
+            ftlpu::MemArrayModel::MissingStreamPolicy::ZeroFill, kReadTiming);
         constexpr std::size_t kAddress = 226;
         const auto stream = ftlpu::StreamId::West(3);
         for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile)

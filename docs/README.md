@@ -12,6 +12,12 @@
   coarse transpose/permute tile program.
 - `icu_mem_slice_program.md` and `icu_mem_slice_program.zh-CN.md` describe the
   multi-operation program executed by one physical MEM slice ICU.
+- [SXM instruction status](sxm_instruction_status.md) describes the opt-in typed
+  matrix reference, unchanged legacy ABI, and the remaining RTL/CModel boundaries.
+- [SXM/MEM regression](sxm_mem_regression.md) contains repository-local commands,
+  the validated small-regression results, and publication scope.
+- [SXM cycle-23 fix](sxm_mem_transpose_timing.md) records the legacy ICU scheduling fix.
+- [MEM Main/R1 timing](mem_read_timing.md) describes unchanged Main defaults and explicit R1 use.
 
 Generated files keep stable names so they can be regenerated in place. For
 example, serve the repository and open:
