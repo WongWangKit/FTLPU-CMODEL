@@ -2243,14 +2243,15 @@ private:
                 os << " inner=" << instruction.weight_inner_column
                    << " streams="
                    << (instruction.weight_input_mode
-                               == MxmWeightInputMode::Int8DequantBf16
+                               != MxmWeightInputMode::Direct16
                            ? 1
                            : 2);
             }
-            os << (instruction.weight_input_mode
-                           == MxmWeightInputMode::Int8DequantBf16
-                       ? " int8"
-                       : " direct16");
+            switch (instruction.weight_input_mode) {
+            case MxmWeightInputMode::Int8DequantBf16: os << " int8"; break;
+            case MxmWeightInputMode::Fp8DequantBf16: os << " fp8_e4m3fn"; break;
+            case MxmWeightInputMode::Direct16: os << " direct16"; break;
+            }
         } else if (instruction.opcode == MxmControlOpcode::Compute) {
             os << "Compute b" << instruction.weight_buffer
                << " stream=" << instruction.activation_stream_base

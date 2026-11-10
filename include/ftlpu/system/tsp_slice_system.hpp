@@ -806,7 +806,7 @@ private:
                 "MXM weight input requested without an active IW instruction");
         }
         if (instruction->weight_input_mode
-            == MxmWeightInputMode::Int8DequantBf16) {
+            != MxmWeightInputMode::Direct16) {
             const auto stream_base = instruction->weight_stream_base;
             if (instruction->weight_load_mode
                 == MxmWeightLoadMode::Vector) {

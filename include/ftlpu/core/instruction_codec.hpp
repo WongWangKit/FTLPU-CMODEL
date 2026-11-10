@@ -93,6 +93,21 @@ struct MxmEncodingLayout {
     static_assert(kComputeEnd <= 64 && kDecodeEnd <= 64 && kIwEnd <= 64);
 };
 
+// The load queue's 16-bit WS template has no spare payload bit. Tag 01
+// selects FP8 IW here; compute instructions have a separate queue.
+inline std::uint64_t pack_mxm_load_template(std::uint64_t native)
+{
+    constexpr auto fp8 = std::uint64_t{1} << MxmEncodingLayout::kIwEnd;
+    return (native & 3) == 0 && (native & fp8) ? (native & ~fp8) | 1 : native;
+}
+
+inline std::uint64_t unpack_mxm_load_template(std::uint64_t packed)
+{
+    return (packed & 3) == 1
+        ? (packed & ~std::uint64_t{3}) | (std::uint64_t{1} << MxmEncodingLayout::kIwEnd)
+        : packed;
+}
+
 struct SxmEncodingLayout {
     static constexpr std::size_t kLaneBits = hw::kSxmLaneIndexBits;
     static constexpr std::size_t kTileBits = hw::kSxmTileSelectorBits;
@@ -305,7 +320,8 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
                    instruction.weight_load_mode == MxmWeightLoadMode::Vector)
                << MxmEncodingLayout::kIwMode)
             | (static_cast<std::uint64_t>(instruction.weight_inner_column) << MxmEncodingLayout::kIwInner)
-            | (static_cast<std::uint64_t>(instruction.weight_input_mode) << MxmEncodingLayout::kIwInput)
+            | (static_cast<std::uint64_t>(instruction.weight_input_mode == MxmWeightInputMode::Direct16) << MxmEncodingLayout::kIwInput)
+            | (static_cast<std::uint64_t>(instruction.weight_input_mode == MxmWeightInputMode::Fp8DequantBf16) << MxmEncodingLayout::kIwEnd)
             | (static_cast<std::uint64_t>(instruction.weight_stream_base) << MxmEncodingLayout::kIwStream);
     case MxmControlOpcode::Compute:
         MxmControlInstruction::check_data_format(instruction.data_format);
@@ -443,7 +459,8 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
     const auto iw_column_mode = ((word >> MxmEncodingLayout::kIwMode) & 0x1u) != 0;
     const auto iw_inner_column = static_cast<std::size_t>((word >> MxmEncodingLayout::kIwInner) & 0x7u);
     const auto iw_input_mode =
-        static_cast<MxmWeightInputMode>((word >> MxmEncodingLayout::kIwInput) & 0x1u);
+        static_cast<MxmWeightInputMode>(((word >> MxmEncodingLayout::kIwInput) & 1u)
+            | (((word >> MxmEncodingLayout::kIwEnd) & 1u) << 1));
     const auto iw_weight_stream_base =
         static_cast<std::size_t>((word >> MxmEncodingLayout::kIwStream) & 0x3fu);
     const auto compute_weight_buffer = static_cast<std::size_t>((word >> 2) & 0x1u);
@@ -454,7 +471,7 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
 
     switch (opcode) {
     case MxmControlOpcode::IW:
-        detail::require_reserved_zero(word, MxmEncodingLayout::mask(MxmEncodingLayout::kIwEnd), "encoded MXM IW instruction has non-zero reserved bits");
+        detail::require_reserved_zero(word, MxmEncodingLayout::mask(MxmEncodingLayout::kIwEnd + 1), "encoded MXM IW instruction has non-zero reserved bits");
         return iw_column_mode
             ? MxmControlInstruction::IWColumn(
                   iw_weight_buffer,

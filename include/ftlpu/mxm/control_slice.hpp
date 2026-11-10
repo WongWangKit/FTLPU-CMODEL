@@ -295,6 +295,7 @@ struct MxmControlInstruction {
     static void check_weight_input_mode(MxmWeightInputMode mode)
     {
         switch (mode) {
+        case MxmWeightInputMode::Fp8DequantBf16:
         case MxmWeightInputMode::Int8DequantBf16:
         case MxmWeightInputMode::Direct16:
             return;
@@ -307,8 +308,8 @@ struct MxmControlInstruction {
     {
         check_weight_input_mode(input_mode);
         const auto stream_count = load_mode == MxmWeightLoadMode::Vector
-            ? input_mode == MxmWeightInputMode::Int8DequantBf16 ? 1 : 2
-            : input_mode == MxmWeightInputMode::Int8DequantBf16
+            ? input_mode != MxmWeightInputMode::Direct16 ? 1 : 2
+            : input_mode != MxmWeightInputMode::Direct16
             ? hw::kMxmInt8LoadStreamsPerCycle
             : hw::kMxmLoadStreamsPerCycle;
         if (stream_base + stream_count > hw::kEastStreams) {
@@ -849,7 +850,7 @@ private:
                 if (instruction->opcode == MxmControlOpcode::IW) {
                     const auto needs_dequant =
                         instruction->weight_input_mode
-                        == MxmWeightInputMode::Int8DequantBf16;
+                        != MxmWeightInputMode::Direct16;
                     dequant_consumed = needs_dequant;
                     if (needs_dequant != dequant_instruction.has_value()) {
                         throw std::logic_error(
@@ -869,7 +870,7 @@ private:
                             os << " inner=" << instruction->weight_inner_column;
                         }
                         if (needs_dequant) {
-                            os << " int8 scale="
+                            os << (instruction->weight_input_mode == MxmWeightInputMode::Fp8DequantBf16 ? " fp8 scale=" : " int8 scale=")
                                << dequant_instruction->scale();
                         } else {
                             os << " direct16";

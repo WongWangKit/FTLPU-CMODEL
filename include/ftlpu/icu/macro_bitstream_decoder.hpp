@@ -1194,6 +1194,8 @@ private:
             const auto header = peek_bits(header_bits);
             if (!header.has_value()) return;
             plan.native = bit_field(*header, 1, native_bits);
+            if (kind_ == IcuMacroQueueKind::MxmLoad)
+                plan.native = isa::unpack_mxm_load_template(plan.native);
             if (plan.extended) {
                 plan.payload_bits = kExtendedTemplatePayloadBits;
             } else {

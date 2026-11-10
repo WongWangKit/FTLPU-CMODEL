@@ -6,6 +6,8 @@
 #include "ftlpu/mxm/supercell.hpp"
 
 #include <array>
+#include <cmath>
+#include <limits>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -15,6 +17,7 @@ namespace ftlpu {
 enum class MxmWeightInputMode {
     Int8DequantBf16 = 0,
     Direct16 = 1,
+    Fp8DequantBf16 = 2,
 };
 
 struct MxmDequantInstruction {
@@ -67,7 +70,8 @@ public:
         if (input_mode == MxmWeightInputMode::Direct16) {
             return input.values;
         }
-        if (input_mode != MxmWeightInputMode::Int8DequantBf16) {
+        if (input_mode != MxmWeightInputMode::Int8DequantBf16
+            && input_mode != MxmWeightInputMode::Fp8DequantBf16) {
             throw std::invalid_argument("MXM weight input mode is invalid");
         }
 
@@ -77,7 +81,7 @@ public:
             convert_column(
                 input,
                 inner_column,
-                instruction.scale_bf16,
+                input_mode, instruction.scale_bf16,
                 output);
             return output;
         }
@@ -90,7 +94,7 @@ public:
             convert_column(
                 input,
                 column,
-                instruction.scale_bf16,
+                input_mode, instruction.scale_bf16,
                 output);
         }
         return output;
@@ -105,10 +109,21 @@ private:
         }
     }
 
+    static float decode_e4m3fn(std::uint8_t byte)
+    {
+        const unsigned magnitude = byte & 0x7f;
+        if (magnitude == 0x7f) return std::numeric_limits<float>::quiet_NaN();
+        const int exponent = magnitude >> 3;
+        const int fraction = magnitude & 7;
+        const float value = exponent == 0 ? std::ldexp(float(fraction), -9)
+            : std::ldexp(float(8 + fraction), exponent - 10);
+        return byte & 0x80 ? -value : value;
+    }
+
     static void convert_column(
         const MxmWeightInput& input,
         std::size_t column,
-        std::uint16_t dequant_scale_bf16,
+        MxmWeightInputMode mode, std::uint16_t dequant_scale_bf16,
         Output& output)
     {
         const auto scale = Bf16::from_bits(dequant_scale_bf16).to_float();
@@ -122,8 +137,9 @@ private:
                 throw std::logic_error(
                     "MXM INT8 IW weight input contains more than one byte");
             }
-            const auto quantized = static_cast<std::int8_t>(
-                static_cast<std::uint8_t>(word->data));
+            const auto byte = static_cast<std::uint8_t>(word->data);
+            const float quantized = mode == MxmWeightInputMode::Fp8DequantBf16
+                ? decode_e4m3fn(byte) : static_cast<float>(static_cast<std::int8_t>(byte));
             output[lane][column] = MxmArray::Supercell::InputWord {
                 Bf16::from_float(
                     static_cast<float>(quantized) * scale).bits(),

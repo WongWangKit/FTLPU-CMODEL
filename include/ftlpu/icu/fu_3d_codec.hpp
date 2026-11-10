@@ -290,6 +290,7 @@ inline void validate_buffer_mode(MxmIcuBufferMode mode)
 inline void validate_weight_input_mode(MxmWeightInputMode mode)
 {
     switch (mode) {
+    case MxmWeightInputMode::Fp8DequantBf16:
     case MxmWeightInputMode::Int8DequantBf16:
     case MxmWeightInputMode::Direct16:
         return;
@@ -726,8 +727,10 @@ inline EncodedMxmLoadIcu3DPacket encode_mxm_load_icu_3d_instruction(
         instruction.weight_stream_base,
         "MXM LOAD_3D weight stream base does not fit 5 bits");
     codec::write_unsigned(packet, MxmIcuEncodingLayout::kLoadInputMode, 1,
-        static_cast<std::uint8_t>(instruction.weight_input_mode),
+        instruction.weight_input_mode == MxmWeightInputMode::Direct16,
         "MXM LOAD_3D input mode does not fit 1 bit");
+    codec::write_unsigned(packet, MxmIcuEncodingLayout::kLoadEnd + 3, 1,
+        instruction.weight_input_mode == MxmWeightInputMode::Fp8DequantBf16, "FP8 IW flag");
     if (instruction.opcode == MxmLoadIcuOpcode::LoadColumn3D)
         codec::write_unsigned(packet, MxmIcuEncodingLayout::kLoadEnd, 3,
             instruction.weight_column_base % 8, "MXM inner column overflow");
@@ -771,7 +774,9 @@ inline MxmLoadIcuInstruction decode_mxm_load_icu_3d_instruction(
     }
     const bool columnLoad = local_operation == static_cast<std::uint8_t>(
         MxmLoadIcuOpcode::LoadColumn3D);
-    codec::require_reserved_zero(packet, MxmIcuEncodingLayout::kLoadEnd + (columnLoad ? 3 : 0),
+    if (!columnLoad && codec::read_unsigned(packet, MxmIcuEncodingLayout::kLoadEnd, 3))
+        throw std::logic_error("block IW has a reserved inner column");
+    codec::require_reserved_zero(packet, MxmIcuEncodingLayout::kLoadEnd + 4,
         "encoded MXM LOAD_3D packet has non-zero reserved bits");
     auto instruction = MxmLoadIcuInstruction {};
     instruction.opcode = static_cast<MxmLoadIcuOpcode>(local_operation);
@@ -791,7 +796,8 @@ inline MxmLoadIcuInstruction decode_mxm_load_icu_3d_instruction(
     instruction.weight_stream_base = static_cast<std::size_t>(
         codec::read_unsigned(packet, MxmIcuEncodingLayout::kLoadStream, 5));
     instruction.weight_input_mode = static_cast<MxmWeightInputMode>(
-        codec::read_unsigned(packet, MxmIcuEncodingLayout::kLoadInputMode, 1));
+        codec::read_unsigned(packet, MxmIcuEncodingLayout::kLoadInputMode, 1)
+        | (codec::read_unsigned(packet, MxmIcuEncodingLayout::kLoadEnd + 3, 1) << 1));
     codec::validate_buffer_mode(instruction.weight_buffer_mode);
     codec::validate_weight_input_mode(instruction.weight_input_mode);
     ::ftlpu::detail::validate_mxm_load_icu_instruction(instruction);
@@ -1159,7 +1165,8 @@ inline EncodedMxmLoadIcu3DPacket encode_mxm_load_icu_shortest_instruction(const 
 {
     // Preserve existing short-packet layouts. The column opcode uses three
     // additional tail bits and currently has only the full packet encoding.
-    if (instruction.opcode == MxmLoadIcuOpcode::LoadColumn3D)
+    if (instruction.opcode == MxmLoadIcuOpcode::LoadColumn3D
+        || instruction.weight_input_mode == MxmWeightInputMode::Fp8DequantBf16)
         return encode_mxm_load_icu_3d_instruction(instruction);
     return compact_mxm_packet(encode_mxm_load_icu_3d_instruction(instruction), instruction.loop);
 }
