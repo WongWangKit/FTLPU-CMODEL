@@ -108,6 +108,64 @@ public:
 
     using StreamBytes = std::array<std::uint8_t, kInputStreams>;
 
+    struct RouteCandidate {
+        float score{};
+        std::uint32_t expert{};
+        bool valid{};
+    };
+
+    void start_route_token()
+    {
+        route_bound_ = {};
+        start_route_round();
+    }
+
+    void start_route_round()
+    {
+        for (std::size_t chain = 0; chain < kBlockCount; ++chain) {
+            const auto tail = 2 * chain + 1;
+            if (stage_inputs_[tail]) throw std::logic_error("VXM routing stage has not drained");
+            accumulators_[tail].reset();
+        }
+    }
+
+    // A present but ineligible candidate still occupies its scheduled stage.
+    void route_filter(std::size_t chain, RouteCandidate candidate)
+    {
+        if (candidate.valid && route_bound_.valid) {
+            candidate.valid = VxmAlu::max_prefers_rhs(candidate.score, route_bound_.score)
+                || (candidate.score == route_bound_.score && candidate.expert > route_bound_.expert);
+        }
+        route_forward(chain, candidate);
+    }
+
+    std::size_t retire_route_candidates()
+    {
+        std::size_t comparisons = 0;
+        for (std::size_t chain = 0; chain < kBlockCount; ++chain) {
+            const auto tail = 2 * chain + 1;
+            auto& input = stage_inputs_[tail];
+            if (!input) continue;
+            comparisons += input->valid && accumulators_[tail].has_value();
+            if (input->valid && (!accumulators_[tail]
+                    || VxmAlu::max_prefers_rhs(*accumulators_[tail], input->value)
+                    || (*accumulators_[tail] == input->value && input->expert < route_ids_[chain]))) {
+                accumulators_[tail] = input->value;
+                route_ids_[chain] = input->expert;
+            }
+            input.reset();
+        }
+        return comparisons;
+    }
+
+    void route_merge(std::size_t chain) { route_forward(0, route_candidate(chain)); }
+
+    RouteCandidate finish_route_round()
+    {
+        route_bound_ = route_candidate(0);
+        return route_bound_;
+    }
+
     struct Utilization {
         std::uint64_t cycles{0};
         std::uint64_t executed_slots{0};
@@ -270,6 +328,8 @@ public:
         for (auto& pipeline : basic_pipelines_) pipeline.reset();
         for (auto& pipeline : special_pipelines_) pipeline.reset();
         for (auto& accumulator : accumulators_) accumulator.reset();
+        route_bound_ = {};
+        route_ids_.fill(0);
         for (auto& reg : output_registers_) reg.reset();
         for (auto& reg : feedback_holding_registers_) reg.reset();
         stream_inputs_.fill(0);
@@ -900,7 +960,21 @@ private:
         float original{0.0f};
         float auxiliary{0.0f};
         bool valid{false};
+        std::uint32_t expert{};
     };
+
+    void route_forward(std::size_t chain, RouteCandidate c)
+    {
+        auto& input = stage_inputs_.at(2 * chain + 1);
+        if (input) throw std::logic_error("VXM routing latch is occupied");
+        input = Token{c.score, 0.0f, 0.0f, c.valid, c.expert};
+    }
+
+    RouteCandidate route_candidate(std::size_t chain) const
+    {
+        const auto& score = accumulators_.at(2 * chain + 1);
+        return {score.value_or(0.0f), route_ids_.at(chain), score.has_value()};
+    }
 
     struct PendingFeedback {
         Token token{};
@@ -1210,6 +1284,8 @@ private:
     std::array<BasicPipeline, kAluCount> basic_pipelines_{};
     std::array<SpecialPipeline, kAluCount> special_pipelines_{};
     std::array<std::optional<float>, kAluCount> accumulators_{};
+    std::array<std::uint32_t, kBlockCount> route_ids_{};
+    RouteCandidate route_bound_{};
     std::array<std::optional<float>, kBlockCount> output_registers_{};
     // Each physical 8-stage chain has direct tail-to-head feedback.  During
     // 2->8 merging, C3/C5/C7 (and C11/C13/C15) use fixed holding registers.

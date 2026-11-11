@@ -448,6 +448,79 @@ static void combine_case(bool half=false) {
   rejects([&]{controller.start({RoutingOpcode::Combine,0,2},d,1,chip->routing());});
   std::cout<<"combine "<<(half?"FP16":"BF16")<<" K2 H64 cycles="<<controller.statistics().cycles<<" exact\n";
 }
+static void vxm_selection_protocol() {
+  Rig rig;
+  VxmSlice vxm;
+  RoutingDescriptor d;
+  d.opcode = RoutingOpcode::SelectVxm;
+  d.select.tokens = 1;
+  d.select.experts = d.select.k = 5;
+  d.select.choice_scores.element = RoutingElement::F32;
+  d.select.choice_scores.rows = 1;
+  d.select.choice_scores.columns = 5;
+  d.select.choice_scores.feature_stride = 1;
+  for (std::size_t byte = 0; byte < 4; ++byte)
+    d.select.choice_scores.planes[byte] = {1, static_cast<std::uint32_t>(byte), 0, 0};
+  d.vxm_select.first_bundle_cycle = 500;
+  for (std::size_t stream = 0; stream < d.vxm_select.streams; ++stream)
+    d.vxm_select.score_planes[stream] = {0, static_cast<std::uint32_t>(stream), 0, 0};
+  rig.rcu.start({RoutingOpcode::SelectVxm, 0, 7}, d, 2);
+  vxm.begin_topk(d, 2, 7);
+  const std::array<std::uint32_t, 5> scores{0x80000000u, 0, 0xff800000u,
+                                           0x7f800000u, 0x3f800000u};
+  VxmSlice::StreamMatrix bundle{};
+  for (auto& lane : bundle)
+    for (std::size_t expert = 0; expert < scores.size(); ++expert)
+      for (std::size_t byte = 0; byte < 4; ++byte)
+        lane[4 * expert + byte] = static_cast<std::uint8_t>(scores[expert] >> (8 * byte));
+
+  bool first = true;
+  std::optional<RoutingCompletion> completion;
+  for (std::size_t cycle = 0; cycle < 1000 && !completion; ++cycle) {
+    if (const auto word = vxm.topk().submission_word()) {
+      if (first) {
+        auto stale = *word;
+        stale.generation = 1;
+        require(!rig.rcu.submit_vxm_selection(stale), "stale VXM submission accepted");
+        auto wrong = *word;
+        ++wrong.index;
+        rejects([&] { rig.rcu.submit_vxm_selection(wrong); });
+        require(!rig.rcu.idle() && !rig.rcu.take_completion(),
+                "partial VXM result marked ready");
+        first = false;
+      } else if (rig.rcu.submit_vxm_selection(*word)) {
+        vxm.topk().accept_submission();
+      }
+    }
+    for (std::size_t tile = 0; tile < hw::kTileRows; ++tile)
+      if (vxm.topk().wants_input(tile)) vxm.set_stream_inputs(tile, bundle);
+    vxm.tick();
+    rig.tick();
+    completion = rig.rcu.take_completion();
+  }
+  require(completion && completion->instance == 7 && vxm.idle(),
+          "VXM selection did not drain");
+  require(rig.rcu.selected_experts() == std::vector<std::uint32_t>{3, 4, 0, 1, 2},
+          "VXM K=E or tie order");
+  require(rig.rcu.selected_score_bits() == std::vector<std::uint32_t>{
+              scores[3], scores[4], scores[0], scores[1], scores[2]},
+          "VXM score bits changed");
+
+  d.select.k = 1;
+  d.select.raw_scores = d.select.choice_scores;
+  d.select.raw_scores.planes[0].base_row = 1;
+  d.vxm_select.raw_offset = RouteVxmSelectSchedule::workspace_blocks(d.select.experts);
+  rig.rcu.start({RoutingOpcode::SelectVxm, 0, 8}, d, 2);
+  vxm.begin_topk(d, 2, 8);
+  vxm.tick();
+  // Expert 2 loses on its choice score but its eligible raw NaN must still fail.
+  bundle[0][4 * 2 + 2] = 0xc0;
+  bundle[0][4 * 2 + 3] = 0x7f;
+  vxm.set_stream_inputs(0, bundle);
+  rejects([&] { vxm.tick(); });
+  require(!rig.rcu.take_completion(), "invalid raw score published VXM selection");
+}
+
 int main() {
   try {
     scenario(1);
@@ -456,6 +529,7 @@ int main() {
     ownership_and_backpressure();
     combine_case();
     combine_case(true);
+    vxm_selection_protocol();
     std::cout << "routing control passed\n";
     return 0;
   } catch (const std::exception &e) {

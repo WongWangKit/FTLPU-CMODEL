@@ -33,6 +33,7 @@ struct MacroTaskBinding {
 struct MacroTaskParameters {
   std::array<std::uint32_t, 8> values{};
   std::uint64_t generation{}, task_id{};
+  bool alternate_weight_bank{};
 };
 inline void
 validate_macro_task_bindings(const std::vector<MacroTaskBinding> &bindings) {

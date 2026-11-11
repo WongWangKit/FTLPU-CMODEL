@@ -193,18 +193,22 @@ public:
         return true;
     }
 
-    bool compute_idle() const noexcept
+    bool compute_idle(std::uint64_t ignored_routing_owner = 0) const noexcept
     {
+        const auto busy = [ignored_routing_owner](const MemInstruction& instruction) {
+            return !instruction.transport_generation &&
+                (!ignored_routing_owner || instruction.routing_owner != ignored_routing_owner);
+        };
         for (const auto& slice : instruction_queues_)
             for (const auto& bank : slice)
                 for (const auto& queue : bank)
                     for (const auto& instruction : queue)
-                        if (!instruction.transport_generation) return false;
+                        if (busy(instruction)) return false;
         for (const auto& slice : instruction_rows_)
             for (const auto& bank : slice)
                 for (const auto& port : bank)
                     for (const auto& slot : port)
-                        if (slot && !slot->transport_generation) return false;
+                        if (slot && busy(*slot)) return false;
         return true;
     }
 

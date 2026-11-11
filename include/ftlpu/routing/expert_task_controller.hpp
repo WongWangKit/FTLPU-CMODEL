@@ -11,6 +11,7 @@ public:
   virtual bool accept_task(const ExpertTaskContext &) = 0;
   virtual void input_ready(const ExpertTaskContext &) = 0;
   virtual void weights_ready(const ExpertTaskContext &) {}
+  virtual void weights_ready(const ExpertTaskContext &task, std::size_t) { weights_ready(task); }
   virtual std::optional<ExpertTaskIdentity> poll_done() = 0;
 };
 class ExpertWeightService {
@@ -18,6 +19,10 @@ public:
   virtual ~ExpertWeightService() = default;
   virtual void start(const ExpertTaskContext &) = 0;
   virtual bool ready(ExpertTaskIdentity) const = 0;
+  virtual bool transfer_started(ExpertTaskIdentity task) const { return ready(task); }
+  virtual bool supports_prefetch() const { return false; }
+  virtual void prefetch(const ExpertTaskContext &) {}
+  virtual std::size_t buffer_for(ExpertTaskIdentity) const { return 0; }
   virtual void release_task(ExpertTaskIdentity) = 0;
 };
 
@@ -30,6 +35,11 @@ public:
   bool idle() const { return state_ == State::Idle && !completion_; }
   const ExpertTaskContext &task() const { return task_; }
   const ExpertTaskStatistics &statistics() const { return statistics_; }
+  void set_input_weight_overlap(bool enabled) {
+    if (!idle())
+      throw std::logic_error("configure overlap during task execution");
+    overlap_input_weights_ = enabled;
+  }
   void connect_weights(ExpertWeightService *weights) {
     if (!idle())
       throw std::logic_error("connect weights during task execution");
@@ -52,9 +62,11 @@ public:
   void reset() {
     auto *consumer = consumer_;
     auto *weights = weights_;
+    const auto overlap = overlap_input_weights_;
     *this = ExpertTaskController{};
     consumer_ = consumer;
     weights_ = weights;
+    overlap_input_weights_ = overlap;
   }
   void start(RoutingInstruction instruction,
              const std::vector<RoutingDescriptor> &descriptors,
@@ -81,6 +93,7 @@ public:
     task_.route_context_id = d.dispatch.context_id;
     state_ = State::ReadActiveCount;
     pending_read_ = false;
+    lookahead_issued_ = false;
   }
   void input_committed(const RoutingCompletion &completion) {
     if (state_ != State::WaitGather ||
@@ -154,7 +167,21 @@ public:
       state_ = State::Offer;
       break;
     case State::Offer:
-      if (consumer_->accept_task(task_))
+      if (!consumer_->accept_task(task_)) {
+        ++statistics_.wait_cycles;
+        break;
+      }
+      if (weights_ && overlap_input_weights_) {
+        weights_->start(task_);
+        state_ = State::WaitWeightLaunch;
+      } else {
+        state_ = State::StartGather;
+      }
+      break;
+    case State::WaitWeightLaunch:
+      // Descriptor scanning can outlast a small Gather. Start the Gather
+      // when the transfer is actually underway (or weights already reside).
+      if (weights_->transfer_started(task_.identity))
         state_ = State::StartGather;
       else
         ++statistics_.wait_cycles;
@@ -172,19 +199,35 @@ public:
     case State::PublishInput:
       consumer_->input_ready(task_);
       if (weights_) {
-        weights_->start(task_);
+        if (!overlap_input_weights_)
+          weights_->start(task_);
         state_ = State::WaitWeights;
       } else
         state_ = State::WaitDone;
       break;
     case State::WaitWeights:
       if (weights_->ready(task_.identity)) {
-        consumer_->weights_ready(task_);
+        consumer_->weights_ready(task_, weights_->buffer_for(task_.identity));
         state_ = State::WaitDone;
       } else
         ++statistics_.wait_cycles;
       break;
     case State::WaitDone:
+      if (!lookahead_issued_ && weights_ && weights_->supports_prefetch() &&
+          task_.active_index + 1 < active_count_) {
+        const auto expert = read(rcu, RouteMetadataKind::Active, task_.active_index + 1);
+        if (!expert) break;
+        auto next = task_;
+        ++next.active_index;
+        next.expert_id = *expert;
+        const auto rows_left = task_.expert_token_count - task_.row_offset;
+        const auto blocks_left = (rows_left + descriptor_.block_rows - 1) / descriptor_.block_rows;
+        if (task_.identity.task_id > std::numeric_limits<std::uint64_t>::max() - blocks_left)
+          throw std::overflow_error("expert lookahead task identity exhausted");
+        next.identity.task_id += blocks_left;
+        weights_->prefetch(next);
+        lookahead_issued_ = true;
+      }
       if (done_) {
         if (weights_)
           weights_->release_task(task_.identity);
@@ -201,6 +244,7 @@ public:
         state_ = State::Build;
       } else {
         task_.row_offset = 0;
+        lookahead_issued_ = false;
         state_ = ++task_.active_index < active_count_ ? State::ReadExpert
                                                       : State::Release;
       }
@@ -226,6 +270,7 @@ private:
     ReadOffset,
     Build,
     Offer,
+    WaitWeightLaunch,
     StartGather,
     WaitGather,
     PublishInput,
@@ -256,6 +301,6 @@ private:
   std::optional<RoutingCompletion> completion_;
   std::uint64_t next_task_{}, retired_task_{};
   std::uint32_t active_count_{}, expert_base_{};
-  bool pending_read_{}, done_{};
+  bool pending_read_{}, done_{}, overlap_input_weights_{}, lookahead_issued_{};
 };
 } // namespace ftlpu

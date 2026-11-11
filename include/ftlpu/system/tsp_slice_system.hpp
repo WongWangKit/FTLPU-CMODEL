@@ -419,12 +419,12 @@ public:
         icu_.reset_program();
     }
 
-    bool common_compute_resources_drained() const noexcept
+    bool common_compute_resources_drained(std::uint64_t ignored_routing_owner = 0) const noexcept
     {
         if (!vxm_.idle()) return false;
         for (const auto& mxm : mxms_) if (!mxm.idle()) return false;
         for (std::size_t h = 0; h < hw::kHemispheres; ++h)
-            if (!mems_[h].compute_idle() || !sxms_[h].idle()
+            if (!mems_[h].compute_idle(ignored_routing_owner) || !sxms_[h].idle()
                 || !streams_[h].compute_empty()) return false;
         return true;
     }
@@ -496,7 +496,13 @@ private:
         auto& queue=icu_.routing_iq();
         if(routing_pending_) {
             queue.hold_and_prefetch_cycle();
-            if(cycle_>=routing_descriptor_due_) {
+            const auto& scheduled = icu_.routing_descriptors().at(routing_pending_->descriptor);
+            const bool start_due =
+                (routing_pending_->opcode != RoutingOpcode::SelectVxm ||
+                 icu_.logical_cycle() + 4 >= scheduled.vxm_select.first_bundle_cycle) &&
+                (routing_pending_->opcode != RoutingOpcode::ImportTopK ||
+                 icu_.logical_cycle() >= scheduled.import_after_cycle);
+            if (cycle_ >= routing_descriptor_due_ && start_due) {
                 const auto instruction=*routing_pending_;routing_pending_.reset();
                 if(instruction.opcode==RoutingOpcode::Dispatch) {
                     routing_combine_.invalidate_outputs();
@@ -504,10 +510,16 @@ private:
                     for(const auto &d:icu_.routing_descriptors())if(d.opcode==RoutingOpcode::WeightTable)table=&d.weight_table;
                     expert_weights_.configure(table);
                     expert_tasks_.connect_weights(table?&expert_weights_:nullptr);
+                    bool has_template = false;
                     for(const auto &d:icu_.routing_descriptors())if(d.opcode==RoutingOpcode::ExpertTemplate) {
                         const auto &a=icu_.routing_descriptors().at(icu_.routing_descriptors()[instruction.descriptor].dispatch.address_template_descriptor_id).address;
-                        expert_macros_.configure(d.expert_template,a,table);expert_tasks_.connect(&expert_macros_);
+                        expert_macros_.configure(d.expert_template,a,table);
+                        if (expert_weights_.supports_prefetch()) expert_macros_.validate_double_buffer_layout(icu_);
+                        expert_tasks_.connect(&expert_macros_);
+                        has_template = true;
                     }
+                    if (expert_weights_.supports_prefetch() && !has_template)
+                        throw std::invalid_argument("expert double buffering requires a resident expert template");
                     expert_tasks_.start(instruction,icu_.routing_descriptors(),icu_.routing_generation(),routing_);
                 }
                 else if(instruction.opcode==RoutingOpcode::Combine) {
@@ -515,8 +527,17 @@ private:
                     if(d.opcode!=RoutingOpcode::Combine)throw std::invalid_argument("combine descriptor opcode mismatch");
                     routing_combine_.start(instruction,d.combine,icu_.routing_generation(),routing_);
                 } else {
-                    if(instruction.opcode==RoutingOpcode::Select || instruction.opcode==RoutingOpcode::Plan)routing_combine_.invalidate_outputs();
-                    routing_.start(instruction,icu_.routing_descriptors()[instruction.descriptor],icu_.routing_generation());
+                    const auto& descriptor = icu_.routing_descriptors()[instruction.descriptor];
+                    const bool vxm_select = instruction.opcode == RoutingOpcode::SelectVxm;
+                    if (vxm_select && icu_.logical_cycle() >= descriptor.vxm_select.first_bundle_cycle)
+                        throw std::logic_error("VXM SELECT descriptor missed its first input window");
+                    if (vxm_select && !vxm_.topk_available())
+                        throw std::logic_error("ROUTE_SELECT_VXM overlaps an active VXM program");
+                    if (is_routing_select(instruction.opcode) || instruction.opcode == RoutingOpcode::Plan)
+                        routing_combine_.invalidate_outputs();
+                    routing_.start(instruction, descriptor, icu_.routing_generation());
+                    if (vxm_select)
+                        vxm_.begin_topk(descriptor, icu_.routing_generation(), instruction.completion);
                 }
                 if(log)*log<<"  RCU cycle="<<cycle_<<' '<<routing_opcode_name(instruction.opcode)<<" descriptor="<<instruction.descriptor<<" instance="<<instruction.completion<<" generation="<<icu_.routing_generation()<<" start\n";
             }
@@ -527,6 +548,15 @@ private:
                 routing_.observe_descriptor_fetch(words);routing_pending_=*instruction;routing_descriptor_due_=cycle_+words;
             }
         } else queue.hold_and_prefetch_cycle();
+        if (auto word = vxm_.topk().submission_word()) {
+            if (routing_.submit_vxm_selection(*word)) {
+                vxm_.topk().accept_submission();
+                if (log) *log << "  VXM SELECT commit word=" << word->index
+                              << " generation=" << word->generation << '\n';
+            } else {
+                vxm_.topk().wait_submission();
+            }
+        }
         routing_.tick(mems_,streams_);
         if(auto completed=routing_.take_completion()) {
             if(completed->task_id)expert_tasks_.input_committed(*completed);
@@ -536,7 +566,10 @@ private:
         std::array<C2cEndpoint*,hw::kHemispheres> endpoints{};
         for(std::size_t h=0;h<hw::kHemispheres;++h)if(c2cs_[h])endpoints[h]=&*c2cs_[h];
         expert_weights_.tick(mems_,endpoints,c2c_dmas_);
-        expert_macros_.tick(icu_,mems_,common_barrier_resources_drained(),cycle_);
+        const auto expert_drained = expert_weights_.supports_prefetch()
+            ? common_compute_resources_drained(ExpertWeightLoader::owner)
+            : common_barrier_resources_drained();
+        expert_macros_.tick(icu_,mems_,expert_drained,cycle_);
         expert_tasks_.tick(routing_);
         if(auto completed=expert_tasks_.take_completion()) {
             for(const auto &d:icu_.routing_descriptors())if(d.opcode==RoutingOpcode::ExpertTemplate) {

@@ -130,12 +130,22 @@ public:
         throw std::invalid_argument("routing view shape/type mismatch");
     };
     switch (d.opcode) {
-    case RoutingOpcode::Select: {
+    case RoutingOpcode::Select:
+    case RoutingOpcode::SelectVxm:
+    case RoutingOpcode::ImportTopK: {
       const auto &s = d.select;
       if (!s.context_id || !s.tokens || s.tokens > RoutingConfig::max_tokens ||
           !s.experts || s.experts > RoutingConfig::max_experts || !s.k ||
           s.k > s.experts || s.k > RoutingConfig::max_k)
         throw std::invalid_argument("routing SELECT capacity/context");
+      if (d.opcode == RoutingOpcode::ImportTopK) {
+        if (s.choice_scores.present() || s.eligibility.present())
+          throw std::invalid_argument("TOPK import takes selected indices and values");
+        shape(s.selected_ids, s.k, s.tokens, RoutingElement::U32);
+        shape(s.selected_scores, s.k, s.tokens, RoutingElement::F32);
+        if (s.raw_scores.present()) shape(s.raw_scores, s.tokens, s.experts, RoutingElement::F32);
+        break;
+      }
       shape(s.choice_scores, s.tokens, s.experts, RoutingElement::F32);
       if (s.raw_scores.present())
         shape(s.raw_scores, s.tokens, s.experts, RoutingElement::F32);
@@ -159,6 +169,7 @@ public:
       if (s.selected_ids.present() && s.selected_scores.present() &&
           overlap(s.selected_ids, s.selected_scores))
         throw std::invalid_argument("routing SELECT outputs overlap");
+      if (d.opcode == RoutingOpcode::SelectVxm) validate_vxm_schedule(d, depth);
       break;
     }
     case RoutingOpcode::Plan:
@@ -214,6 +225,18 @@ public:
       throw std::logic_error("routing plan is leased");
     begin(i, d, generation, 0);
   }
+  bool submit_vxm_selection(VxmSelectionWord word) {
+    if (word.generation < generation_) return false;
+    if (word.generation != generation_ || word.context != context_ ||
+        word.completion != instruction_.completion)
+      throw std::logic_error("VXM selection submission identity mismatch");
+    if (state_ != State::ImportVxm || vxm_word_) return false;
+    if (word.index != vxm_word_index_)
+      throw std::logic_error("VXM selection submission out of order");
+    vxm_word_ = word.value;
+    return true;
+  }
+
   void start_task_address(const RoutingDescriptor &d,
                           ExpertTaskIdentity identity) {
     if (!plan_pinned_ || identity.generation != generation_ ||
@@ -235,7 +258,9 @@ private:
     if (!task_id)
       (void)encode_routing_instruction(i);
     validate_descriptor(d);
-    if (d.opcode != RoutingOpcode::Select &&
+    if (d.opcode == RoutingOpcode::SelectVxm && !config_.vxm_topk_enabled)
+      throw std::invalid_argument("VXM Top-K is disabled");
+    if (!is_routing_select(d.opcode) &&
         (!selected_ ||
          context_ != (d.opcode == RoutingOpcode::Plan ? d.plan.context_id
                                                       : d.address.context_id)))
@@ -267,10 +292,14 @@ private:
         banks_.push_back({q.hemisphere, q.slice, q.bank});
       }
     };
-    if (d.opcode == RoutingOpcode::Select) {
-      add(d.select.choice_scores);
-      add(d.select.raw_scores);
-      add(d.select.eligibility);
+    if (is_routing_select(d.opcode)) {
+      if (d.opcode == RoutingOpcode::Select) {
+        add(d.select.choice_scores);
+        add(d.select.raw_scores);
+        add(d.select.eligibility);
+      } else if (has_distinct_raw()) {
+        add(d.select.raw_scores);
+      }
       add(d.select.selected_ids);
       add(d.select.selected_scores);
       context_ = d.select.context_id;
@@ -281,7 +310,7 @@ private:
       raw_.resize(t_ * k_);
       selected_ = planned_ = false;
       token_ = expert_ = slot_ = 0;
-      next_ = State::SelectClear;
+      next_ = d.opcode == RoutingOpcode::ImportTopK ? State::ImportSramId : State::SelectClear;
     } else if (d.opcode == RoutingOpcode::Plan) {
       add(d.plan.weights);
       counts_.resize(e_);
@@ -304,7 +333,13 @@ private:
     }
     std::sort(banks_.begin(), banks_.end());
     banks_.erase(std::unique(banks_.begin(), banks_.end()), banks_.end());
-    state_ = State::Acquire;
+    if (i.opcode == RoutingOpcode::SelectVxm) {
+      vxm_word_index_ = 0;
+      vxm_word_.reset();
+      state_ = State::ImportVxm;
+    } else {
+      state_ = State::Acquire;
+    }
   }
 
 public:
@@ -381,6 +416,61 @@ public:
       break;
     case State::Io:
       tick_io(mems);
+      break;
+    case State::ImportVxm:
+      if (vxm_word_) {
+        const auto position = vxm_word_index_ / 2;
+        if (vxm_word_index_ % 2) {
+          if (std::isnan(std::bit_cast<float>(*vxm_word_)))
+            throw std::invalid_argument("NaN VXM selection score");
+          raw_[position] = *vxm_word_;
+        } else {
+          if (*vxm_word_ >= e_)
+            throw std::out_of_range("VXM selection expert");
+          ids_[position] = *vxm_word_;
+        }
+        vxm_word_.reset();
+        ++stats_.metadata_accesses;
+        if (++vxm_word_index_ == 2 * ids_.size()) {
+          if (has_distinct_raw() || descriptor_.select.selected_ids.present() ||
+              descriptor_.select.selected_scores.present()) {
+            next_ = has_distinct_raw() ? State::ImportReadId : State::ExportId;
+            state_ = State::Acquire;
+          } else {
+            selected_ = true;
+            state_ = State::Finish;
+          }
+        }
+      }
+      break;
+    case State::ImportSramId:
+      read(descriptor_.select.selected_ids, slot_, token_, State::ImportSramStoreId);
+      break;
+    case State::ImportSramStoreId:
+      if (io_value_ >= e_) throw std::out_of_range("imported Top-K expert index");
+      current_expert_ = io_value_;
+      ids_[token_ * k_ + slot_] = current_expert_;
+      ++stats_.metadata_accesses;
+      state_ = has_distinct_raw() ? State::ImportReadRaw : State::ImportSramScore;
+      break;
+    case State::ImportSramScore:
+      read(descriptor_.select.selected_scores, slot_, token_, State::ImportStoreRaw);
+      break;
+    case State::ImportReadId:
+      current_expert_ = ids_[token_ * k_ + slot_];
+      ++stats_.metadata_accesses;
+      state_ = State::ImportReadRaw;
+      break;
+    case State::ImportReadRaw:
+      read(descriptor_.select.raw_scores, token_, current_expert_, State::ImportStoreRaw);
+      break;
+    case State::ImportStoreRaw:
+      if (std::isnan(std::bit_cast<float>(io_value_)))
+        throw std::invalid_argument("NaN routing raw score");
+      raw_[token_ * k_ + slot_] = io_value_;
+      ++stats_.metadata_accesses;
+      state_ = instruction_.opcode == RoutingOpcode::ImportTopK
+          ? State::NextSelected : State::ExportId;
       break;
     case State::SelectClear:
       candidates_[slot_++] = {};
@@ -471,6 +561,20 @@ public:
         state_ = State::NextSelected;
       break;
     case State::NextSelected:
+      if (instruction_.opcode != RoutingOpcode::Select) {
+        if (++slot_ == k_) {
+          slot_ = 0;
+          ++token_;
+        }
+        if (token_ == t_) {
+          selected_ = true;
+          state_ = State::Finish;
+        } else {
+          state_ = instruction_.opcode == RoutingOpcode::ImportTopK ? State::ImportSramId
+              : has_distinct_raw() ? State::ImportReadId : State::ExportId;
+        }
+        break;
+      }
       if (++slot_ < k_)
         state_ = State::StoreId;
       else if (++token_ < t_) {
@@ -681,6 +785,13 @@ private:
     Idle,
     Acquire,
     Io,
+    ImportVxm,
+    ImportSramId,
+    ImportSramStoreId,
+    ImportSramScore,
+    ImportReadId,
+    ImportReadRaw,
+    ImportStoreRaw,
     SelectClear,
     Eligibility,
     MaskRead,
@@ -725,6 +836,9 @@ private:
 #define RCU_STATE_NAME(name) case State::name:return #name;
     switch(state) {
       RCU_STATE_NAME(Idle) RCU_STATE_NAME(Acquire) RCU_STATE_NAME(Io)
+      RCU_STATE_NAME(ImportVxm) RCU_STATE_NAME(ImportReadId)
+      RCU_STATE_NAME(ImportSramId) RCU_STATE_NAME(ImportSramStoreId) RCU_STATE_NAME(ImportSramScore)
+      RCU_STATE_NAME(ImportReadRaw) RCU_STATE_NAME(ImportStoreRaw)
       RCU_STATE_NAME(SelectClear) RCU_STATE_NAME(Eligibility) RCU_STATE_NAME(MaskRead)
       RCU_STATE_NAME(ReadChoice) RCU_STATE_NAME(ChoiceRead) RCU_STATE_NAME(RawRead)
       RCU_STATE_NAME(Compare) RCU_STATE_NAME(StoreId) RCU_STATE_NAME(StoreRaw)
@@ -751,6 +865,44 @@ private:
     RoutingPlane source, destination;
     std::size_t source_row, destination_row;
   };
+  bool has_distinct_raw() const {
+    return descriptor_.select.raw_scores.present() &&
+           descriptor_.select.raw_scores != descriptor_.select.choice_scores;
+  }
+
+  static void validate_vxm_schedule(const RoutingDescriptor& d, std::size_t depth) {
+    const auto& schedule = d.vxm_select;
+    const auto& select = d.select;
+    const auto blocks = RouteVxmSelectSchedule::workspace_blocks(select.experts);
+    const auto batches = (select.tokens + hw::kPhysicalVectorBytes - 1) /
+                         hw::kPhysicalVectorBytes;
+    const auto rows = batches * blocks;
+    const bool raw = select.raw_scores.present() && select.raw_scores != select.choice_scores;
+    const bool mask = select.eligibility.present();
+    if (schedule.first_bundle_cycle < 4 || !schedule.bundle_interval ||
+        (mask ? schedule.eligibility_offset < rows : schedule.eligibility_offset != 0) ||
+        (raw ? schedule.raw_offset < rows : schedule.raw_offset != 0) ||
+        (mask && raw &&
+         std::max(schedule.raw_offset, schedule.eligibility_offset) -
+         std::min(schedule.raw_offset, schedule.eligibility_offset) < rows))
+      throw std::invalid_argument("invalid VXM scoring schedule or workspace ranges");
+    for (std::size_t i = 0; i < schedule.score_planes.size(); ++i) {
+      const auto& plane = schedule.score_planes[i];
+      if (plane.hemisphere >= hw::kHemispheres || plane.slice >= hw::kMemSliceColumns ||
+          plane.bank >= hw::kMemBanksPerSlice ||
+          std::uint64_t(plane.base_row) +
+            std::max(schedule.raw_offset, schedule.eligibility_offset) + rows > depth ||
+          plane.hemisphere != schedule.score_planes[i & ~std::size_t(1)].hemisphere)
+        throw std::invalid_argument("invalid VXM scoring plane");
+      for (std::size_t j = 0; j < i; ++j) {
+        const auto& other = schedule.score_planes[j];
+        if (plane.hemisphere == other.hemisphere && plane.slice == other.slice &&
+            plane.bank == other.bank)
+          throw std::invalid_argument("VXM scoring planes require independent banks");
+      }
+    }
+  }
+
   static bool overlap(const RoutingTensorView &a, const RoutingTensorView &b) {
     for (std::size_t i = 0; i < a.bytes(); ++i)
       for (std::size_t j = 0; j < b.bytes(); ++j) {
@@ -936,6 +1088,8 @@ private:
   std::optional<std::uint32_t> metadata_response_;
   std::array<Candidate, RoutingConfig::max_k> candidates_{};
   Candidate incoming_{};
+  std::optional<std::uint32_t> vxm_word_{};
+  std::size_t vxm_word_index_{};
   std::vector<std::uint32_t> ids_, raw_, counts_, offsets_, cursors_, active_;
   std::vector<RoutingAssignment> assignments_;
   std::vector<std::uint32_t> inverse_; // <=128*16 u32, single metadata-port access per cycle

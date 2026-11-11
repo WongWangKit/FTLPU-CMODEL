@@ -8,24 +8,26 @@
 namespace ftlpu {
 struct ExpertWeightStatistics {
   std::uint64_t table_reads{}, dma_segments{}, committed_vectors{},
-      residency_hits{}, wait_cycles{};
+      residency_hits{}, wait_cycles{}, prefetches{}, prefetch_hits{};
 };
 
 // Area-oriented indirect control adapter. Uses the existing RX and MEM Write
 // datapaths; one RX notification/vector may be outstanding. No host pager runs.
-class ExpertWeightLoader final : public ExpertWeightService {
+class ExpertWeightBufferLoader final : public ExpertWeightService {
 public:
   static constexpr std::uint64_t owner = UINT64_MAX;
   static constexpr std::uint32_t sync_tag = 65535;
   bool idle() const { return state_ == State::Idle && banks_.empty(); }
   const ExpertWeightStatistics &statistics() const { return statistics_; }
-  void configure(const ExpertWeightTableDescriptor *table) {
+  void configure(const ExpertWeightTableDescriptor *table, std::uint32_t bank_xor) {
     if (!idle())
       throw std::logic_error("configure busy expert weight loader");
     table_ = table;
+    bank_xor_ = bank_xor;
+    next_tag_ = std::uint64_t(bank_xor) << 62;
     resident_ = false;
   }
-  void reset() { *this = ExpertWeightLoader{}; }
+  const ExpertTaskContext &task() const { return task_; }
   void start(const ExpertTaskContext &task) override {
     if (state_ != State::Idle || !table_ || task.expert_id >= table_->experts ||
         !task.identity.task_id)
@@ -54,10 +56,16 @@ public:
       throw std::logic_error("wrong weight completion identity");
     return state_ == State::Ready;
   }
+  bool transfer_started(ExpertTaskIdentity identity) const override {
+    return ready(identity) || (identity == task_.identity && state_ == State::Transfer);
+  }
   void release_task(ExpertTaskIdentity identity) override {
+    release_task(identity, task_.more);
+  }
+  void release_task(ExpertTaskIdentity identity, bool more) {
     if (identity != task_.identity || state_ != State::Ready)
       throw std::logic_error("release unfinished weights");
-    state_ = task_.more ? State::Idle : State::Release;
+    state_ = more ? State::Idle : State::Release;
   }
   bool matches(std::size_t hemisphere, std::uint32_t tag) const {
     return state_ == State::Transfer && hemisphere == segment_.hemisphere &&
@@ -112,6 +120,7 @@ public:
         raw_[field_++] = *value;
         if (field_ == 8) {
           segment_ = decode_expert_weight_segment(raw_);
+          segment_.bank ^= bank_xor_;
           field_ = 0;
           if (state_ == State::Scan) {
             banks_.emplace_back(segment_.hemisphere, segment_.slice,
@@ -255,7 +264,104 @@ private:
   std::optional<std::uint32_t> read_response_;
   std::uint64_t clock_{}, due_{}, pending_tag_{}, next_tag_{};
   std::uint32_t field_{}, segment_index_{}, received_{}, written_{},
-      resident_expert_{};
+      resident_expert_{}, bank_xor_{};
   bool pending_vector_{}, write_issued_{}, resident_{};
+};
+
+// A/B leases are independent. Only one buffer can be loading through the
+// shared C2C RX and DMA service while the other is resident for expert reads.
+class ExpertWeightLoader final : public ExpertWeightService {
+public:
+  static constexpr auto owner = ExpertWeightBufferLoader::owner;
+  static constexpr auto sync_tag = ExpertWeightBufferLoader::sync_tag;
+  bool idle() const { return buffers_[0].idle() && buffers_[1].idle(); }
+  bool supports_prefetch() const override { return double_buffered_; }
+  void set_double_buffered(bool enabled) {
+    if (!idle() || (enabled && hw::kMemBanksPerSlice != 2))
+      throw std::logic_error("expert double buffering requires idle two-bank MEM");
+    double_buffered_ = enabled;
+  }
+  void configure(const ExpertWeightTableDescriptor *table) {
+    buffers_[0].configure(table, 0);
+    buffers_[1].configure(table, 1);
+  }
+  void reset() {
+    const auto enabled = double_buffered_;
+    *this = ExpertWeightLoader{};
+    double_buffered_ = enabled;
+  }
+  void start(const ExpertTaskContext &task) override {
+    if (active_) throw std::logic_error("previous expert task still holds weights");
+    if (prefetched_ && prefetched_->identity == task.identity) {
+      if (prefetched_->expert_id != task.expert_id)
+        throw std::logic_error("prefetched expert disagrees with dispatch");
+      active_slot_ = transfer_slot_;
+      prefetched_.reset();
+      ++prefetch_hits_;
+    } else {
+      buffers_[active_slot_].start(task);
+      if (!prefetched_) {
+        transfer_slot_ = active_slot_;
+        transfer_prefetch_ = false;
+      }
+    }
+    active_ = task;
+  }
+  void prefetch(const ExpertTaskContext &task) override {
+    if (!double_buffered_ || !active_ || prefetched_ || !ready(active_->identity) ||
+        active_->expert_id == task.expert_id || task.identity.task_id <= active_->identity.task_id ||
+        task.identity.generation != active_->identity.generation ||
+        task.identity.plan_epoch != active_->identity.plan_epoch)
+      throw std::logic_error("invalid next expert prefetch");
+    const auto slot = 1 - active_slot_;
+    buffers_[slot].start(task);
+    transfer_slot_ = slot;
+    transfer_prefetch_ = true;
+    prefetched_ = task;
+    ++prefetches_;
+  }
+  bool ready(ExpertTaskIdentity task) const override {
+    return active_ && buffers_[active_slot_].ready(task);
+  }
+  bool transfer_started(ExpertTaskIdentity task) const override {
+    return active_ && buffers_[active_slot_].transfer_started(task);
+  }
+  std::size_t buffer_for(ExpertTaskIdentity task) const override {
+    if (!ready(task)) throw std::logic_error("expert weight buffer is not ready");
+    return active_slot_;
+  }
+  void release_task(ExpertTaskIdentity task) override {
+    if (!active_ || task != active_->identity)
+      throw std::logic_error("invalid active expert weight release");
+    buffers_[active_slot_].release_task(task, active_->more);
+    active_.reset();
+  }
+  const ExpertTaskContext &loading_task() const { return buffers_[transfer_slot_].task(); }
+  std::size_t loading_slot() const { return transfer_slot_; }
+  bool loading_is_prefetch() const { return transfer_prefetch_; }
+  bool matches(std::size_t hemisphere, std::uint32_t tag) const {
+    return buffers_[transfer_slot_].matches(hemisphere, tag);
+  }
+  bool can_receive() const { return buffers_[transfer_slot_].can_receive(); }
+  void notify_vector(std::uint64_t tag) { buffers_[transfer_slot_].notify_vector(tag); }
+  void tick(std::array<MemArrayModel, hw::kHemispheres> &mems,
+            const std::array<C2cEndpoint *, hw::kHemispheres> &endpoints,
+            const std::array<C2cDmaEngine *, hw::kHemispheres> &dmas) {
+    buffers_[0].tick(mems, endpoints, dmas);
+    if (double_buffered_) buffers_[1].tick(mems, endpoints, dmas);
+  }
+  ExpertWeightStatistics statistics() const {
+    const auto &a = buffers_[0].statistics(), &b = buffers_[1].statistics();
+    return {a.table_reads + b.table_reads, a.dma_segments + b.dma_segments,
+            a.committed_vectors + b.committed_vectors, a.residency_hits + b.residency_hits,
+            a.wait_cycles + b.wait_cycles, prefetches_, prefetch_hits_};
+  }
+
+private:
+  std::array<ExpertWeightBufferLoader, 2> buffers_;
+  std::optional<ExpertTaskContext> active_, prefetched_;
+  std::size_t active_slot_{}, transfer_slot_{};
+  std::uint64_t prefetches_{}, prefetch_hits_{};
+  bool double_buffered_{}, transfer_prefetch_{};
 };
 } // namespace ftlpu

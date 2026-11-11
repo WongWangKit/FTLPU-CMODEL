@@ -2,6 +2,7 @@
 
 #include "ftlpu/icu/fu_3d_codec.hpp"
 #include "ftlpu/vxm/compact_instruction.hpp"
+#include "ftlpu/vxm/topk_instruction.hpp"
 
 #include <array>
 #include <cstddef>
@@ -40,6 +41,8 @@ inline void validate_vxm_icu_run_2d_instruction(
     const VxmIcuRun2DInstruction& instruction)
 {
     validate_icu_loop_3d(instruction.loop);
+    if (is_vxm_topk(instruction.instruction))
+        throw std::invalid_argument("VXM TOPK uses a standalone native word");
     if (instruction.loop.counts[2] != 1
         || instruction.loop.cycle_strides[2] != 1)
         throw std::invalid_argument(

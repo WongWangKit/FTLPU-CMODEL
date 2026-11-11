@@ -14,6 +14,7 @@
 #include "ftlpu/mxm/control_slice.hpp"
 #include "ftlpu/sxm/instruction.hpp"
 #include "ftlpu/vxm/compact_instruction.hpp"
+#include "ftlpu/vxm/topk_instruction.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1024,6 +1025,9 @@ public:
     void finish_task() {
         if(!task_running_ || !done())throw StaticScheduleError("finishing an active task queue");
         task_running_=false;
+    }
+    bool task_uses_alternate_weight_bank() const {
+        return task_running_ && task_parameters_.alternate_weight_bank;
     }
 
     const RawImemWord& read_raw_imem(std::size_t address) const
@@ -2385,8 +2389,10 @@ private:
                 encoded = isa::encode_mxm_instruction(instruction);
             } else if constexpr (QueueRole == IcuQueueRole::MxmDequant) {
                 encoded = isa::encode_mxm_dequant_instruction(instruction);
-            } else if constexpr (QueueRole == IcuQueueRole::Vxm
-                || is_sxm_queue_role(QueueRole)) {
+            } else if constexpr (QueueRole == IcuQueueRole::Vxm) {
+                (void)decode_vxm_topk(instruction);
+                encoded = instruction.control;
+            } else if constexpr (is_sxm_queue_role(QueueRole)) {
                 throw std::invalid_argument(
                     "VXM/SXM raw queues accept RUN_2D packets, not standalone words");
             } else if constexpr (QueueRole == IcuQueueRole::C2cTx
@@ -2409,6 +2415,12 @@ private:
                 "legacy ICU entries do not use the raw-word decoder");
         } else if constexpr (QueueRole == IcuQueueRole::Routing) {
             return decode_routing_instruction(word);
+        } else if constexpr (QueueRole == IcuQueueRole::Vxm) {
+            if (!detail::raw_icu_bits_are_zero(word, 54, InstructionBits))
+                throw std::logic_error("VXM TOPK native word has non-zero reserved bits");
+            const VxmCompactInstruction instruction{detail::read_raw_icu_bits(word, 2, 52), 0};
+            (void)decode_vxm_topk(instruction);
+            return instruction;
         } else if constexpr (QueueRole == IcuQueueRole::Mem) {
             if (!detail::raw_icu_bits_are_zero(
                     word, 66, InstructionBits))

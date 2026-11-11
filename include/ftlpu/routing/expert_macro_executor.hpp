@@ -6,6 +6,7 @@ namespace ftlpu {
 struct ExpertMacroTaskTrace {
   ExpertTaskContext task;
   std::uint64_t start_cycle{}, finish_cycle{}, output_segments{};
+  std::size_t weight_buffer{};
 };
 class ExpertMacroExecutor final : public ExpertTaskConsumer {
 public:
@@ -40,11 +41,44 @@ public:
       throw std::logic_error("unexpected macro INPUT_READY");
     input_ = true;
   }
-  void weights_ready(const ExpertTaskContext &task) override {
+  void weights_ready(const ExpertTaskContext &task, std::size_t buffer) override {
     check(task);
     if (state_ != State::Wait || weight_ready_)
       throw std::logic_error("unexpected macro WEIGHT_READY");
     weight_ready_ = true;
+    weight_buffer_ = buffer;
+  }
+  void validate_double_buffer_layout(InstructionControlUnit &icu) const {
+    if (!weights_ || icu.transport_overlap_enabled())
+      throw std::invalid_argument("expert double buffering requires dedicated weight transport");
+    std::set<std::size_t> primary;
+    for (std::size_t i = 0; i < weights_->segments; ++i) {
+      const auto s = expert_weight_segment(*weights_, i);
+      if (s.fabric_stream != 30)
+        throw std::invalid_argument("expert double buffering reserves W30 for weights");
+      primary.insert(InstructionControlUnit::mem_queue(
+          static_cast<Hemisphere>(s.hemisphere), s.slice, s.bank));
+    }
+    for (const auto bank : primary) {
+      const auto alternate = bank ^ 1;
+      if (primary.contains(alternate) || !icu.mem_iq(alternate).done())
+        throw std::invalid_argument("alternate expert weight bank is already scheduled");
+      for (const auto *view : {&address_->source, &address_->destination, &template_->output})
+        for (std::size_t plane = 0; plane < view->bytes(); ++plane) {
+          const auto &p = view->planes[plane];
+          if (alternate == InstructionControlUnit::mem_queue(
+                               static_cast<Hemisphere>(p.hemisphere), p.slice, p.bank))
+            throw std::invalid_argument("alternate expert weight bank aliases a tensor view");
+        }
+      for (const auto &queue : template_->queues) {
+        if (queue.kind != 0) continue;
+        if (queue.index == alternate ||
+            (queue.index == bank && !std::ranges::any_of(queue.bindings, [](const auto &binding) {
+               return binding.parameter == MacroTaskParameter::WeightBase;
+             })))
+          throw std::invalid_argument("expert double buffering requires dedicated weight read queues");
+      }
+    }
   }
   std::optional<ExpertTaskIdentity> poll_done() override {
     auto result = done_;
@@ -90,7 +124,7 @@ public:
                                   [](auto &queue) { queue.launch_task(); });
         if (trace_.size() == 256)
           trace_.pop_front();
-        trace_.push_back({task_, cycle + 1, 0, 0});
+        trace_.push_back({task_, cycle + 1, 0, 0, weight_buffer_});
         state_ = State::Run;
       }
       return;
@@ -158,6 +192,7 @@ private:
           throw std::invalid_argument(
               "weight base binding without weight table");
         p.values[2] = q.weight_base;
+        p.alternate_weight_bank = weight_buffer_ == 1;
         found = true;
       } else {
         const bool output = binding.parameter == MacroTaskParameter::OutputBase;
@@ -191,6 +226,6 @@ private:
   std::optional<ExpertTaskIdentity> done_;
   std::deque<ExpertMacroTaskTrace> trace_;
   bool input_{}, weight_ready_{};
-  std::size_t queue_index_{};
+  std::size_t queue_index_{}, weight_buffer_{};
 };
 } // namespace ftlpu

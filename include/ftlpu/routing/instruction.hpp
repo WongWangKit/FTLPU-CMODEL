@@ -15,11 +15,13 @@ namespace ftlpu {
 // Version 1 is a finite, single-context, area-oriented device implementation.
 struct RoutingConfig {
   bool enabled{hw::config::kRoutingEnabled};
+  static constexpr std::uint32_t isa_version = 7;
   static constexpr std::size_t max_experts = 1024, max_k = 16, max_tokens = 128;
   static constexpr std::size_t block_rows = 32, address_depth = 8;
   static constexpr std::size_t imem_depth = 256, iq_depth = 4,
                                descriptor_depth = 32;
   std::size_t control_latency{hw::config::kRoutingControlLatency};
+  bool vxm_topk_enabled{true};
   void validate() const {
     if (!control_latency || control_latency > 1024)
       throw std::invalid_argument("routing control latency");
@@ -86,6 +88,19 @@ struct RouteSelectDescriptor {
   std::uint32_t context_id{1}, tokens{}, experts{}, k{};
   RoutingTensorView choice_scores{}, raw_scores{}, eligibility{},
       selected_ids{}, selected_scores{};
+};
+struct RouteVxmSelectSchedule {
+  static constexpr std::size_t chains = 8, bytes_per_score = 4;
+  static constexpr std::size_t streams = chains * bytes_per_score;
+  static constexpr std::size_t workspace_blocks(std::size_t experts) {
+    return (experts + hw::kPhysicalVectorBytes - 1) /
+           hw::kPhysicalVectorBytes * hw::kTileRows;
+  }
+  // Byte p of chain j is read on stream 4*j+p. Each plane stores one
+  // row per (token batch, expert block), with token in the physical lane.
+  std::array<RoutingPlane, streams> score_planes{};
+  std::uint32_t first_bundle_cycle{}, bundle_interval{1};
+  std::uint32_t eligibility_offset{}, raw_offset{};
 };
 struct RoutePlanDescriptor {
   std::uint32_t context_id{1};
@@ -182,12 +197,23 @@ enum class RoutingOpcode : std::uint32_t {
   Dispatch = 4,
   WeightTable = 5, // configuration record only; not an executable opcode
   ExpertTemplate = 6,
-  Combine = 7
+  Combine = 7,
+  SelectVxm = 8,
+  ImportTopK = 9
 };
+inline constexpr bool is_routing_select(RoutingOpcode opcode) {
+  return opcode == RoutingOpcode::Select || opcode == RoutingOpcode::SelectVxm ||
+         opcode == RoutingOpcode::ImportTopK;
+}
+
 inline constexpr const char *routing_opcode_name(RoutingOpcode opcode) {
   switch (opcode) {
   case RoutingOpcode::Select:
     return "ROUTE_SELECT";
+  case RoutingOpcode::SelectVxm:
+    return "ROUTE_SELECT_VXM";
+  case RoutingOpcode::ImportTopK:
+    return "ROUTE_IMPORT_TOPK";
   case RoutingOpcode::Plan:
     return "ROUTE_PLAN";
   case RoutingOpcode::Address:
@@ -206,6 +232,9 @@ inline constexpr const char *routing_opcode_name(RoutingOpcode opcode) {
 struct RoutingDescriptor {
   RoutingOpcode opcode{RoutingOpcode::Select};
   RouteSelectDescriptor select{};
+  RouteVxmSelectSchedule vxm_select{};
+  // Import reads selected_ids/selected_scores as rank-major [K,T].
+  std::uint32_t import_after_cycle{};
   RoutePlanDescriptor plan{};
   RouteAddressDescriptor address{};
   RouteTaskDispatchDescriptor dispatch{};
@@ -217,20 +246,31 @@ struct RoutingInstruction {
   RoutingOpcode opcode{RoutingOpcode::Select};
   std::uint32_t descriptor{}, completion{};
 };
+struct VxmSelectionWord {
+  std::uint64_t generation{};
+  std::uint32_t context{}, completion{};
+  std::size_t index{};
+  std::uint32_t value{};
+};
+
 inline void
 validate_routing_descriptor_references(const std::vector<RoutingDescriptor> &ds,
                                        std::uint32_t capability) {
-  if (capability > 5 || (!capability && !ds.empty()))
+  if (capability > RoutingConfig::isa_version || (!capability && !ds.empty()))
     throw std::invalid_argument("unsupported routing capability");
   bool table_seen = false, template_seen = false;
   for (const auto &d : ds) {
+    if (d.opcode == RoutingOpcode::SelectVxm && capability < 6)
+      throw std::invalid_argument("VXM SELECT requires Routing v6");
+    if (d.opcode == RoutingOpcode::ImportTopK && capability < 7)
+      throw std::invalid_argument("TOPK import requires Routing v7");
     if (d.opcode == RoutingOpcode::Combine) {
       if (capability < 5) throw std::invalid_argument("combine requires Routing v5");
       validate_route_combine(d.combine);
       bool template_match=false, select_match=false;
       for (const auto &x:ds) {
         if (x.opcode==RoutingOpcode::ExpertTemplate && x.expert_template.output==d.combine.source) template_match=true;
-        if (x.opcode==RoutingOpcode::Select && x.select.context_id==d.combine.context_id) {
+        if (is_routing_select(x.opcode) && x.select.context_id==d.combine.context_id) {
           if (d.combine.source.rows != std::uint64_t(x.select.tokens)*x.select.k || d.combine.destination.rows!=x.select.tokens)
             throw std::invalid_argument("combine shape must match current routing plan");
           select_match=true;
@@ -273,7 +313,7 @@ validate_routing_descriptor_references(const std::vector<RoutingDescriptor> &ds,
       if (d.opcode == RoutingOpcode::Dispatch) {
         const auto &a = ds[d.dispatch.address_template_descriptor_id].address;
         for (const auto &s : ds)
-          if (s.opcode == RoutingOpcode::Select &&
+          if (is_routing_select(s.opcode) &&
               s.select.context_id == d.dispatch.context_id &&
               s.select.experts != table->experts)
             throw std::invalid_argument("weight table expert count mismatch");
@@ -310,7 +350,7 @@ validate_routing_descriptor_references(const std::vector<RoutingDescriptor> &ds,
       if (d.opcode == RoutingOpcode::Dispatch) {
         const auto &a = ds[d.dispatch.address_template_descriptor_id].address;
         for (const auto &select : ds)
-          if (select.opcode == RoutingOpcode::Select &&
+          if (is_routing_select(select.opcode) &&
               select.select.context_id == d.dispatch.context_id &&
               std::uint64_t(select.select.tokens) * select.select.k >
                   t->output.rows)
@@ -384,7 +424,8 @@ struct RoutingWord {
 };
 inline RoutingWord encode_routing_instruction(RoutingInstruction i) {
   if (static_cast<unsigned>(i.opcode) < 1 ||
-      (static_cast<unsigned>(i.opcode) > 4 && i.opcode != RoutingOpcode::Combine) ||
+      (static_cast<unsigned>(i.opcode) > 4 && i.opcode != RoutingOpcode::Combine &&
+       i.opcode != RoutingOpcode::SelectVxm && i.opcode != RoutingOpcode::ImportTopK) ||
       i.descriptor >= RoutingConfig::descriptor_depth || !i.completion ||
       i.completion >= 0x80000000u)
     throw std::invalid_argument("invalid routing instruction");
@@ -417,12 +458,22 @@ encode_routing_descriptors(const std::vector<RoutingDescriptor> &ds) {
     w.push_back(static_cast<std::uint32_t>(d.opcode));
     switch (d.opcode) {
     case RoutingOpcode::Select:
+    case RoutingOpcode::SelectVxm:
+    case RoutingOpcode::ImportTopK:
       w.insert(w.end(), {d.select.context_id, d.select.tokens, d.select.experts,
                          d.select.k});
       for (const auto *v : {&d.select.choice_scores, &d.select.raw_scores,
                             &d.select.eligibility, &d.select.selected_ids,
                             &d.select.selected_scores})
         routing_pack_view(w, *v);
+      if (d.opcode == RoutingOpcode::SelectVxm) {
+        const auto& schedule = d.vxm_select;
+        w.insert(w.end(), {schedule.first_bundle_cycle, schedule.bundle_interval,
+                           schedule.eligibility_offset, schedule.raw_offset});
+        for (const auto& p : schedule.score_planes)
+          w.insert(w.end(), {p.hemisphere, p.slice, p.bank, p.base_row});
+      }
+      if (d.opcode == RoutingOpcode::ImportTopK) w.push_back(d.import_after_cycle);
       break;
     case RoutingOpcode::Plan:
       w.push_back(d.plan.context_id);
@@ -508,6 +559,8 @@ decode_routing_descriptors(const std::vector<std::uint32_t> &w) {
     d.opcode = static_cast<RoutingOpcode>(get());
     switch (d.opcode) {
     case RoutingOpcode::Select:
+    case RoutingOpcode::SelectVxm:
+    case RoutingOpcode::ImportTopK:
       d.select.context_id = get();
       d.select.tokens = get();
       d.select.experts = get();
@@ -517,6 +570,16 @@ decode_routing_descriptors(const std::vector<std::uint32_t> &w) {
       d.select.eligibility = view();
       d.select.selected_ids = view();
       d.select.selected_scores = view();
+      if (d.opcode == RoutingOpcode::SelectVxm) {
+        auto& schedule = d.vxm_select;
+        schedule.first_bundle_cycle = get();
+        schedule.bundle_interval = get();
+        schedule.eligibility_offset = get();
+        schedule.raw_offset = get();
+        for (auto& p : schedule.score_planes)
+          p = {get(), get(), get(), get()};
+      }
+      if (d.opcode == RoutingOpcode::ImportTopK) d.import_after_cycle = get();
       break;
     case RoutingOpcode::Plan:
       d.plan.context_id = get();

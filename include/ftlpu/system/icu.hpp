@@ -137,7 +137,7 @@ public:
     const RoutingIcu& routing_iq() const {return routing_queue_;}
     const std::vector<RoutingDescriptor>& routing_descriptors() const {return routing_descriptors_;}
     void install_routing_descriptors(std::vector<RoutingDescriptor> descriptors) {
-        validate_routing_descriptor_references(descriptors,5);
+        validate_routing_descriptor_references(descriptors, RoutingConfig::isa_version);
         if(descriptors.size()>RoutingConfig::descriptor_depth)throw std::invalid_argument("routing descriptor capacity");
         (void)encode_routing_descriptors(descriptors);routing_descriptors_=std::move(descriptors);
         for(const auto &d:routing_descriptors_)if(d.opcode==RoutingOpcode::ExpertTemplate)
@@ -697,6 +697,12 @@ public:
         VxmCompactInstruction instruction)
     {
         check_vxm_queue(alu);
+        if (is_vxm_topk(instruction)) {
+            if (alu != VxmTopKInstruction::queue)
+                throw std::invalid_argument("VXM TOPK must target VXM queue 0");
+            vxm_queues_[alu].push_instruction(instruction);
+            return;
+        }
         vxm_queues_[alu].push_vxm_run_2d(
             VxmIcuRun2DInstruction::Run2D(
                 0,
@@ -1680,16 +1686,7 @@ public:
         compute_enabled_ = (!program_loading_ && common_barriers_.begin_cycle(program_issue_enabled_));
         bool any = false;
         if (compute_enabled_) {
-            for (std::size_t alu = 0; alu < kVxmQueues; ++alu) {
-                const auto instruction = vxm_queues_[alu].dispatch_next();
-                if (!instruction.has_value()) continue;
-                vxm.issue_south(alu, *instruction);
-                any = true;
-                if (os != nullptr) {
-                    *os << "  ICU -> VXM.q" << alu << ' '
-                        << describe_vxm(alu, *instruction) << '\n';
-                }
-            }
+            any = issue_vxm_queues(vxm, os);
         }
         else if (!program_loading_) for (auto& queue : vxm_queues_) queue.hold_compute_cycle();
         log_dispatch_idle(os, any);
@@ -1794,23 +1791,16 @@ public:
             }
         }
         if (compute_enabled_) {
-            for (std::size_t alu = 0; alu < kVxmQueues; ++alu) {
-                const auto instruction = vxm_queues_[alu].dispatch_next();
-                if (!instruction.has_value()) continue;
-                vxm.issue_south(alu, *instruction);
-                any = true;
-                if (os != nullptr) {
-                    *os << "  ICU -> VXM.q" << alu << ' '
-                        << describe_vxm(alu, *instruction) << '\n';
-                }
-            }
+            any = issue_vxm_queues(vxm, os) || any;
         }
 
         for (std::size_t queue = 0; queue < kMemQueues; ++queue) {
             queue_control_transport_ticked_[queue]=false;
             const auto owner_h=queue/kMemQueuesPerHemisphere;
             const auto owner_local=queue%kMemQueuesPerHemisphere;
-            if(mems[owner_h].routing_bank_owned(owner_local/hw::kMemBanksPerSlice,owner_local%hw::kMemBanksPerSlice)) {
+            const bool alternate_weight_bank = mem_queues_[queue].task_uses_alternate_weight_bank();
+            const auto target_bank = (owner_local % hw::kMemBanksPerSlice) ^ alternate_weight_bank;
+            if(mems[owner_h].routing_bank_owned(owner_local/hw::kMemBanksPerSlice,target_bank)) {
                 // Keep instruction/control prefetch alive without consuming
                 // commands until this single-port bank is returned.
                 mem_queues_[queue].hold_and_prefetch_cycle();
@@ -1859,7 +1849,9 @@ public:
             const auto hemisphere = queue / kMemQueuesPerHemisphere;
             const auto local_queue = queue % kMemQueuesPerHemisphere;
             const auto mem_slice = local_queue / hw::kMemBanksPerSlice;
-            const auto bank = local_queue % hw::kMemBanksPerSlice;
+            if (alternate_weight_bank && (transport || instruction->opcode != MemOpcode::Read))
+                throw StaticScheduleError("expert weight bank remap requires a dedicated MEM read queue");
+            const auto bank = target_bank;
             mems[hemisphere].enqueue_instruction(mem_slice, bank, *instruction);
             any = true;
             if (os != nullptr) {
@@ -2355,10 +2347,44 @@ private:
         return os.str();
     }
 
+    bool issue_vxm_queues(VxmSlice& vxm, std::ostream* os)
+    {
+        bool issued = false;
+        for (std::size_t alu = 0; alu < kVxmQueues; ++alu) {
+            auto& queue = vxm_queues_[alu];
+            if (vxm.topk().active()) {
+                queue.hold_and_prefetch_cycle();
+                continue;
+            }
+            const auto instruction = queue.dispatch_next();
+            if (!instruction) continue;
+            if (is_vxm_topk(*instruction)) {
+                if (alu != VxmTopKInstruction::queue)
+                    throw StaticScheduleError("VXM TOPK must issue on VXM queue 0");
+                vxm.begin_topk(decode_vxm_topk(*instruction));
+            } else {
+                vxm.issue_south(alu, *instruction);
+            }
+            issued = true;
+            if (os != nullptr) {
+                *os << "  ICU -> VXM.q" << alu << ' '
+                    << describe_vxm(alu, *instruction) << '\n';
+            }
+        }
+        return issued;
+    }
+
     static std::string describe_vxm(
         std::size_t stage,
         const VxmCompactInstruction& packet)
     {
+        if (is_vxm_topk(packet)) {
+            const auto instruction = decode_vxm_topk(packet);
+            std::ostringstream os;
+            os << "TOPK rows=" << instruction.rows << " columns=" << instruction.columns
+               << " k=" << instruction.k << " mask=" << instruction.has_mask;
+            return os.str();
+        }
         const auto decoded =
             VxmCompactInstructionCodec::decode(stage, packet);
         const auto& instruction = decoded.instruction;
