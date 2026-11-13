@@ -1,5 +1,4 @@
 #include "ftlpu/core/bf16.hpp"
-#include "ftlpu/icu/fu_3d_codec.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
 
 #include <algorithm>
@@ -68,21 +67,9 @@ public:
     }
     void columnBlock(std::size_t cycle, std::size_t buffer, float s) {
         if (cycle < loadCursor) throw std::logic_error("column load queue overlap");
-        IcuLoop3D loop{};
-        loop.wait_cycle = cycle - loadCursor;
-        loop.counts = {T, 1, 1};
-        loop.cycle_strides = {1, T, T};
-        auto instruction = MxmLoadIcuInstruction::Load3D(loop, buffer,
-            MxmIcuBufferMode::Fixed, 0, {1, 0, 0}, weightStream);
-        instruction.opcode = MxmLoadIcuOpcode::LoadColumn3D;
-        const auto decoded = isa::decode_mxm_load_icu_3d_instruction(
-            isa::encode_mxm_load_icu_shortest_instruction(instruction));
-        icu.enqueue_mxm_load_3d(0, decoded);
-        icu.enqueue_mxm_dequant_3d(0,
-            MxmDequantIcuInstruction::Dequant3D(loop, MxmDequantInstruction::Scale(s)));
-        for (std::size_t i = 0; i < T; ++i)
-            loadOps.push_back(MxmControlInstruction::IWColumn(buffer, i / 8, i % 8,
-                MxmWeightInputMode::Int8DequantBf16, weightStream));
+        for (std::size_t i=0;i<T;++i)
+            load(cycle+i, MxmControlInstruction::IWColumn(buffer,i/8,i%8,
+                MxmWeightInputMode::Int8DequantBf16,weightStream),s);
         loadCursor = cycle + T;
         end = std::max(end, loadCursor);
     }
@@ -196,12 +183,12 @@ Result run(std::size_t tokens, std::size_t streams, const std::filesystem::path&
         const auto& control = system->mxm_unit(0).control();
         const auto loadAction = system->icu().mxm_load_iq(0).last_trace().action;
         const bool loading = loadAction == IcuQueueAction::FunctionalIssue
-            || loadAction == IcuQueueAction::MxmLoad3DIssue;
+            || loadAction == IcuQueueAction::MacroIssue;
         const bool computing = control.compute_active(0);
         if (loading) {
             const auto dqAction = system->icu().mxm_dequant_iq(0).last_trace().action;
             if (dqAction != IcuQueueAction::FunctionalIssue
-                && dqAction != IcuQueueAction::MxmDequant3DIssue)
+                && dqAction != IcuQueueAction::MacroIssue)
                 throw std::logic_error("load lacks matching real dequant issue");
             const auto& load = schedule.loadOps.at(result.loadCycles);
             ++result.loadCycles;

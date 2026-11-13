@@ -23,7 +23,6 @@ enum class IcuControlOpcode : std::uint8_t {
     Repeat = 2,
     Sync = 3,
     Notify = 4,
-    Repeat2D = 6,
     WaitEvent = 7,
 };
 
@@ -40,23 +39,8 @@ struct IcuRepeat {
     std::int64_t address_stride{0};
 };
 
-// Total iteration counts include the functional instruction that was already
-// issued at coordinate (0, 0). The control entry emits all remaining points in
-// outer-major, inner-minor order.
-struct IcuRepeat2D {
-    std::size_t inner_count{1};
-    std::size_t inner_interval{1};
-    std::int64_t inner_stride{0};
-    std::size_t outer_count{1};
-    std::size_t outer_interval{1};
-    std::int64_t outer_stride{0};
-    IcuInductionTarget induction_target{IcuInductionTarget::None};
-};
-
-// An absolute-cycle macro entry. Unlike Repeat/Repeat2D, this descriptor owns
-// its functional instruction and therefore needs neither a leading
-// instruction nor queue-local NOP padding. The local ICU expands one native
-// instruction at every point in the two-dimensional iteration space.
+// A Macro owns its native FU template and absolute issue schedule.
+// It is encoded by the packed Macro codec, not a separate loop opcode.
 struct IcuMacroSchedule {
     std::size_t start_cycle{0};
     std::size_t inner_count{1};
@@ -68,32 +52,11 @@ struct IcuMacroSchedule {
     IcuInductionTarget induction_target{IcuInductionTarget::None};
 };
 
-// A coarse functional-unit instruction owns one native operation plus an
-// affine iteration space. Dimension zero is the innermost counter. The local
-// ICU advances the counters and emits one native operation at each absolute
-// issue cycle.
-struct IcuStreamNdSchedule {
-    static constexpr std::size_t kMaxRank = 3;
-
-    std::size_t start_cycle{0};
-    std::size_t rank{1};
-    std::array<std::size_t, kMaxRank> counts{1, 1, 1};
-    std::array<std::size_t, kMaxRank> cycle_strides{1, 1, 1};
-    std::array<std::int64_t, kMaxRank> operand_strides{0, 0, 0};
-    IcuInductionTarget induction_target{IcuInductionTarget::None};
-};
-
-using IcuMemStreamNdSchedule = IcuStreamNdSchedule;
-using IcuMxmStreamNdSchedule = IcuStreamNdSchedule;
-using IcuVxmStreamNdSchedule = IcuStreamNdSchedule;
-using IcuSxmTileProgramSchedule = IcuStreamNdSchedule;
-
 struct IcuControlInstruction {
     IcuControlOpcode opcode{IcuControlOpcode::Nop};
     std::size_t count{0};
     std::size_t interval{1};
     std::int64_t address_stride{0};
-    IcuRepeat2D repeat_2d{};
     std::size_t event_tag{0};
 
     static constexpr IcuControlInstruction Nop(std::size_t cycles) noexcept
@@ -111,15 +74,6 @@ struct IcuControlInstruction {
             count,
             interval,
             address_stride};
-    }
-
-    static constexpr IcuControlInstruction Repeat2D(
-        IcuRepeat2D repeat) noexcept
-    {
-        IcuControlInstruction instruction;
-        instruction.opcode = IcuControlOpcode::Repeat2D;
-        instruction.repeat_2d = repeat;
-        return instruction;
     }
 
     static constexpr IcuControlInstruction Sync() noexcept

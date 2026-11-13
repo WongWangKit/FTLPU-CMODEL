@@ -1,3 +1,5 @@
+> 历史设计记录：本文中的独立 2D/3D、STREAM_ND、slice/tile program 已移除，不是当前 ISA。当前实现见 [Macro ISA](icu_macro_scheduler.zh-CN.md)。旧测试产物需重新编译。
+
 # SXM TILE_PROGRAM
 
 `SXM_TILE_PROGRAM` 将一条完整的原生 SXM 配置与一到三维绝对 cycle 迭代

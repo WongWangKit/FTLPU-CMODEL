@@ -5,7 +5,7 @@
 #include <stdexcept>
 
 // Shared packet payload access without imposing MEM/MXM codec geometry.
-namespace ftlpu::isa::fu_3d_codec_detail {
+namespace ftlpu::isa::packet_codec_detail {
 
 constexpr std::size_t kExtendedSubtypePhysicalOffset = 88;
 constexpr unsigned kExtendedSubtypeBits = 4;
@@ -119,4 +119,4 @@ void require_reserved_zero(
     }
 }
 
-} // namespace ftlpu::isa::fu_3d_codec_detail
+} // namespace ftlpu::isa::packet_codec_detail

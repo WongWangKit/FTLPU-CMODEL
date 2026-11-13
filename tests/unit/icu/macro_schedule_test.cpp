@@ -38,27 +38,25 @@ try {
         "ICU macro emitted incorrect cycles or addresses");
     require(queue.done(), "ICU macro queue did not complete");
 
-    Queue interleaved;
-    interleaved.push_macro(IcuMacroSchedule {
-        3, 3, 4, 1, 1, 1, 0,
-        IcuInductionTarget::MemAddress,
-    }, MemInstruction::Read(100, 0));
-    interleaved.push_macro(IcuMacroSchedule {
-        4, 3, 4, 1, 1, 1, 0,
-        IcuInductionTarget::MemAddress,
-    }, MemInstruction::Read(200, 1));
+    Queue sequential;
+    sequential.push_macro({3,3,4,1,1,1,0,IcuInductionTarget::MemAddress},MemInstruction::Read(100,0));
+    sequential.push_macro({12,3,4,1,1,1,0,IcuInductionTarget::MemAddress},MemInstruction::Read(200,1));
     issues.clear();
-    for (std::size_t cycle = 0; cycle < 13; ++cycle) {
-        if (const auto instruction = interleaved.tick())
-            issues.emplace_back(cycle, instruction->address);
+    for(std::size_t cycle=0;cycle<=20;++cycle)
+        if(auto instruction=sequential.tick())issues.emplace_back(cycle,instruction->address);
+    require(issues==std::vector<std::pair<std::size_t,std::size_t>>{
+        {3,100},{7,101},{11,102},{12,200},{16,201},{20,202}},"sequential Macro boundary changed");
+    require(sequential.done(),"sequential queue failed to drain");
+    for(std::size_t next : {3u,4u,11u}) {
+        bool rejected=false;
+        try {
+            Queue invalid;
+            invalid.push_macro({3,3,4,1,1,1,0,IcuInductionTarget::MemAddress},MemInstruction::Read(100,0));
+            invalid.push_macro({next,3,4,1,1,1,0,IcuInductionTarget::MemAddress},MemInstruction::Read(200,1));
+            for(std::size_t cycle=0;cycle<30;++cycle)invalid.tick();
+        }catch(const StaticScheduleError&){rejected=true;}
+        require(rejected,"different Macros interleaved on one ICU queue");
     }
-    require(issues == std::vector<std::pair<std::size_t, std::size_t>> {
-        {3, 100}, {4, 200}, {7, 101},
-        {8, 201}, {11, 102}, {12, 202}},
-        "ICU did not interleave independent macro descriptors");
-    require(interleaved.done(), "interleaved macro queue did not complete");
-    require(interleaved.peak_active_macros() == 2,
-        "interleaved macro peak-context count is incorrect");
 
     static_assert(InstructionControlUnit::MxmIcu::macro_context_depth == 40);
     static_assert(
@@ -165,75 +163,14 @@ try {
     require(cycleWidthEnforced,
         "Macro scheduler accepted a cycle outside its 32-bit compare key");
 
-    using Flat40Queue =
-        DistributedIcuQueue<MemInstruction, 128, 128, 64, 1, 40>;
-    Flat40Queue flat40;
-    for (std::size_t context = 0; context < 41; ++context) {
-        flat40.push_macro(IcuMacroSchedule {
-            100 + context, 2, 1000, 1, 1, 1, 0,
-            IcuInductionTarget::MemAddress,
-        }, MemInstruction::Read(1000 + context, 0));
-    }
-    for (std::size_t cycle = 0; cycle < 140; ++cycle)
-        static_cast<void>(flat40.tick());
-    require(flat40.peak_active_macros() == 40,
-        "flat Macro scheduler did not populate all 40 physical entries");
-    bool flat40Overflow = false;
-    try {
-        static_cast<void>(flat40.tick());
-    } catch (const StaticScheduleError&) {
-        flat40Overflow = true;
-    }
-    require(flat40Overflow,
-        "flat Macro scheduler accepted a 41st live context");
-
-    Queue collision;
-    collision.push_macro(IcuMacroSchedule {
-        3, 1, 1, 0, 1, 1, 0,
-        IcuInductionTarget::MemAddress,
-    }, MemInstruction::Read(300, 0));
-    collision.push_macro(IcuMacroSchedule {
-        3, 1, 1, 0, 1, 1, 0,
-        IcuInductionTarget::MemAddress,
-    }, MemInstruction::Read(400, 0));
-    bool collisionDetected = false;
-    try {
-        for (std::size_t cycle = 0; cycle <= 3; ++cycle)
-            static_cast<void>(collision.tick());
-    } catch (const StaticScheduleError&) {
-        collisionDetected = true;
-    }
-    require(collisionDetected,
-        "flat Macro scheduler did not reject a multi-match cycle");
-    bool lateDetected = false;
-    try {
-        static_cast<void>(collision.tick());
-    } catch (const StaticScheduleError&) {
-        lateDetected = true;
-    }
-    require(lateDetected,
-        "flat Macro scheduler dynamically delayed a missed issue cycle");
-
-    using OneContextQueue =
-        DistributedIcuQueue<MemInstruction, 128, 32, 8, 1, 1>;
-    OneContextQueue constrained;
-    constrained.push_macro(IcuMacroSchedule {
-        3, 3, 4, 1, 1, 1, 0,
-        IcuInductionTarget::MemAddress,
-    }, MemInstruction::Read(100, 0));
-    constrained.push_macro(IcuMacroSchedule {
-        4, 3, 4, 1, 1, 1, 0,
-        IcuInductionTarget::MemAddress,
-    }, MemInstruction::Read(200, 1));
-    bool contextOverflow = false;
-    try {
-        for (std::size_t cycle = 0; cycle < 6; ++cycle)
-            (void)constrained.tick();
-    } catch (const StaticScheduleError&) {
-        contextOverflow = true;
-    }
-    require(contextOverflow,
-        "finite ICU Macro context capacity was not enforced");
+    // A one-slot frontend can retire and refill sequential Macro contexts.
+    using OneContextQueue = DistributedIcuQueue<MemInstruction,128,32,8,1,1>;
+    OneContextQueue one;
+    one.push_macro({3,3,4,1,1,1,0,IcuInductionTarget::MemAddress},MemInstruction::Read(100,0));
+    one.push_macro({20,3,4,1,1,1,0,IcuInductionTarget::MemAddress},MemInstruction::Read(200,0));
+    std::size_t count=0;
+    for(std::size_t cycle=0;cycle<32;++cycle)if(one.tick())++count;
+    require(count==6 && one.done() && one.peak_active_macros()==1,"single-slot Macro refill failed");
 
     std::cout << "icu_macro_schedule_test passed\n";
     return 0;

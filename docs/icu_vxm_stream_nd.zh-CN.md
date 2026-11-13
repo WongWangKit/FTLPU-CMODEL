@@ -1,3 +1,6 @@
+> Retired on 2026-11-12. VXM launch-loop instructions are no longer supported.
+> Recompile with the [sequential VXM ISA](icu_vxm_sequential.md). The text below is historical.
+
 # VXM_STREAM_ND
 
 `VXM_STREAM_ND` 在一条 ICU 宏指令中携带原生 96-bit VXM 紧凑配置包，以及

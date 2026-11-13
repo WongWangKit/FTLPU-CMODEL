@@ -9,7 +9,6 @@
 #include "ftlpu/icu/distributed_queue.hpp"
 #include "ftlpu/icu/common_barrier.hpp"
 #include "ftlpu/icu/queue_completion.hpp"
-#include "ftlpu/icu/fu_3d_instruction.hpp"
 #include "ftlpu/icu/location.hpp"
 #include "ftlpu/mem/mem_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
@@ -52,6 +51,7 @@ struct IcuFrontendStatistics {
     std::size_t macro_descriptor_count{0};
     std::size_t macro_mem_descriptor_count{0};
     std::size_t macro_mxm_descriptor_count{0};
+    std::size_t macro_sxm_descriptor_count{0};
     std::size_t macro_descriptor_decode_cycles{0};
     std::size_t macro_max_descriptor_decode_cycles{0};
     std::size_t macro_decoder_active_cycles{0};
@@ -304,7 +304,8 @@ public:
             });
         };
         return ready(mem_queues_) && ready(mxm_load_queues_)
-            && ready(mxm_dequant_queues_) && ready(mxm_compute_queues_);
+            && ready(mxm_dequant_queues_) && ready(mxm_compute_queues_)
+            && ready(sxm_transpose_queues_) && ready(sxm_permute_queues_);
     }
 
     void tick_raw_macro_frontends()
@@ -319,6 +320,7 @@ public:
         tick(mxm_load_queues_);
         tick(mxm_dequant_queues_);
         tick(mxm_compute_queues_);
+        tick(sxm_transpose_queues_); tick(sxm_permute_queues_);
         queue_control_pool_.end_cycle(true);
     }
 
@@ -353,7 +355,7 @@ public:
             if (image.storage==ProgramStorage::TransportImem
                 && (image.kind!=IcuMacroQueueKind::Mem || image.mode!=IcuQueueMode::Native))
                 throw std::invalid_argument("transport requires Native MEM words");
-            if (image.mode==IcuQueueMode::Macro && static_cast<unsigned>(image.kind)>3)
+            if (image.mode==IcuQueueMode::Macro && (image.kind==IcuMacroQueueKind::Vxm || static_cast<unsigned>(image.kind)>6))
                 throw std::invalid_argument("queue has no packed Macro codec");
             // Query the main queue geometry without allocating a transport store.
             visit_program_queue(image.kind,image.queue_index,false,[&](auto& q) {
@@ -367,7 +369,7 @@ public:
             }); break;
         case ProgramStorage::Qctl:
             if(image.word_bytes()!=12 || image.word_count()>hw::kQueueControlCapacity
-                || static_cast<unsigned>(image.kind)>3 || !image.generation)
+                || image.kind==IcuMacroQueueKind::Vxm || static_cast<unsigned>(image.kind)>6 || !image.generation)
                 throw std::invalid_argument("invalid QCTL image");
             visit_program_queue(image.kind,image.queue_index,false,[](auto&){}); break;
         case ProgramStorage::Barr:
@@ -659,18 +661,10 @@ public:
         VxmCompactInstruction instruction)
     {
         check_vxm_queue(alu);
-        vxm_queues_[alu].push_vxm_run_2d(
-            VxmIcuRun2DInstruction::Run2D(
-                0,
-                {1, 1}, {1, 1}, std::move(instruction)));
+        vxm_queues_[alu].push_instruction(std::move(instruction));
     }
 
-    void enqueue_vxm_run_2d(
-        std::size_t alu, VxmIcuRun2DInstruction instruction)
-    {
-        check_vxm_queue(alu);
-        vxm_queues_[alu].push_vxm_run_2d(std::move(instruction));
-    }
+
 
     void enqueue_vxm(
         std::size_t alu,
@@ -694,14 +688,7 @@ public:
         vxm_queues_[alu].push_repeat(Repeat {count, interval, 0});
     }
 
-    void enqueue_vxm_stream_nd(std::size_t alu,
-        IcuVxmStreamNdSchedule schedule,
-        VxmCompactInstruction instruction)
-    {
-        check_vxm_queue(alu);
-        vxm_queues_[alu].push_vxm_stream_nd(
-            schedule, std::move(instruction));
-    }
+
 
     void enqueue_mem(std::size_t column, MemInstruction instruction)
     {
@@ -709,22 +696,9 @@ public:
         mem_queues_[column].push_instruction(instruction);
     }
 
-    void enqueue_mem_3d(
-        std::size_t column,
-        MemIcuInstruction instruction)
-    {
-        check_mem_queue(column);
-        mem_queues_[column].push_mem_3d(std::move(instruction));
-    }
 
-    void enqueue_mem_write_read_2d(
-        std::size_t column,
-        MemIcuWriteRead2DInstruction instruction)
-    {
-        check_mem_queue(column);
-        mem_queues_[column].push_mem_write_read_2d(
-            std::move(instruction));
-    }
+
+
 
     void enqueue_mem_nop(std::size_t column, std::size_t cycles)
     {
@@ -749,20 +723,9 @@ public:
         mem_queues_[column].push_macro(schedule, std::move(instruction));
     }
 
-    void enqueue_mem_stream_nd(std::size_t column,
-        IcuMemStreamNdSchedule schedule, MemInstruction instruction)
-    {
-        check_mem_queue(column);
-        mem_queues_[column].push_mem_stream_nd(
-            schedule, std::move(instruction));
-    }
 
-    void enqueue_mem_slice_program(
-        std::size_t column, IcuMemSliceProgram program)
-    {
-        check_mem_queue(column);
-        mem_queues_[column].push_mem_slice_program(std::move(program));
-    }
+
+
 
     void enqueue_mem_synchronized_write(std::size_t queue,
         MemInstruction instruction, std::size_t count,
@@ -905,14 +868,7 @@ public:
         mxm_load_queues_[mxm].push_nop(cycles);
     }
 
-    void enqueue_mxm_load_3d(
-        std::size_t mxm,
-        MxmLoadIcuInstruction instruction)
-    {
-        check_mxm_queue(mxm);
-        mxm_load_queues_[mxm].push_mxm_load_3d(
-            std::move(instruction));
-    }
+
 
     void enqueue_mxm_dequant(
         std::size_t mxm,
@@ -922,14 +878,7 @@ public:
         mxm_dequant_queues_[mxm].push_instruction(instruction);
     }
 
-    void enqueue_mxm_dequant_3d(
-        std::size_t mxm,
-        MxmDequantIcuInstruction instruction)
-    {
-        check_mxm_queue(mxm);
-        mxm_dequant_queues_[mxm].push_mxm_dequant_3d(
-            std::move(instruction));
-    }
+
 
     void enqueue_mxm_dequant_nop(std::size_t mxm, std::size_t cycles)
     {
@@ -951,20 +900,7 @@ public:
             schedule, std::move(instruction));
     }
 
-    void enqueue_mxm_load_stream_nd(std::size_t mxm,
-        IcuMxmStreamNdSchedule schedule,
-        MxmControlInstruction instruction)
-    {
-        check_mxm_queue(mxm);
-        if (instruction.opcode != MxmControlOpcode::IW
-            && !(instruction.opcode == MxmControlOpcode::IS
-                && instruction.decode_operation
-                    == MxmIsOperation::LoadActivation))
-            throw std::invalid_argument(
-                "MXM load STREAM_ND requires IW/load-activation");
-        mxm_load_queues_[mxm].push_mxm_stream_nd(
-            schedule, std::move(instruction));
-    }
+
 
     void enqueue_mxm_dequant_macro(std::size_t mxm,
         IcuMacroSchedule schedule, MxmDequantInstruction instruction)
@@ -974,14 +910,7 @@ public:
             schedule, std::move(instruction));
     }
 
-    void enqueue_mxm_dequant_stream_nd(std::size_t mxm,
-        IcuMxmStreamNdSchedule schedule,
-        MxmDequantInstruction instruction)
-    {
-        check_mxm_queue(mxm);
-        mxm_dequant_queues_[mxm].push_mxm_stream_nd(
-            schedule, std::move(instruction));
-    }
+
 
     void enqueue_mxm_compute_macro(std::size_t mxm,
         IcuMacroSchedule schedule, MxmControlInstruction instruction)
@@ -997,29 +926,9 @@ public:
             schedule, std::move(instruction));
     }
 
-    void enqueue_mxm_compute_stream_nd(std::size_t mxm,
-        IcuMxmStreamNdSchedule schedule,
-        MxmControlInstruction instruction)
-    {
-        check_mxm_queue(mxm);
-        if (instruction.opcode == MxmControlOpcode::IW
-            || (instruction.opcode == MxmControlOpcode::IS
-                && instruction.decode_operation
-                    == MxmIsOperation::LoadActivation))
-            throw std::invalid_argument(
-                "MXM compute STREAM_ND cannot carry a load instruction");
-        mxm_compute_queues_[mxm].push_mxm_stream_nd(
-            schedule, std::move(instruction));
-    }
 
-    void enqueue_mxm_compute_3d(
-        std::size_t mxm,
-        MxmComputeIcuInstruction instruction)
-    {
-        check_mxm_queue(mxm);
-        mxm_compute_queues_[mxm].push_mxm_compute_3d(
-            std::move(instruction));
-    }
+
+
 
     void enqueue_mxm_compute_nop(std::size_t mxm, std::size_t cycles)
     {
@@ -1066,22 +975,10 @@ public:
             throw std::invalid_argument("ICU SXM transpose queue requires a Transpose instruction");
         }
         const auto side = hemisphere_index(hemisphere);
-        sxm_transpose_queues_[side].push_sxm_run_2d(
-            SxmIcuRun2DInstruction::Run2D(
-                0,
-                {1, 1}, {1, 1}, std::move(instruction)));
+        sxm_transpose_queues_[side].push_instruction(std::move(instruction));
     }
 
-    void enqueue_sxm_transpose_tile_program(Hemisphere hemisphere,
-        IcuSxmTileProgramSchedule schedule, SxmInstruction instruction)
-    {
-        if (instruction.opcode != SxmOpcode::Transpose)
-            throw std::invalid_argument(
-                "ICU SXM transpose tile program requires Transpose");
-        const auto side = hemisphere_index(hemisphere);
-        sxm_transpose_queues_[side].push_sxm_tile_program(
-            schedule, std::move(instruction));
-    }
+
 
     void enqueue_sxm_permute(SxmInstruction instruction)
     {
@@ -1094,22 +991,10 @@ public:
             throw std::invalid_argument("ICU SXM permute queue requires a Permute instruction");
         }
         const auto side = hemisphere_index(hemisphere);
-        sxm_permute_queues_[side].push_sxm_run_2d(
-            SxmIcuRun2DInstruction::Run2D(
-                0,
-                {1, 1}, {1, 1}, std::move(instruction)));
+        sxm_permute_queues_[side].push_instruction(std::move(instruction));
     }
 
-    void enqueue_sxm_permute_tile_program(Hemisphere hemisphere,
-        IcuSxmTileProgramSchedule schedule, SxmInstruction instruction)
-    {
-        if (instruction.opcode != SxmOpcode::Permute)
-            throw std::invalid_argument(
-                "ICU SXM permute tile program requires Permute");
-        const auto side = hemisphere_index(hemisphere);
-        sxm_permute_queues_[side].push_sxm_tile_program(
-            schedule, std::move(instruction));
-    }
+
 
     void enqueue_sxm_transpose_nop(std::size_t cycles)
     {
@@ -1994,6 +1879,10 @@ public:
         for (std::size_t index = 0; index < mxm_compute_queues_.size(); ++index)
             append(IcuMacroQueueKind::MxmCompute, index,
                 mxm_compute_queues_[index]);
+        for(std::size_t i=0;i<hw::kHemispheres;++i) {
+            append(IcuMacroQueueKind::SxmTranspose,i,sxm_transpose_queues_[i]);
+            append(IcuMacroQueueKind::SxmPermute,i,sxm_permute_queues_[i]);
+        }
         return result;
     }
 
@@ -2028,6 +1917,7 @@ public:
                 decoder.mem_descriptor_count;
             statistics.macro_mxm_descriptor_count +=
                 decoder.mxm_descriptor_count;
+            statistics.macro_sxm_descriptor_count += decoder.sxm_descriptor_count;
             statistics.macro_descriptor_decode_cycles +=
                 decoder.descriptor_decode_cycles;
             statistics.macro_max_descriptor_decode_cycles = std::max(
@@ -2316,9 +2206,9 @@ private:
     }
 
     std::array<VxmIcu, kVxmQueues> vxm_queues_{};
-    // Legacy VXM/SXM builders still describe positions in a compiler-side
+    // Native VXM builders still describe positions in a compiler-side
     // program timeline. These cursors exist only while translating that API:
-    // gaps become local-iMEM NOPs and every hardware RUN_2D packet starts at
+    // gaps become local-iMEM NOPs and every sequential configuration starts at
     // relative cycle zero. They are never consulted by the runtime ICU.
     std::array<MemIcu, kMemQueues> mem_queues_{};
     // Separate bounded native transport control RAM. It shares the physical

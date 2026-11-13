@@ -1,3 +1,4 @@
+#include "../../support/sxm_macro_fixture.hpp"
 #include "ftlpu/sxm/slice.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
 #include <iostream>
@@ -11,10 +12,16 @@ void run(bool reverse,std::size_t gap){
     const auto direction=reverse?StreamDirection::West:StreamDirection::East;
     const std::size_t offset=reverse?hw::kStreamsPerDirection:0,in=reverse?1:0,out=reverse?0:1;
     const auto original=SxmInstruction::Transpose({{offset},{offset+1}},{{offset+2},{offset+3}});
-    const auto packet=isa::encode_sxm_transpose_icu_run_2d_instruction(SxmIcuRun2DInstruction::Run2D(0,{1,1},{1,1},original));
-    const auto instruction=isa::decode_sxm_transpose_icu_run_2d_instruction(packet).instruction;
+    const auto instruction=IcuSxmActiveMacroContextCodec<true>::unpack(
+        IcuSxmActiveMacroContextCodec<true>::pack_initial(
+            {0,1,1,0,1,1,0,IcuInductionTarget::None},original)).instruction;
     check(SxmWideTranspose::accepts(instruction));
     const std::size_t starts[]={0,N+gap,2*(N+gap)};
+    test::SxmMacroFixture program;
+    program.add(0,3,N+gap,instruction);
+    InstructionControlUnit::SxmTransposeIcu queue;
+    program.load(queue,true);
+    while(!queue.raw_macro_ready()) queue.prefetch_raw_macro();
     auto value=[](std::size_t tile,std::size_t r,std::size_t c){return static_cast<unsigned>((tile*1723+r*43+c*7)&65535);};
     auto inject=[&](std::size_t t){for(std::size_t k=0;k<3;k++)for(std::size_t sl=0;sl<hw::kTileRows;sl++){
         if(t<starts[k]+sl||t>=starts[k]+sl+N)continue;
@@ -31,7 +38,7 @@ void run(bool reverse,std::size_t gap){
     std::size_t checked=0;
     for(std::size_t t=0;t<=starts[2]+2*N+2*SxmWideTranspose::skew;t++){
         fabric.begin_cycle();
-        for(auto start:starts)if(t==start){check(slice.can_issue(instruction));slice.issue(instruction);check(!slice.can_issue(instruction));}
+        if(auto issued=queue.tick()){check(slice.can_issue(*issued));slice.issue(*issued);check(!slice.can_issue(*issued));}
         slice.evaluate(fabric);inject(t+1);fabric.commit_cycle();
         for(std::size_t sl=0;sl<hw::kTileRows;sl++){
             std::optional<std::pair<std::size_t,std::size_t>> expected;
@@ -53,7 +60,7 @@ void run(bool reverse,std::size_t gap){
 }
 int main(){
     auto system=std::make_unique<TspSliceSystem>(SystemHardwareConfiguration{},SxmTransposeArchitecture::WideStreaming);
-    system->icu().enqueue_sxm_transpose(SxmInstruction::Transpose({{0},{1}},{{2},{3}}));
+
     for(bool reverse:{false,true})for(std::size_t gap:{0u,7u})run(reverse,gap);
     SxmSlice legacy(SxmStreamPortMap::SameDirection(0,1));
     auto command=SxmInstruction::Transpose({{0},{1}},{{2},{3}});

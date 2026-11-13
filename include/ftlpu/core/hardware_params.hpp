@@ -185,36 +185,15 @@ constexpr std::size_t kIcuC2cMacroContextDepth = config::kIcuC2cMacroContextDept
 constexpr std::size_t kIcuMemMacroContextBits = config::kIcuMemMacroContextBits;
 constexpr std::size_t kIcuMxmMacroContextBits = config::kIcuMxmMacroContextBits;
 
-// Each physical FU ICU owns one decoded loop state. Each context retains the
-// decoded static fields, loop counters, and packet PC.
-// A physical ICU executes one coarse instruction to completion. The IQ may
-// prefetch following packets, but they never become simultaneously active.
-constexpr std::size_t kIcuMem3DContextDepth = 1;
-constexpr std::size_t kIcuMxmLoad3DContextDepth = 1;
-constexpr std::size_t kIcuMxmDequant3DContextDepth = 1;
-constexpr std::size_t kIcuMxmCompute3DContextDepth = 1;
-constexpr std::size_t kIcuVxmRun2DContextDepth = 1;
-constexpr std::size_t kIcuSxmRun2DContextDepth = 1;
-// WRITE_READ_2D shares the single MEM context slot but needs two independent
-// 2-D event cursors while its write and read sweeps overlap in time.
-constexpr std::size_t kIcuMem3DContextBits = 384;
-constexpr std::size_t kIcuMxmLoad3DContextBits =
-    ((288 + kMxmColumnBits - 2 + 31) / 32) * 32;
-constexpr std::size_t kIcuMxmDequant3DContextBits = 224;
-constexpr std::size_t kIcuMxmCompute3DContextBits =
-    ((320 + 2 * (kMxmAccumulatorAddressBits - 13)
-      + 3 * (kMxmAccumulatorStrideBits - 14) + 31) / 32) * 32;
 // Retained in the existing ABI encoding-version field. The 32-lane ISA keeps
 // version 1; wide packets/FU fields require version 2 on both sides.
 constexpr std::size_t kIcuIsaLayoutVersion =
     kPhysicalVectorBytes > 32 || kMxmAccumulatorAddressBits > 13 || kMxmColumnBits > 2 ? 2 : 1;
-// Compact VXM config (96), two-counter launch fields/state, and local i-MEM
-// PC. The third counter used by MEM/MXM does not exist in this context.
-constexpr std::size_t kIcuVxmRun2DContextBits = 256;
+// VXM uses sequential 96-bit configurations and has no FU-loop context.
 // Queue-local compact SXM fields, two-counter launch state, and PC. Transpose
 // carries two stream bases and one input-row selector; Permute additionally
 // carries the physical-lane map and output selectors.
-constexpr std::size_t kIcuSxmTransposeRun2DContextBits = 256;
+constexpr std::size_t kIcuSxmTransposeMacroContextBits = 256;
 // Keep the 32-lane context unchanged; wider permutations retain their complete
 // lane map and larger tile selectors in the single active hardware context.
 constexpr std::size_t kSxmLaneIndexBits =
@@ -224,7 +203,7 @@ constexpr std::size_t kSxmTileSelectorBits =
     std::bit_width(kTileRows) < 3 ? 3 : std::bit_width(kTileRows);
 constexpr std::size_t kSxmGroupStrideBits =
     std::bit_width(kTileRows - 1) < 2 ? 2 : std::bit_width(kTileRows - 1);
-constexpr std::size_t kIcuSxmPermuteRun2DContextBits =
+constexpr std::size_t kIcuSxmPermuteMacroContextBits =
     ((384 + kPhysicalVectorBytes * kSxmLaneIndexBits - 160
       + kSxmTileSelectorBits - 3 + kSxmGroupStrideBits - 2 + 31) / 32) * 32;
 

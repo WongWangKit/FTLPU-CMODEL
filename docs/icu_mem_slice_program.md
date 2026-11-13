@@ -1,3 +1,5 @@
+> 历史设计记录：本文中的独立 2D/3D、STREAM_ND、slice/tile program 已移除，不是当前 ISA。当前实现见 [Macro ISA](icu_macro_scheduler.zh-CN.md)。旧测试产物需重新编译。
+
 # MEM ICU Slice Program
 
 ## Purpose

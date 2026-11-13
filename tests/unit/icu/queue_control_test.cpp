@@ -160,33 +160,18 @@ void overlapping_contexts()
         put(6,11);put(5,8);put(1,10);
         if(m==1)put(0,1); // a later descriptor's delta follows its template
     }
-    Queue raw,native;
-    raw.load_raw_macro(IcuMacroQueueKind::Mem,words);
-    raw.configure_queue_controls({{26,IcuControlOpcode::WaitEvent,7}},16,8,2);
-    while(!raw.raw_macro_ready())raw.prefetch_raw_macro();
-    native.push_nop(20);
-    for(unsigned i=0;i<14;++i) {
-        if(i==2)native.append_control(IcuControlInstruction::WaitEvent(7));
-        native.push_instruction(MemInstruction::Read((i%2?200:100)+i/2,2));
-        if(i!=13)native.push_nop(2);
-    }
-    native.launch();
-    std::vector<std::pair<unsigned,std::size_t>> a,b;
-    for(unsigned p=0;p<90;++p) {
-        if(p==24){raw.notify(8);native.notify(8);} // wrong tag cannot release
-        if(p==40){raw.notify(7);native.notify(7);}
-        if(auto x=raw.tick())a.emplace_back(p,isa::encode_mem_instruction(*x));
-        if(auto x=native.tick())b.emplace_back(p,isa::encode_mem_instruction(*x));
-        if(p==30)require(raw.active_macro_count()==2 && raw.cycle()==26,
-            "queue wait discarded or advanced an active Context");
-    }
-    if(a!=b) {
-        for(const auto& [p,x]:a)std::cerr<<"raw "<<p<<' '<<x<<'\n';
-        for(const auto& [p,x]:b)std::cerr<<"native "<<p<<' '<<x<<'\n';
-    }
-    require(a==b && a.size()==14 && raw.peak_active_macros()==2,
-        "interleaved Contexts changed Native issue order across WAIT");
+    rejects([&] {
+        Queue raw;
+        raw.load_raw_macro(IcuMacroQueueKind::Mem,words);
+        raw.configure_queue_controls({{26,IcuControlOpcode::WaitEvent,7}},16,8,2);
+        while(!raw.raw_macro_ready())raw.prefetch_raw_macro();
+        for(unsigned p=0;p<90;++p) {
+            if(p==40)raw.notify(7);
+            raw.tick();
+        }
+    }); // A WAIT does not authorize interleaved execution of two Macros.
 }
+
 void response_during_wait()
 {
     IcuQueueControlFrontend f;

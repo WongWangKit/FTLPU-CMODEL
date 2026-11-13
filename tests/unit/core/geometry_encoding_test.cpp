@@ -1,4 +1,4 @@
-#include "ftlpu/icu/sxm_run_2d.hpp"
+#include "ftlpu/icu/sxm_macro_instruction.hpp"
 #include "ftlpu/mem/mem_array.hpp"
 #include "ftlpu/sxm/slice.hpp"
 
@@ -38,55 +38,39 @@ int main() try
     }
     auto instruction = SxmInstruction::Permute(streams(0), streams(16), map);
     instruction.output_tile = hw::kTileRows - 1;
-    auto run = SxmIcuRun2DInstruction::Run2D(0, {3, 2}, {2, 13}, instruction,
-        (hw::kTileRows - 1) * hw::kLanesPerTile);
-    auto packet = isa::encode_sxm_permute_icu_run_2d_instruction(run);
-    auto decoded = isa::decode_sxm_permute_icu_run_2d_instruction(packet);
+    using Codec = IcuSxmActiveMacroContextCodec<false>;
+    IcuMacroSchedule schedule{0,3,2,0,2,13,0,IcuInductionTarget::None};
+    const auto packet = Codec::pack_initial(schedule,instruction);
+    auto decoded = Codec::unpack(packet);
     require(decoded.instruction.permute_map == map
-            && decoded.instruction.output_tile == hw::kTileRows - 1
-            && decoded.permute_map_stride == run.permute_map_stride,
-        "SXM packet lost high lane indices, last tile or group stride");
+            && decoded.instruction.output_tile == hw::kTileRows - 1,
+        "SXM Macro lost high lane indices or last tile");
     const auto permuted = SxmSlice::permute(input, decoded.instruction.permute_map);
     for (std::size_t i = 0; i < map.size(); ++i)
         require(permuted[i / hw::kLanesPerTile][i % hw::kLanesPerTile]
                     == static_cast<int>(map[i]), "SXM physical permutation mismatch");
     instruction.output_tile = SxmInstruction::kAllOutputTiles;
-    run.instruction = instruction;
-    decoded = isa::decode_sxm_permute_icu_run_2d_instruction(
-        isa::encode_sxm_permute_icu_run_2d_instruction(run));
+    decoded = Codec::unpack(Codec::pack_initial(schedule,instruction));
     require(decoded.instruction.output_tile == SxmInstruction::kAllOutputTiles,
         "SXM all-tiles sentinel did not round trip");
     const auto raw = isa::decode_sxm_instruction(isa::encode_sxm_instruction(instruction));
     require(raw.permute_map == map && raw.output_tile == instruction.output_tile,
         "legacy SXM codec lost widened permutation or sentinel");
-    packet.words.back().lanes[0] ^= 4;
+    instruction.permute_map.back() = SxmInstruction::kTotalLanes;
     bool rejected = false;
-    try { (void)isa::decode_sxm_permute_icu_run_2d_instruction(packet); }
-    catch (const std::logic_error&) { rejected = true; }
-    require(rejected, "SXM accepted a corrupt continuation word index");
-    run.instruction.permute_map.back() = SxmInstruction::kTotalLanes;
-    rejected = false;
-    try { (void)isa::encode_sxm_permute_icu_run_2d_instruction(run); }
+    try { (void)Codec::pack_initial(schedule,instruction); }
     catch (const std::invalid_argument&) { rejected = true; }
     require(rejected, "SXM accepted an out-of-range source lane");
-    if constexpr (hw::kPhysicalVectorBytes == 32) {
-        require(isa::EncodedSxmInstruction{}.words.size() == 13
-            && isa::EncodedSxmPermuteIcuRun2DPacket::kWordCount == 4
-            && isa::SxmEncodingLayout::kOutputRowOffset == 276
-            && isa::SxmEncodingLayout::kOutputTileOffset == 280
-            && isa::SxmEncodingLayout::kStrideOffset == 283,
-            "32-lane SXM encoding compatibility changed");
-    }
+    if constexpr (hw::kPhysicalVectorBytes == 32)
+        require(Codec::bit_count==384,"LPU32 permute context exceeds 384 bits");
     if constexpr (hw::kPhysicalVectorBytes == 64) {
         require(hw::kMemSliceColumns == 52 && hw::kMemSlicesPerGroup == 4
             && hw::kMemGroups == 13 && hw::kSystemStreamRegisterColumns == 16,
             "8-tile target changed the MEM/SR topology");
-        require(isa::EncodedSxmPermuteIcuRun2DPacket::kWordCount == 6,
-            "64-lane SXM packet length is incorrect");
     }
     std::cout << "geometry_encoding_test passed: tiles=" << hw::kTileRows
         << " mem_group=" << hw::kMemSlicesPerGroup << " lanes=" << map.size()
-        << " sxm_words=" << isa::EncodedSxmPermuteIcuRun2DPacket::kWordCount << '\n';
+        << " sxm_words=" << Codec::word_count << '\n';
     return 0;
 } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

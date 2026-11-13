@@ -278,10 +278,7 @@ void test_unified_mem_icu_insertion_and_transport_only_tick()
         "public raw control codec did not preserve WAIT_EVENT");
 
     MemIcu boundaryQueue;
-    boundaryQueue.push_mem_3d(MemIcuInstruction::Write3D(
-        IcuLoop3D {0, {1, 1, 1}, {1, 1, 1}},
-        MemIcuAddress3D::Affine(0, {0, 0, 0}),
-        StreamId::West(0)));
+    boundaryQueue.push_encoded_synchronized_packet(packet);
     const auto occupancy = boundaryQueue.imem_occupancy();
     bool splitRejected = false;
     try {
@@ -290,7 +287,7 @@ void test_unified_mem_icu_insertion_and_transport_only_tick()
         splitRejected = true;
     }
     require(splitRejected && boundaryQueue.imem_occupancy() == occupancy,
-        "MEM_WRITE_SYNC insertion split a 3-D packet or changed i-MEM on failure");
+        "MEM_WRITE_SYNC insertion split a synchronized transport packet or changed i-MEM on failure");
 
     bool launchedRejected = false;
     try {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/instruction_codec.hpp"
+#include "ftlpu/icu/sxm_macro_instruction.hpp"
 
 #include <algorithm>
 #include <array>
@@ -73,6 +74,7 @@ struct IcuMacroDecoderStatistics {
     std::size_t descriptor_count{0};
     std::size_t mem_descriptor_count{0};
     std::size_t mxm_descriptor_count{0};
+    std::size_t sxm_descriptor_count{0};
     std::size_t descriptor_decode_cycles{0};
     std::size_t max_descriptor_decode_cycles{0};
     std::size_t ddb_entries_committed{0};
@@ -276,7 +278,7 @@ private:
     static constexpr unsigned kCompactOperandDeltaBits = 14;
     static constexpr std::size_t kExtendedTemplatePayloadBits = 6 * 32 + 2;
     static constexpr std::size_t kTemplatePayloadWords =
-        (kExtendedTemplatePayloadBits + 63) / 64;
+        (kExtendedTemplatePayloadBits + (std::is_same_v<FuncInstruction, SxmInstruction> ? isa::sxm_macro_native_bits(false) : 0) + 63) / 64;
     static constexpr unsigned kMemAddressBits = static_cast<unsigned>(
         std::bit_width(hw::kSramDepthRows - 1));
 
@@ -329,7 +331,7 @@ private:
         std::bit_width(DdbRunCapacity - 1);
     static constexpr std::size_t kMaxDdbScheduleBits = 193;
     static constexpr std::size_t kMaxDdbPayloadBits =
-        49 + kMaxDdbScheduleBits + 32 + 13 + 2 * kDdbIndexBits
+        (std::is_same_v<FuncInstruction, SxmInstruction> ? isa::sxm_macro_native_bits(false) : 49) + kMaxDdbScheduleBits + 32 + 13 + 2 * kDdbIndexBits
         + 64 * (DdbRunCapacity - 1);
     static constexpr std::size_t kMaxDdbPayloadWords =
         (kMaxDdbPayloadBits + 63) / 64;
@@ -604,6 +606,9 @@ private:
             if (kind_ != IcuMacroQueueKind::MxmDequant)
                 throw std::invalid_argument(
                     "MXM dequant Macro decoder has an invalid queue kind");
+        } else if constexpr (std::is_same_v<FuncInstruction, SxmInstruction>) {
+            if (kind_ != IcuMacroQueueKind::SxmTranspose && kind_ != IcuMacroQueueKind::SxmPermute)
+                throw std::invalid_argument("SXM Macro decoder queue kind mismatch");
         } else {
             throw std::invalid_argument(
                 "Macro v1 is unsupported for this ICU instruction type");
@@ -616,7 +621,9 @@ private:
         case IcuMacroQueueKind::Mem: return kMemAddressBits;
         case IcuMacroQueueKind::MxmLoad: return 2;
         case IcuMacroQueueKind::MxmCompute: return 13;
-        case IcuMacroQueueKind::MxmDequant: return 0;
+        case IcuMacroQueueKind::MxmDequant:
+        case IcuMacroQueueKind::SxmTranspose:
+        case IcuMacroQueueKind::SxmPermute: return 0;
         }
         throw std::logic_error("unknown Macro queue kind");
     }
@@ -628,6 +635,8 @@ private:
         case IcuMacroQueueKind::MxmLoad: return 29;
         case IcuMacroQueueKind::MxmDequant: return 16;
         case IcuMacroQueueKind::MxmCompute: return 49;
+        case IcuMacroQueueKind::SxmTranspose: return isa::sxm_macro_native_bits(true);
+        case IcuMacroQueueKind::SxmPermute: return isa::sxm_macro_native_bits(false);
         }
         throw std::logic_error("unknown Macro queue kind");
     }
@@ -654,7 +663,8 @@ private:
         result.inner_interval = cursor; cursor += 32;
         result.outer_count = cursor; cursor += 32;
         result.outer_interval = cursor; cursor += 32;
-        if (kind_ != IcuMacroQueueKind::MxmDequant) {
+        if (kind_ != IcuMacroQueueKind::MxmDequant
+            && kind_ != IcuMacroQueueKind::SxmTranspose && kind_ != IcuMacroQueueKind::SxmPermute) {
             result.inner_stride = cursor; cursor += 32;
             result.outer_stride = cursor; cursor += 32;
         }
@@ -714,9 +724,16 @@ private:
 
         const auto layout = ddb_field_layout();
         DdbSlot result;
-        result.payload.write(layout.instruction,
-            layout.summary.instruction_bits,
-            encode_native(descriptor.descriptor_template.instruction));
+        if constexpr (std::is_same_v<FuncInstruction, SxmInstruction>) {
+            auto offset = layout.instruction;
+            isa::write_sxm_macro_native(descriptor.descriptor_template.instruction,
+                kind_ == IcuMacroQueueKind::SxmTranspose, [&](std::uint64_t value, unsigned width) {
+                    result.payload.write(offset,width,value); offset += width;
+                });
+        } else {
+            result.payload.write(layout.instruction, layout.summary.instruction_bits,
+                encode_native(descriptor.descriptor_template.instruction));
+        }
 
         const auto& schedule = descriptor.descriptor_template.schedule;
         const auto write32 = [&](std::size_t offset, std::uint64_t value) {
@@ -806,6 +823,8 @@ private:
                 ? IcuInductionTarget::MxmAccumulatorAddress
                 : IcuInductionTarget::None;
             break;
+        case IcuMacroQueueKind::SxmTranspose:
+        case IcuMacroQueueKind::SxmPermute:
         case IcuMacroQueueKind::MxmDequant:
             result.induction_target = IcuInductionTarget::None;
             break;
@@ -1117,6 +1136,8 @@ private:
         ++statistics_.descriptor_count;
         if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
             ++statistics_.mem_descriptor_count;
+        else if (kind_==IcuMacroQueueKind::SxmTranspose || kind_==IcuMacroQueueKind::SxmPermute)
+            ++statistics_.sxm_descriptor_count;
         else
             ++statistics_.mxm_descriptor_count;
         run_decode_start_cycle_ = statistics_.cycles;
@@ -1185,6 +1206,13 @@ private:
                 plan.mem_preserve = bit_field(*header, 10, 1) != 0;
                 plan.payload_bits = compact_schedule_bits(plan.shape);
             }
+        } else if constexpr (std::is_same_v<FuncInstruction, SxmInstruction>) {
+            header_bits = plan.extended ? 1 : 3;
+            const auto header = peek_bits(header_bits);
+            if (!header) return;
+            if (!plan.extended) plan.shape = static_cast<Shape>(bit_field(*header,1,2));
+            plan.payload_bits = native_instruction_bits() + (plan.extended
+                ? kExtendedTemplatePayloadBits : compact_schedule_bits(plan.shape));
         } else {
             const auto opcode_header = peek_bits(3);
             if (!opcode_header.has_value()) return;
@@ -1264,6 +1292,16 @@ private:
                 decoded = read_compact_schedule(
                     cursor, template_plan_.shape, result.schedule);
             }
+        } else if constexpr (std::is_same_v<FuncInstruction, SxmInstruction>) {
+            result.instruction = isa::read_sxm_macro_native(
+                kind_ == IcuMacroQueueKind::SxmTranspose, [&](unsigned width) {
+                    auto value = cursor.read(width);
+                    if (!value) throw StaticScheduleError("truncated SXM Macro template");
+                    return *value;
+                });
+            result.schedule = IcuMacroSchedule{};
+            decoded = template_plan_.extended ? read_extended_schedule(cursor,result.schedule)
+                : read_compact_schedule(cursor,template_plan_.shape,result.schedule);
         } else {
             result.instruction = decode_native(template_plan_.native);
             if (template_plan_.extended) {
@@ -1648,8 +1686,7 @@ private:
         auto result = DecodedContext{
             slot.sidecar.first_record_index + next_context_index,
             unpack_ddb_schedule(payload, start_cycle),
-            decode_native(payload.read(layout.instruction,
-                layout.summary.instruction_bits)),
+            unpack_ddb_native(payload),
             ignore_timing ? 0 : current_cycle};
         set_operand(result.instruction, static_cast<std::size_t>(
             payload.read(layout.next_operand,
@@ -1701,6 +1738,16 @@ private:
                 next_context_index + 1);
         }
         return result;
+    }
+
+    FuncInstruction unpack_ddb_native(const PackedDdbEntry& payload) const
+    {
+        const auto layout = ddb_field_layout();
+        if constexpr (std::is_same_v<FuncInstruction, SxmInstruction>) {
+            auto offset = layout.instruction;
+            return isa::read_sxm_macro_native(kind_ == IcuMacroQueueKind::SxmTranspose,
+                [&](unsigned width) { auto value=payload.read(offset,width); offset+=width; return value; });
+        } else return decode_native(payload.read(layout.instruction,layout.summary.instruction_bits));
     }
 
     void set_operand(FuncInstruction& instruction, std::size_t operand) const

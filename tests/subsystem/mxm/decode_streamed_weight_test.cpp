@@ -98,22 +98,8 @@ public:
     void compute_at(std::size_t cycle, ftlpu::MxmControlInstruction instruction)
     {
         if (cycle < compute_) throw std::logic_error("overlapping compute queue");
-        auto loop = ftlpu::IcuLoop3D {};
-        loop.wait_cycle = cycle - compute_;
-        // Exercise the hardware-visible raw macro fields, including the
-        // destination segment and the separate whole-row read instruction.
-        const auto macro = instruction.opcode == ftlpu::MxmControlOpcode::IS
-            ? ftlpu::MxmComputeIcuInstruction::IsStreamCompute3D(
-                loop, instruction.weight_buffer, ftlpu::MxmIcuBufferMode::Fixed,
-                instruction.stream_base, instruction.data_format,
-                instruction.accumulator_address, {0, 0, 0}, instruction.weight_column,
-                instruction.accumulator_destination, instruction.accumulator_clear,
-                instruction.is_mode)
-            : ftlpu::MxmComputeIcuInstruction::AccumulatorRead3D(
-                loop, instruction.stream_base, instruction.accumulator_address,
-                {0, 0, 0}, instruction.accumulator_clear,
-                instruction.accumulator_output_format, instruction.accumulator_destination);
-        icu_.enqueue_mxm_compute_3d(0, macro);
+        icu_.enqueue_mxm_compute_nop(0, cycle-compute_);
+        icu_.enqueue_mxm(0,instruction);
         compute_ = cycle + 1;
         end_ = std::max(end_, compute_);
     }

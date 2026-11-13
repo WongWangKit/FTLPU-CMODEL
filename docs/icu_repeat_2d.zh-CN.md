@@ -1,3 +1,5 @@
+> 历史设计记录：本文中的独立 2D/3D、STREAM_ND、slice/tile program 已移除，不是当前 ISA。当前实现见 [Macro ISA](icu_macro_scheduler.zh-CN.md)。旧测试产物需重新编译。
+
 # ICU Repeat2D 指令
 
 `Repeat2D` 是队列局部、阻塞式的二维单指令迭代控制。紧邻它之前的功能指令已经作为

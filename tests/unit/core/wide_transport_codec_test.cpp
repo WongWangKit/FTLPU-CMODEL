@@ -22,15 +22,6 @@ int main() try
     const auto iw = MxmControlInstruction::IWDirect16(1, column);
     require(isa::decode_mxm_instruction(isa::encode_mxm_instruction(iw)).weight_column == column,
         "FU lost the highest MXM supercell column");
-    const auto loadRun = MxmLoadIcuInstruction::Load3D({0,{2,1,1},{1,1,1}},
-        1,MxmIcuBufferMode::Fixed,column,{-static_cast<std::int64_t>(column),0,0},
-        16,MxmWeightInputMode::Direct16);
-    const auto decodedLoad = isa::decode_mxm_load_icu_3d_instruction(
-        isa::encode_mxm_load_icu_3d_instruction(loadRun));
-    require(decodedLoad.weight_column_base == column
-        && decodedLoad.weight_column_strides[0] == -static_cast<std::int64_t>(column)
-        && decodedLoad.weight_stream_base == 16 && decodedLoad.weight_input_mode == MxmWeightInputMode::Direct16,
-        "ICU load fields overlapped when the column selector widened");
     const auto compute = MxmControlInstruction::Compute(1, 0, 0, address, 1,
         MxmAccumulatorDestination::Stream, MxmDataFormat::BFloat16, false,
         MxmAccumulatorOutputFormat::BFloat16);
@@ -41,48 +32,18 @@ int main() try
     const auto read = MxmControlInstruction::AccumulatorRead(address,0,false);
     require(isa::decode_mxm_instruction(isa::encode_mxm_instruction(read)).accumulator_address == address,
         "FU accumulator-read lost its highest address");
+    const auto streamAddress=address-(column+hw::kMxmIsColumns-1)/hw::kMxmSupercellsPerPlane;
     const auto stream = MxmControlInstruction::IsStreamCompute(0,0,
-        MxmDataFormat::BFloat16,address,column,MxmAccumulatorDestination::Stream,false,MxmIsMode::Block);
+        MxmDataFormat::BFloat16,streamAddress,column,MxmAccumulatorDestination::Sram,false,MxmIsMode::Block);
     const auto decodedStream = isa::decode_mxm_instruction(isa::encode_mxm_instruction(stream));
-    require(decodedStream.accumulator_address == address && decodedStream.weight_column == column
+    require(decodedStream.accumulator_address == streamAddress && decodedStream.weight_column == column
         && decodedStream.data_format == MxmDataFormat::BFloat16 && !decodedStream.accumulator_clear,
         "FU stream-compute fields overlapped after widening");
-    const auto half = static_cast<std::int64_t>(hw::kMxmAccumulatorRows / 2);
-    auto run = MxmComputeIcuInstruction::Compute3D({0,{1,2,1},{1,3,1}},
-        1,MxmIcuBufferMode::Fixed,0,0,half,{0,-half,0},1,MxmDataFormat::BFloat16,
-        {MxmAccumulatorDestination::Sram,false,MxmAccumulatorOutputFormat::BFloat16});
-    const auto packet = isa::encode_mxm_compute_icu_3d_instruction(run);
-    const auto decodedRun = isa::decode_mxm_compute_icu_3d_instruction(packet);
-    require(decodedRun.accumulator_address_base == static_cast<std::size_t>(half)
-        && decodedRun.accumulator_address_strides[1] == -half,
-        "ICU lost a high accumulator base or negative stride");
-    run.accumulator_address_base = 0;
-    run.accumulator_address_strides[1] = half;
-    const auto positive = isa::decode_mxm_compute_icu_3d_instruction(
-        isa::encode_mxm_compute_icu_3d_instruction(run));
-    require(positive.accumulator_address_strides[1] == half,
-        "ICU truncated a positive stride at the old signed boundary");
-    using Queue = DistributedIcuQueue<MxmControlInstruction,128,64,16,1,1,IcuQueueRole::MxmCompute>;
-    Queue queue;
-    queue.push_mxm_compute_3d(run);
-    std::vector<std::size_t> issued;
-    for (std::size_t cycle=0; cycle<6; ++cycle)
-        if (const auto instruction=queue.tick()) issued.push_back(instruction->accumulator_address);
-    require(issued == std::vector<std::size_t>{0,static_cast<std::size_t>(half)},
-        "wide ICU packet did not decode and issue both address domains");
-    require(queue.peak_active_3d_contexts() == 1 && queue.active_3d_context_count() == 0,
-        "wide ICU packet did not retire its sole active context");
-    const auto readRun = MxmComputeIcuInstruction::AccumulatorRead3D({0,{1,1,1},{1,1,1}},0,address,{0,0,0});
-    require(isa::decode_mxm_compute_icu_3d_instruction(
-        isa::encode_mxm_compute_icu_3d_instruction(readRun)).accumulator_address_base == address,
-        "ICU accumulator-read lost its highest address");
-    const auto streamRun = MxmComputeIcuInstruction::IsStreamCompute3D(
-        {0,{1,1,1},{1,1,1}},0,MxmIcuBufferMode::Fixed,0,MxmDataFormat::BFloat16,
-        address,{0,0,0},column,MxmAccumulatorDestination::Stream,false,MxmIsMode::Block);
-    const auto decodedStreamRun = isa::decode_mxm_compute_icu_3d_instruction(
-        isa::encode_mxm_compute_icu_3d_instruction(streamRun));
-    require(decodedStreamRun.accumulator_column == column && decodedStreamRun.accumulator_address_base == address,
-        "ICU stream-compute lost its widened fields");
+    // The Macro context carries the same native FU fields.
+    using Codec = IcuActiveMacroContextCodec256<MxmControlInstruction>;
+    const IcuMacroSchedule schedule{0,1,1,0,1,1,0,IcuInductionTarget::None};
+    require(Codec::unpack(Codec::pack_initial(schedule,compute)).instruction.accumulator_address==address,
+        "Macro context lost the highest accumulator address");
     MxmAccumulator accumulator;
     MxmAccumulator::Segment segment{};
     segment.fill(2.5f);
@@ -91,7 +52,7 @@ int main() try
         "last context/column is not physically backed by accumulator storage");
     bool rejected = false;
     try { accumulator.accumulate(hw::kMxmAccumulatorRows, column, segment); }
-    catch (const std::out_of_range&) { rejected = true; }
+    catch (const std::exception&) { rejected = true; }
     require(rejected, "accumulator accepted the first row beyond configured capacity");
     C2cVector vector;
     vector.vector_tag=91;
@@ -155,7 +116,7 @@ int main() try
         "per-lane arbitration unnecessarily serialized independent C2C lanes");
     std::cout << "wide_transport_codec_test passed: lanes=" << hw::kPhysicalVectorBytes
         << " address_bits=" << hw::kMxmAccumulatorAddressBits << " column_bits=" << hw::kMxmColumnBits
-        << " compute_words=" << isa::EncodedMxmComputeIcu3DPacket::kWordCount << " c2c_beats=" << beats << '\n';
+        << " compute_words=" << Codec::word_count << " c2c_beats=" << beats << '\n';
     return 0;
 } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';return 1;
