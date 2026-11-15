@@ -1,0 +1,12 @@
+Checkpoint 4 VXM - authoritative CMODEL check
+Date: 2026-11-14
+
+Authority: https://github.com/WongWangKit/FTLPU-CMODEL
+Default branch: main
+Authoritative SHA: 2351cec89b5ef9c3c73f97b2d2e77c458fb36c95
+Remote update pending at checkpoint start: no
+
+The daily repository check Work was invoked before migration. During this
+checkpoint that Work established D:\LPU\FTLPU-CMODEL-main as a clean Git work
+tree at the same SHA. Checkpoint 4 wrote source only under
+D:\LPU\FTLPU-CMODEL-clock.

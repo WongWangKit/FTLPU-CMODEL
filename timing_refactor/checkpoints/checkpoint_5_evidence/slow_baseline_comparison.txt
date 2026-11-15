@@ -1,0 +1,10 @@
+tests=6
+result=EXPECTED_FROZEN_FAILURES
+kernel.projection.w8a16=MXM accumulator address 1536 outside configured 128-row SRAM
+kernel.swiglu.w8a16=MXM accumulator address 1536 outside configured 128-row SRAM
+model.smollm2.prefill_attention=MXM accumulator address 512 outside configured 128-row SRAM
+model.decoder.decode_layer=MXM accumulator address 128 outside configured 128-row SRAM
+model.smollm2.decode_ffn=SRAM row outside configured slice SRAM
+model.smollm2.decode_attention=VXM active-bundle at cycle 31
+comparison=messages and categories unchanged from Checkpoint 4
+

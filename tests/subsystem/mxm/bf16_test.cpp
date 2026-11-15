@@ -77,42 +77,54 @@ public:
         std::size_t cycle,
         ftlpu::MxmControlInstruction instruction)
     {
-        if (cycle < mxm_load_) {
+        if (cycle == 0) {
+            throw std::logic_error("BF16 MXM load cannot execute before row0 is registered");
+        }
+        const auto issue_cycle = cycle - 1;
+        if (issue_cycle < mxm_load_) {
             throw std::logic_error("BF16 MXM test overlaps the load queue");
         }
-        icu_.enqueue_mxm_load_nop(0, cycle - mxm_load_);
+        icu_.enqueue_mxm_load_nop(0, issue_cycle - mxm_load_);
         icu_.enqueue_mxm(0, instruction);
-        mxm_load_ = cycle + 1;
-        end_cycle_ = std::max(end_cycle_, mxm_load_);
+        mxm_load_ = issue_cycle + 1;
+        end_cycle_ = std::max(end_cycle_, cycle + 1);
     }
 
     void mxm_compute_at(
         std::size_t cycle,
         ftlpu::MxmControlInstruction instruction)
     {
-        if (cycle < mxm_compute_) {
+        if (cycle == 0) {
+            throw std::logic_error("BF16 MXM compute cannot execute before row0 is registered");
+        }
+        const auto issue_cycle = cycle - 1;
+        if (issue_cycle < mxm_compute_) {
             throw std::logic_error("BF16 MXM test overlaps the compute queue");
         }
-        icu_.enqueue_mxm_compute_nop(0, cycle - mxm_compute_);
+        icu_.enqueue_mxm_compute_nop(0, issue_cycle - mxm_compute_);
         icu_.enqueue_mxm(0, instruction);
-        mxm_compute_ = cycle + 1;
-        end_cycle_ = std::max(end_cycle_, mxm_compute_);
+        mxm_compute_ = issue_cycle + 1;
+        end_cycle_ = std::max(end_cycle_, cycle + 1);
     }
 
     void mxm_dequant_at(
         std::size_t cycle,
         ftlpu::MxmDequantInstruction instruction)
     {
-        if (cycle < mxm_dequant_) {
+        if (cycle == 0) {
+            throw std::logic_error("BF16 MXM dequant cannot execute before row0 is registered");
+        }
+        const auto issue_cycle = cycle - 1;
+        if (issue_cycle < mxm_dequant_) {
             throw std::logic_error(
                 "BF16 MXM test overlaps the dequant queue");
         }
         icu_.enqueue_mxm_dequant_nop(
             0,
-            cycle - mxm_dequant_);
+            issue_cycle - mxm_dequant_);
         icu_.enqueue_mxm_dequant(0, instruction);
-        mxm_dequant_ = cycle + 1;
-        end_cycle_ = std::max(end_cycle_, mxm_dequant_);
+        mxm_dequant_ = issue_cycle + 1;
+        end_cycle_ = std::max(end_cycle_, cycle + 1);
     }
 
     void mem_repeat_at(
@@ -141,8 +153,8 @@ public:
         if (count > 1) {
             icu_.enqueue_mxm_compute_repeat(0, count - 1, 1);
         }
-        mxm_compute_ = cycle + count;
-        end_cycle_ = std::max(end_cycle_, mxm_compute_);
+        mxm_compute_ = cycle + count - 1;
+        end_cycle_ = std::max(end_cycle_, cycle + count);
     }
 
     std::size_t end_cycle() const

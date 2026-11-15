@@ -40,6 +40,10 @@ public:
         *this=IcuQueueControlFrontend{};
         handle_=pool.add_partition(entries,limit);pool_=&pool;
     }
+    void rebind_shared_pool(IcuQueueControlPool& pool) noexcept
+    {
+        if (pool_ != nullptr) pool_ = &pool;
+    }
     void begin_cycle()
     {
         if(pool_) return;

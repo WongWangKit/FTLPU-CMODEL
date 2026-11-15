@@ -228,6 +228,19 @@ int main() try
     const auto previous = loader.statistics();
     require(*previous.images[1].first_ddr_request > *previous.images[0].image_committed,
         "queue switch preceded the last commit");
+    require(previous.word_fifo_writes == a.word_count()+b.word_count()
+            && previous.word_fifo_reads == previous.word_fifo_writes
+            && previous.ingress_fifo_writes == previous.word_fifo_writes
+            && previous.ingress_fifo_reads == previous.word_fifo_writes,
+        "Program Word or ingress FIFO lost a physical record");
+    require(previous.relay_writes
+            == a.word_count()+7*b.word_count()
+            && previous.relay_reads == previous.relay_writes,
+        "MEM-near and MXM-tail records crossed the wrong Relay count");
+    require(previous.peak_word_fifo != 0
+            && previous.peak_ingress_fifo != 0
+            && previous.peak_relay_level != 0,
+        "Program distribution FIFO occupancy was not observable");
     compare(*system, a, mem); compare(*system, b, mxm);
     // A fresh, executable Native program exercises safe long/short switching.
     system=std::make_unique<C2cDmaSystem>(ddr_config(),1,SystemHardwareConfiguration{},config);

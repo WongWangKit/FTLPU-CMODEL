@@ -47,6 +47,7 @@ int main() try
     MxmAccumulator accumulator;
     MxmAccumulator::Segment segment{};
     segment.fill(2.5f);
+    accumulator.low();
     accumulator.accumulate(address,column,segment);
     require(accumulator.read(address,column)==segment && accumulator.value(address,hw::kMxmColumns-1)==2.5f,
         "last context/column is not physically backed by accumulator storage");
@@ -54,6 +55,8 @@ int main() try
     try { accumulator.accumulate(hw::kMxmAccumulatorRows, column, segment); }
     catch (const std::exception&) { rejected = true; }
     require(rejected, "accumulator accepted the first row beyond configured capacity");
+    accumulator.validate_posedge();
+    accumulator.posedge();
     C2cVector vector;
     vector.vector_tag=91;
     for (std::size_t i=0;i<hw::kPhysicalVectorBytes;++i)

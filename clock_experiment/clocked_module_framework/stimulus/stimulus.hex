@@ -1,0 +1,30 @@
+80000000 // cycle 0: initial synchronous reset
+40e22700 // cycle 1: FIFO empty simultaneous read/write; SRAM uninitialized read
+412449a1 // cycle 2: FIFO write; SRAM write address 1
+01666000 // cycle 3: register hold; FIFO write
+41e88500 // cycle 4: fill FIFO; SRAM read address 1
+422ab000 // cycle 5: full simultaneous read/write
+426cd000 // cycle 6: simultaneous read/write
+42801000 // cycle 7: FIFO read
+02eee000 // cycle 8: register hold; FIFO write
+43310000 // cycle 9: FIFO write and pointer wrap
+43733000 // cycle 10: full simultaneous read/write
+43801000 // cycle 11: FIFO read
+43c01000 // cycle 12: FIFO read
+44001000 // cycle 13: FIFO read to empty and pointer wrap
+44755000 // cycle 14: empty simultaneous read/write
+44801000 // cycle 15: FIFO read
+04c00000 // cycle 16: idle and register hold
+45000ab2 // cycle 17: SRAM write address 2
+45400600 // cycle 18: SRAM read address 2
+c5800000 // cycle 19: mid-traffic synchronous reset
+45c00500 // cycle 20: SRAM retained read address 1
+46382000 // cycle 21: FIFO write after reset
+46401700 // cycle 22: FIFO read; SRAM uninitialized read address 3
+06800000 // cycle 23: register hold
+46fa2000 // cycle 24: FIFO write
+473a4000 // cycle 25: FIFO write
+47401000 // cycle 26: FIFO read
+47ba7000 // cycle 27: simultaneous FIFO read/write
+47c01000 // cycle 28: FIFO read
+48001000 // cycle 29: FIFO read to empty

@@ -37,6 +37,7 @@ public:
     void clear();
     std::uint8_t byte(std::size_t row, std::size_t byte_offset) const;
     void set_byte(std::size_t row, std::size_t byte_offset, std::uint8_t value);
+    void validate_segment(std::size_t tile, std::size_t row) const;
     StreamPayloadTileSegment read_segment(std::size_t tile, std::size_t row) const;
     void write_segment(
         std::size_t tile,

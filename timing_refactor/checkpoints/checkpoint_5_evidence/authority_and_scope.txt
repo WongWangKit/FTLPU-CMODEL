@@ -1,0 +1,9 @@
+authoritative_repo=D:\LPU\FTLPU-CMODEL-main
+branch=main
+head=2351cec89b5ef9c3c73f97b2d2e77c458fb36c95
+status=clean (## main...origin/main)
+modified_workspace=D:\LPU\FTLPU-CMODEL-clock only
+software_modified=no
+vmodel_modified=no (read-only RTL evidence)
+git_commit_or_push=no
+

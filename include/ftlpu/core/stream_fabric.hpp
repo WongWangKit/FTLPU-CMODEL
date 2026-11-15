@@ -2,6 +2,7 @@
 
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/stream.hpp"
+#include "ftlpu/core/timing.hpp"
 
 #include <algorithm>
 #include <array>
@@ -25,7 +26,7 @@ struct StreamRegisterColumn {
     std::array<std::array<StreamLaneRegisterFile, hw::kLanesPerTile>, hw::kTileRows> lanes{};
 };
 
-class StreamRegisterFabric {
+class StreamRegisterFabric final : public timing::ClockedModule {
 public:
     struct CycleActivity {
         std::size_t staged_writes{0};
@@ -66,7 +67,7 @@ public:
         consumed_cells_.clear();
         std::fill(last_staged_cycle_.begin(), last_staged_cycle_.end(),
             std::numeric_limits<std::size_t>::max());
-        cycle_ = 0;
+        committed_cycles_ = 0;
         cycle_open_ = false;
         current_activity_ = {};
         last_activity_ = {};
@@ -79,7 +80,7 @@ public:
 
     std::size_t cycle() const noexcept
     {
-        return cycle_;
+        return committed_cycles_;
     }
 
     bool cycle_open() const noexcept
@@ -127,12 +128,12 @@ public:
         return last_activity_;
     }
 
-    void begin_cycle()
+    void low() override
     {
         if (cycle_open_) {
             throw std::logic_error("stream-register cycle is already open");
         }
-        // commit_cycle() leaves the staging state clean. Do not rescan the
+        // posedge() leaves the staging state clean. Do not rescan the
         // complete fabric a second time at the start of every cycle.
         current_activity_ = {};
         cycle_open_ = true;
@@ -242,7 +243,8 @@ public:
         select(next_producers_[column].lanes[tile][lane], stream) =
             classify_producer(producer);
         next_cells_.push_back(encode_cell(column, tile, lane, stream));
-        last_staged_cycle_[encode_cell(column, tile, lane, stream)] = cycle_ + 1;
+        last_staged_cycle_[encode_cell(column, tile, lane, stream)] =
+            committed_cycles_ + 1;
         ++current_activity_.staged_writes;
         if (stream.direction() == StreamDirection::East)
             ++current_activity_.east_staged_writes;
@@ -380,9 +382,17 @@ public:
         }
     }
 
-    void commit_cycle()
+    void validate_posedge() const override
     {
         require_open_cycle();
+        if (current_.size() != next_.size()
+            || current_.size() != next_producers_.size()
+            || current_.size() != consumed_.size())
+            throw std::logic_error("stream-register Current/Next geometry mismatch");
+    }
+
+    void posedge() override
+    {
         current_.swap(next_);
         last_activity_ = current_activity_;
         for (const std::size_t encoded : current_cells_) {
@@ -406,11 +416,11 @@ public:
         }
         consumed_cells_.clear();
         cycle_open_ = false;
-        ++cycle_;
+        ++committed_cycles_;
     }
 
-    // Initialization hook for tests/host staging before cycle 0.  Runtime
-    // producers should use begin_cycle + stage_write + commit_cycle instead.
+    // Initialization hook for tests/host staging before cycle 0. Runtime
+    // producers are ordered by SystemPhase LOW and committed by Clock.
     void initialize_cell(
         std::size_t column,
         std::size_t tile,
@@ -586,7 +596,7 @@ private:
     void require_open_cycle() const
     {
         if (!cycle_open_) {
-            throw std::logic_error("stream-register operation requires begin_cycle()");
+            throw std::logic_error("stream-register operation requires LOW preparation");
         }
     }
 
@@ -638,7 +648,9 @@ private:
     std::vector<std::size_t> next_cells_{};
     std::vector<std::size_t> consumed_cells_{};
     std::vector<std::size_t> last_staged_cycle_{};
-    std::size_t cycle_{0};
+    // Diagnostic commit count. In TspSliceSystem every commit is issued only
+    // by the global Clock, so it remains lockstep with the physical cycle.
+    std::size_t committed_cycles_{0};
     bool cycle_open_{false};
     CycleActivity current_activity_{};
     CycleActivity last_activity_{};

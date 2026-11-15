@@ -212,9 +212,10 @@ int main()
         ftlpu::SxmStreamId {east1.packed()},
         sr_map));
 
-    fabric.begin_cycle();
+    fabric.low();
     sr_sxm.evaluate(fabric);
-    fabric.commit_cycle();
+    sr_sxm.validate_posedge(); fabric.validate_posedge();
+    sr_sxm.posedge(); fabric.posedge();
     assert(sr_sxm.cycle() == 1);
     assert(!fabric.cell(0, 0, 0, east0).valid);
     assert(fabric.cell(1, 0, 0, east1).valid);
@@ -276,9 +277,10 @@ int main()
                 stream_range(0, 2 * ftlpu::hw::kLanesPerTile),
                 stream_range(16, 2 * ftlpu::hw::kLanesPerTile)));
         }
-        parallel_fabric.begin_cycle();
+        parallel_fabric.low();
         parallel_sxm.evaluate(parallel_fabric);
-        parallel_fabric.commit_cycle();
+        parallel_sxm.validate_posedge(); parallel_fabric.validate_posedge();
+        parallel_sxm.posedge(); parallel_fabric.posedge();
     }
 
     auto reverse_superlanes = ftlpu::Permute320::identity_map();
@@ -292,9 +294,10 @@ int main()
         stream_range(16, 2 * ftlpu::hw::kLanesPerTile),
         stream_range(0, 2 * ftlpu::hw::kLanesPerTile),
         reverse_superlanes));
-    parallel_fabric.begin_cycle();
+    parallel_fabric.low();
     parallel_sxm.evaluate(parallel_fabric);
-    parallel_fabric.commit_cycle();
+    parallel_sxm.validate_posedge(); parallel_fabric.validate_posedge();
+    parallel_sxm.posedge(); parallel_fabric.posedge();
 
     for (std::size_t row = 0; row < ftlpu::hw::kLanesPerTile; ++row) {
         for (std::size_t plane = 0; plane < ftlpu::SxmSlice::kTransposeBytePlanes; ++plane) {
@@ -338,9 +341,10 @@ int main()
                 stream_range(0, 2 * ftlpu::hw::kLanesPerTile),
                 stream_range(16, 2 * ftlpu::hw::kLanesPerTile)));
         }
-        selected_fabric.begin_cycle();
+        selected_fabric.low();
         selected_sxm.evaluate(selected_fabric);
-        selected_fabric.commit_cycle();
+        selected_sxm.validate_posedge(); selected_fabric.validate_posedge();
+        selected_sxm.posedge(); selected_fabric.posedge();
     }
     auto selected_tile = ftlpu::SxmInstruction::Permute(
         stream_range(16, 2 * ftlpu::hw::kLanesPerTile),
@@ -348,9 +352,10 @@ int main()
         ftlpu::Permute320::identity_map());
     selected_tile.output_tile = 2;
     selected_sxm.issue(selected_tile);
-    selected_fabric.begin_cycle();
+    selected_fabric.low();
     selected_sxm.evaluate(selected_fabric);
-    selected_fabric.commit_cycle();
+    selected_sxm.validate_posedge(); selected_fabric.validate_posedge();
+    selected_sxm.posedge(); selected_fabric.posedge();
 
     for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
         for (std::size_t stream = 0;
@@ -404,9 +409,10 @@ int main()
                     stream_range(0, 2 * ftlpu::hw::kLanesPerTile),
                     stream_range(16, 2 * ftlpu::hw::kLanesPerTile)));
             }
-            diagonal_fabric.begin_cycle();
+            diagonal_fabric.low();
             diagonal_sxm.evaluate(diagonal_fabric);
-            diagonal_fabric.commit_cycle();
+            diagonal_sxm.validate_posedge(); diagonal_fabric.validate_posedge();
+            diagonal_sxm.posedge(); diagonal_fabric.posedge();
         }
 
         auto diagonal_map = ftlpu::Permute320::identity_map();
@@ -425,9 +431,10 @@ int main()
             stream_range(16, 2 * ftlpu::hw::kLanesPerTile),
             stream_range(0, 2 * ftlpu::hw::kLanesPerTile),
             diagonal_map));
-        diagonal_fabric.begin_cycle();
+        diagonal_fabric.low();
         diagonal_sxm.evaluate(diagonal_fabric);
-        diagonal_fabric.commit_cycle();
+        diagonal_sxm.validate_posedge(); diagonal_fabric.validate_posedge();
+        diagonal_sxm.posedge(); diagonal_fabric.posedge();
 
         for (std::size_t destination_tile = 0;
              destination_tile < ftlpu::hw::kTileRows;
@@ -516,9 +523,10 @@ int main()
                 stream_range(0, 2 * ftlpu::hw::kLanesPerTile),
                 cycle_map));
         }
-        wavefront_fabric.begin_cycle();
+        wavefront_fabric.low();
         wavefront_sxm.evaluate(wavefront_fabric);
-        wavefront_fabric.commit_cycle();
+        wavefront_sxm.validate_posedge(); wavefront_fabric.validate_posedge();
+        wavefront_sxm.posedge(); wavefront_fabric.posedge();
 
         if (cycle == 0) continue;
         for (std::size_t destination_tile = 0;
@@ -575,7 +583,9 @@ int main()
                 if (iteration == 1) instruction.output_row = ftlpu::SxmInstruction::kConsumeOutputRowBase + 2;
                 fanout_sxm.issue(instruction);
             }
-            fanout_fabric.begin_cycle();fanout_sxm.evaluate(fanout_fabric);fanout_fabric.commit_cycle();
+            fanout_fabric.low();fanout_sxm.evaluate(fanout_fabric);
+            fanout_sxm.validate_posedge();fanout_fabric.validate_posedge();
+            fanout_sxm.posedge();fanout_fabric.posedge();
             if (cycle>=5 && cycle<9) {
                 const auto tile=cycle-5;
                 for (std::size_t row=0;row<8;++row)

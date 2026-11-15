@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
+#include "ftlpu/core/timing.hpp"
 #include "ftlpu/mxm/array.hpp"
 #include "ftlpu/mxm/supercell.hpp"
 #include "ftlpu/mxm/weight_dequantizer.hpp"
@@ -415,13 +416,17 @@ struct MxmControlInstruction {
     }
 };
 
-class MxmControlSlice {
+class MxmControlSlice : public timing::ClockedModule {
 public:
     using WeightInput = MxmWeightInput;
     using InstructionSlot = std::optional<MxmControlInstruction>;
     using DequantInstructionSlot = std::optional<MxmDequantInstruction>;
     using WeightInputSlot = std::optional<WeightInput>;
     using WeightInputProvider = std::function<WeightInput(std::size_t)>;
+    using InstructionRows = std::array<
+        InstructionSlot, hw::kMxmSupercellsPerPlane>;
+    using DequantInstructionRows = std::array<
+        DequantInstructionSlot, hw::kMxmSupercellsPerPlane>;
 
     struct ComputePulse {
         std::size_t weight_buffer{0};
@@ -477,9 +482,9 @@ public:
     {
         if (!load_instruction_queue_.empty() || !compute_instruction_queue_.empty()
             || !dequant_instruction_queue_.empty()) return false;
-        for (const auto& row : load_instruction_rows_) if (row) return false;
-        for (const auto& row : compute_instruction_rows_) if (row) return false;
-        for (const auto& row : dequant_instruction_rows_) if (row) return false;
+        for (const auto& row : load_instruction_rows_state_.current()) if (row) return false;
+        for (const auto& row : compute_instruction_rows_state_.current()) if (row) return false;
+        for (const auto& row : dequant_instruction_rows_state_.current()) if (row) return false;
         return true;
     }
 
@@ -488,15 +493,9 @@ public:
         load_instruction_queue_.clear();
         dequant_instruction_queue_.clear();
         compute_instruction_queue_.clear();
-        for (auto& slot : load_instruction_rows_) {
-            slot.reset();
-        }
-        for (auto& slot : compute_instruction_rows_) {
-            slot.reset();
-        }
-        for (auto& slot : dequant_instruction_rows_) {
-            slot.reset();
-        }
+        load_instruction_rows_state_.reset(InstructionRows {});
+        compute_instruction_rows_state_.reset(InstructionRows {});
+        dequant_instruction_rows_state_.reset(DequantInstructionRows {});
         for (auto& slot : weight_inputs_) {
             slot.reset();
         }
@@ -513,17 +512,15 @@ public:
         for (auto& pulse : decode_stream_compute_pulse_details_) {
             pulse.reset();
         }
-        for (auto& buffer : loaded_cells_) {
-            for (auto& row : buffer) {
-                row.fill(false);
-            }
-        }
-        cycle_ = 0;
+        cycle_state_.reset(0);
+        pending_load_pop_ = false;
+        pending_dequant_pop_ = false;
+        pending_compute_pop_ = false;
     }
 
     std::size_t cycle() const
     {
-        return cycle_;
+        return cycle_state_.current();
     }
 
     void issue_south(MxmControlInstruction instruction)
@@ -556,20 +553,20 @@ public:
     const InstructionSlot& instruction_at(std::size_t tile) const
     {
         check_tile(tile);
-        return load_instruction_rows_[tile];
+        return load_instruction_rows_state_.current()[tile];
     }
 
     const InstructionSlot& compute_instruction_at(std::size_t tile) const
     {
         check_tile(tile);
-        return compute_instruction_rows_[tile];
+        return compute_instruction_rows_state_.current()[tile];
     }
 
     const DequantInstructionSlot& dequant_instruction_at(
         std::size_t tile) const
     {
         check_tile(tile);
-        return dequant_instruction_rows_[tile];
+        return dequant_instruction_rows_state_.current()[tile];
     }
 
     const WeightInputSlot& weight_input_at(std::size_t tile) const
@@ -602,7 +599,7 @@ public:
         check_tile(tile);
         check_column(column);
         MxmControlInstruction::check_weight_buffer(weight_buffer);
-        return loaded_cells_[weight_buffer][tile][column];
+        return array_.cell(tile, column).weight_buffer_valid(weight_buffer);
     }
 
     std::optional<std::size_t> compute_weight_buffer(std::size_t tile) const
@@ -659,17 +656,72 @@ public:
         bool print_matrix = true,
         std::optional<std::size_t> log_tile = std::nullopt)
     {
+        low(os, weight_provider, print_matrix, log_tile);
+        validate_posedge();
+        posedge();
+    }
+
+    void low() override
+    {
+        static NullStream null_stream;
+        low(null_stream.stream(), nullptr, false, std::nullopt);
+    }
+
+    void low(
+        std::ostream& os,
+        const WeightInputProvider& weight_provider,
+        bool print_matrix = true,
+        std::optional<std::size_t> log_tile = std::nullopt)
+    {
         if (log_tile.has_value()) {
             check_tile(*log_tile);
         }
+        load_instruction_rows_state_.prepare();
+        dequant_instruction_rows_state_.prepare();
+        compute_instruction_rows_state_.prepare();
+        cycle_state_.prepare();
+        pending_load_pop_ = false;
+        pending_dequant_pop_ = false;
+        pending_compute_pop_ = false;
+        fill_missing_weight_inputs(weight_provider);
+        os << "mxm_control cycle " << cycle_state_.current() << '\n';
+        execute(os, print_matrix, log_tile);
+        array_.low();
+        advance();
         dispatch_load_instruction();
         dispatch_dequant_instruction();
         dispatch_compute_instruction();
-        fill_missing_weight_inputs(weight_provider);
-        os << "mxm_control cycle " << cycle_ << '\n';
-        execute(os, print_matrix, log_tile);
-        advance();
-        ++cycle_;
+        cycle_state_.next_value() = cycle_state_.current() + 1;
+    }
+
+    void validate_posedge() const override
+    {
+        load_instruction_rows_state_.validate_commit();
+        dequant_instruction_rows_state_.validate_commit();
+        compute_instruction_rows_state_.validate_commit();
+        cycle_state_.validate_commit();
+        if (pending_load_pop_ && load_instruction_queue_.empty())
+            throw std::logic_error("MXM load queue pop lost its head");
+        if (pending_dequant_pop_ && dequant_instruction_queue_.empty())
+            throw std::logic_error("MXM dequant queue pop lost its head");
+        if (pending_compute_pop_ && compute_instruction_queue_.empty())
+            throw std::logic_error("MXM compute queue pop lost its head");
+        array_.validate_posedge();
+    }
+
+    void posedge() override
+    {
+        load_instruction_rows_state_.commit();
+        dequant_instruction_rows_state_.commit();
+        compute_instruction_rows_state_.commit();
+        cycle_state_.commit();
+        if (pending_load_pop_) load_instruction_queue_.pop_front();
+        if (pending_dequant_pop_) dequant_instruction_queue_.pop_front();
+        if (pending_compute_pop_) compute_instruction_queue_.pop_front();
+        pending_load_pop_ = false;
+        pending_dequant_pop_ = false;
+        pending_compute_pop_ = false;
+        array_.posedge();
     }
 
 private:
@@ -774,31 +826,33 @@ private:
 
     void dispatch_load_instruction()
     {
-        if (load_instruction_rows_[0].has_value() || load_instruction_queue_.empty()) {
+        auto& rows = load_instruction_rows_state_.next_value();
+        if (rows[0].has_value() || load_instruction_queue_.empty()) {
             return;
         }
-        load_instruction_rows_[0] = load_instruction_queue_.front();
-        load_instruction_queue_.pop_front();
+        rows[0] = load_instruction_queue_.front();
+        pending_load_pop_ = true;
     }
 
     void dispatch_compute_instruction()
     {
-        if (compute_instruction_rows_[0].has_value() || compute_instruction_queue_.empty()) {
+        auto& rows = compute_instruction_rows_state_.next_value();
+        if (rows[0].has_value() || compute_instruction_queue_.empty()) {
             return;
         }
-        compute_instruction_rows_[0] = compute_instruction_queue_.front();
-        compute_instruction_queue_.pop_front();
+        rows[0] = compute_instruction_queue_.front();
+        pending_compute_pop_ = true;
     }
 
     void dispatch_dequant_instruction()
     {
-        if (dequant_instruction_rows_[0].has_value()
+        auto& rows = dequant_instruction_rows_state_.next_value();
+        if (rows[0].has_value()
             || dequant_instruction_queue_.empty()) {
             return;
         }
-        dequant_instruction_rows_[0] =
-            dequant_instruction_queue_.front();
-        dequant_instruction_queue_.pop_front();
+        rows[0] = dequant_instruction_queue_.front();
+        pending_dequant_pop_ = true;
     }
 
     void fill_missing_weight_inputs(const WeightInputProvider& weight_provider)
@@ -808,7 +862,8 @@ private:
         }
 
         for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
-            const auto& instruction = load_instruction_rows_[tile];
+            const auto& instruction =
+                load_instruction_rows_state_.current()[tile];
             if (!instruction.has_value()
                 || instruction->opcode != MxmControlOpcode::IW
                 || weight_inputs_[tile].has_value()) {
@@ -835,10 +890,16 @@ private:
         }
         bool any = false;
         bool any_logged = false;
+        const auto& load_instruction_rows =
+            load_instruction_rows_state_.current();
+        const auto& dequant_instruction_rows =
+            dequant_instruction_rows_state_.current();
+        const auto& compute_instruction_rows =
+            compute_instruction_rows_state_.current();
         for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
-            const auto& instruction = load_instruction_rows_[tile];
+            const auto& instruction = load_instruction_rows[tile];
             const auto& dequant_instruction =
-                dequant_instruction_rows_[tile];
+                dequant_instruction_rows[tile];
             bool dequant_consumed = false;
             if (instruction.has_value()) {
                 any = true;
@@ -903,20 +964,17 @@ private:
                             os << " inner=" << instruction->weight_inner_column;
                         }
                         os << " ";
-                        array_.tick_cell_iw_load(
+                        array_.stage_cell_iw_load(
                             tile, column, load, input, os);
                     } else {
                         static NullStream null_stream;
-                        array_.tick_cell_iw_load(
+                        array_.stage_cell_iw_load(
                             tile,
                             column,
                             load,
                             input,
                             null_stream.stream());
                     }
-                    loaded_cells_[instruction->weight_buffer][tile][column]
-                        = array_.cell(tile, column).weight_buffer_valid(
-                            instruction->weight_buffer);
                 } else if (
                     instruction->opcode == MxmControlOpcode::IS
                     && instruction->decode_operation
@@ -945,7 +1003,7 @@ private:
                 }
             }
 
-            const auto& compute_instruction = compute_instruction_rows_[tile];
+            const auto& compute_instruction = compute_instruction_rows[tile];
             if (compute_instruction.has_value()) {
                 any = true;
                 const auto should_log = !log_tile.has_value() || tile == *log_tile;
@@ -1023,7 +1081,7 @@ private:
                             compute_instruction->accumulator_destination,
                             compute_instruction->accumulator_clear,
                             *dequant_instruction,
-                            cycle_ - tile,
+                            cycle_state_.current() - tile,
                             compute_instruction->is_mode};
                 } else if (
                     compute_instruction->opcode
@@ -1058,15 +1116,13 @@ private:
             os << "  idle\n";
         }
         if (print_matrix) {
-            print_load_matrix(os, loaded_cells_, log_tile);
+            print_load_matrix(os, array_, log_tile);
         }
     }
 
     static void print_load_matrix(
         std::ostream& os,
-        const std::array<
-            std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>,
-            MxmSupercell::kWeightBuffers>& loaded,
+        const MxmArray& array,
         std::optional<std::size_t> log_tile)
     {
         os << "  load_matrix:\n";
@@ -1077,7 +1133,8 @@ private:
             for (std::size_t tile = first_tile; tile < end_tile; ++tile) {
                 os << "      row " << tile << ": ";
                 for (std::size_t column = 0; column < hw::kMxmSupercellsPerPlane; ++column) {
-                    os << (loaded[buffer][tile][column] ? 'L' : '.');
+                    os << (array.cell(tile, column).weight_buffer_valid(buffer)
+                            ? 'L' : '.');
                 }
                 os << '\n';
             }
@@ -1086,15 +1143,20 @@ private:
 
     void advance()
     {
+        const auto& load_current = load_instruction_rows_state_.current();
+        const auto& dequant_current = dequant_instruction_rows_state_.current();
+        const auto& compute_current = compute_instruction_rows_state_.current();
+        auto& load_next = load_instruction_rows_state_.next_value();
+        auto& dequant_next = dequant_instruction_rows_state_.next_value();
+        auto& compute_next = compute_instruction_rows_state_.next_value();
         for (std::size_t tile = hw::kMxmSupercellsPerPlane - 1; tile > 0; --tile) {
-            load_instruction_rows_[tile] = load_instruction_rows_[tile - 1];
-            dequant_instruction_rows_[tile] =
-                dequant_instruction_rows_[tile - 1];
-            compute_instruction_rows_[tile] = compute_instruction_rows_[tile - 1];
+            load_next[tile] = load_current[tile - 1];
+            dequant_next[tile] = dequant_current[tile - 1];
+            compute_next[tile] = compute_current[tile - 1];
         }
-        load_instruction_rows_[0].reset();
-        dequant_instruction_rows_[0].reset();
-        compute_instruction_rows_[0].reset();
+        load_next[0].reset();
+        dequant_next[0].reset();
+        compute_next[0].reset();
     }
 
     MxmArray& array_;
@@ -1102,10 +1164,9 @@ private:
     std::deque<MxmControlInstruction> load_instruction_queue_{};
     std::deque<MxmDequantInstruction> dequant_instruction_queue_{};
     std::deque<MxmControlInstruction> compute_instruction_queue_{};
-    std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> load_instruction_rows_{};
-    std::array<DequantInstructionSlot, hw::kMxmSupercellsPerPlane>
-        dequant_instruction_rows_{};
-    std::array<InstructionSlot, hw::kMxmSupercellsPerPlane> compute_instruction_rows_{};
+    timing::ClockedState<InstructionRows> load_instruction_rows_state_{};
+    timing::ClockedState<DequantInstructionRows> dequant_instruction_rows_state_{};
+    timing::ClockedState<InstructionRows> compute_instruction_rows_state_{};
     std::array<WeightInputSlot, hw::kMxmSupercellsPerPlane> weight_inputs_{};
     std::array<bool, hw::kMxmSupercellsPerPlane> compute_pulses_{};
     std::array<std::optional<ComputePulse>, hw::kMxmSupercellsPerPlane> compute_pulse_details_{};
@@ -1119,10 +1180,10 @@ private:
         std::optional<IsStreamComputePulse>,
         hw::kMxmSupercellsPerPlane>
         decode_stream_compute_pulse_details_{};
-    std::array<
-        std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>,
-        MxmSupercell::kWeightBuffers> loaded_cells_{};
-    std::size_t cycle_{0};
+    timing::ClockedState<std::size_t> cycle_state_{0};
+    bool pending_load_pop_{};
+    bool pending_dequant_pop_{};
+    bool pending_compute_pop_{};
 };
 
 } // namespace ftlpu

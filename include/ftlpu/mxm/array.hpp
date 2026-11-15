@@ -11,7 +11,7 @@
 
 namespace ftlpu {
 
-class MxmArray {
+class MxmArray : public timing::ClockedModule {
 public:
     using Supercell = MxmSupercell;
     using InputVector = Supercell::InputVector;
@@ -24,6 +24,27 @@ public:
                 cell.reset();
             }
         }
+        for (auto& row : evaluated_) row.fill(false);
+    }
+
+    void low() override
+    {
+        for (std::size_t row = 0; row < cells_.size(); ++row)
+            for (std::size_t column = 0; column < cells_[row].size(); ++column)
+                if (!evaluated_[row][column]) cells_[row][column].low();
+    }
+
+    void validate_posedge() const override
+    {
+        for (const auto& row : cells_)
+            for (const auto& cell : row) cell.validate_posedge();
+    }
+
+    void posedge() override
+    {
+        for (auto& row : cells_)
+            for (auto& cell : row) cell.posedge();
+        for (auto& row : evaluated_) row.fill(false);
     }
 
     Supercell& cell(std::size_t row, std::size_t column)
@@ -101,11 +122,25 @@ public:
         InputVector input,
         std::ostream& os)
     {
+        stage_cell_iw_load(row, column, instruction, std::move(input), os);
+        low();
+        validate_posedge();
+        posedge();
+    }
+
+    void stage_cell_iw_load(
+        std::size_t row,
+        std::size_t column,
+        MxmInstruction instruction,
+        InputVector input,
+        std::ostream& os)
+    {
         auto& target = cell(row, column);
         os << "mxm_array cell(" << row << "," << column << ") ";
         target.set_input(input);
         target.issue(instruction);
-        target.tick(os);
+        target.low(os);
+        evaluated_[row][column] = true;
     }
 
 private:
@@ -120,6 +155,9 @@ private:
     }
 
     std::array<std::array<Supercell, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane> cells_{};
+    std::array<
+        std::array<bool, hw::kMxmSupercellsPerPlane>,
+        hw::kMxmSupercellsPerPlane> evaluated_{};
 };
 
 } // namespace ftlpu

@@ -1,6 +1,8 @@
 #pragma once
 
 #include "ftlpu/c2c/icu_instruction.hpp"
+#include "ftlpu/core/clone_ptr.hpp"
+#include "ftlpu/core/copy_on_write_vector.hpp"
 #include "ftlpu/icu/native_word.hpp"
 #include "ftlpu/icu/instruction.hpp"
 #include "ftlpu/icu/vxm_instruction.hpp"
@@ -520,6 +522,15 @@ public:
         MacroContextDepth;
     static constexpr std::size_t macro_issue_cycle_bits =
         std::numeric_limits<std::uint32_t>::digits;
+    static constexpr bool rtl_integrated_macro_frontend =
+        QueueRole == IcuQueueRole::Mem
+        || QueueRole == IcuQueueRole::MxmLoad
+        || QueueRole == IcuQueueRole::MxmDequant
+        || QueueRole == IcuQueueRole::MxmCompute;
+    static constexpr std::size_t timed_issue_depth =
+        hw::kIcuFuTimedQueueDepth;
+    static constexpr std::size_t timed_issue_lookahead =
+        hw::kIcuFuIssueLookaheadCycles;
 
     void reset()
     {
@@ -553,6 +564,16 @@ public:
         active_macro_count_ = 0;
         macro_remaining_points_ = 0;
         peak_active_macros_ = 0;
+        timed_issues_.clear();
+        peak_timed_issue_occupancy_ = 0;
+        timed_issue_full_cycles_ = 0;
+        timed_issue_writes_ = 0;
+        timed_issue_reads_ = 0;
+        decoded_context_fifo_.clear();
+        peak_context_fifo_occupancy_ = 0;
+        context_fifo_full_cycles_ = 0;
+        context_fifo_writes_ = 0;
+        context_fifo_reads_ = 0;
         last_macro_final_cycle_.reset();
         synchronized_instruction_.reset();
         synchronized_remaining_ = 0;
@@ -692,6 +713,8 @@ public:
     };
     void set_queue_transport_executor(std::function<QueueTransportResult(std::uint32_t)> executor)
     { queue_transport_executor_ = std::move(executor); }
+    void rebind_shared_queue_control_pool(IcuQueueControlPool& pool) noexcept
+    { queue_controls_.rebind_shared_pool(pool); }
     bool queue_transport_due() const noexcept
     {
         const auto* entry=queue_controls_.cached_due(cycle_);
@@ -712,10 +735,22 @@ public:
 
     bool raw_macro_ready() const noexcept
     {
+        const auto urgent_pending = [&] {
+            if constexpr (rtl_integrated_macro_frontend)
+                return macro_decoder_->has_pending_at_or_before(
+                    timed_issue_lookahead + 1);
+            return macro_decoder_->has_pending_cycle_zero();
+        };
+        const auto urgent_buffered = [&] {
+            if constexpr (!rtl_integrated_macro_frontend) return false;
+            return !decoded_context_fifo_.empty()
+                && decoded_context_fifo_.front().schedule.start_cycle
+                    <= timed_issue_lookahead + 1;
+        };
         return raw_macro_mode_ && static_cast<bool>(macro_decoder_)
             && macro_decoder_->primed()
             && queue_controls_.primed()
-            && (!macro_decoder_->has_pending_cycle_zero()
+            && (!(urgent_pending() || urgent_buffered())
                 || active_macro_count_ == MacroContextDepth);
     }
 
@@ -726,9 +761,19 @@ public:
                 "ICU queue is not configured for a raw Macro image");
         // The issue clock is stopped during priming. Finish the initial
         // cycle-zero admission without pre-allocating far-future contexts.
-        accept_decoded_macro(macro_decoder_->tick(
-            0, active_macro_count_, MacroContextDepth,
-            earliest_active_macro_release_cycle()), false);
+        if constexpr (rtl_integrated_macro_frontend)
+            schedule_active_macro_to_timed(0);
+        if constexpr (rtl_integrated_macro_frontend) {
+            admit_context_fifo_head(false);
+            enqueue_decoded_context(macro_decoder_->tick(
+                0,decoded_context_fifo_.size(),
+                hw::kIcuMacroContextFifoDepth,
+                earliest_active_macro_release_cycle()));
+        } else {
+            accept_decoded_macro(macro_decoder_->tick(
+                0, active_macro_count_, MacroContextDepth,
+                earliest_active_macro_release_cycle()), false);
+        }
         queue_controls_.prime_cycle();
     }
 
@@ -1344,7 +1389,7 @@ public:
                     "ICU synchronized packet exceeds configured local i-MEM depth");
             validate_imem_packet_boundary(address);
 
-            auto updated = imem_;
+            auto updated = imem_.values();
             updated.insert(updated.begin()
                     + static_cast<std::ptrdiff_t>(address),
                 kSynchronizedPacketWordCount, std::nullopt);
@@ -1363,7 +1408,10 @@ public:
         }
         if (raw_macro_mode_)
             return static_cast<bool>(macro_decoder_) && macro_decoder_->done()
-                && active_macro_count_ == 0 && queue_controls_.done()
+                && active_macro_count_ == 0
+                && decoded_context_fifo_.empty()
+                && timed_issues_.empty()
+                && queue_controls_.done()
                 && cycle_ >= queue_control_end_cycle_;
         return fetch_pc_ == program_end_pc_
             && pending_fetches_.empty()
@@ -1393,6 +1441,26 @@ public:
     }
     std::size_t issued_count() const noexcept { return issued_count_; }
     std::size_t active_macro_count() const noexcept { return active_macro_count_; }
+    std::size_t timed_issue_occupancy() const noexcept
+    { return timed_issues_.size(); }
+    std::size_t peak_timed_issue_occupancy() const noexcept
+    { return peak_timed_issue_occupancy_; }
+    std::size_t timed_issue_full_cycles() const noexcept
+    { return timed_issue_full_cycles_; }
+    std::size_t timed_issue_writes() const noexcept
+    { return timed_issue_writes_; }
+    std::size_t timed_issue_reads() const noexcept
+    { return timed_issue_reads_; }
+    std::size_t context_fifo_occupancy() const noexcept
+    { return decoded_context_fifo_.size(); }
+    std::size_t peak_context_fifo_occupancy() const noexcept
+    { return peak_context_fifo_occupancy_; }
+    std::size_t context_fifo_full_cycles() const noexcept
+    { return context_fifo_full_cycles_; }
+    std::size_t context_fifo_writes() const noexcept
+    { return context_fifo_writes_; }
+    std::size_t context_fifo_reads() const noexcept
+    { return context_fifo_reads_; }
     std::size_t synchronized_issued_count() const noexcept
     {
         return synchronized_issued_count_;
@@ -1436,7 +1504,8 @@ public:
                     : macro_decoder_->command_count()
                         - macro_decoder_->decoded_count()
                         + macro_decoder_->pending_decoded_contexts())
-                + macro_remaining_points();
+                + macro_remaining_points() + timed_issues_.size()
+                + decoded_context_fifo_.size();
         return iq_.size() + pending_fetches_.size()
             + (program_end_pc_ - fetch_pc_)
             + repeat_remaining_ + nop_remaining_
@@ -1896,6 +1965,33 @@ private:
             decoded->record_index, decoded->admission_cycle);
     }
 
+    void enqueue_decoded_context(
+        std::optional<DecodedIcuMacroContext<FuncInstruction>> decoded)
+    {
+        if (!decoded) return;
+        if (decoded_context_fifo_.size()
+            == hw::kIcuMacroContextFifoDepth)
+            throw std::logic_error(
+                "Macro decoder wrote a full Context FIFO");
+        decoded_context_fifo_.push_back(std::move(*decoded));
+        ++context_fifo_writes_;
+        peak_context_fifo_occupancy_=std::max(
+            peak_context_fifo_occupancy_,decoded_context_fifo_.size());
+    }
+
+    void admit_context_fifo_head(bool execution_started)
+    {
+        context_fifo_full_cycles_+=decoded_context_fifo_.size()
+            == hw::kIcuMacroContextFifoDepth;
+        if (decoded_context_fifo_.empty()
+            || active_macro_count_==MacroContextDepth)
+            return;
+        auto decoded=std::move(decoded_context_fifo_.front());
+        decoded_context_fifo_.pop_front();
+        ++context_fifo_reads_;
+        accept_decoded_macro(std::move(decoded),execution_started);
+    }
+
     std::optional<FuncInstruction> tick_raw_macro()
     {
         notify_emitted_ = false;
@@ -1936,10 +2032,26 @@ private:
         // Contexts visible at the beginning of the cycle may issue. A context
         // decoded in this cycle is written afterwards and becomes visible on
         // the next cycle, matching a one-write-port context RAM without bypass.
-        auto result = issue_active_macro();
-        accept_decoded_macro(macro_decoder_->tick(
-            cycle_, active_macro_count_, MacroContextDepth,
-            earliest_active_macro_release_cycle()), true);
+        auto result = [&]() -> std::optional<FuncInstruction> {
+            if constexpr (rtl_integrated_macro_frontend) {
+                auto issued=issue_timed_macro();
+                schedule_active_macro_to_timed(
+                    cycle_ + timed_issue_lookahead);
+                return issued;
+            }
+            return issue_active_macro();
+        }();
+        if constexpr (rtl_integrated_macro_frontend) {
+            admit_context_fifo_head(true);
+            enqueue_decoded_context(macro_decoder_->tick(
+                cycle_,decoded_context_fifo_.size(),
+                hw::kIcuMacroContextFifoDepth,
+                earliest_active_macro_release_cycle()));
+        } else {
+            accept_decoded_macro(macro_decoder_->tick(
+                cycle_, active_macro_count_, MacroContextDepth,
+                earliest_active_macro_release_cycle()), true);
+        }
 
         finish_trace();
         queue_controls_.end_cycle();
@@ -2607,6 +2719,90 @@ private:
     using ActiveMacroStorage =
         std::array<ActiveMacroSlot, MacroContextDepth>;
 
+    struct TimedIssue {
+        std::uint32_t issue_cycle{0};
+        FuncInstruction instruction{};
+        std::size_t pc{0};
+    };
+
+    std::optional<FuncInstruction> issue_timed_macro()
+    {
+        if (timed_issues_.size() == timed_issue_depth)
+            ++timed_issue_full_cycles_;
+        if (timed_issues_.empty()) {
+            last_trace_.action=IcuQueueAction::MacroWait;
+            return std::nullopt;
+        }
+        const auto& head=timed_issues_.front();
+        if (head.issue_cycle < cycle_)
+            throw StaticScheduleError(
+                "ICU timed issue queue missed its FU deadline");
+        if (head.issue_cycle != cycle_) {
+            last_trace_.action=IcuQueueAction::MacroWait;
+            return std::nullopt;
+        }
+        auto issue=std::move(timed_issues_.front());
+        timed_issues_.pop_front();
+        last_dispatched_=issue.instruction;
+        last_dispatched_pc_=issue.pc;
+        last_trace_.issue_pc=issue.pc;
+        last_trace_.action=IcuQueueAction::MacroIssue;
+        ++issued_count_;
+        ++timed_issue_reads_;
+        --macro_remaining_points_;
+        return std::move(issue.instruction);
+    }
+
+    void schedule_active_macro_to_timed(std::size_t target_cycle)
+    {
+        if (active_macro_count_ == 0) return;
+        if (target_cycle > std::numeric_limits<std::uint32_t>::max())
+            throw std::overflow_error(
+                "ICU timed issue cycle exceeds the physical 32-bit range");
+        std::optional<std::size_t> selected_slot;
+        for (std::size_t slot=0;slot<MacroContextDepth;++slot) {
+            const auto& active=(*active_macro_storage_)[slot];
+            if (!active.valid()) continue;
+            if (active.issue_cycle() < target_cycle) {
+                std::ostringstream message;
+                message << "ICU Macro scheduler missed its look-ahead cycle"
+                        << " current=" << cycle_
+                        << " target=" << target_cycle
+                        << " next_issue=" << active.issue_cycle();
+                throw StaticScheduleError(message.str());
+            }
+            if (active.issue_cycle()!=target_cycle) continue;
+            if (selected_slot)
+                throw StaticScheduleError(
+                    "overlapping ICU Macros target one timed queue cycle");
+            selected_slot=slot;
+        }
+        if (!selected_slot) return;
+        if (timed_issues_.size() == timed_issue_depth)
+            throw StaticScheduleError(
+                "ICU Macro scheduler was backpressured at its look-ahead deadline");
+
+        auto& slot=(*active_macro_storage_)[*selected_slot];
+        auto due=ActiveMacroCodec::unpack(slot.payload);
+        timed_issues_.push_back(TimedIssue{
+            static_cast<std::uint32_t>(target_cycle),due.instruction,slot.pc});
+        ++timed_issue_writes_;
+        peak_timed_issue_occupancy_=std::max(
+            peak_timed_issue_occupancy_,timed_issues_.size());
+
+        const bool complete=ActiveMacroCodec::advance_after_issue(due);
+        if (!complete) {
+            slot.payload=ActiveMacroCodec::pack(due);
+        } else if (raw_macro_mode_ && static_cast<bool>(macro_decoder_)) {
+            macro_decoder_->record_context_completion(
+                slot.admission_cycle,target_cycle);
+        }
+        if (complete) {
+            slot.reset();
+            --active_macro_count_;
+        }
+    }
+
     std::optional<FuncInstruction> tick_macros()
     {
         // Existing contexts observe the cycle boundary before a new context is
@@ -2751,8 +2947,8 @@ private:
         return macro_remaining_points_;
     }
 
-    std::vector<std::optional<Entry>> imem_{};
-    std::vector<std::optional<RawImemWord>> raw_imem_{};
+    CopyOnWriteVector<std::optional<Entry>> imem_{};
+    CopyOnWriteVector<std::optional<RawImemWord>> raw_imem_{};
     IcuMacroQueueKind raw_macro_kind_{IcuMacroQueueKind::Mem};
     IcuQueueControlFrontend queue_controls_{};
     std::uint32_t queue_control_end_cycle_{0};
@@ -2761,7 +2957,7 @@ private:
     std::size_t queue_control_physical_cycles_{0};
     std::size_t raw_macro_word_count_{0};
     bool raw_macro_mode_{false};
-    std::unique_ptr<MacroDecoder> macro_decoder_{};
+    ClonePtr<MacroDecoder> macro_decoder_{};
     std::deque<Entry> iq_{};
     std::deque<std::size_t> iq_pcs_{};
     std::deque<PendingFetch> pending_fetches_{};
@@ -2772,7 +2968,18 @@ private:
     // the payload is selected only for the unique matching slot. Heap
     // allocation is a host-model detail that keeps dormant queue objects
     // small and does not model dynamically sized hardware.
-    std::unique_ptr<ActiveMacroStorage> active_macro_storage_{};
+    ClonePtr<ActiveMacroStorage> active_macro_storage_{};
+    std::deque<DecodedIcuMacroContext<FuncInstruction>>
+        decoded_context_fifo_{};
+    std::deque<TimedIssue> timed_issues_{};
+    std::size_t peak_context_fifo_occupancy_{0};
+    std::size_t context_fifo_full_cycles_{0};
+    std::size_t context_fifo_writes_{0};
+    std::size_t context_fifo_reads_{0};
+    std::size_t peak_timed_issue_occupancy_{0};
+    std::size_t timed_issue_full_cycles_{0};
+    std::size_t timed_issue_writes_{0};
+    std::size_t timed_issue_reads_{0};
     std::optional<std::uint32_t> last_macro_final_cycle_{};
     std::size_t active_macro_count_{0};
     std::size_t macro_remaining_points_{0};

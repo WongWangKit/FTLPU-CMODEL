@@ -56,9 +56,10 @@ struct Fixture {
 
     void tick()
     {
-        fabric.begin_cycle();
+        fabric.low();
         sxm.evaluate(fabric);
-        fabric.commit_cycle();
+        sxm.validate_posedge(); fabric.validate_posedge();
+        sxm.posedge(); fabric.posedge();
     }
 
     void output(std::size_t tag, std::size_t selected = 8)

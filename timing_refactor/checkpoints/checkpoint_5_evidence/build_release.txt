@@ -1,0 +1,7 @@
+build_dir=D:\LPU\FTLPU-CMODEL-clock\out\checkpoint_5_sxm
+configuration=Release
+actual_projects=74
+release_executables=73
+missing_executables=0
+result=PASS
+

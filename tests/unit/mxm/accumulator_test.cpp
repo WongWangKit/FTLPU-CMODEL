@@ -34,6 +34,7 @@ int main()
         first[lane] = static_cast<float>(lane + 1);
         second[lane] = static_cast<float>(2 * lane);
     }
+    accumulator.low();
     accumulator.accumulate(17, 2, first);
     accumulator.accumulate(17, 2, second);
     const auto result = accumulator.read(17, 2);
@@ -41,11 +42,16 @@ int main()
         assert(result[lane] == first[lane] + second[lane]);
         assert(accumulator.value(17, 16 + lane) == result[lane]);
     }
+    accumulator.validate_posedge();
+    accumulator.posedge();
 
+    accumulator.low();
     accumulator.clear_segment(17, 2);
     for (const auto value : accumulator.read(17, 2)) {
         assert(value == 0.0f);
     }
+    accumulator.validate_posedge();
+    accumulator.posedge();
     assert(throws([&] {
         (void)accumulator.read(ftlpu::hw::kMxmAccumulatorRows, 0);
     }));

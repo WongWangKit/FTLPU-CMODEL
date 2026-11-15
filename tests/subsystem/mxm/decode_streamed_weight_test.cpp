@@ -88,30 +88,36 @@ public:
 
     void load_at(std::size_t cycle, ftlpu::MxmControlInstruction instruction)
     {
-        if (cycle < load_) throw std::logic_error("overlapping load queue");
-        icu_.enqueue_mxm_load_nop(0, cycle - load_);
+        if (cycle == 0) throw std::logic_error("load cannot execute before row0 is registered");
+        const auto issue_cycle = cycle - 1;
+        if (issue_cycle < load_) throw std::logic_error("overlapping load queue");
+        icu_.enqueue_mxm_load_nop(0, issue_cycle - load_);
         icu_.enqueue_mxm(0, instruction);
-        load_ = cycle + 1;
-        end_ = std::max(end_, load_);
+        load_ = issue_cycle + 1;
+        end_ = std::max(end_, cycle + 1);
     }
 
     void compute_at(std::size_t cycle, ftlpu::MxmControlInstruction instruction)
     {
-        if (cycle < compute_) throw std::logic_error("overlapping compute queue");
-        icu_.enqueue_mxm_compute_nop(0, cycle-compute_);
-        icu_.enqueue_mxm(0,instruction);
-        compute_ = cycle + 1;
-        end_ = std::max(end_, compute_);
+        if (cycle == 0) throw std::logic_error("compute cannot execute before row0 is registered");
+        const auto issue_cycle = cycle - 1;
+        if (issue_cycle < compute_) throw std::logic_error("overlapping compute queue");
+        icu_.enqueue_mxm_compute_nop(0, issue_cycle - compute_);
+        icu_.enqueue_mxm(0, instruction);
+        compute_ = issue_cycle + 1;
+        end_ = std::max(end_, cycle + 1);
     }
 
     void dequant_at(std::size_t cycle)
     {
-        if (cycle < dequant_) throw std::logic_error("overlapping dequant queue");
-        icu_.enqueue_mxm_dequant_nop(0, cycle - dequant_);
+        if (cycle == 0) throw std::logic_error("dequant cannot execute before row0 is registered");
+        const auto issue_cycle = cycle - 1;
+        if (issue_cycle < dequant_) throw std::logic_error("overlapping dequant queue");
+        icu_.enqueue_mxm_dequant_nop(0, issue_cycle - dequant_);
         icu_.enqueue_mxm_dequant(
             0, ftlpu::MxmDequantInstruction::Scale(kScale));
-        dequant_ = cycle + 1;
-        end_ = std::max(end_, dequant_);
+        dequant_ = issue_cycle + 1;
+        end_ = std::max(end_, cycle + 1);
     }
 
     std::size_t end_cycle() const noexcept { return end_; }

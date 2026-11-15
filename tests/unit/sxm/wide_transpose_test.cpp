@@ -34,12 +34,14 @@ void run(bool reverse,std::size_t gap){
             StreamOutputPort(fabric,in,direction,"test source").write_segment(sl,p,seg);
         }
     }};
-    fabric.begin_cycle();inject(0);fabric.commit_cycle();
+    fabric.low();inject(0);fabric.validate_posedge(); fabric.posedge();
     std::size_t checked=0;
     for(std::size_t t=0;t<=starts[2]+2*N+2*SxmWideTranspose::skew;t++){
-        fabric.begin_cycle();
+        fabric.low();
         if(auto issued=queue.tick()){check(slice.can_issue(*issued));slice.issue(*issued);check(!slice.can_issue(*issued));}
-        slice.evaluate(fabric);inject(t+1);fabric.commit_cycle();
+        slice.evaluate(fabric);inject(t+1);
+        slice.validate_posedge();fabric.validate_posedge();
+        slice.posedge();fabric.posedge();
         for(std::size_t sl=0;sl<hw::kTileRows;sl++){
             std::optional<std::pair<std::size_t,std::size_t>> expected;
             for(std::size_t k=0;k<3;k++){
@@ -67,7 +69,7 @@ int main(){
     check(!legacy.can_issue(command));
     SxmSlice wide(SxmStreamPortMap::SameDirection(0,1),SxmTransposeArchitecture::WideStreaming);
     check(wide.can_issue(command));wide.issue(command);
-    StreamRegisterFabric missing(2);missing.begin_cycle();bool threw=false;
+    StreamRegisterFabric missing(2);missing.low();bool threw=false;
     try{wide.evaluate(missing);}catch(const std::logic_error&){threw=true;}check(threw);
     wide.reset();check(wide.idle());
     std::cout<<"wide transpose: 3 tiles, both directions, gap/reset/missing-input checks passed; payload bytes="<<SxmWideTranspose::payload_capacity_bytes<<'\n';

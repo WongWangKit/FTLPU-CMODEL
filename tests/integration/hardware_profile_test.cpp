@@ -24,13 +24,19 @@ int main() try {
     for (std::size_t i=0; i<values.size(); ++i) values[i] = float(i+1);
     const auto row = hw::kMxmAccumulatorRows-1;
     const auto col = hw::kMxmSupercellsPerPlane-1;
+    acc.low();
     acc.accumulate(row, col, values);
     acc.accumulate(row, col, values);
     auto result = acc.read(row, col);
     for (std::size_t i=0; i<values.size(); ++i)
         require(result[i] == 2*values[i], "last ACC segment accumulation failed");
+    acc.validate_posedge();
+    acc.posedge();
+    acc.low();
     acc.clear_segment(row, col);
     for (float v : acc.read(row, col)) require(v == 0, "ACC clear failed");
+    acc.validate_posedge();
+    acc.posedge();
     rejected = false;
     try { (void)acc.read(row+1, col); }
     catch (const std::out_of_range&) { rejected = true; }

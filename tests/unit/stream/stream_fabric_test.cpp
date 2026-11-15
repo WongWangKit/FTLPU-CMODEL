@@ -10,7 +10,7 @@ int main()
     const auto stream = ftlpu::StreamId::East(7);
 
     // One StreamId denotes the same logical stream across all physical lanes.
-    fabric.begin_cycle();
+    fabric.low();
     for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
         ftlpu::StreamPayloadTileSegment segment{};
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
@@ -18,7 +18,7 @@ int main()
         }
         fabric.stage_payload_segment(0, tile, stream, segment, 123, "test producer");
     }
-    fabric.commit_cycle();
+    fabric.validate_posedge(); fabric.posedge();
 
     const auto vector = fabric.vector(0, stream);
     for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
@@ -30,18 +30,18 @@ int main()
     }
 
     // Passive eastward propagation is one SR column per cycle.
-    fabric.begin_cycle();
+    fabric.low();
     fabric.stage_linear_links();
-    fabric.commit_cycle();
+    fabric.validate_posedge(); fabric.posedge();
     assert(!fabric.cell(0, 0, 0, stream).valid);
     assert(fabric.cell(1, 0, 0, stream).valid);
     assert(fabric.cell(1, 0, 0, stream).data == 0);
 
     // A consumer suppresses forwarding of the consumed physical segment.
-    fabric.begin_cycle();
+    fabric.low();
     fabric.consume_segment(1, 0, stream, "test consumer");
     fabric.stage_linear_links();
-    fabric.commit_cycle();
+    fabric.validate_posedge(); fabric.posedge();
     assert(!fabric.cell(2, 0, 0, stream).valid);
     // Other tile rows still propagate.
     assert(fabric.cell(2, 1, 0, stream).valid);
@@ -53,7 +53,7 @@ int main()
 
     // Two producers cannot write the same physical SR cell in one cycle.
     bool collision = false;
-    fabric.begin_cycle();
+    fabric.low();
     fabric.stage_write(0, 0, 0, stream, ftlpu::StreamCell::Valid(1), "producer A");
     try {
         fabric.stage_write(0, 0, 0, stream, ftlpu::StreamCell::Valid(2), "producer B");

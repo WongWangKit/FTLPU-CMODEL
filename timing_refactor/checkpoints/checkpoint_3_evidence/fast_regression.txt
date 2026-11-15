@@ -1,0 +1,13 @@
+Checkpoint 3 MXM - fast regression evidence
+Date: 2026-11-14
+
+Command:
+ctest --test-dir D:\LPU\FTLPU-CMODEL-clock\out\checkpoint_3_mxm -C Release -L fast -E rmsnorm --output-on-failure
+
+Result: PASS
+Passed: 61
+Failed: 0
+CTest real time: 17.88 seconds
+
+The known RMSNorm baseline was deliberately excluded and was checked
+separately in rmsnorm_baseline.txt.

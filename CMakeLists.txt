@@ -67,11 +67,16 @@ ftlpu_add_test(bf16_test tests/unit/core/bf16_test.cpp
     unit.core.bf16 unit core fast)
 ftlpu_add_test(wide_transport_codec_test tests/unit/core/wide_transport_codec_test.cpp
     unit.core.wide_transport_codec unit core mxm c2c fast)
+ftlpu_add_test(timing_test tests/unit/core/timing_test.cpp
+    unit.core.timing unit core timing fast)
 
 ftlpu_add_test(stream_fabric_test tests/unit/stream/stream_fabric_test.cpp
     unit.stream.fabric unit stream fast)
 ftlpu_add_test(stream_port_test tests/unit/stream/stream_port_test.cpp
     unit.stream.port unit stream fast)
+ftlpu_add_test(stream_fabric_clock_test
+    tests/unit/stream/stream_fabric_clock_test.cpp
+    unit.stream.clocked_fabric unit stream timing fast)
 
 ftlpu_add_test(mem_slice_test tests/unit/mem/slice_test.cpp
     unit.mem.slice unit mem fast)
@@ -86,6 +91,8 @@ ftlpu_add_test(mem_array_r1_test tests/unit/mem/mem_array_test.cpp
 target_compile_definitions(mem_array_r1_test PRIVATE FTLPU_TEST_MEM_R1=1)
 ftlpu_add_test(mem_read_mode_test tests/unit/mem/mem_read_mode_test.cpp
     unit.mem.read_mode unit mem fast)
+ftlpu_add_test(mem_clocked_test tests/unit/mem/mem_clocked_test.cpp
+    unit.mem.clocked unit mem timing fast)
 ftlpu_add_test(vector_roundtrip_test tests/unit/mem/vector_roundtrip_test.cpp
     unit.mem.vector_roundtrip unit mem fast)
 
@@ -97,6 +104,8 @@ ftlpu_add_test(mxm_control_slice_test tests/unit/mxm/control_slice_test.cpp
     unit.mxm.control_slice unit mxm fast)
 ftlpu_add_test(mxm_accumulator_test tests/unit/mxm/accumulator_test.cpp
     unit.mxm.accumulator unit mxm fast)
+ftlpu_add_test(mxm_clocked_test tests/unit/mxm/mxm_clocked_test.cpp
+    unit.mxm.clocked unit mxm timing fast)
 ftlpu_add_test(mxm_weight_dequantizer_test tests/unit/mxm/weight_dequantizer_test.cpp
     unit.mxm.weight_dequantizer unit mxm fast)
 
@@ -108,6 +117,8 @@ ftlpu_add_test(vxm_superlane_test tests/unit/vxm/superlane_test.cpp
     unit.vxm.superlane unit vxm fast)
 ftlpu_add_test(vxm_slice_test tests/unit/vxm/slice_test.cpp
     unit.vxm.slice unit vxm fast)
+ftlpu_add_test(vxm_clocked_test tests/unit/vxm/vxm_clocked_test.cpp
+    unit.vxm.clocked unit vxm timing fast)
 ftlpu_add_test(vxm_fp16_16alu_test tests/unit/vxm/fp16_16alu_test.cpp
     unit.vxm.fp16_16alu unit vxm fast)
 ftlpu_add_test(vxm_input_buffer_test tests/unit/vxm/input_buffer_test.cpp
@@ -130,6 +141,8 @@ ftlpu_add_test(sxm_attention_transpose_test tests/unit/sxm/attention_transpose_t
     unit.sxm.attention_transpose unit sxm fast)
 ftlpu_add_test(sxm_local_blocks_timing_test tests/unit/sxm/local_blocks_timing_test.cpp
     unit.sxm.local_blocks_timing unit sxm fast)
+ftlpu_add_test(sxm_clocked_test tests/unit/sxm/sxm_clocked_test.cpp
+    unit.sxm.clocked unit sxm fast)
 ftlpu_add_test(icu_barrier_test tests/unit/icu/barrier_test.cpp
     unit.icu.barrier unit icu fast)
 ftlpu_add_test(icu_common_barrier_test tests/unit/icu/common_barrier_test.cpp
@@ -146,12 +159,23 @@ ftlpu_add_test(icu_vxm_sequential_instruction_test
 ftlpu_add_test(icu_c2c_packet_codec_test
     tests/unit/icu/c2c_packet_codec_test.cpp
     unit.icu.c2c_packet_codec unit icu c2c fast)
+ftlpu_add_test(icu_clocked_test tests/unit/icu/icu_clocked_test.cpp
+    unit.icu.clocked unit icu timing fast)
+ftlpu_add_test(icu_rtl_fifo_test tests/unit/icu/rtl_fifo_test.cpp
+    unit.icu.rtl_fifo unit icu timing fast)
+ftlpu_add_demo(icu_rtl_fifo_golden_trace
+    tests/unit/icu/rtl_fifo_golden_trace.cpp)
 
 # Subsystem tests: multiple hardware blocks connected by physical SR routes.
 ftlpu_add_test(c2c_test tests/subsystem/c2c/dual_chip_test.cpp
     subsystem.c2c.dual_chip subsystem c2c fast)
+ftlpu_add_test(c2c_clocked_test tests/subsystem/c2c/c2c_clocked_test.cpp
+    subsystem.c2c.clocked subsystem c2c timing fast)
 ftlpu_add_test(c2c_dma_ddr4_test tests/subsystem/c2c/dma_ddr4_test.cpp
     subsystem.c2c.dma_ddr4 subsystem c2c dma ddr4 fast)
+ftlpu_add_test(c2c_dma_clocked_test
+    tests/subsystem/c2c/c2c_dma_clocked_test.cpp
+    subsystem.c2c.dma_clocked subsystem c2c dma ddr4 timing fast)
 ftlpu_add_test(stream_topology_test tests/subsystem/system/stream_topology_test.cpp
     subsystem.topology.stream subsystem topology fast)
 ftlpu_add_test(full_chip_topology_test tests/subsystem/system/full_chip_topology_test.cpp
@@ -166,6 +190,9 @@ ftlpu_add_test(vxm_repeated_distributed_input_test
     subsystem.topology.vxm_repeated_distributed_input subsystem topology vxm fast)
 ftlpu_add_test(hardware_configuration_test tests/subsystem/system/hardware_configuration_test.cpp
     subsystem.hardware.configuration subsystem hardware fast)
+ftlpu_add_test(tsp_timing_integration_test
+    tests/subsystem/system/tsp_timing_integration_test.cpp
+    subsystem.system.timing subsystem system timing fast)
 ftlpu_add_test(program_loader_test tests/subsystem/system/program_loader_test.cpp
     subsystem.program.loader subsystem program dma fast)
 add_test(NAME subsystem.program.configuration COMMAND "${CMAKE_COMMAND}"

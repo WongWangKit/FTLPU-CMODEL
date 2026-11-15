@@ -1,0 +1,7 @@
+command=ctest -C Release -L fast -E rmsnorm --output-on-failure
+tests=63
+passed=63
+failed=0
+elapsed_seconds=18.50
+result=PASS
+

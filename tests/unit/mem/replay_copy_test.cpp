@@ -33,10 +33,13 @@ int main() try {
             if (cycle >= latency && cycle - latency < rows)
                 mem->enqueue_instruction(destination,
                     MemInstruction::Write(768 + cycle - latency, stream));
-            fabric.begin_cycle();
+            fabric.low();
             mem->evaluate(fabric);
             fabric.stage_linear_links();
-            fabric.commit_cycle();
+            mem->validate_posedge();
+            fabric.validate_posedge();
+            mem->posedge();
+            fabric.posedge();
         }
         for (std::size_t row = 0; row < rows; ++row)
             for (std::size_t tile = 0; tile < hw::kTileRows; ++tile)

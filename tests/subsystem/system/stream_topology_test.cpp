@@ -121,9 +121,9 @@ int main()
         ftlpu::StreamCell::Valid(42));
 
     auto routes = topology.default_route_selection();
-    fabric.begin_cycle();
+    fabric.low();
     topology.stage_active_routes(fabric, routes);
-    fabric.commit_cycle();
+    fabric.validate_posedge(); fabric.posedge();
     assert(fabric.cell(dst_out, 0, 0, stream).valid);
     assert(fabric.cell(dst_out, 0, 0, stream).data == 42);
     assert(!fabric.cell(acc_in, 0, 0, stream).valid);
@@ -137,9 +137,9 @@ int main()
         ftlpu::StreamCell::Valid(99));
     routes.disable("normal.tx_to_dst");
     routes.enable("bypass.tx_to_acc");
-    fabric.begin_cycle();
+    fabric.low();
     topology.stage_active_routes(fabric, routes);
-    fabric.commit_cycle();
+    fabric.validate_posedge(); fabric.posedge();
     assert(!fabric.cell(dst_out, 0, 0, stream).valid);
     assert(fabric.cell(acc_in, 0, 0, stream).data == 99);
 
@@ -149,7 +149,7 @@ int main()
     routes.enable("normal.tx_to_dst");
     bool rejected = false;
     try {
-        fabric.begin_cycle();
+        fabric.low();
         topology.stage_active_routes(fabric, routes);
     } catch (const std::logic_error&) {
         rejected = true;

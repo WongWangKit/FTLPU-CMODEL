@@ -321,9 +321,12 @@ void commits_are_independent_of_compute_and_trace()
             cell.transport = true;
             fabric.initialize_cell(0, tile, lane, StreamId::East(0), cell);
         }
-        fabric.begin_cycle();
+        fabric.low();
         mem->evaluate(fabric, false);
-        fabric.commit_cycle();
+        mem->validate_posedge();
+        fabric.validate_posedge();
+        mem->posedge();
+        fabric.posedge();
         require(mem->transport_committed_segments(9, 33, 0, 1) == tile + 1,
             "MEM commit scoreboard is not tied to actual tile writes");
         require(mem->executed_transfers().empty(),
@@ -342,12 +345,12 @@ void commits_are_independent_of_compute_and_trace()
     require(!provenance.compute_empty(), "computation SR data escaped the safety check");
 
     StreamRegisterFabric explicitSource(2);
-    explicitSource.begin_cycle();
+    explicitSource.low();
     StreamOutputPort rx(explicitSource, 0, StreamDirection::West, "arbitrary debug name", true);
     rx.write_cell(0, 0, 31, StreamCell::Valid(1));
     StreamOutputPort compute(explicitSource, 1, StreamDirection::East, "C2C-looking debug name");
     compute.write_cell(0, 0, 0, StreamCell::Valid(2));
-    explicitSource.commit_cycle();
+    explicitSource.validate_posedge(); explicitSource.posedge();
     require(explicitSource.cell(0, 0, 0, StreamId::West(31)).transport
         && !explicitSource.cell(1, 0, 0, StreamId::East(0)).transport
         && explicitSource.last_cycle_activity().c2c_staged_writes == 1,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/instruction_codec.hpp"
+#include "ftlpu/core/clone_ptr.hpp"
 #include "ftlpu/icu/sxm_macro_instruction.hpp"
 
 #include <algorithm>
@@ -68,6 +69,16 @@ struct IcuMacroDecoderStatistics {
     std::size_t reservoir_empty_cycles{0};
     std::size_t reservoir_full_cycles{0};
     std::size_t reservoir_occupancy_bit_samples{0};
+    std::size_t response_fifo_occupancy_samples{0};
+    std::size_t response_fifo_peak_occupancy{0};
+    std::size_t response_fifo_full_cycles{0};
+    std::size_t response_fifo_writes{0};
+    std::size_t response_fifo_reads{0};
+    std::size_t word_fifo_occupancy_samples{0};
+    std::size_t word_fifo_peak_occupancy{0};
+    std::size_t word_fifo_full_cycles{0};
+    std::size_t word_fifo_writes{0};
+    std::size_t word_fifo_reads{0};
     std::size_t decoder_active_cycles{0};
     std::size_t decoder_starvation_cycles{0};
     std::size_t decoder_ddb_stall_cycles{0};
@@ -159,14 +170,20 @@ public:
     static constexpr std::size_t ddb_depth = DdbDepth;
     static constexpr std::size_t admission_lookahead = AdmissionLookahead;
     static constexpr std::size_t context_expand_width = 1;
+    static constexpr std::size_t response_fifo_depth =
+        hw::kIcuLocalImemResponseDepth;
+    static constexpr std::size_t word_fifo_depth =
+        hw::kIcuMacroWordFifoDepth;
 
     IcuMacroV1Decoder(IcuMacroQueueKind kind, std::vector<RawWord> image)
-        : kind_(kind), image_(std::move(image)),
+        : kind_(kind),
+          image_(std::make_shared<const std::vector<RawWord>>(
+              std::move(image))),
           ddb_storage_(std::make_unique<
               std::array<DdbSlot, DdbDepth>>())
     {
         validate_kind();
-        if (image_.empty())
+        if (image_->empty())
             throw StaticScheduleError(
                 "Macro raw i-MEM image has no control word");
     }
@@ -210,7 +227,7 @@ public:
     // admission stay frozen. No new request is issued until RUN resumes.
     void hold_cycle()
     {
-        commit_ready_fetch();
+        advance_fetch_frontend();
         age_pending_fetches();
     }
 
@@ -226,9 +243,15 @@ public:
 
     bool has_pending_cycle_zero() const
     {
+        return has_pending_at_or_before(0);
+    }
+
+    bool has_pending_at_or_before(std::size_t cycle) const
+    {
         if (ddb_size_ == 0) return false;
         const auto& payload = (*ddb_storage_)[ddb_read_pointer_].payload;
-        return payload.read(ddb_field_layout().next_start_cycle, 32) == 0;
+        return payload.read(ddb_field_layout().next_start_cycle, 32)
+            <= cycle;
     }
 
     bool control_latched() const noexcept { return control_latched_; }
@@ -568,6 +591,10 @@ private:
         std::size_t remaining_cycles{ImemReadLatency};
     };
 
+    struct FetchedWord {
+        std::size_t address{0};
+    };
+
     static std::int64_t signed_value(std::uint64_t raw, unsigned width)
     {
         if (width == 0 || width > 64)
@@ -877,7 +904,7 @@ private:
         ++statistics_.cycles;
         waiting_for_bits_ = false;
         decoder_active_this_cycle_ = false;
-        commit_ready_fetch();
+        advance_fetch_frontend();
 
         auto admitted = expand_and_admit(
             current_cycle, active_occupancy, active_capacity,
@@ -892,8 +919,9 @@ private:
         if (waiting_for_bits_) {
             ++statistics_.bit_wait_cycles;
             ++statistics_.decoder_starvation_cycles;
-            if (pending_fetches_.empty()
-                && next_fetch_address_ == image_.size())
+            if (pending_fetches_.empty() && response_fifo_.empty()
+                && word_fifo_.empty()
+                && next_fetch_address_ == image_->size())
                 throw StaticScheduleError(
                     "truncated Macro v1 raw i-MEM image");
         }
@@ -901,7 +929,7 @@ private:
             ++statistics_.reservoir_empty_cycles;
         statistics_.reservoir_occupancy_bit_samples +=
             reservoir_.available_bits();
-        if (!reservoir_.can_refill(pending_payload_fetch_count()))
+        if (!reservoir_.can_refill(0))
             ++statistics_.reservoir_full_cycles;
         if (ddb_size_ == DdbDepth) ++statistics_.ddb_full_cycles;
         statistics_.ddb_occupancy_samples += ddb_size_;
@@ -915,14 +943,16 @@ private:
         return admitted;
     }
 
-    void commit_ready_fetch()
+    bool word_fifo_head_ready() const
     {
-        if (pending_fetches_.empty()
-            || pending_fetches_.front().remaining_cycles != 0)
-            return;
-        const auto address = pending_fetches_.front().address;
-        const auto& word = image_[address];
-        pending_fetches_.pop_front();
+        if (word_fifo_.empty()) return false;
+        return word_fifo_.front().address == 0
+            || reservoir_.can_refill(0);
+    }
+
+    void consume_fetched_word(std::size_t address)
+    {
+        const auto& word = (*image_)[address];
         ++statistics_.fetched_words;
 
         if (address == 0) {
@@ -962,6 +992,49 @@ private:
             reservoir_.available_bits());
     }
 
+    // Three explicit sequential boundaries: two-cycle SRAM request pipeline,
+    // local-iMEM response FIFO, and Macro word FIFO.  Ordering below permits
+    // full+dequeue replacement but never an empty enqueue-to-dequeue bypass.
+    void advance_fetch_frontend()
+    {
+        const bool consume_word=word_fifo_head_ready();
+        if (consume_word) {
+            const auto address=word_fifo_.front().address;
+            word_fifo_.pop_front();
+            consume_fetched_word(address);
+            ++statistics_.word_fifo_reads;
+        }
+
+        const bool move_response=!response_fifo_.empty()
+            && word_fifo_.size() < word_fifo_depth;
+        if (move_response) {
+            word_fifo_.push_back(response_fifo_.front());
+            response_fifo_.pop_front();
+            ++statistics_.response_fifo_reads;
+            ++statistics_.word_fifo_writes;
+        }
+
+        if (!pending_fetches_.empty()
+            && pending_fetches_.front().remaining_cycles == 0
+            && response_fifo_.size() < response_fifo_depth) {
+            response_fifo_.push_back(
+                FetchedWord{pending_fetches_.front().address});
+            pending_fetches_.pop_front();
+            ++statistics_.response_fifo_writes;
+        }
+        statistics_.response_fifo_occupancy_samples+=response_fifo_.size();
+        statistics_.word_fifo_occupancy_samples+=word_fifo_.size();
+        statistics_.response_fifo_peak_occupancy=std::max(
+            statistics_.response_fifo_peak_occupancy,
+            response_fifo_.size());
+        statistics_.word_fifo_peak_occupancy=std::max(
+            statistics_.word_fifo_peak_occupancy,word_fifo_.size());
+        statistics_.response_fifo_full_cycles+=
+            response_fifo_.size()==response_fifo_depth;
+        statistics_.word_fifo_full_cycles+=
+            word_fifo_.size()==word_fifo_depth;
+    }
+
     std::size_t pending_payload_fetch_count() const noexcept
     {
         return outstanding_payload_fetches_;
@@ -971,17 +1044,15 @@ private:
     {
         if (fetch_issue_cooldown_ != 0 || disabled_
             || state_ == State::Done
-            || next_fetch_address_ == image_.size())
+            || next_fetch_address_ == image_->size())
             return;
-        if (next_fetch_address_ != 0) {
-            // The control word is deliberately non-speculative. Once it has
-            // enabled Macro mode, every payload request reserves one future
-            // reservoir word because the i-MEM response cannot backpressure.
-            if (!control_latched_
-                || !reservoir_.can_refill(
-                    pending_payload_fetch_count()))
-                return;
-        }
+        if (pending_fetches_.size()+response_fifo_.size()
+            >= response_fifo_depth)
+            return;
+        // The control word is deliberately non-speculative. Payload fetches
+        // may then fill the bounded response/word FIFOs independently of the
+        // parser reservoir, matching the RTL local-iMEM credit boundary.
+        if (next_fetch_address_ != 0 && !control_latched_) return;
         pending_fetches_.push_back(PendingFetch{
             next_fetch_address_, ImemReadLatency});
         if (next_fetch_address_ != 0)
@@ -1834,8 +1905,10 @@ private:
     }
 
     IcuMacroQueueKind kind_;
-    std::vector<RawWord> image_;
+    std::shared_ptr<const std::vector<RawWord>> image_;
     std::deque<PendingFetch> pending_fetches_{};
+    std::deque<FetchedWord> response_fifo_{};
+    std::deque<FetchedWord> word_fifo_{};
     std::size_t outstanding_payload_fetches_{0};
     std::size_t fetch_issue_cooldown_{0};
     std::size_t next_fetch_address_{0};
@@ -1862,7 +1935,7 @@ private:
     DecodedDescriptor building_descriptor_{};
     // Heap allocation is a host-model detail that keeps thousands of dormant
     // ICU queue objects small; the modeled hardware remains a fixed DDB RAM.
-    std::unique_ptr<std::array<DdbSlot, DdbDepth>> ddb_storage_{};
+    ClonePtr<std::array<DdbSlot, DdbDepth>> ddb_storage_{};
     std::size_t ddb_read_pointer_{0};
     std::size_t ddb_write_pointer_{0};
     std::size_t ddb_size_{0};

@@ -279,7 +279,7 @@ public:
         for (auto& quantizer : static_quantizers_) quantizer.reset();
         for (auto& request : quantizer_requests_) request.reset();
         last_trace_.fill({});
-        statistics_ = {};
+        *statistics_ = {};
         cycle_ = 0;
         last_feedback_capture_count_ = 0;
     }
@@ -555,8 +555,8 @@ public:
             if (active) {
                 activity.states[stage] = VxmLaneAluTraceState::Executed;
                 last_trace_[stage].state = VxmLaneAluTraceState::Executed;
-                ++statistics_.executed_slots;
-                ++statistics_.stage_executions[stage];
+                ++statistics_->executed_slots;
+                ++statistics_->stage_executions[stage];
 
                 const auto accepted_useful = issued[stage]
                     && is_useful_operation(issued[stage]->operation);
@@ -564,7 +564,7 @@ public:
                     basic_was_busy || special_was_busy;
                 if (accepted_useful || internally_useful) {
                     activity.useful[stage] = true;
-                    ++statistics_.useful_slots;
+                    ++statistics_->useful_slots;
                 }
             } else if (waiting_for_input[stage]) {
                 activity.states[stage] = VxmLaneAluTraceState::Stalled;
@@ -696,8 +696,8 @@ public:
             quantizer_requests_[block].reset();
         }
         if (!outputs_.empty()) output_ = outputs_.front();
-        ++statistics_.cycles;
-        auto& depth_statistics = statistics_.by_chain_depth[
+        ++statistics_->cycles;
+        auto& depth_statistics = statistics_->by_chain_depth[
             Statistics::depth_index(chain_depth_)];
         ++depth_statistics.cycles;
         depth_statistics.executed_slots += activity.active_slots();
@@ -711,10 +711,10 @@ public:
                 ++depth_statistics.stage_executions[stage];
             }
         }
-        if (retain_statistics_timeline_ || statistics_.timeline.empty())
-            statistics_.timeline.push_back(activity);
+        if (retain_statistics_timeline_ || statistics_->timeline.empty())
+            statistics_->timeline.push_back(activity);
         else
-            statistics_.timeline.back() = activity;
+            statistics_->timeline.back() = activity;
         ++cycle_;
         return consumed;
     }
@@ -724,17 +724,17 @@ public:
     const std::array<VxmLaneAluTrace, kAluCount>& last_trace() const { return last_trace_; }
     std::size_t last_trace_cycle() const { return cycle_ == 0 ? 0 : cycle_ - 1; }
     std::size_t cycle() const { return cycle_; }
-    const Statistics& statistics() const { return statistics_; }
+    const Statistics& statistics() const { return *statistics_; }
     // Full per-cycle history is useful for small unit tests. Long-running
     // simulations need only the latest activity and cumulative counters.
     void set_statistics_timeline_retention(bool retain) {
         retain_statistics_timeline_ = retain;
-        if (!retain && statistics_.timeline.size() > 1) {
-            const auto latest = statistics_.timeline.back();
-            std::vector<CycleActivity>{latest}.swap(statistics_.timeline);
+        if (!retain && statistics_->timeline.size() > 1) {
+            const auto latest = statistics_->timeline.back();
+            std::vector<CycleActivity>{latest}.swap(statistics_->timeline);
         }
     }
-    void reset_statistics() { statistics_ = {}; }
+    void reset_statistics() { *statistics_ = {}; }
     bool idle() const
     {
         return datapath_idle()
@@ -803,7 +803,7 @@ public:
 
     void print_activity_trace(std::ostream& os) const
     {
-        for (const auto& activity : statistics_.timeline) {
+        for (const auto& activity : statistics_->timeline) {
             os << "cycle " << activity.cycle
                << " depth " << static_cast<std::size_t>(activity.chain_depth)
                << " active ";
@@ -1244,7 +1244,10 @@ private:
     std::array<std::optional<VxmStaticQuantizer::Request>, kBlockCount>
         quantizer_requests_{};
     std::array<VxmLaneAluTrace, kAluCount> last_trace_{};
-    Statistics statistics_{};
+    // Statistics are software-observation state, not flops. Transactional
+    // VXM snapshots share this object so preparing one hardware Next state
+    // does not copy an ever-growing per-cycle timeline.
+    std::shared_ptr<Statistics> statistics_{std::make_shared<Statistics>()};
     bool retain_statistics_timeline_{true};
     std::size_t cycle_{0};
     std::size_t last_feedback_capture_count_{0};

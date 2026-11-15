@@ -75,12 +75,13 @@ int main()
     }
 
     auto provider = [&control](std::size_t tile) {
-        const auto token = control.cycle() - tile;
-        const auto target_column = ftlpu::hw::kMxmSupercellsPerPlane - 1 - token;
-        return row_input(tile, target_column);
+        const auto& instruction = control.instruction_at(tile);
+        return row_input(tile, instruction->weight_column);
     };
 
-    for (std::size_t cycle = 0; cycle < 2 * ftlpu::hw::kMxmSupercellsPerPlane - 1; ++cycle) {
+    for (std::size_t cycle = 0;
+         cycle < 2 * ftlpu::hw::kMxmSupercellsPerPlane + 1;
+         ++cycle) {
         control.tick(log, provider);
     }
 
@@ -108,13 +109,13 @@ int main()
             kBuffer, kTargetSupercellColumn, inner_column));
     }
     auto column_provider = [&column_control](std::size_t tile) {
-        const auto inner_column = column_control.cycle() - tile;
+        const auto& instruction = column_control.instruction_at(tile);
         return column_input(
-            tile, kTargetSupercellColumn, inner_column);
+            tile, kTargetSupercellColumn, instruction->weight_inner_column);
     };
     for (std::size_t cycle = 0;
          cycle < ftlpu::hw::kMxmSupercellColumns
-             + ftlpu::hw::kMxmSupercellsPerPlane - 1;
+             + ftlpu::hw::kMxmSupercellsPerPlane;
          ++cycle) {
         column_control.tick(log, column_provider);
     }
@@ -154,6 +155,7 @@ int main()
         ftlpu::MxmControlInstruction::IWDirect16(kBuffer));
     parallel_control.issue_south(ftlpu::MxmControlInstruction::Compute(kBuffer, kActivationStream, kOutputStream));
     parallel_control.set_weight_input(0, row_input(0, 0));
+    parallel_control.tick(log);
     parallel_control.tick(log);
     if (!require(parallel_control.compute_active(0), "Compute should issue in parallel with IW")) {
         return 1;
@@ -228,6 +230,7 @@ int main()
     missing_input_control.issue_south(ftlpu::MxmControlInstruction::IW(0));
     caught = false;
     try {
+        missing_input_control.tick(log);
         missing_input_control.tick(log);
     } catch (const std::logic_error&) {
         caught = true;

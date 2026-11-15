@@ -1,0 +1,11 @@
+Checkpoint 4 VXM - frozen RMSNorm baseline
+Date: 2026-11-14
+
+Command:
+ctest --test-dir D:\LPU\FTLPU-CMODEL-clock\out\checkpoint_4_vxm -C Release -R ^kernel\.rmsnorm$ --output-on-failure
+
+Expected known failure retained:
+VXM input Buffer cannot be reconfigured while a Bundle is active
+
+The error text and failure class match the Checkpoint 3 frozen baseline. It is
+not counted as a new Checkpoint 4 regression and was not bypassed.

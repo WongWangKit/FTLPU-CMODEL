@@ -41,6 +41,12 @@ void Sram::set_byte(std::size_t row, std::size_t byte_offset, std::uint8_t value
     ensure_page(page_index)[index % kPageBytes] = value;
 }
 
+void Sram::validate_segment(std::size_t tile, std::size_t row) const
+{
+    (void)tile_byte_offset(tile);
+    check_row(row);
+}
+
 StreamPayloadTileSegment Sram::read_segment(std::size_t tile, std::size_t row) const
 {
     const auto byte_offset = tile_byte_offset(tile);

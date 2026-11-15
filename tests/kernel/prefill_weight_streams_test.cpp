@@ -51,27 +51,31 @@ public:
         end = std::max(end, next);
     }
     void load(std::size_t cycle, MxmControlInstruction op, float s) {
-        if (cycle < loadCursor) throw std::logic_error("MXM load queue overlap");
-        icu.enqueue_mxm_load_nop(0, cycle - loadCursor);
-        icu.enqueue_mxm_dequant_nop(0, cycle - loadCursor);
+        if (cycle == 0) throw std::logic_error("MXM load cannot execute before row0 is registered");
+        const auto issueCycle = cycle - 1;
+        if (issueCycle < loadCursor) throw std::logic_error("MXM load queue overlap");
+        icu.enqueue_mxm_load_nop(0, issueCycle - loadCursor);
+        icu.enqueue_mxm_dequant_nop(0, issueCycle - loadCursor);
         icu.enqueue_mxm(0, op);
         icu.enqueue_mxm_dequant(0, MxmDequantInstruction::Scale(s));
         loadOps.push_back(op);
-        loadCursor = cycle + 1; end = std::max(end, loadCursor);
+        loadCursor = issueCycle + 1; end = std::max(end, cycle + 1);
     }
     void compute(std::size_t cycle, MxmControlInstruction op) {
-        if (cycle < computeCursor) throw std::logic_error("MXM compute queue overlap");
-        icu.enqueue_mxm_compute_nop(0, cycle - computeCursor);
-        icu.enqueue_mxm(0, op); computeCursor = cycle + 1;
-        end = std::max(end, computeCursor);
+        if (cycle == 0) throw std::logic_error("MXM compute cannot execute before row0 is registered");
+        const auto issueCycle = cycle - 1;
+        if (issueCycle < computeCursor) throw std::logic_error("MXM compute queue overlap");
+        icu.enqueue_mxm_compute_nop(0, issueCycle - computeCursor);
+        icu.enqueue_mxm(0, op); computeCursor = issueCycle + 1;
+        end = std::max(end, cycle + 1);
     }
     void columnBlock(std::size_t cycle, std::size_t buffer, float s) {
         if (cycle < loadCursor) throw std::logic_error("column load queue overlap");
         for (std::size_t i=0;i<T;++i)
             load(cycle+i, MxmControlInstruction::IWColumn(buffer,i/8,i%8,
                 MxmWeightInputMode::Int8DequantBf16,weightStream),s);
-        loadCursor = cycle + T;
-        end = std::max(end, loadCursor);
+        loadCursor = cycle + T - 1;
+        end = std::max(end, cycle + T);
     }
     std::size_t end = 0;
     std::vector<MxmControlInstruction> loadOps;

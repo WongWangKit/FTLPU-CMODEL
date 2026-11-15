@@ -58,9 +58,11 @@ try {
         require(rejected,"different Macros interleaved on one ICU queue");
     }
 
-    static_assert(InstructionControlUnit::MxmIcu::macro_context_depth == 40);
+    // Local VMODEL lpu_mxm_subsystem/lpu_mxm_local_imem_frontend default to
+    // four independently active Macro contexts per stream.
+    static_assert(InstructionControlUnit::MxmIcu::macro_context_depth == 4);
     static_assert(
-        InstructionControlUnit::MxmIcu::macro_issue_compare_width == 40);
+        InstructionControlUnit::MxmIcu::macro_issue_compare_width == 4);
     static_assert(
         InstructionControlUnit::MxmIcu::macro_issue_cycle_bits == 32);
     static_assert(

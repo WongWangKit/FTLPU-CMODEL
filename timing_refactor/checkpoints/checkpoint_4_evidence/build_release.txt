@@ -1,0 +1,16 @@
+Checkpoint 4 VXM - Release build evidence
+Date: 2026-11-14
+
+Source: D:\LPU\FTLPU-CMODEL-clock
+Build: D:\LPU\FTLPU-CMODEL-clock\out\checkpoint_4_vxm
+Configuration: Release
+Hardware configuration: config\ftlpu-lpu32.json
+
+Generated project count excluding ALL_BUILD/ZERO_CHECK/RUN_TESTS: 73
+Release executable count: 72
+Missing expected executable: 0
+Result: PASS
+
+An exploratory Debug all-target build encountered the MSVC C1128 object-section
+limit in several pre-existing large translation units. The formal checkpoint
+build uses the same Release configuration as prior checkpoints and completed.

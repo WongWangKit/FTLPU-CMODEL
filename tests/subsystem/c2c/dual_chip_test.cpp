@@ -72,9 +72,12 @@ void test_rx_diagonal_pipeline_accepts_one_vector_per_cycle()
     }
 
     for (std::size_t cycle = 0; cycle < kVectorCount; ++cycle) {
-        fabric.begin_cycle();
+        fabric.low();
         rx.evaluate(fabric, transport);
-        fabric.commit_cycle();
+        rx.validate_posedge();
+        fabric.validate_posedge();
+        rx.posedge();
+        fabric.posedge();
 
         require(
             transport.received.size() == kVectorCount - cycle - 1,
@@ -139,9 +142,12 @@ void test_tx_diagonal_pipeline_emits_one_vector_per_cycle()
             }
         }
 
-        fabric.begin_cycle();
+        fabric.low();
         tx.evaluate(fabric, transport);
-        fabric.commit_cycle();
+        tx.validate_posedge();
+        fabric.validate_posedge();
+        tx.posedge();
+        fabric.posedge();
 
         const auto expected_completed = cycle + 1 < hw::kTileRows
             ? 0

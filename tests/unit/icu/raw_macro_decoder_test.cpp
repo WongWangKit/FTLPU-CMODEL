@@ -155,15 +155,15 @@ try {
         IcuMacroQueueKind::Mem, kMemImage);
     std::size_t pipelinedContexts = 0;
     std::size_t nonPipelinedContexts = 0;
-    for (std::size_t cycle = 0; cycle < 6; ++cycle) {
+    for (std::size_t cycle = 0; cycle < 8; ++cycle) {
         if (pipelinedFetch.tick(true).has_value()) ++pipelinedContexts;
         if (nonPipelinedFetch.tick(true).has_value())
             ++nonPipelinedContexts;
     }
-    require(pipelinedFetch.statistics().fetched_words == 3
-            && nonPipelinedFetch.statistics().fetched_words == 2,
+    require(pipelinedFetch.statistics().response_fifo_writes == 3
+            && nonPipelinedFetch.statistics().response_fifo_writes == 2,
         "Macro i-MEM read latency is still coupled to request II");
-    for (std::size_t cycle = 6;
+    for (std::size_t cycle = 8;
          (!pipelinedFetch.done() || !nonPipelinedFetch.done()); ++cycle) {
         if (cycle > 128)
             throw std::runtime_error(
@@ -303,7 +303,9 @@ try {
     try {
         IcuMacroV1Decoder<MemInstruction, 96> invalid(
             IcuMacroQueueKind::Mem, invalidControlImage);
-        for (std::size_t cycle = 0; cycle < 3; ++cycle)
+        // Two-cycle SRAM read plus response and word FIFO boundaries place
+        // the control word at the decoder on the fifth frontend cycle.
+        for (std::size_t cycle = 0; cycle < 5; ++cycle)
             static_cast<void>(invalid.tick(true));
     } catch (const StaticScheduleError&) {
         rejectedReservedControl = true;
@@ -416,6 +418,18 @@ try {
     require(dequantIssue.has_value()
             && dequantIssue->scale_bf16 == 0x3f80,
         "raw MXM dequant decoder reconstructed the wrong instruction");
+    require(icu.mem_iq(0).timed_issue_writes() == 2
+            && icu.mem_iq(0).timed_issue_reads() == 2
+            && icu.mxm_load_iq(0).timed_issue_writes() == 1
+            && icu.mxm_load_iq(0).timed_issue_reads() == 1
+            && icu.mxm_compute_iq(0).timed_issue_writes() == 1
+            && icu.mxm_compute_iq(0).timed_issue_reads() == 1
+            && icu.mxm_dequant_iq(0).timed_issue_writes() == 1
+            && icu.mxm_dequant_iq(0).timed_issue_reads() == 1,
+        "RTL-aligned timed queues did not preserve one enqueue/dequeue per issue");
+    require(icu.mem_iq(0).peak_timed_issue_occupancy() != 0
+            && icu.mem_iq(0).timed_issue_occupancy() == 0,
+        "MEM timed queue occupancy was not observable or did not drain");
 
     const auto statistics = icu.frontend_statistics();
     require(statistics.imem_entries == 9,
@@ -429,6 +443,16 @@ try {
     require(statistics.macro_fetched_words == 9
             && statistics.macro_decoder_active_cycles != 0,
         "raw Macro aggregate statistics omitted fetch or decoder activity");
+    require(statistics.context_fifo_writes == 5
+            && statistics.context_fifo_reads == 5
+            && statistics.timed_issue_writes == 5
+            && statistics.timed_issue_reads == 5,
+        "Macro Context/Timed FIFO aggregate accounting is not conserved");
+    require(statistics.peak_imem_response_fifo_occupancy != 0
+            && statistics.peak_macro_word_fifo_occupancy != 0
+            && statistics.peak_context_fifo_occupancy != 0
+            && statistics.peak_timed_issue_occupancy != 0,
+        "Macro frontend FIFO occupancy is not observable");
 
     const auto queueStatistics = icu.macro_queue_frontend_statistics();
     require(queueStatistics.size() == 4,
@@ -458,6 +482,10 @@ try {
             && computeQueue->active_context_bits == 256
             && dequantQueue->active_context_bits == 256,
         "raw Macro per-queue statistics reported the wrong context width");
+    require(memQueue->context_fifo_depth == 4
+            && memQueue->timed_issue_depth == 16
+            && memQueue->timed_issue_lookahead == 2,
+        "raw Macro per-queue statistics lost RTL FIFO geometry");
     require(memQueue->ddb_entry_bits == 723
             && loadQueue->ddb_entry_bits == 710
             && computeQueue->ddb_entry_bits == 741

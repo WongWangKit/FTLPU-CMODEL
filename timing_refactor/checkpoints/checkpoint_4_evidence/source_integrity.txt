@@ -1,0 +1,10 @@
+Checkpoint 4 VXM - source boundary evidence
+Date: 2026-11-14
+
+Modified source root: D:\LPU\FTLPU-CMODEL-clock
+Authoritative reference: D:\LPU\FTLPU-CMODEL-main
+
+The authoritative reference is a clean Git work tree at
+2351cec89b5ef9c3c73f97b2d2e77c458fb36c95. Checkpoint 4 did not write source
+there. Only targeted Checkpoint 4 implementation/test/document files were
+written under FTLPU-CMODEL-clock. No Git commit or push was performed.

@@ -60,7 +60,7 @@ std::uint16_t fp16_bits(float value)
 std::size_t east_read_to_mxm_latency(std::size_t slice)
 {
     return ftlpu::hw::kMemGroups
-        + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 2
+        + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 1
         - slice / ftlpu::hw::kMemSlicesPerGroup;
 }
 
@@ -108,11 +108,17 @@ public:
         std::size_t cycle,
         ftlpu::MxmControlInstruction instruction)
     {
-        pad(mxm_load_, cycle, [&](std::size_t count) {
+        if (cycle == 0) {
+            throw std::logic_error(
+                "MXM load cannot execute before row0 is registered");
+        }
+        const auto issue_cycle = cycle - 1;
+        pad(mxm_load_, issue_cycle, [&](std::size_t count) {
             icu_.enqueue_mxm_load_nop(0, count);
         });
         icu_.enqueue_mxm(0, instruction);
-        advance(mxm_load_, cycle + 1);
+        advance(mxm_load_, issue_cycle + 1);
+        end_cycle_ = std::max(end_cycle_, cycle + 1);
     }
 
     void mxm_compute_at(
@@ -120,14 +126,20 @@ public:
         ftlpu::MxmControlInstruction instruction,
         std::size_t count = 1)
     {
-        pad(mxm_compute_, cycle, [&](std::size_t gap) {
+        if (cycle == 0) {
+            throw std::logic_error(
+                "MXM compute cannot execute before row0 is registered");
+        }
+        const auto issue_cycle = cycle - 1;
+        pad(mxm_compute_, issue_cycle, [&](std::size_t gap) {
             icu_.enqueue_mxm_compute_nop(0, gap);
         });
         icu_.enqueue_mxm(0, instruction);
         if (count > 1) {
             icu_.enqueue_mxm_compute_repeat(0, count - 1, 1);
         }
-        advance(mxm_compute_, cycle + count);
+        advance(mxm_compute_, issue_cycle + count);
+        end_cycle_ = std::max(end_cycle_, cycle + count);
     }
 
     std::size_t end_cycle() const

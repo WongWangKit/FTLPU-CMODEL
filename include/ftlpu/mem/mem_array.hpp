@@ -3,6 +3,7 @@
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/stream_fabric.hpp"
 #include "ftlpu/core/stream_port.hpp"
+#include "ftlpu/core/timing.hpp"
 #include "ftlpu/mem/slice.hpp"
 #include "ftlpu/mem/sram.hpp"
 
@@ -85,9 +86,14 @@ private:
     BoundaryColumns columns_{};
 };
 
-class MemArrayModel {
+class MemArrayModel : public timing::ClockedModule {
 public:
     using InstructionSlot = std::optional<MemInstruction>;
+    using InstructionRows = std::array<
+        std::array<
+            std::array<std::array<InstructionSlot, hw::kTileRows>, 2>,
+            hw::kMemBanksPerSlice>,
+        hw::kMemSliceColumns>;
 
     enum class MissingStreamPolicy {
         Error,
@@ -113,6 +119,7 @@ public:
         std::size_t address{0};
         std::uint64_t vector_tag{0};
         StreamPayloadTileSegment bytes{};
+        std::uint64_t transport_generation{0};
     };
 
     struct InstructionTrace {
@@ -140,25 +147,22 @@ public:
 
     void reset_execution_state()
     {
-        cycle_ = 0;
+        cycle_state_.reset(0);
         for (auto& slice : instruction_queues_) {
             for (auto& bank : slice)
                 for (auto& queue : bank) queue.clear();
         }
-        for (auto& slice : instruction_rows_) {
-            for (auto& bank : slice) {
-                for (auto& port : bank)
-                    for (auto& slot : port) slot.reset();
-            }
-        }
+        instruction_rows_state_.reset(InstructionRows{});
+        read_response_state_.reset(std::vector<MemTransfer>{});
         executed_mem_.clear();
         executed_instructions_.clear();
         transport_commits_.clear();
-        read_responses_.clear();
         staged_read_responses_.clear();
         consumed_mem_.clear();
-        pending_compute_read_ = false;
-        pending_transport_read_ = false;
+        pending_sram_writes_.clear();
+        dispatched_queue_slots_ = {};
+        active_fabric_ = nullptr;
+        cycle_prepared_ = false;
         last_transport_commit_segments_ = 0;
     }
 
@@ -169,7 +173,7 @@ public:
 
     std::size_t cycle() const noexcept
     {
-        return cycle_;
+        return cycle_state_.current();
     }
 
     const MemStreamPortMap& ports() const noexcept
@@ -184,7 +188,7 @@ public:
             for (const auto& bank : slice)
                 for (const auto& queue : bank)
                     if (!queue.empty()) return false;
-        for (const auto& slice : instruction_rows_)
+        for (const auto& slice : instruction_rows_state_.current())
             for (const auto& bank : slice)
                 for (const auto& port : bank)
                     for (const auto& slot : port)
@@ -194,13 +198,13 @@ public:
 
     bool compute_idle() const noexcept
     {
-        if (pending_compute_read_) return false;
+        if (has_pending_read_response(false)) return false;
         for (const auto& slice : instruction_queues_)
             for (const auto& bank : slice)
                 for (const auto& queue : bank)
                     for (const auto& instruction : queue)
                         if (!instruction.transport_generation) return false;
-        for (const auto& slice : instruction_rows_)
+        for (const auto& slice : instruction_rows_state_.current())
             for (const auto& bank : slice)
                 for (const auto& port : bank)
                     for (const auto& slot : port)
@@ -210,13 +214,13 @@ public:
 
     bool transport_idle() const noexcept
     {
-        if (pending_transport_read_) return false;
+        if (has_pending_read_response(true)) return false;
         for (const auto& slice : instruction_queues_)
             for (const auto& bank : slice)
                 for (const auto& queue : bank)
                     for (const auto& instruction : queue)
                         if (instruction.transport_generation) return false;
-        for (const auto& slice : instruction_rows_)
+        for (const auto& slice : instruction_rows_state_.current())
             for (const auto& bank : slice)
                 for (const auto& port : bank)
                     for (const auto& slot : port)
@@ -227,6 +231,7 @@ public:
     void configure_transport_commit(std::uint64_t generation, std::uint32_t launch,
         std::size_t slice, std::size_t bank, std::size_t vectors)
     {
+        require_cycle_boundary("configuring a transport commit scoreboard");
         check_mem_slice(slice); check_bank(bank);
         if (!generation || !launch || !vectors || transport_commits_.size() >= 65535
             || vectors > std::numeric_limits<std::uint64_t>::max() / hw::kTileRows)
@@ -263,6 +268,7 @@ public:
         std::size_t bank,
         MemInstruction instruction)
     {
+        require_cycle_boundary("enqueueing a MEM instruction");
         check_mem_slice(mem_slice);
         check_bank(bank);
         const std::size_t port = instruction.opcode == MemOpcode::Write
@@ -372,9 +378,10 @@ public:
         check_mem_slice(mem_slice);
         check_bank(bank);
         check_tile(tile);
-        const auto& read = instruction_rows_[mem_slice][bank][0][tile];
+        const auto& rows = instruction_rows_state_.current();
+        const auto& read = rows[mem_slice][bank][0][tile];
         return read.has_value()
-            ? read : instruction_rows_[mem_slice][bank][1][tile];
+            ? read : rows[mem_slice][bank][1][tile];
     }
 
     const std::vector<MemTransfer>& executed_transfers() const noexcept
@@ -395,7 +402,14 @@ public:
     // Main mode has no pending response queue; both response views stay empty.
     const std::vector<MemTransfer>& read_responses() const noexcept
     {
-        return read_responses_;
+        return read_response_state_.current();
+    }
+
+    // Diagnostic visibility of the responses sampled during the active LOW.
+    // They become architectural registered outputs only at POSEDGE.
+    const std::vector<MemTransfer>& next_read_responses() const noexcept
+    {
+        return read_response_state_.next();
     }
 
     // Observation of the old registered outputs used by this evaluate().
@@ -412,7 +426,7 @@ public:
 
     bool has_pending_read_responses() const noexcept
     {
-        return !read_responses_.empty();
+        return !read_response_state_.current().empty();
     }
 
     // Evaluate one MEM cycle against the current SR state.  This method never
@@ -423,30 +437,86 @@ public:
     // consume this cycle's current in both modes.
     void evaluate(StreamRegisterFabric& fabric, bool capture_trace = true)
     {
+        if (cycle_prepared_ || active_fabric_ != nullptr)
+            throw std::logic_error("MemArrayModel LOW executed more than once");
+        active_fabric_ = &fabric;
+        capture_trace_ = capture_trace;
+        low();
+    }
+
+    void low() override
+    {
+        if (active_fabric_ == nullptr)
+            throw std::logic_error("MemArrayModel LOW requires an attached SR fabric");
+        auto& fabric = *active_fabric_;
         ports_.validate_for(fabric);
         if (!fabric.cycle_open()) {
             throw std::logic_error("MemArrayModel::evaluate requires an open SR cycle");
         }
 
+        cycle_prepared_ = true;
+        cycle_state_.prepare();
+        cycle_state_.next_value() = cycle_state_.current() + 1;
+        instruction_rows_state_.prepare();
+        read_response_state_.prepare();
+        read_response_state_.next_value().clear();
         executed_mem_.clear();
         executed_instructions_.clear();
-        last_transport_commit_segments_ = 0;
         consumed_mem_.clear();
-        staged_read_responses_.swap(read_responses_);
-        read_responses_.clear();
-        pending_compute_read_ = false;
-        pending_transport_read_ = false;
+        pending_sram_writes_.clear();
+        dispatched_queue_slots_ = {};
+        staged_read_responses_ = read_response_state_.current();
         for (const auto& response : staged_read_responses_) {
             StreamOutputPort output(fabric, response.sr_column,
                 response.stream.direction(), "MEM Read");
             output.write_payload_segment(response.tile, response.stream.index(),
                 response.bytes, response.vector_tag);
         }
-        dispatch_from_queues();
-        capture_trace_ = capture_trace;
-        execute_current_instructions(fabric);
-        advance_instructions();
-        ++cycle_;
+        auto& cycle_rows = instruction_rows_state_.next_value();
+        dispatch_from_queues(cycle_rows);
+        execute_current_instructions(fabric, cycle_rows);
+        advance_instructions(cycle_rows);
+    }
+
+    void validate_posedge() const override
+    {
+        if (!cycle_prepared_ || active_fabric_ == nullptr)
+            throw std::logic_error("MemArrayModel POSEDGE requires one completed LOW");
+        cycle_state_.validate_commit();
+        instruction_rows_state_.validate_commit();
+        read_response_state_.validate_commit();
+        for (const auto& pending : pending_sram_writes_) {
+            if (pending.transport_commit_index
+                && *pending.transport_commit_index >= transport_commits_.size())
+                throw std::logic_error("MEM staged transport commit owner became invalid");
+        }
+    }
+
+    void posedge() override
+    {
+        cycle_state_.commit();
+        instruction_rows_state_.commit();
+        read_response_state_.commit();
+
+        for (std::size_t slice = 0; slice < hw::kMemSliceColumns; ++slice)
+            for (std::size_t bank = 0; bank < hw::kMemBanksPerSlice; ++bank)
+                for (std::size_t port = 0; port < 2; ++port)
+                    if (dispatched_queue_slots_[slice][bank][port])
+                        instruction_queues_[slice][bank][port].pop_front();
+
+        last_transport_commit_segments_ = 0;
+        for (const auto& pending : pending_sram_writes_) {
+            sram_.bank(pending.mem_slice, pending.bank).write_segment(
+                pending.tile, pending.address, pending.bytes);
+            if (pending.transport_commit_index) {
+                ++transport_commits_[*pending.transport_commit_index].committed;
+                ++last_transport_commit_segments_;
+            }
+        }
+        pending_sram_writes_.clear();
+        dispatched_queue_slots_ = {};
+        active_fabric_ = nullptr;
+        cycle_prepared_ = false;
     }
 
     void log_cycle(std::ostream& os, std::optional<std::size_t> log_tile = std::nullopt) const
@@ -454,7 +524,7 @@ public:
         if (log_tile.has_value()) {
             check_tile(*log_tile);
         }
-        os << "mem cycle " << (cycle_ == 0 ? 0 : cycle_ - 1) << '\n';
+        os << "mem cycle " << (cycle() == 0 ? 0 : cycle() - 1) << '\n';
         log_instructions(os, log_tile);
         log_mem(os, log_tile);
     }
@@ -524,23 +594,24 @@ private:
         }
     }
 
-    void dispatch_from_queues()
+    void dispatch_from_queues(InstructionRows& rows)
     {
         for (std::size_t mem_slice = 0; mem_slice < hw::kMemSliceColumns; ++mem_slice) {
             for (std::size_t bank = 0; bank < hw::kMemBanksPerSlice; ++bank) {
                 for (std::size_t port = 0; port < 2; ++port) {
-                    if (instruction_rows_[mem_slice][bank][port][0].has_value()
+                    if (rows[mem_slice][bank][port][0].has_value()
                         || instruction_queues_[mem_slice][bank][port].empty())
                         continue;
-                    instruction_rows_[mem_slice][bank][port][0] =
+                    rows[mem_slice][bank][port][0] =
                         instruction_queues_[mem_slice][bank][port].front();
-                    instruction_queues_[mem_slice][bank][port].pop_front();
+                    dispatched_queue_slots_[mem_slice][bank][port] = true;
                 }
             }
         }
     }
 
-    void execute_current_instructions(StreamRegisterFabric& fabric)
+    void execute_current_instructions(
+        StreamRegisterFabric& fabric, const InstructionRows& rows)
     {
         for (std::size_t mem_slice = 0; mem_slice < hw::kMemSliceColumns; ++mem_slice) {
             for (std::size_t bank = 0; bank < hw::kMemBanksPerSlice; ++bank) {
@@ -550,7 +621,7 @@ private:
                 for (std::size_t port = 0; port < 2; ++port)
                     for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
                         const auto& instruction =
-                            instruction_rows_[mem_slice][bank][port][tile];
+                            rows[mem_slice][bank][port][tile];
                         if (!instruction.has_value()) continue;
 
                         if (capture_trace_) {
@@ -588,16 +659,15 @@ private:
         const auto physical_address = instruction.address;
         const auto bytes =
             sram_.bank(mem_slice, bank).read_segment(tile, physical_address);
-        const auto vector_tag = static_cast<std::uint64_t>(cycle_) * hw::kTileRows + tile;
+        const auto vector_tag = static_cast<std::uint64_t>(cycle()) * hw::kTileRows + tile;
 
         if (read_timing_ == ReadTiming::RegisteredR1) {
-            read_responses_.push_back(MemTransfer {
+            read_response_state_.next_value().push_back(MemTransfer {
                 MemTransfer::Kind::LoadSramToStream,
                 mem_slice, bank, tile, sr_column, stream,
                 physical_address, vector_tag, bytes,
+                instruction.transport_generation,
             });
-            if (instruction.transport_generation) pending_transport_read_ = true;
-            else pending_compute_read_ = true;
         } else {
             StreamOutputPort output(fabric, sr_column, stream.direction(), "MEM Read");
             output.write_payload_segment(tile, stream.index(), bytes, vector_tag);
@@ -616,6 +686,7 @@ private:
                 physical_address,
                 vector_tag,
                 bytes,
+                instruction.transport_generation,
             });
         }
     }
@@ -755,18 +826,30 @@ private:
                 + last_stream_column_cycles);
         }
 
-        sram_.bank(mem_slice, bank).write_segment(
-            tile, instruction.address, bytes);
+        sram_.bank(mem_slice, bank).validate_segment(tile, instruction.address);
+        auto transport_commit_index = std::optional<std::size_t>{};
         if (instruction.transport_generation) {
             auto found = std::find_if(transport_commits_.begin(), transport_commits_.end(),
                 [&](const auto& s) { return s.generation == instruction.transport_generation
                     && s.launch == instruction.transport_launch
                     && s.slice == mem_slice && s.bank == bank; });
-            if (found == transport_commits_.end() || found->committed >= found->expected)
+            if (found == transport_commits_.end())
                 throw std::logic_error("unbound or duplicate transport SRAM commit");
-            ++found->committed;
-            ++last_transport_commit_segments_;
+            const auto index = static_cast<std::size_t>(found - transport_commits_.begin());
+            const auto staged = static_cast<std::uint64_t>(std::count_if(
+                pending_sram_writes_.begin(), pending_sram_writes_.end(),
+                [&](const auto& pending) {
+                    return pending.transport_commit_index
+                        && *pending.transport_commit_index == index;
+                }));
+            if (found->committed + staged >= found->expected)
+                throw std::logic_error("unbound or duplicate transport SRAM commit");
+            transport_commit_index = index;
         }
+        pending_sram_writes_.push_back(PendingSramWrite {
+            mem_slice, bank, tile, instruction.address, bytes,
+            transport_commit_index,
+        });
         if (capture_trace_) {
             executed_mem_.push_back(MemTransfer {
                 MemTransfer::Kind::StoreStreamToSram,
@@ -778,13 +861,14 @@ private:
                 instruction.address,
                 vector_tag,
                 bytes,
+                instruction.transport_generation,
             });
         }
     }
 
-    void advance_instructions()
+    static void advance_instructions(InstructionRows& rows)
     {
-        for (auto& mem_slice : instruction_rows_) {
+        for (auto& mem_slice : rows) {
             for (auto& bank : mem_slice) {
                 for (auto& port : bank) {
                     for (std::size_t tile = hw::kTileRows - 1;
@@ -794,6 +878,24 @@ private:
                 }
             }
         }
+    }
+
+    bool has_pending_read_response(const bool transport) const noexcept
+    {
+        return std::any_of(
+            read_response_state_.current().begin(),
+            read_response_state_.current().end(),
+            [transport](const auto& response) {
+                return bool(response.transport_generation) == transport;
+            });
+    }
+
+    void require_cycle_boundary(const char* operation) const
+    {
+        if (cycle_prepared_)
+            throw std::logic_error(
+                std::string("MEM cannot perform host/control mutation while ")
+                + operation + " after LOW preparation");
     }
 
     static void print_hex_bytes(std::ostream& os, const StreamPayloadTileSegment& bytes)
@@ -874,19 +976,13 @@ private:
         std::array<std::array<std::deque<MemInstruction>, 2>,
             hw::kMemBanksPerSlice>,
         hw::kMemSliceColumns> instruction_queues_{};
-    std::array<
-        std::array<
-            std::array<std::array<InstructionSlot, hw::kTileRows>, 2>,
-            hw::kMemBanksPerSlice>,
-        hw::kMemSliceColumns> instruction_rows_{};
+    timing::ClockedState<InstructionRows> instruction_rows_state_{};
     std::vector<MemTransfer> executed_mem_{};
     std::vector<InstructionTrace> executed_instructions_{};
-    std::vector<MemTransfer> read_responses_{};
+    timing::ClockedState<std::vector<MemTransfer>> read_response_state_{};
     std::vector<MemTransfer> staged_read_responses_{};
     std::vector<MemTransfer> consumed_mem_{};
-    bool pending_compute_read_{false};
-    bool pending_transport_read_{false};
-    std::size_t cycle_{0};
+    timing::ClockedState<std::size_t> cycle_state_{0};
     bool capture_trace_{true};
     struct TransportCommitState {
         std::uint64_t generation;
@@ -895,6 +991,20 @@ private:
         std::uint64_t expected, committed;
     };
     std::vector<TransportCommitState> transport_commits_{};
+    struct PendingSramWrite {
+        std::size_t mem_slice{};
+        std::size_t bank{};
+        std::size_t tile{};
+        std::size_t address{};
+        StreamPayloadTileSegment bytes{};
+        std::optional<std::size_t> transport_commit_index{};
+    };
+    std::vector<PendingSramWrite> pending_sram_writes_{};
+    std::array<
+        std::array<std::array<bool, 2>, hw::kMemBanksPerSlice>,
+        hw::kMemSliceColumns> dispatched_queue_slots_{};
+    StreamRegisterFabric* active_fabric_{nullptr};
+    bool cycle_prepared_{false};
     std::size_t last_transport_commit_segments_{0};
 };
 

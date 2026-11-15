@@ -28,8 +28,17 @@ public:
         , chip_(hardware, sxm_architecture)
         , program_loader_(ddr4_, chip_.icu(), dma_fifo_depth_vectors, program_load)
     {
-        program_loader_.set_drain_checker([this]{return chip_.can_load_program();});
-        program_loader_.set_program_reset([this]{chip_.reset_program();});
+        // The loader evaluates completion inside SystemPhase LOW, where the
+        // external API's timing_idle() gate is intentionally false.  Check
+        // hardware drain here; submit() itself is still called only at a
+        // complete-cycle boundary by the enclosing system API.
+        program_loader_.set_drain_checker([this]{
+            return chip_.icu().program_queues_done()
+                && chip_.program_resources_drained();
+        });
+        program_loader_.set_program_reset([this]{chip_.stage_program_reset();});
+        chip_.attach_c2c_ddr(ddr4_);
+        chip_.attach_program_loader(program_loader_);
         for (std::size_t index = 0; index < hw::kHemispheres; ++index) {
             const auto hemisphere = static_cast<Hemisphere>(index);
             chip_.attach_c2c_dma(hemisphere, dmas_[index]);
@@ -62,11 +71,8 @@ public:
 
     void tick(TspSliceSystem::LogSinks sinks = {})
     {
-        program_loader_.tick(cycle_);
         chip_.tick(sinks);
-        ddr4_.tick();
         ++cycle_;
-        program_loader_.observe_completion(cycle_);
     }
 
     bool kernel_done() const {return program_loader_.kernel_done();}
@@ -76,9 +82,9 @@ public:
     // drained. Device and shared DMA/DDR clocks are deliberately preserved.
     void clear_completed_program() {
         if(!can_load_program()) throw std::logic_error("previous program has not drained");
-        chip_.reset_program();
-        chip_.icu().set_program_loading(false);
-        chip_.icu().set_program_issue_enabled(true);
+        chip_.stage_program_reset();
+        chip_.icu().stage_program_loading(false);
+        chip_.icu().stage_program_issue_enabled(true);
     }
 
     void reset_execution_state()

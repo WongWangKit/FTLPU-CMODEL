@@ -147,6 +147,12 @@ constexpr std::size_t kIcuMacroDecodeWindowBits = config::kIcuMacroDecodeWindowB
 constexpr std::size_t kIcuMacroDdbDepth = config::kIcuMacroDdbDepth;
 constexpr std::size_t kIcuMacroAdmissionLookahead = config::kIcuMacroAdmissionLookahead;
 constexpr std::size_t kIcuMacroDdbRunCapacity = config::kIcuMacroDdbRunCapacity;
+constexpr std::size_t kIcuLocalImemResponseDepth = config::kIcuLocalImemResponseDepth;
+constexpr std::size_t kIcuMacroWordFifoDepth = config::kIcuMacroWordFifoDepth;
+constexpr std::size_t kIcuMacroContextFifoDepth = config::kIcuMacroContextFifoDepth;
+constexpr std::size_t kIcuFuTimedQueueDepth = config::kIcuFuTimedQueueDepth;
+constexpr std::size_t kIcuFuIssueLookaheadCycles =
+    config::kIcuFuIssueLookaheadCycles;
 constexpr std::size_t kIcuBarrierLatencyCycles = config::kIcuBarrierLatencyCycles;
 constexpr std::size_t kIcuVxmInstructionBits = config::kIcuVxmInstructionBits;
 constexpr std::size_t kIcuMemInstructionBits = config::kIcuMemInstructionBits;
