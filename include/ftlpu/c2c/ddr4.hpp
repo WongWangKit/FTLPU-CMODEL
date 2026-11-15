@@ -257,6 +257,20 @@ public:
             });
     }
 
+    ReadCompletion peek_read_completion(RequestId id) const
+    {
+        if (!read_completion_ready(id)) {
+            throw std::logic_error(
+                "DDR4 read completion is not ready or is out of order");
+        }
+        const auto it = std::find_if(
+            state_.read_completions.begin(), state_.read_completions.end(),
+            [id](const ReadCompletion& completion) {
+                return completion.id == id;
+            });
+        return *it;
+    }
+
     ReadCompletion pop_read_completion(RequestId id)
     {
         require_input_window("read completion pop");

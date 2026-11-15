@@ -168,6 +168,8 @@ ftlpu_add_test(instruction_fetch_dma_test
     unit.icu.instruction_fetch_dma unit icu dma timing fast)
 ftlpu_add_demo(icu_rtl_fifo_golden_trace
     tests/unit/icu/rtl_fifo_golden_trace.cpp)
+ftlpu_add_demo(instruction_dma_golden_trace
+    tests/unit/icu/instruction_dma_golden_trace.cpp)
 
 # Subsystem tests: multiple hardware blocks connected by physical SR routes.
 ftlpu_add_test(c2c_test tests/subsystem/c2c/dual_chip_test.cpp

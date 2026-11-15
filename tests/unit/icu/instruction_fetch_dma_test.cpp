@@ -4,21 +4,6 @@
 #include <stdexcept>
 #include <vector>
 
-namespace ftlpu {
-struct InstructionFetchDmaTestAccess {
-    static void corrupt_front_response_id(InstructionFetchDma& dma) {
-        if(dma.state_.responses.empty())
-            throw std::logic_error("no response to corrupt");
-        dma.state_.responses.front().dma_id^=1;
-    }
-    static void mark_front_response_error(InstructionFetchDma& dma) {
-        if(dma.state_.responses.empty())
-            throw std::logic_error("no response to mark");
-        dma.state_.responses.front().error=true;
-    }
-};
-}
-
 using namespace ftlpu;
 
 namespace {
@@ -158,34 +143,89 @@ void response_fifo_backpressure_and_recovery()
         "downstream stall did not fill and backpressure the response FIFO");
 }
 
-void id_error_and_reset_paths()
+void protocol_step(InstructionDmaProtocolCore& core,
+    InstructionDmaProtocolInputs inputs)
 {
-    auto exercise=[](bool responseError) {
-        Ddr4Model ddr(ddr_config());
-        auto item=fixture(24,PhysicalInstructionWordWidth::Bits96,0x44);
-        item.program.base_address=0x9003;
-        stage(ddr,item.program.base_address,item.source);
-        InstructionFetchDma dma(ddr);
-        dma.start(item.program);
-        for(std::size_t cycle=0;dma.response_fifo_occupancy()==0;++cycle) {
-            require(cycle<1000,"response FIFO never became non-empty");
-            dma.tick();ddr.tick();
-        }
-        if(responseError)
-            InstructionFetchDmaTestAccess::mark_front_response_error(dma);
-        else
-            InstructionFetchDmaTestAccess::corrupt_front_response_id(dma);
-        dma.tick();ddr.tick();
-        require(dma.fault()&&dma.fault_code()==(responseError?2:1),
-            "instruction DMA did not latch the expected response fault");
-        dma.reset();
-        for(std::size_t cycle=0;!dma.drained()||!ddr.drained();++cycle) {
-            require(cycle<1000,"instruction DMA reset did not drain orphan DDR responses");
-            dma.tick();ddr.tick();
-        }
-    };
-    exercise(false);
-    exercise(true);
+    core.drive(std::move(inputs));
+    core.low();
+    core.validate_posedge();
+    core.posedge();
+    core.high();
+}
+
+InstructionDmaProtocolInputs command(std::uint8_t id)
+{
+    InstructionDmaProtocolInputs inputs{};
+    inputs.command_valid=true;
+    inputs.command_address=0x1000+id*0x100;
+    inputs.command_length=64;
+    inputs.command_id=id;
+    inputs.request_ready=true;
+    return inputs;
+}
+
+InstructionDmaProtocolInputs response(std::uint8_t id,bool error=false,
+    bool reassemblerReady=false)
+{
+    InstructionDmaProtocolInputs inputs{};
+    inputs.request_ready=true;
+    inputs.response_valid=true;
+    inputs.response.id=id;
+    inputs.response.keep=0xffffffffU;
+    inputs.response.last=true;
+    inputs.response.error=error;
+    inputs.reassembler_ready=reassemblerReady;
+    return inputs;
+}
+
+void protocol_fault_and_reset_paths()
+{
+    InstructionDmaProtocolCore core;
+    protocol_step(core,command(7));
+    protocol_step(core,command(8));
+    require(core.outstanding()==2,"protocol command FIFO did not fill");
+
+    auto mismatch=response(99,true);
+    core.drive(mismatch);
+    require(core.response_input_fire()&&core.response_id_invalid()
+        &&core.response_error()&&core.fault()
+        &&core.fault_code()==kInstructionDmaFaultId,
+        "ID fault did not have RTL priority over response error");
+    core.low();core.validate_posedge();core.posedge();
+    require(core.fault()&&core.fault_code()==kInstructionDmaFaultId
+        &&core.outstanding()==1&&core.response_fifo_occupancy()==1,
+        "mismatched last response did not enqueue and dequeue the head ID");
+
+    auto blocked=response(8,false,true);
+    blocked.command_valid=true;
+    blocked.command_id=9;
+    blocked.command_length=32;
+    core.drive(blocked);
+    require(!core.command_ready()&&!core.request_valid()
+        &&!core.response_ready()&&core.response_fire(),
+        "sticky fault did not block new input while allowing RX drain");
+    core.low();core.validate_posedge();core.posedge();
+    require(core.outstanding()==1&&core.response_fifo_occupancy()==0
+        &&!core.idle(),"fault drain or stranded outstanding state is wrong");
+
+    core.reset();
+    require(core.idle()&&!core.fault(),"protocol reset did not clear state");
+    protocol_step(core,command(9));
+    protocol_step(core,response(9,true));
+    require(core.fault()&&core.fault_code()==kInstructionDmaFaultResponse
+        &&core.outstanding()==0&&core.response_fifo_occupancy()==1,
+        "matching error response did not latch the RTL response fault");
+    InstructionDmaProtocolInputs drain{};
+    drain.reassembler_ready=true;
+    protocol_step(core,drain);
+    require(core.idle()&&core.fault(),
+        "response fault did not preserve sticky fault after RX drain");
+
+    core.reset();
+    protocol_step(core,response(55));
+    require(core.fault()&&core.fault_code()==kInstructionDmaFaultId
+        &&core.outstanding()==0&&core.response_fifo_occupancy()==1,
+        "response without an outstanding command did not fault");
 }
 }
 
@@ -193,7 +233,7 @@ int main() try
 {
     single_and_multi_outstanding();
     response_fifo_backpressure_and_recovery();
-    id_error_and_reset_paths();
+    protocol_fault_and_reset_paths();
     std::cout<<"instruction_fetch_dma_test passed\n";
     return 0;
 } catch(const std::exception& error) {
