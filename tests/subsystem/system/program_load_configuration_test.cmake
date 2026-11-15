@@ -9,11 +9,13 @@ file(MAKE_DIRECTORY "${BINARY_DIR}/program-load-config-test")
 set(test_dir "${BINARY_DIR}/program-load-config-test")
 file(READ "${SOURCE_DIR}/config/ftlpu-lpu32.json" original)
 set(fields dma_fifo_depth_vectors bus_bytes_per_cycle route_latency_cycles
-    imem_write_ii_cycles imem_write_commit_latency_cycles)
+    imem_write_ii_cycles imem_write_commit_latency_cycles
+    mem_groups_per_relay)
 set(constants kDmaFifoDepthVectors kProgramLoadBusBytesPerCycle
     kProgramLoadRouteLatencyCycles kProgramLoadImemWriteIiCycles
-    kProgramLoadImemWriteCommitLatencyCycles)
-foreach(index RANGE 0 4)
+    kProgramLoadImemWriteCommitLatencyCycles
+    kProgramLoadMemGroupsPerRelay)
+foreach(index RANGE 0 5)
     list(GET fields ${index} field)
     list(GET constants ${index} constant)
     if(index EQUAL 0)
@@ -47,7 +49,8 @@ ftlpu_generate_hardware_config("${test_dir}/legacy.json" "${test_dir}/legacy.hpp
 file(READ "${test_dir}/legacy.hpp" generated)
 foreach(expected IN ITEMS "kDmaFifoDepthVectors = 16;"
     "kProgramLoadBusBytesPerCycle = 32;" "kProgramLoadRouteLatencyCycles = 1;"
-    "kProgramLoadImemWriteIiCycles = 1;" "kProgramLoadImemWriteCommitLatencyCycles = 1;")
+    "kProgramLoadImemWriteIiCycles = 1;" "kProgramLoadImemWriteCommitLatencyCycles = 1;"
+    "kProgramLoadMemGroupsPerRelay = 2;")
     string(FIND "${generated}" "${expected}" position)
     if(position LESS 0)
         message(FATAL_ERROR "missing backward-compatible default: ${expected}")

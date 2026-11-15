@@ -1,490 +1,203 @@
-#include "ftlpu/axi/memory_backend.hpp"
 #include "ftlpu/icu/instruction_fetch_dma.hpp"
-#include "ftlpu/icu/macro_bitstream_decoder.hpp"
 
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
-#include <deque>
-#include <functional>
 #include <iostream>
-#include <optional>
 #include <stdexcept>
-#include <string>
-#include <utility>
 #include <vector>
 
-namespace {
+namespace ftlpu {
+struct InstructionFetchDmaTestAccess {
+    static void corrupt_front_response_id(InstructionFetchDma& dma) {
+        if(dma.state_.responses.empty())
+            throw std::logic_error("no response to corrupt");
+        dma.state_.responses.front().dma_id^=1;
+    }
+    static void mark_front_response_error(InstructionFetchDma& dma) {
+        if(dma.state_.responses.empty())
+            throw std::logic_error("no response to mark");
+        dma.state_.responses.front().error=true;
+    }
+};
+}
 
 using namespace ftlpu;
 
-void require(bool condition, const std::string& message)
+namespace {
+void require(bool value,const char* message)
+{if(!value)throw std::runtime_error(message);}
+
+Ddr4Config ddr_config()
 {
-    if (!condition)
-        throw std::runtime_error(message);
+    Ddr4Config config{};
+    config.beat_bytes=32;
+    config.read_latency_cycles=2;
+    config.read_latency_jitter_cycles=0;
+    config.peak_bandwidth_bytes_per_second=config.lpu_clock_hz*32;
+    config.transfer_channels=1;
+    return config;
 }
 
-std::vector<std::uint8_t> make_machine_code(
-    std::size_t byte_count, std::uint8_t seed)
+std::vector<std::uint8_t> bytes(std::size_t count,std::uint8_t seed)
 {
-    auto bytes = std::vector<std::uint8_t>(byte_count, 0);
-    for (std::size_t index = 0; index < byte_count; ++index) {
-        bytes[index] = static_cast<std::uint8_t>(
-            seed + index * 37 + (index >> 1) * 11);
-    }
-    return bytes;
+    std::vector<std::uint8_t> result(count);
+    for(std::size_t i=0;i<count;++i)
+        result[i]=static_cast<std::uint8_t>(seed+i*37+(i>>1)*11);
+    return result;
 }
 
-bool same_word(const PhysicalInstructionWord& lhs,
-    const PhysicalInstructionWord& rhs)
+void stage(Ddr4Model& ddr,std::uint64_t address,
+    const std::vector<std::uint8_t>& source)
 {
-    return lhs.index == rhs.index && lhs.width == rhs.width
-        && lhs.byte_count == rhs.byte_count && lhs.bytes == rhs.bytes;
+    for(std::size_t offset=0;offset<source.size();offset+=32) {
+        C2cVector vector{};
+        for(std::size_t b=0;b<32;++b)
+            vector.payload[b/hw::kLanesPerTile][b%hw::kLanesPerTile]=
+                offset+b<source.size()?source[offset+b]:0xa5;
+        ddr.initialize_vector(address+offset,vector);
+    }
 }
 
-class FiniteInstructionQueueSink {
-public:
-    FiniteInstructionQueueSink(std::size_t depth,
-        std::size_t consume_start_cycle,
-        std::size_t consume_period_cycles)
-        : depth_(depth)
-        , consume_start_cycle_(consume_start_cycle)
-        , consume_period_cycles_(consume_period_cycles)
-    {
-        if (depth_ == 0)
-            throw std::invalid_argument("queue sink depth must be non-zero");
-    }
-
-    bool ready(std::size_t cycle) const noexcept
-    {
-        return queue_.size() < depth_ || will_consume(cycle);
-    }
-
-    void tick(std::size_t cycle, bool word_valid,
-        const PhysicalInstructionWord& word)
-    {
-        const auto consume = will_consume(cycle);
-        const auto accepted = word_valid && ready(cycle);
-        if (word_valid && !ready(cycle))
-            ++full_wait_cycles_;
-        if (consume) {
-            consumed_.push_back(queue_.front());
-            queue_.pop_front();
-        }
-        if (accepted) {
-            queue_.push_back(word);
-            accepted_.push_back(word);
-        }
-        require(queue_.size() <= depth_,
-            "finite queue sink exceeded its configured depth");
-        peak_occupancy_ = std::max(peak_occupancy_, queue_.size());
-    }
-
-    std::size_t depth() const noexcept { return depth_; }
-    std::size_t occupancy() const noexcept { return queue_.size(); }
-    std::size_t peak_occupancy() const noexcept
-    {
-        return peak_occupancy_;
-    }
-    std::size_t full_wait_cycles() const noexcept
-    {
-        return full_wait_cycles_;
-    }
-    const std::vector<PhysicalInstructionWord>& accepted() const noexcept
-    {
-        return accepted_;
-    }
-
-private:
-    bool will_consume(std::size_t cycle) const noexcept
-    {
-        return !queue_.empty() && consume_period_cycles_ != 0
-            && cycle >= consume_start_cycle_
-            && (cycle - consume_start_cycle_) % consume_period_cycles_ == 0;
-    }
-
-    std::size_t depth_{0};
-    std::size_t consume_start_cycle_{0};
-    std::size_t consume_period_cycles_{0};
-    std::deque<PhysicalInstructionWord> queue_{};
-    std::vector<PhysicalInstructionWord> accepted_{};
-    std::vector<PhysicalInstructionWord> consumed_{};
-    std::size_t peak_occupancy_{0};
-    std::size_t full_wait_cycles_{0};
+struct ProgramFixture {
+    InstructionFetchProgram program{};
+    std::vector<std::uint8_t> source{};
 };
 
-struct ScenarioConfig {
-    std::string name{};
-    std::uint64_t base_address{0x1000};
-    std::size_t word_count{1};
-    PhysicalInstructionWordWidth word_width{
-        PhysicalInstructionWordWidth::Bits96};
-    std::size_t axi_data_width_bits{256};
-    std::size_t burst_beats{4};
-    std::size_t response_fifo_beats{4};
-    axi::DramConfig dram{};
-    std::size_t queue_depth{16};
-    std::size_t consume_start_cycle{0};
-    std::size_t consume_period_cycles{1};
-    std::uint8_t pattern_seed{0x21};
-};
-
-struct ScenarioResult {
-    std::vector<std::uint8_t> machine_code{};
-    std::vector<PhysicalInstructionWord> accepted_words{};
-    InstructionFetchDmaTrace dma_trace{};
-    InstructionFetchDmaStatistics dma_statistics{};
-    axi::Axi4ReadStatistics axi_statistics{};
-    std::uint64_t backend_bytes_serviced{0};
-    std::size_t assembler_capacity{0};
-    std::size_t queue_peak{0};
-    std::size_t queue_full_wait_cycles{0};
-};
-
-ScenarioResult run_scenario(const ScenarioConfig& config)
+std::vector<PhysicalInstructionWord> run(
+    std::vector<ProgramFixture> fixtures,
+    InstructionFetchDmaConfig dmaConfig={},
+    std::size_t releaseCycle=0,
+    InstructionFetchDmaStatistics* statistics=nullptr)
 {
-    const auto wordBytes =
-        physical_instruction_word_bytes(config.word_width);
-    const auto byteCount = config.word_count * wordBytes;
-    const auto machineCode =
-        make_machine_code(byteCount, config.pattern_seed);
-
-    auto dram = axi::SimpleDramBackend(config.dram);
-    dram.initialize_bytes(config.base_address, machineCode);
-    const auto padding = std::vector<std::uint8_t>(64, 0xe7);
-    dram.initialize_bytes(config.base_address + byteCount, padding);
-
-    auto axiConfig = axi::Axi4Config {};
-    axiConfig.data_width_bits = config.axi_data_width_bits;
-    axiConfig.max_burst_beats = config.burst_beats;
-    axiConfig.max_read_outstanding = 1;
-    axiConfig.read_response_fifo_beats = config.response_fifo_beats;
-    auto slave = axi::Axi4MemorySlave(axiConfig, dram);
-
-    auto dmaConfig = InstructionFetchDmaConfig {};
-    dmaConfig.axi_data_width_bits = config.axi_data_width_bits;
-    dmaConfig.burst_beats = config.burst_beats;
-    dmaConfig.max_outstanding = 1;
-    dmaConfig.axi_id = 3;
-    auto dma = InstructionFetchDma(dmaConfig);
-    dma.start(InstructionFetchProgram {
-        config.base_address, config.word_count, config.word_width});
-
-    auto sink = FiniteInstructionQueueSink(config.queue_depth,
-        config.consume_start_cycle, config.consume_period_cycles);
-    auto heldWord = std::optional<PhysicalInstructionWord> {};
-
-    constexpr auto kMaximumCycles = std::size_t {100'000};
-    for (std::size_t cycle = 0;
-         cycle < kMaximumCycles && !dma.complete(); ++cycle) {
-        const auto axiOutputs = slave.evaluate();
-        const auto sinkReady = sink.ready(cycle);
-        const auto dmaCycle = dma.tick(axiOutputs, sinkReady);
-        const auto axiCycle = slave.tick(dmaCycle.outputs.axi);
-
-        require(dmaCycle.cycle == cycle && axiCycle.cycle == cycle,
-            "DMA, AXI, and harness cycle counters diverged");
-        require(dmaCycle.ar_fire == axiCycle.ar_fire
-                && dmaCycle.r_fire == axiCycle.r_fire,
-            "DMA and AXI disagreed about a channel handshake");
-
-        if (dmaCycle.outputs.word_valid && !sinkReady) {
-            if (!heldWord.has_value())
-                heldWord = dmaCycle.outputs.word;
-            else
-                require(same_word(*heldWord, dmaCycle.outputs.word),
-                    "word output changed while queue ready was low");
-        }
-        if (dmaCycle.word_fire)
-            heldWord.reset();
-
-        sink.tick(cycle, dmaCycle.outputs.word_valid,
-            dmaCycle.outputs.word);
+    Ddr4Model ddr(ddr_config());
+    for(std::size_t i=0;i<fixtures.size();++i) {
+        fixtures[i].program.base_address=0x1003+i*0x4000;
+        stage(ddr,fixtures[i].program.base_address,fixtures[i].source);
     }
-
-    require(dma.complete(), config.name + " did not complete");
-    require(sink.accepted().size() == config.word_count,
-        config.name + " delivered an incorrect word count");
-    require(dma.statistics().bytes_received == byteCount
-            && dram.bytes_serviced() == byteCount,
-        config.name + " read padding or missed program bytes");
-    require(dma.statistics().words_assembled == config.word_count
-            && dma.statistics().words_enqueued == config.word_count,
-        config.name + " word counters are incorrect");
-    require(slave.read_outstanding() == 0
-            && slave.response_fifo_occupancy() == 0 && dram.idle(),
-        config.name + " left an AXI or DRAM request active");
-    require(dma.statistics().assembler_peak_bytes
-            <= dma.assembler_capacity(),
-        config.name + " exceeded the bounded assembler capacity");
-
-    for (std::size_t word = 0; word < config.word_count; ++word) {
-        const auto& actual = sink.accepted()[word];
-        require(actual.index == word && actual.width == config.word_width
-                && actual.byte_count == wordBytes,
-            config.name + " changed physical-word metadata");
-        for (std::size_t byte = 0; byte < wordBytes; ++byte) {
-            require(actual.bytes[byte]
-                    == machineCode[word * wordBytes + byte],
-                config.name + " lost, duplicated, or reordered a byte");
+    InstructionFetchDma dma(ddr,dmaConfig);
+    std::vector<PhysicalInstructionWord> output;
+    std::size_t next=0;
+    for(std::size_t cycle=0;cycle<100000;++cycle) {
+        if(next<fixtures.size()&&dma.can_accept_program())
+            dma.start(fixtures[next++].program);
+        if(cycle>=releaseCycle&&dma.word_ready()) {
+            output.push_back(dma.front_word());
+            dma.pop_word();
         }
-        for (std::size_t byte = wordBytes;
-             byte < actual.bytes.size(); ++byte) {
-            require(actual.bytes[byte] == 0,
-                config.name + " exposed tail padding as instruction data");
-        }
+        dma.tick();
+        ddr.tick();
+        if(next==fixtures.size()&&dma.drained()&&ddr.drained())break;
+        require(cycle+1<100000,"instruction DMA scenario timed out");
     }
-
-    for (const auto& burst : dma.trace().bursts) {
-        const auto burstBytes = burst.beat_bytes * burst.beat_count;
-        require(burst.beat_count <= config.burst_beats
-                && burst.address % burst.beat_bytes == 0,
-            config.name + " emitted an illegal AXI burst shape");
-        require((burst.address >> 12)
-                == ((burst.address + burstBytes - 1) >> 12),
-            config.name + " emitted a burst crossing 4 KiB");
-    }
-
-    require(dma.trace().r_beat_cycles.size()
-                == dma.statistics().r_handshakes
-            && dma.trace().word_assembled_cycles.size()
-                == config.word_count
-            && dma.trace().word_enqueue_cycles.size()
-                == config.word_count,
-        config.name + " trace is incomplete");
-
-    std::cout << config.name
-              << " ar=" << dma.statistics().ar_handshakes
-              << " r=" << dma.statistics().r_handshakes
-              << " assembled=" << dma.statistics().words_assembled
-              << " enqueued=" << dma.statistics().words_enqueued
-              << " queue_wait="
-              << dma.statistics().queue_backpressure_cycles
-              << " r_wait="
-              << dma.statistics().axi_r_backpressure_cycles
-              << " assembler_peak="
-              << dma.statistics().assembler_peak_bytes
-              << " queue_peak=" << sink.peak_occupancy()
-              << " cycles=" << dma.statistics().cycle_count
-              << " payload_bytes_per_cycle="
-              << dma.statistics().effective_payload_bytes_per_cycle()
-              << '\n';
-
-    return ScenarioResult {
-        machineCode,
-        sink.accepted(),
-        dma.trace(),
-        dma.statistics(),
-        slave.statistics(),
-        dram.bytes_serviced(),
-        dma.assembler_capacity(),
-        sink.peak_occupancy(),
-        sink.full_wait_cycles(),
-    };
+    if(statistics)*statistics=dma.statistics();
+    return output;
 }
 
-void test_96_bit_contiguous_and_machine_word_abi()
+void compare(const std::vector<PhysicalInstructionWord>& words,
+    const std::vector<ProgramFixture>& fixtures)
 {
-    auto config = ScenarioConfig {};
-    config.name = "fetch96";
-    config.word_count = 11;
-    config.word_width = PhysicalInstructionWordWidth::Bits96;
-    config.dram.read_latency_cycles = 2;
-    config.dram.latency_jitter_cycles = 0;
-    config.dram.bandwidth_bytes_per_cycle = 64;
-    const auto result = run_scenario(config);
-
-    const auto& word = result.accepted_words.front();
-    require(word.lane32(0)
-            == (static_cast<std::uint32_t>(result.machine_code[0])
-                | (static_cast<std::uint32_t>(result.machine_code[1]) << 8)
-                | (static_cast<std::uint32_t>(result.machine_code[2]) << 16)
-                | (static_cast<std::uint32_t>(result.machine_code[3]) << 24)),
-        "physical-word lane 0 is not little-endian bits [31:0]");
-    const auto raw = IcuRawImemWord96 {{
-        word.lane32(0), word.lane32(1), word.lane32(2)}};
-    require(raw.bit(0) == ((word.bytes[0] & 1u) != 0)
-            && raw.bit(31)
-                == (((word.bytes[3] >> 7) & 1u) != 0),
-        "physical-word byte ABI disagrees with IcuRawImemWord bit order");
+    std::size_t output=0;
+    for(const auto& fixture:fixtures) {
+        const auto wordBytes=physical_instruction_word_bytes(
+            fixture.program.word_width);
+        for(std::size_t word=0;word<fixture.program.word_count;++word) {
+            require(output<words.size(),"instruction word was lost");
+            require(words[output].index==word
+                &&words[output].byte_count==wordBytes,
+                "instruction word metadata is wrong");
+            for(std::size_t b=0;b<wordBytes;++b)
+                require(words[output].bytes[b]
+                    ==fixture.source[word*wordBytes+b],
+                    "instruction bytes were lost, duplicated, or reordered");
+            ++output;
+        }
+    }
+    require(output==words.size(),"unexpected instruction word was emitted");
 }
 
-void test_arvalid_holds_until_arready()
+ProgramFixture fixture(std::size_t words,
+    PhysicalInstructionWordWidth width,std::uint8_t seed)
 {
-    auto dmaConfig = InstructionFetchDmaConfig {};
-    dmaConfig.axi_data_width_bits = 256;
-    dmaConfig.burst_beats = 4;
-    dmaConfig.max_outstanding = 1;
-    dmaConfig.axi_id = 6;
-    auto dma = InstructionFetchDma(dmaConfig);
-    dma.start(InstructionFetchProgram {
-        0x1200, 10, PhysicalInstructionWordWidth::Bits96});
+    ProgramFixture result{};
+    result.program.word_count=words;
+    result.program.word_width=width;
+    result.source=bytes(words*physical_instruction_word_bytes(width),seed);
+    return result;
+}
 
-    auto slaveOutputs = axi::Axi4ReadOutputs {};
-    auto held = std::optional<axi::Axi4ReadInputs> {};
-    for (std::size_t cycle = 0; cycle < 3; ++cycle) {
-        const auto result = dma.tick(slaveOutputs, true);
-        require(result.outputs.axi.arvalid && !result.ar_fire,
-            "ARVALID did not remain asserted while ARREADY was low");
-        if (!held.has_value())
-            held = result.outputs.axi;
+void single_and_multi_outstanding()
+{
+    auto single=fixture(11,PhysicalInstructionWordWidth::Bits96,0x21);
+    auto singleCopy=std::vector<ProgramFixture>{single};
+    compare(run(singleCopy),singleCopy);
+
+    auto fixtures=std::vector<ProgramFixture>{
+        fixture(40,PhysicalInstructionWordWidth::Bits96,0x31),
+        fixture(20,PhysicalInstructionWordWidth::Bits128,0x52),
+        fixture(24,PhysicalInstructionWordWidth::Bits64,0x73)};
+    InstructionFetchDmaStatistics stats{};
+    const auto output=run(fixtures,{},0,&stats);
+    compare(output,fixtures);
+    require(stats.command_handshakes==3
+        &&stats.outstanding_peak>=2,
+        "multiple instruction commands were not outstanding");
+    require(stats.ar_handshakes==stats.r_handshakes,
+        "DDR request/response count did not balance");
+}
+
+void response_fifo_backpressure_and_recovery()
+{
+    InstructionFetchDmaConfig config{};
+    config.response_fifo_depth=2;
+    auto fixtures=std::vector<ProgramFixture>{
+        fixture(80,PhysicalInstructionWordWidth::Bits96,0x19)};
+    InstructionFetchDmaStatistics stats{};
+    const auto output=run(fixtures,config,120,&stats);
+    compare(output,fixtures);
+    require(stats.response_fifo_peak==2
+        &&stats.response_fifo_full_cycles>0
+        &&stats.queue_backpressure_cycles>0,
+        "downstream stall did not fill and backpressure the response FIFO");
+}
+
+void id_error_and_reset_paths()
+{
+    auto exercise=[](bool responseError) {
+        Ddr4Model ddr(ddr_config());
+        auto item=fixture(24,PhysicalInstructionWordWidth::Bits96,0x44);
+        item.program.base_address=0x9003;
+        stage(ddr,item.program.base_address,item.source);
+        InstructionFetchDma dma(ddr);
+        dma.start(item.program);
+        for(std::size_t cycle=0;dma.response_fifo_occupancy()==0;++cycle) {
+            require(cycle<1000,"response FIFO never became non-empty");
+            dma.tick();ddr.tick();
+        }
+        if(responseError)
+            InstructionFetchDmaTestAccess::mark_front_response_error(dma);
         else
-            require(result.outputs.axi.araddr == held->araddr
-                    && result.outputs.axi.arlen == held->arlen
-                    && result.outputs.axi.arsize == held->arsize
-                    && result.outputs.axi.arburst == held->arburst
-                    && result.outputs.axi.arid == held->arid,
-                "AXI AR fields changed while ARREADY was low");
-    }
-
-    slaveOutputs.arready = true;
-    const auto accepted = dma.tick(slaveOutputs, true);
-    require(accepted.ar_fire && dma.trace().bursts.size() == 1
-            && dma.statistics().ar_handshakes == 1,
-        "DMA did not commit the held AR request when ARREADY rose");
+            InstructionFetchDmaTestAccess::corrupt_front_response_id(dma);
+        dma.tick();ddr.tick();
+        require(dma.fault()&&dma.fault_code()==(responseError?2:1),
+            "instruction DMA did not latch the expected response fault");
+        dma.reset();
+        for(std::size_t cycle=0;!dma.drained()||!ddr.drained();++cycle) {
+            require(cycle<1000,"instruction DMA reset did not drain orphan DDR responses");
+            dma.tick();ddr.tick();
+        }
+    };
+    exercise(false);
+    exercise(true);
+}
 }
 
-void test_128_bit_contiguous()
+int main() try
 {
-    auto config = ScenarioConfig {};
-    config.name = "fetch128";
-    config.base_address = 0x2400;
-    config.word_count = 9;
-    config.word_width = PhysicalInstructionWordWidth::Bits128;
-    config.dram.read_latency_cycles = 1;
-    config.dram.latency_jitter_cycles = 0;
-    config.dram.bandwidth_bytes_per_cycle = 32;
-    (void)run_scenario(config);
-}
-
-void test_word_crosses_axi_beat()
-{
-    auto config = ScenarioConfig {};
-    config.name = "cross_beat_96";
-    config.base_address = 0x3100;
-    config.word_count = 7;
-    config.word_width = PhysicalInstructionWordWidth::Bits96;
-    config.axi_data_width_bits = 64;
-    config.burst_beats = 8;
-    config.dram.read_latency_cycles = 0;
-    config.dram.latency_jitter_cycles = 0;
-    config.dram.bandwidth_bytes_per_cycle = 16;
-    const auto result = run_scenario(config);
-    require(result.dma_statistics.r_handshakes > config.word_count,
-        "cross-beat test did not split words across AXI beats");
-}
-
-void test_word_crosses_axi_burst()
-{
-    auto config = ScenarioConfig {};
-    config.name = "cross_burst_96";
-    config.base_address = 0x4000;
-    config.word_count = 8;
-    config.word_width = PhysicalInstructionWordWidth::Bits96;
-    config.burst_beats = 1;
-    config.dram.read_latency_cycles = 1;
-    config.dram.latency_jitter_cycles = 0;
-    config.dram.bandwidth_bytes_per_cycle = 64;
-    const auto result = run_scenario(config);
-    require(result.dma_trace.bursts.size() >= 3,
-        "cross-burst test did not create multiple AXI bursts");
-}
-
-void test_partial_final_axi_beat_uses_exact_narrow_reads()
-{
-    auto config = ScenarioConfig {};
-    config.name = "partial_tail_96";
-    config.base_address = 0x5000;
-    config.word_count = 5; // 60 bytes on a 32-byte AXI bus.
-    config.word_width = PhysicalInstructionWordWidth::Bits96;
-    config.burst_beats = 4;
-    config.dram.read_latency_cycles = 0;
-    config.dram.latency_jitter_cycles = 0;
-    config.dram.bandwidth_bytes_per_cycle = 64;
-    const auto result = run_scenario(config);
-    require(std::any_of(result.dma_trace.bursts.begin(),
-                result.dma_trace.bursts.end(),
-                [](const auto& burst) { return burst.beat_bytes < 32; }),
-        "partial-tail test did not use a narrow final AXI read");
-    require(result.backend_bytes_serviced == 60,
-        "partial-tail test fetched padding bytes");
-}
-
-void test_four_kilobyte_boundary_split()
-{
-    auto config = ScenarioConfig {};
-    config.name = "boundary_4k";
-    config.base_address = 0x0ff0;
-    config.word_count = 4; // 48 bytes, crossing the page boundary.
-    config.word_width = PhysicalInstructionWordWidth::Bits96;
-    config.burst_beats = 8;
-    config.dram.read_latency_cycles = 0;
-    config.dram.latency_jitter_cycles = 0;
-    config.dram.bandwidth_bytes_per_cycle = 64;
-    const auto result = run_scenario(config);
-    require(result.dma_trace.bursts.size() >= 2
-            && result.dma_trace.bursts.front().address == 0x0ff0,
-        "4-KiB test did not split the read at the boundary");
-}
-
-void test_queue_full_backpressure_and_recovery()
-{
-    auto config = ScenarioConfig {};
-    config.name = "queue_full_recovery";
-    config.base_address = 0x6000;
-    config.word_count = 48;
-    config.word_width = PhysicalInstructionWordWidth::Bits96;
-    config.burst_beats = 16;
-    config.response_fifo_beats = 4;
-    config.queue_depth = 16;
-    config.consume_start_cycle = 100;
-    config.consume_period_cycles = 1;
-    config.dram.read_latency_cycles = 0;
-    config.dram.latency_jitter_cycles = 0;
-    config.dram.bandwidth_bytes_per_cycle = 256;
-    const auto result = run_scenario(config);
-    require(result.queue_peak == config.queue_depth
-            && result.queue_full_wait_cycles > 0
-            && result.dma_statistics.queue_backpressure_cycles > 0,
-        "queue-full test did not apply sink backpressure");
-    require(result.dma_statistics.axi_r_backpressure_cycles > 0
-            && result.axi_statistics.r_stall_cycles > 0,
-        "queue-full pressure did not propagate to AXI RREADY");
-    require(result.dma_statistics.assembler_peak_bytes
-            <= result.assembler_capacity,
-        "queue-full recovery exceeded the elastic assembler");
-}
-
-void test_dram_latency_jitter_and_bandwidth_variation()
-{
-    auto config = ScenarioConfig {};
-    config.name = "dram_timing_variation";
-    config.base_address = 0x8000;
-    config.word_count = 13;
-    config.word_width = PhysicalInstructionWordWidth::Bits128;
-    config.burst_beats = 3;
-    config.dram.read_latency_cycles = 7;
-    config.dram.latency_jitter_cycles = 9;
-    config.dram.bandwidth_bytes_per_cycle = 5;
-    config.dram.random_seed = 0x12345678;
-    const auto result = run_scenario(config);
-    require(result.dma_statistics.cycle_count
-            > result.dma_statistics.r_handshakes,
-        "DRAM timing variation did not introduce modeled wait cycles");
-}
-
-} // namespace
-
-int main()
-{
-    test_96_bit_contiguous_and_machine_word_abi();
-    test_arvalid_holds_until_arready();
-    test_128_bit_contiguous();
-    test_word_crosses_axi_beat();
-    test_word_crosses_axi_burst();
-    test_partial_final_axi_beat_uses_exact_narrow_reads();
-    test_four_kilobyte_boundary_split();
-    test_queue_full_backpressure_and_recovery();
-    test_dram_latency_jitter_and_bandwidth_variation();
+    single_and_multi_outstanding();
+    response_fifo_backpressure_and_recovery();
+    id_error_and_reset_paths();
+    std::cout<<"instruction_fetch_dma_test passed\n";
     return 0;
+} catch(const std::exception& error) {
+    std::cerr<<"instruction_fetch_dma_test failed: "
+        <<error.what()<<'\n';
+    return 1;
 }

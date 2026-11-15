@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ftlpu/c2c/dma.hpp"
+#include "ftlpu/icu/instruction_fetch_dma.hpp"
 #include "ftlpu/system/icu.hpp"
 
 #include <limits>
@@ -44,6 +44,8 @@ struct ProgramLoadStatistics {
     std::size_t effective_bytes{0}, dma_bytes{0}, written_words{0};
     std::size_t dma_credit_wait_cycles{0}, bus_wait_cycles{0}, target_wait_cycles{0};
     std::size_t peak_reassembly_bytes{0}, peak_dma_vectors{0};
+    std::size_t peak_instruction_dma_outstanding{0};
+    std::size_t peak_instruction_dma_response_fifo{0};
     std::size_t peak_word_fifo{0}, peak_ingress_fifo{0}, peak_relay_level{0};
     std::size_t word_fifo_full_cycles{0}, ingress_fifo_full_cycles{0};
     std::size_t relay_full_cycles{0};
@@ -87,6 +89,10 @@ struct ProgramLoadStatistics {
            << " dma_credit_wait_cycles=" << dma_credit_wait_cycles
            << " bus_wait_cycles=" << bus_wait_cycles
            << " target_wait_cycles=" << target_wait_cycles
+           << " peak_instruction_dma_outstanding="
+           << peak_instruction_dma_outstanding
+           << " peak_instruction_dma_response_fifo="
+           << peak_instruction_dma_response_fifo
            << " peak_word_fifo=" << peak_word_fifo
            << " peak_ingress_fifo=" << peak_ingress_fifo
            << " peak_relay_level=" << peak_relay_level
@@ -98,7 +104,8 @@ struct ProgramLoadStatistics {
 
 // One active program, one active destination. DDR is ticked by the enclosing
 // system, exactly once per physical cycle. This engine shares that DDR with
-// weight/data DMA and reuses C2cDmaEngine's actual FIFO and outstanding credits.
+// weight/data DMA. It has its own command, outstanding-ID and response state;
+// the two DMA classes only contend through the shared Ddr4Model.
 class ProgramLoader : public timing::ClockedModule {
 public:
     enum class State { Idle, LoadQueue, WaitCommit, AllCommitted, Prime, Ready, Started, Draining, Completed };
@@ -107,7 +114,10 @@ public:
     ProgramLoader(Ddr4Model& ddr, InstructionControlUnit& icu,
         std::size_t fifo_depth = hw::config::kDmaFifoDepthVectors,
         ProgramLoadConfig config = {})
-        : dma_(ddr, fifo_depth), ddr_(ddr), icu_(icu), config_(config)
+        : dma_(ddr, InstructionFetchDmaConfig {
+              256, 8, hw::config::kProgramLoadOutstandingDepth,
+              fifo_depth})
+        , ddr_(ddr), icu_(icu), config_(config)
     { config_.validate(); }
 
     void enable_clocked_mode()
@@ -225,8 +235,14 @@ public:
         icu_.stage_program_issue_enabled(true);
     }
     const ProgramLoadStatistics& statistics() const noexcept { return stats_; }
-    C2cDmaEngine& dma() noexcept { return dma_; }
-    const C2cDmaEngine& dma() const noexcept { return dma_; }
+    InstructionFetchDma& dma() noexcept { return dma_; }
+    const InstructionFetchDma& dma() const noexcept { return dma_; }
+
+    static std::pair<std::size_t,std::size_t> relay_destination_for_test(
+        const ProgramImage& image)
+    {
+        return relay_destination(image);
+    }
 
     void reset()
     {
@@ -287,7 +303,7 @@ public:
             throw std::invalid_argument("program generation must increase across task switches");
         if((qctl && !queueEvents) || (barr && (!barrierEvents || !barrierRam)))
             throw std::invalid_argument("missing committed event or barrier configuration");
-        if (!dma_.idle() || dma_.receive_ready())
+        if (!dma_.drained())
             throw std::logic_error("program DMA still has unconsumed traffic");
         std::size_t total_bytes = 0;
         for (const auto& image : images) {
@@ -295,9 +311,6 @@ public:
                 throw std::overflow_error("aggregate program image size overflow");
             total_bytes += image.byte_count;
         }
-        while (dma_.take_completion_notification()) {}
-        while (dma_.take_completion_sync_tag()) {}
-        dma_.clear_completion_history();
         if(program_reset_) program_reset_(); else icu_.stage_program_reset();
         if(generation) {last_generation_=*generation;icu_.stage_program_generation(*generation);}
         images_ = std::move(images);
@@ -386,9 +399,6 @@ private:
             configure_target(image);
             record.image_committed = cycle;
             if(!record.source_done) record.source_done=cycle;
-            while (dma_.take_completion_notification()) {}
-            while (dma_.take_completion_sync_tag()) {}
-            dma_.clear_completion_history();
             if (++current_ == images_.size()) {
                 stats_.all_images_committed = cycle;
                 state_ = State::AllCommitted;
@@ -441,22 +451,19 @@ private:
                 route_[s] = std::move(route_[s - 1]);
                 route_[s - 1].reset();
             }
-        if (dma_.receive_ready() && routed_bytes_ < image.byte_count) {
+        if (dma_.word_ready() && routed_bytes_ < image.byte_count) {
             if (!route_.front()) {
                 Packet packet{};
                 packet.size = std::min({config_.bus_bytes_per_cycle,
-                    hw::kPhysicalVectorBytes - vector_offset_,
+                    image.word_bytes() - vector_offset_,
                     image.byte_count - routed_bytes_});
-                const auto& vector = dma_.front_received();
-                for (std::size_t b = 0; b < packet.size; ++b) {
-                    const auto offset = vector_offset_ + b;
-                    packet.bytes[b] = vector.payload[offset / hw::kLanesPerTile]
-                        [offset % hw::kLanesPerTile];
-                }
+                const auto word = dma_.front_word();
+                for (std::size_t b = 0; b < packet.size; ++b)
+                    packet.bytes[b] = word.bytes[vector_offset_ + b];
                 vector_offset_ += packet.size;
                 routed_bytes_ += packet.size;
-                if (vector_offset_ == hw::kPhysicalVectorBytes || routed_bytes_ == image.byte_count) {
-                    dma_.pop_received();
+                if (vector_offset_ == image.word_bytes()) {
+                    dma_.pop_word();
                     vector_offset_ = 0;
                 }
                 route_.front() = packet;
@@ -485,13 +492,22 @@ private:
             if (!record.first_data_return) record.first_data_return = cycle;
         }
         if (dma_.low_load_credit_wait()) ++stats_.dma_credit_wait_cycles;
+        if (dma_.fault())
+            throw std::runtime_error("instruction DMA fault code "
+                + std::to_string(dma_.fault_code()));
         if (dma_.low_idle() && !record.source_done) {
             record.source_done = cycle;
             state_ = State::WaitCommit;
         }
         stats_.peak_reassembly_bytes = std::max(stats_.peak_reassembly_bytes, reassembly_.size());
         stats_.peak_dma_vectors = std::max(stats_.peak_dma_vectors,
-            dma_.low_outstanding_reads() + dma_.low_receive_queue_size());
+            dma_.low_receive_queue_size());
+        stats_.peak_instruction_dma_outstanding = std::max(
+            stats_.peak_instruction_dma_outstanding,
+            dma_.low_outstanding_reads());
+        stats_.peak_instruction_dma_response_fifo = std::max(
+            stats_.peak_instruction_dma_response_fifo,
+            dma_.low_receive_queue_size());
     }
     struct Packet { std::array<std::uint8_t, hw::kPhysicalVectorBytes> bytes{}; std::size_t size{0}; };
     struct PendingWrite { std::array<std::uint8_t, kReassemblyBytes> bytes{}; std::size_t address{0}, due{0}; };
@@ -548,9 +564,13 @@ private:
 
     void validate_image(const ProgramImage& image) {
         icu_.validate_program_image(image);
-        if(image.vector_count()) {
-            const auto dma=C2cDmaInstruction::Load(image.source_address,image.vector_count());
-            if(dma.vector_address(image.vector_count()-1)>UINT64_MAX-(hw::kPhysicalVectorBytes-1))
+        if(image.byte_count) {
+            const auto requests=(image.byte_count+hw::kPhysicalVectorBytes-1)
+                / hw::kPhysicalVectorBytes;
+            if(requests-1>(UINT64_MAX-image.source_address)
+                    / hw::kPhysicalVectorBytes
+                || image.source_address+(requests-1)*hw::kPhysicalVectorBytes
+                    > UINT64_MAX-(hw::kPhysicalVectorBytes-1))
                 throw std::invalid_argument("program DMA image crosses the address space");
         }
     }
@@ -573,7 +593,8 @@ private:
         if (image.kind==IcuMacroQueueKind::Mem) {
             constexpr auto queues_per_hemisphere=
                 InstructionControlUnit::kMemQueuesPerHemisphere;
-            constexpr auto banks_per_relay=2*hw::kMemBanksPerSlice;
+            constexpr auto banks_per_relay=
+                hw::kProgramLoadMemBanksPerRelay;
             const auto hemisphere=image.queue_index/queues_per_hemisphere;
             const auto local=image.queue_index%queues_per_hemisphere;
             return {hemisphere,std::min(local/banks_per_relay,
@@ -657,7 +678,17 @@ private:
     {
         routed_bytes_ = vector_offset_ = accepted_words_ = next_write_cycle_ = 0;
         const auto& image = images_[current_];
-        if(image.vector_count()) dma_.issue(C2cDmaInstruction::Load(image.source_address, image.vector_count()));
+        if(image.word_count()) {
+            const auto width=image.word_bytes()==4
+                ? PhysicalInstructionWordWidth::Bits32
+                : image.word_bytes()==8
+                    ? PhysicalInstructionWordWidth::Bits64
+                    : image.word_bytes()==12
+                        ? PhysicalInstructionWordWidth::Bits96
+                        : PhysicalInstructionWordWidth::Bits128;
+            dma_.start(InstructionFetchProgram {
+                image.source_address,image.word_count(),width});
+        }
         else stats_.images[current_].source_done=stats_.request_accepted;
         state_ = State::LoadQueue;
     }
@@ -667,7 +698,7 @@ private:
     }
     void configure_target(const ProgramImage& image) {icu_.stage_program_seal(image);}
 
-    C2cDmaEngine dma_;
+    InstructionFetchDma dma_;
     Ddr4Model& ddr_;
     std::function<bool()> drain_checker_{};
     std::function<void()> program_reset_{};

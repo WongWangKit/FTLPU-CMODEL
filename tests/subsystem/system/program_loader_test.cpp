@@ -122,6 +122,31 @@ ProgramLoadStatistics sweep(ProgramLoadConfig config, std::size_t depth = 16,
     require(loader.started() && loader.statistics().program_start == start, "unified start failed");
     return stats;
 }
+
+ProgramLoadStatistics relay_trace(std::size_t local_queue)
+{
+    auto system=std::make_unique<C2cDmaSystem>(ddr_config(),4);
+    const auto payload=image_bytes(true,9);
+    const auto address=0x50000+local_queue*0x100;
+    stage(*system,address,payload);
+    ProgramImage image{address,IcuMacroQueueKind::Mem,local_queue,
+        payload.size()};
+    auto& loader=system->program_loader();
+    loader.submit({image},system->cycle());
+    wait_ready(*system);
+    const auto stats=loader.statistics();
+    const auto newRelay=local_queue/16;
+    const auto oldRelay=std::min(local_queue/4,std::size_t{6});
+    std::cout<<"relay_trace queue="<<local_queue
+        <<" old_target=R"<<oldRelay
+        <<" corrected_target=R"<<newRelay
+        <<" relay_writes="<<stats.relay_writes<<'\n';
+    require(stats.relay_writes==(newRelay+1)*image.word_count()
+        &&stats.relay_reads==stats.relay_writes,
+        "corrected MEM Relay path changed hop count or lost ordering");
+    return stats;
+}
+
 void barrier_storage_and_activation() {
     auto system=std::make_unique<C2cDmaSystem>(ddr_config(),1);
     auto encoded=std::make_unique<InstructionControlUnit>();encoded->mem_iq(0).append_control(IcuControlInstruction::Nop(8));
@@ -197,6 +222,9 @@ int main() try
     const auto shared = sweep(config, 16, true);
     require(*shared.all_images_committed > *baseline.all_images_committed,
         "program and weight reads bypassed shared DDR bandwidth");
+    (void)relay_trace(4);
+    (void)relay_trace(16);
+    (void)relay_trace(96);
 
     auto system = std::make_unique<C2cDmaSystem>(ddr_config(), 1,
         SystemHardwareConfiguration{}, config);

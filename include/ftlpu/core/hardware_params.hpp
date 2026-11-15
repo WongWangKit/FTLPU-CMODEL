@@ -55,6 +55,13 @@ constexpr std::size_t kMemBanksPerSlice = config::kMemBanksPerSlice;
 constexpr std::size_t kMemSlicesPerGroup =
     config::kStreamTopology.mem_slices_per_group;
 constexpr std::size_t kMemGroups = kMemSliceColumns / kMemSlicesPerGroup;
+constexpr std::size_t kProgramLoadMemGroupsPerRelay =
+    config::kProgramLoadMemGroupsPerRelay;
+constexpr std::size_t kProgramLoadMemBanksPerRelay =
+    kMemSlicesPerGroup * kMemBanksPerSlice
+    * kProgramLoadMemGroupsPerRelay;
+constexpr std::size_t kProgramLoadRelaysPerHemisphere =
+    config::kProgramLoadRelaysPerHemisphere;
 constexpr std::size_t kMemBoundaryStreamRegisterColumns = kMemGroups + 1;
 constexpr std::size_t kC2cToSxmStreamRegisterColumns = 1;
 constexpr std::size_t kSxmToMxmStreamRegisterColumns = 1;
@@ -242,6 +249,10 @@ static_assert(kHemispheres > 0);
 static_assert(kTileRows > 0);
 static_assert(kLanesPerTile > 0);
 static_assert(kMemSlicesPerGroup > 0);
+static_assert(kProgramLoadMemGroupsPerRelay > 0);
+static_assert((kMemGroups + kProgramLoadMemGroupsPerRelay - 1)
+        / kProgramLoadMemGroupsPerRelay
+    == kProgramLoadRelaysPerHemisphere);
 static_assert(kC2cBytesPerStreamPerCycle > 0
     && kC2cBytesPerStreamPerCycle <= kPhysicalVectorBytes);
 static_assert(kStreams > 0 && kStreams <= 64 && kStreams % 2 == 0);

@@ -409,3 +409,45 @@ Trace 审计。
 | `timing_refactor/rtl_golden/queue_fifo_trace_tb.sv` | `187C2B506543CB9D2D8800DE3E7536405953D808D035C88B3611584FB1612F7B` |
 | `timing_refactor/ICU_INSTRUCTION_PATH_ALIGNMENT.md` | `24A3066E7BD093149AE3772DA8C52670713A13C79BA458AD954FB09831CAB387` |
 
+## 2026-11-15：ICU A.1 Relay Mapping 与 A.2 Instruction DMA
+
+### A.1 MEM Relay Mapping 修正
+
+- 以本地 VMODEL 当前源码为准，确认每个 Relay 管辖
+  `4 slices/group × 2 banks/slice × 2 groups/relay = 16 MEM banks`。
+- 每半区 104 条 MEM Queue 映射为 7 个 Relay：R0～R5 各覆盖 16 条，R6
+  覆盖 96～103；MXM Load/Dequant/Compute 均走该半区尾端 R6。
+- 新增 `mem_groups_per_relay=2` 生成配置和编译期几何约束，删除
+  ProgramLoader 对旧分组关系的隐式推断。
+- 新增 East/West 共 208 条 MEM Queue 穷举映射测试及 MXM tail 测试。
+  代表 Trace：Queue 4 从错误 R1 修正为 R0，Queue 16 从错误 R4 修正为 R1，
+  Queue 96 保持 R6。
+
+### A.2 Instruction DMA 集成
+
+- ProgramLoader 不再把 `C2cDmaEngine` 当作指令装载 DMA；改为实际持有并驱动
+  `InstructionFetchDma`，C2C Data DMA 与 Instruction DMA 成为独立对象，只共享
+  同一个 `Ddr4Model` 及其带宽/仲裁。
+- Instruction DMA 使用 256-bit DDR beat、8-bit ID、16-entry ordered
+  outstanding ID 和 16-entry RX FIFO；实现 ID/last/error 检查、full replacement、
+  下游反压、reset orphan drain、稳定输出和 32/64/96/128-bit record 重组。
+- Instruction DMA、ProgramLoader 与 DDR 纳入原有 Clock/SystemPhase Current/Next
+  边界；HIGH 不重复请求、入队、出队或写 iMEM。
+- 新增单命令、多 outstanding、不同 record width、精确 byte order、RX full/
+  recovery、ID mismatch、response error、reset/drain 测试。原 ProgramLoader 共享
+  DDR 测试仍同时运行独立 C2C Data DMA，证明两条 DMA 语义未合并。
+
+### 验证与边界
+
+- Release 全量构建：PASS。
+- 定向 9 项 CTest：9/9 PASS，覆盖 timing、ICU、Instruction DMA、C2C DMA/DDR、
+  ProgramLoader、Relay mapping 和硬件配置。
+- 全量 CTest：72/79 PASS；7 个失败与既有冻结基线同类（4 个 MXM accumulator
+  配置容量、1 个 MEM SRAM 配置容量、2 个 VXM active-bundle），没有新增失败。
+- 本地 VMODEL `lpu_program_load_relay_chain_tb`：80 checks PASS；
+  `lpu_instruction_dma.sv` 与 `lpu_queue_fifo.sv`：ModelSim 编译 PASS。
+- 本地 VMODEL 没有独立 Instruction DMA 功能 TB，因此 A.2 的 RTL/CModel
+  同激励功能 Golden 仍为 PARTIAL，不能用“编译通过”替代功能等价证明。
+- 未修改 VMODEL，未启动 FIFO depth sweep、完整 attention workload 或
+  Checkpoint 7C。
+

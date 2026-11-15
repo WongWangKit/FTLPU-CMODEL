@@ -5,8 +5,8 @@
 本清单对应以下本地快照：
 
 - VMODEL：`D:\LPU\FTLPU-VMODEL-main` 当前脏工作树，分支 `rtl-handshake-naming`，HEAD `2cbaa104090c6df099894559794c0f981d4aafda`。ProgramLoad 新文件多为未跟踪文件，因此以下参数来自当前磁盘源码，不代表干净提交。
-- CModel：`D:\LPU\FTLPU-CMODEL-clock` Checkpoint 7B 工作区；有效生成配置来自 `out/checkpoint_7b_dma_ddr/generated/include/ftlpu/core/hardware_config.hpp`。
-- 本轮没有运行测试。读写时序、满空、复位和反压均为静态源码结论。
+- CModel：`D:\LPU\FTLPU-CMODEL-clock` 当前 ICU A.1/A.2 工作区；有效生成配置来自 `out/icu_rtl_alignment/generated/include/ftlpu/core/hardware_config.hpp`。
+- 本轮已执行 CModel 定向与全量测试，并以本地 VMODEL 做 Relay 功能自检和 Instruction DMA 编译核对；本地 VMODEL 没有独立 Instruction DMA 功能 TB，因此对应跨模型功能 Golden 仍标记为 PARTIAL。
 
 分类：
 
@@ -27,8 +27,16 @@ FIFO 的内容已经过时。
 当前 CModel 对 MEM/MXM 分布式 ProgramLoad/Macro 共同路径增加或修正了以下
 有限硬件边界：
 
+MEM Relay 的物理分组已按 RTL 修正为 `4 slices/group × 2 banks/slice ×
+2 groups/relay = 16 banks/relay`；每半区 104 个 Queue 因而映射到 7 级
+Relay，最后一级只覆盖 96–103。`mem_groups_per_relay` 已成为独立生成配置，
+不再由 ProgramLoader 内部魔数推断。
+
 | CModel 当前结构 | 容量/时序 | RTL 对应 | 当前状态 |
 |---|---:|---|---|
+| Instruction DMA outstanding ID | 16 × 8-bit ID | `lpu_instruction_dma/u_outstanding_id_fifo` | Direct/Partial：ordered ID、last-beat release、sticky mismatch fault 已建模 |
+| Instruction DMA RX FIFO | 16 × 256-bit payload + valid-bytes/ID/last/error metadata | `lpu_instruction_dma/u_response_fifo` 16×298b | Direct/Partial：深度、full replacement、下游反压、error 已建模；C++ entry 非 packed bit-vector |
+| Instruction word/control assembler | 32/64/96/128-bit record；有界 35/39/43/47B reservoir | RTL DMA RX + 64B reassembler 的分层对应 | Partial：ProgramLoader 高层仍串行 image |
 | Program reassembly | 64 B | `lpu_program_load_reassembler` 64 B | Partial：容量对应，CModel DMA/descriptor 协议仍不同 |
 | Program word FIFO | 8 entries | `lpu_program_load_word_fifo` 8×164b | Partial：显式有限 FIFO 和反压已建模，C++ entry 为语义对象 |
 | Distribution ingress FIFO | 2 entries | `lpu_program_distribute_elastic_stage` 2×165b | Partial/Direct：深度和逐拍推进对应 |
@@ -59,7 +67,7 @@ FIFO 的内容已经过时。
 尚未一一复刻的 RTL ProgramLoad 边界：
 
 - 32-entry command RAM 与 LOAD/PRIME/WAIT/JUMP/END 控制机。
-- 独立 config FIFO、ordered outstanding-ID FIFO、298-bit RX FIFO 的内部结构。
+- 独立 config FIFO 的多 image 并发配对；Instruction DMA outstanding/RX 已接入。
 - BOTH 分叉的独立完成位、VXM direct 分支、endpoint round-robin 与 commit-valid。
 - 独立 32-entry PRIME FIFO。
 - VXM/SXM distributed Program endpoint：当前 RTL endpoint `ready=0`，standalone
@@ -73,7 +81,7 @@ reads/writes 和 backpressure，但不能用这些数据推断尚未建模的 BO
 
 - CModel 定向测试：FIFO、Macro schedule、raw Macro decoder、ProgramLoader、
   ICU clocked、TSP timing integration 全部 PASS。
-- CModel 全量 Release：77 项中 70 PASS；7 个失败与 Checkpoint 4～7B 的冻结
+- CModel 全量 Release：79 项中 72 PASS；7 个失败与 Checkpoint 4～7B 的冻结
   baseline 完全同类（4 个 MXM accumulator 容量、1 个 MEM SRAM 容量、2 个
   VXM active-bundle），没有新增 ICU 失败。
 - RTL/CModel FIFO 共同激励：12 cycles、17 fields 逐字段一致，覆盖 empty
@@ -182,12 +190,16 @@ C++ 对象通常没有可综合的“packed width”。下表中的 width 若写
 | 结构 / 成员 | 类别 | 容量 / 逻辑宽度 | Producer → Consumer | 满空、延迟、反压 | 是否可能无限增长 | RTL 对应 | 优先级 | 证据 |
 |---|---|---|---|---|---|---|---|---|
 | `images_ : vector<ProgramImage>` | 软件容器 | 本次 program image 数；元数据对象 | `submit()` → `begin_queue/tick` | 无硬件 full/ready；image严格串行 | 可随输入增长 | controller RAM/config descriptors 的高层合并 | P3 | `include/ftlpu/system/program_loader.hpp:153-228,395` |
-| `C2cDmaEngine` credit/receive queues | 有限行为模型 | 当前 depth 16 vectors；每 vector payload 32B/256b | ProgramLoader Load → DDR → ProgramLoader | 请求/返回受真实 C2C DMA credit与receive queue限制；ProgramLoader仅用 stream0 | 有配置上限 | RTL Instruction DMA ID/RX FIFO，语义不同 | P0 | `program_loader.hpp:87-99,338-358,373-387`；`include/ftlpu/c2c/dma.hpp:37-46,298-307,391-425`；CP7B config `hardware_config.hpp:79-80` |
-| `route_ : vector<optional<Packet>>` | 模拟弹性 pipeline | CP7B depth 1；每 slot ≤32B/256b | DMA receive → reassembly | 每 tick 从尾到头移动；尾端无64B空间则整条上游slot保持 | 固定为配置深度 | RTL ingress+relay网络的极简合并 | P0 | `program_loader.hpp:218,302-336,361,396`；config `hardware_config.hpp:81` |
+| `InstructionFetchDma` command/outstanding | 有限硬件行为模型 | 16 commands × 8-bit ID | ProgramLoader command → shared DDR requests | ordered ID、last response release、ID exhaustion、sticky fault；每拍至多接受一个 command | 有界 | RTL outstanding-ID FIFO | P0 | `include/ftlpu/icu/instruction_fetch_dma.hpp`；`program_loader.hpp` |
+| `InstructionFetchDma` response FIFO | 有限硬件行为模型 | 16 entries × 256-bit payload + metadata | shared DDR completion → word/control assembler | full+dequeue replacement；full/stall 回压 DDR completion；记录 occupancy/full/read | 有界 | RTL 16×298b RX FIFO | P0 | 同上；`rtl/program_load/lpu_instruction_dma.sv:83-140` |
+| `route_ : vector<optional<Packet>>` | DMA 到 reassembler 的有限弹性 pipeline | `route_latency_cycles` slots；每 slot ≤32B/256b | Instruction DMA assembled word → reassembly | 每 tick 从尾到头移动；尾端无64B空间则整条上游slot保持 | 固定为配置深度 | RTL DMA/reassembler 接口前的 CModel bus-latency adapter，不再代表 relay 网络 | P0 | `program_loader.hpp:441-472,709`；config `ftlpu-lpu32.json:259` |
 | `reassembly_ : deque<uint8_t>` | 有容量约束的软件 Buffer | 最大 64 B | route tail → word assembler | 只有空间容纳packet才pop route；达到12/16B即可取word | 代码显式限制64B，不会无限增长 | RTL 64B reassembler，Partial | P0 | `program_loader.hpp:93,285-307,397` |
-| `commits_ : deque<PendingWrite>` | Pending Event Queue | 无固定模板深度；每项含64B storage+address+due；admission由commit latency guard限制 | word assembler → `write_program_word()` | due cycle前保留；当前 latency=1，代码以 `size <= latency` 控制接受，并非8-entry FIFO | 理论容器可增长，实际 admission 有界 | RTL Program Word FIFO/commit ack 的合并，Different | P0 | `program_loader.hpp:260-300,361-362,382-398`；config `hardware_config.hpp:82-83` |
-| Program loader state/current index | 控制状态 | 单 active image | images_ → DMA/commit | 下一个 image 必须等当前全部word commit | 固定 | controller PC/active descriptor 的软件抽象 | P2 | `program_loader.hpp:92,258-282,399-401` |
-| 独立 `InstructionFetchDma` assembler/queues | 有限行为模型，但未集成 | AXI256、burst16、1 outstanding；assembler有界 | 仅其测试/潜在调用者 | 有 ready/valid 与 word sink backpressure | 有界 | 更接近 RTL Instruction DMA，但当前 mapping=Missing from actual path | P3（未集成） | `include/ftlpu/icu/instruction_fetch_dma.hpp:23-55,64-94,262-340,483-498` |
+| `word_fifo_ : deque<PendingWrite>` | 有限硬件行为 FIFO | 8 entries；语义 Program Word | reassembler → distribution ingress | 满时回压 reassembler；读写计数、peak/full cycles 可观测 | 有界 | RTL Program Word FIFO，Direct/Partial | P0 | `program_loader.hpp:412-438,624-632,667-672`；config `ftlpu-lpu32.json:265` |
+| `ingress_fifo_ : deque<PendingWrite>` | 有限硬件行为 FIFO | 2 entries；语义 Program record | Program Word FIFO → relay R0 | 满时回压 word FIFO；每拍至多向 R0 推进一项 | 有界 | RTL distribution ingress elastic，Direct/Partial | P0 | `program_loader.hpp:624-632,661-672`；config `ftlpu-lpu32.json:266` |
+| `relay_fifos_` | 有限 registered-ready relay buffers | 2 hemispheres × 7 relays × 2 entries | ingress → local MEM/MXM endpoint | 每拍至多一 hop；ready 取 LOW 开始时 occupancy；满时禁止同拍 replacement | 有界 | RTL East/West relay chains，Direct/Partial | P0 | `program_loader.hpp:587-674,714-716`；config `ftlpu-lpu32.json:267-269` |
+| `commits_ : deque<PendingWrite>` | 有界 Pending Event Queue | admission 受 commit latency guard；每项含64B storage+address+due | endpoint accept → `write_program_word()` | due cycle前保留；不是 Program Word FIFO；只建模 endpoint commit latency | 实际 admission 有界 | RTL endpoint commit/ack 的时间抽象，Different | P0 | `program_loader.hpp:386-405,633-645,711` |
+| Program loader state/current index | 控制状态 | 单 active image | images_ → Instruction DMA/commit | 下一个 image 必须等当前全部 word commit | 固定 | controller PC/active descriptor 的软件抽象 | P2 | `program_loader.hpp:354-405,676-690` |
+| Instruction assembler | 有限行为模型，已集成 | 32/64/96/128-bit records；256-bit response crossing | RX FIFO → ProgramLoader route/reassembly | 下游 stall 时保持完整 word；容量有界并统计 peak | 有界 | RTL RX FIFO + reassembler 的语义分层 | P0 | `include/ftlpu/icu/instruction_fetch_dma.hpp` |
 
 ### 5.2 `DistributedIcuQueue` 每 endpoint 状态
 
@@ -217,25 +229,25 @@ CP7B 配置还定义 Queue Control capacity 16、cache depth 4、read latency 2�
 |---|---:|---|---:|---|---|---|
 | Controller command RAM | 32×155 | `images_` + state/current | image数，无硬件上限 | Merged/Different | 无RTL command opcode/PC/host backpressure周期 | P2 |
 | Config FIFO | 16×155 | `images_[current_]` | 1 active | Missing/Merged | CModel串行image避免配对问题，无法研究FIFO occupancy | P0 |
-| Outstanding ID FIFO | 16×8 | C2cDmaEngine credits | 16 vectors | Partial/Different | DMA协议、ID有序检查不同 | P0 |
-| RX FIFO | 16×298 | C2cDmaEngine receive queue | 16 vectors，payload256b | Partial | C++对象非298b packed；错误/ID字段不同 | P0 |
+| Outstanding ID FIFO | 16×8 | `InstructionFetchDma::outstanding_ids` | 16 commands | Direct/Partial | 真实路径；ProgramLoader 当前串行 image，独立测试覆盖多 outstanding | P0 |
+| RX FIFO | 16×298 | `InstructionFetchDma::responses` | 16 semantic entries | Direct/Partial | data/ID/last/error 与反压对应；非 packed C++ bit-vector | P0 |
 | Reassembler | 64B | `reassembly_` | 64B | Partial | 容量相同；同拍和错误状态边界不同 | P0 |
-| Program Word FIFO | 8×164 | `commits_` | 非固定8；受latency guard | Different | PendingWrite不是valid/ready FIFO | P0 |
+| Program Word FIFO | 8×164 | `word_fifo_` | 8 | Direct/Partial | C++ entry为语义对象；已统计 occupancy/full/read/write | P0 |
 | Prime FIFO | 32×14 | state=`Prime` + per-queue configure | 无队列 | Merged | 不表现多Prime记录occupancy | P2 |
-| Ingress elastic | 2×165 | `route_` | 1×≤256b | Different | packet粒度与record粒度不同 | P0 |
-| Relay buffers | 14×(2×165) | 无；合并进`route_` | 无拓扑 | Missing | 无局部拥塞/BOTH/RR | P0 |
+| Ingress elastic | 2×165 | `ingress_fifo_` | 2 | Direct/Partial | C++ entry为语义对象；无 scope/BOTH metadata | P0 |
+| Relay buffers | 14×(2×165) | `relay_fifos_` | 2×7×2 | Direct/Partial | 具备拓扑、registered-ready和近端停靠；缺 BOTH/RR/commit-valid | P0 |
 | BOTH done state | 2 bits/record | 无 | 0 | Missing | CModel destination已唯一化 | P0 |
-| MEM local iMEM | 208×(131072×96) | 208×(131072×96) | 相同 | Direct容量 / Partial时序 | RTL两级读，CModel latency1 | P0 |
-| MEM response FIFO | 208×(4×97) | pending fetches | 间接有界 | Merged/Different | 无独立4-entry occupancy | P0 |
-| MEM word FIFO | 208×(4×97) | Macro reservoir入口 | reservoir3 words | Merged | CModel没有独立word FIFO | P1 |
-| MEM context FIFO | 208×(4×271) | DDB8 + active admission | 8 + contexts32 | Different | 深度/entry语义不同 | P1 |
-| MEM active contexts | 208×4 | 208×32 | 32 | Different | 8倍深度，反压显著不同 | P1 |
-| MEM timed queue | 208×(16×96) | active context direct issue/control | 无独立16 FIFO | Missing/Merged | occupancy、burst吸收、deadline不同 | P1 |
-| MXM local iMEM | 12×(65536×128) | 12×(65536×128) | 相同 | Direct容量 / Partial时序 | 同MEM fetch差异 | P0 |
-| MXM response FIFO | 12×(4×129) | pending fetches | 间接有界 | Merged/Different | 无独立4-entry occupancy | P0 |
-| MXM word/context FIFOs | per stream 4 entries | reservoir3 + DDB8 | 3/8 | Different | 结构与admission不同 | P1 |
-| MXM active contexts | 12×4 | 12×40 | 40 | Different | 10倍深度 | P1 |
-| MXM timed queues | 12×(16×81) | active context/issue path | 无独立16 FIFO | Missing/Merged | local coordinator前缓冲不对应 | P1 |
+| MEM local iMEM | 208×(131072×96) | 208×(131072×96) | 相同 | Direct容量 / Partial实现 | 两级 fetch 已对齐；存储 backing 仍为 C++ 语义模型 | P0 |
+| MEM response FIFO | 208×(4×97) | 独立 response FIFO | 4 | Direct/Partial | C++ entry为语义对象 | P0 |
+| MEM word FIFO | 208×(4×97) | 独立 Macro word FIFO | 4 | Direct/Partial | payload非 packed RTL vector | P1 |
+| MEM context FIFO | 208×(4×271) | 独立 decoded context FIFO | 4 | Direct/Partial | FU-specific字段仍为语义对象 | P1 |
+| MEM active contexts | 208×4 | 208×4 | 4 | Direct/Partial | allocator/selector未做完整 cluster 同迹对比 | P1 |
+| MEM timed queue | 208×(16×96) | 独立 timed issue FIFO | 16 | Direct/Partial | due-cycle语义已建模，payload非 packed RTL vector | P1 |
+| MXM local iMEM | 12×(65536×128) | 12×(65536×128) | 相同 | Direct容量 / Partial实现 | 两级 fetch 已对齐；存储 backing 仍为 C++ 语义模型 | P0 |
+| MXM response FIFO | 12×(4×129) | 独立 response FIFO | 4 | Direct/Partial | C++ entry为语义对象 | P0 |
+| MXM word/context FIFOs | per stream 4 entries | 独立 word/context FIFO | 4/4 | Direct/Partial | 保留额外 DDB8 作为 CModel parser 内部边界 | P1 |
+| MXM active contexts | 12×4 | 12×4 | 4 | Direct/Partial | 尚无完整 cluster 同迹对比 | P1 |
+| MXM timed queues | 12×(16×81) | 独立 timed issue FIFO | 16 | Direct/Partial | local coordinator前的精确 packed encoding仍不同 | P1 |
 | VXM standalone 4/2/4 FIFOs | 未集成 | Native IQ16；Macro禁用 | 16/native | Different | 不能做Macro周期对比 | P1，待接入 |
 | SXM standalone 4/2/4 FIFOs | 未集成 | Macro reservoir3+DDB8+contexts4 | 有限 | Different | CModel已集成，RTL只standalone | P1，待范围统一 |
 
@@ -257,11 +269,16 @@ DDR response
 
 ### 7.2 local iMEM P0 边界
 
-RTL local iMEM 两级读后进入 4-entry response FIFO。这个 FIFO既吸收 SRAM 固定流水返回，又决定是否继续发 fetch。CModel 目前用 1-cycle PendingFetch 合并这两部分；即便最终指令内容相同，fetch response、reservoir occupancy 和 frontend-ready 周期也会不同。因此它是周期同步前必须建模的 P0，而不是普通实现细节。
+RTL local iMEM 两级读后进入 4-entry response FIFO。当前 CModel 已使用两拍 fetch
+和独立 4-entry response FIFO；它既吸收固定流水返回，也决定是否继续 fetch，
+occupancy/full/read/write 均可观测。存储实现仍是语义 backing，不宣称 SRAM Macro 同构。
 
 ### 7.3 Macro P1 边界
 
-word FIFO、context FIFO、active contexts 和 timed issue queue共同决定压缩流展开速度。当前最大不一致不是“word宽”，而是资源数：RTL MEM/MXM active=4，CModel MEM=32、MXM=40；RTL还有独立16-entry timed queue。这会让 CModel 更晚产生 decoder backpressure，并改变Prime完成时间和FU stall后的恢复行为。
+word FIFO、context FIFO、active contexts 和 timed issue queue共同决定压缩流展开速度。
+当前 CModel 的共同 MEM/MXM 路径已经对齐 word FIFO 4、context FIFO 4、
+active contexts 4 和 timed issue FIFO 16；FU-specific entry 编码及完整 RTL
+cluster Trace 仍是 Partial。
 
 ## 8. FIFO 深度研究顺序
 
@@ -273,13 +290,13 @@ word FIFO、context FIFO、active contexts 和 timed issue queue共同决定压�
 4. FU local iMEM response FIFO（4）及真实两级读延迟。
 5. BOTH branch completion 与 endpoint commit acknowledgement（虽不是FIFO，却决定全局反压）。
 
-理由：这些结构任何一个满都会回压外部指令装载或阻塞全部/半区 Program 分发；CModel 当前又缺少最关键的 relay/branch occupancy，所以不能直接用现有 CModel 扫深度。
+理由：这些结构任何一个满都会回压外部指令装载或阻塞全部/半区 Program 分发。当前 CModel 已有 DMA、word、ingress、relay occupancy；BOTH/endpoint commit-valid 等未建模边界若纳入扫描，仍须先补齐。
 
 ### P1：在 P0 对齐后扫描
 
 1. Decoder word FIFO（4）。
 2. Context FIFO（MEM/MXM 4，VXM/SXM standalone 2）。
-3. Active context 深度（RTL MEM/MXM 4；CModel 32/40 是待同步差异）。
+3. Active context 深度（RTL/CModel MEM/MXM 当前均为4）。
 4. Timed issue queue（RTL MEM/MXM 16；VXM/SXM standalone 4）。
 5. CModel DDB 8、admission lookahead 8、run capacity 8。
 
@@ -294,9 +311,12 @@ word FIFO、context FIFO、active contexts 和 timed issue queue共同决定压�
 ### P3：不纳入硬件 FIFO 深度优化
 
 - CModel `vector<ProgramImage>`、统计结构、日志/trace容器。
-- 未接入当前执行路径的 `InstructionFetchDma` 内部容量（在正式接入前只做设计参考）。
 - 纯 descriptor/codec 临时对象和测试 fixture。
 
 ## 9. 结论
 
-当前两边唯一较接近的容量基线是 MEM/MXM local iMEM word宽与深度、64B reassembly、3-word Macro reservoir。其余关键结构多数是 Partial、Merged、Different 或 Missing。尤其是物理分发网络、local iMEM 返回 FIFO、active context 数和 timed issue queue，都会改变周期、occupancy、吞吐和反压，必须在任何 FIFO 深度/PPA结论前先完成模型同步和同激励逐周期验证。
+当前已可对 Instruction DMA outstanding/RX、Program Word、Ingress、两半区 Relay、
+local iMEM response/word、context 和 timed issue FIFO 做有限容量 occupancy 与
+backpressure 统计。尚未补齐的 P0/P2 边界主要是 command/config 多 image 配对、
+BOTH、endpoint RR/commit-valid 和 PRIME FIFO；在把它们纳入深度结论前仍需明确
+实验范围并建立完整 cluster 同激励 Trace。

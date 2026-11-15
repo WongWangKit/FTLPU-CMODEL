@@ -163,6 +163,9 @@ ftlpu_add_test(icu_clocked_test tests/unit/icu/icu_clocked_test.cpp
     unit.icu.clocked unit icu timing fast)
 ftlpu_add_test(icu_rtl_fifo_test tests/unit/icu/rtl_fifo_test.cpp
     unit.icu.rtl_fifo unit icu timing fast)
+ftlpu_add_test(instruction_fetch_dma_test
+    tests/unit/icu/instruction_fetch_dma_test.cpp
+    unit.icu.instruction_fetch_dma unit icu dma timing fast)
 ftlpu_add_demo(icu_rtl_fifo_golden_trace
     tests/unit/icu/rtl_fifo_golden_trace.cpp)
 
@@ -195,6 +198,9 @@ ftlpu_add_test(tsp_timing_integration_test
     subsystem.system.timing subsystem system timing fast)
 ftlpu_add_test(program_loader_test tests/subsystem/system/program_loader_test.cpp
     subsystem.program.loader subsystem program dma fast)
+ftlpu_add_test(program_loader_relay_mapping_test
+    tests/subsystem/system/program_loader_relay_mapping_test.cpp
+    subsystem.program.relay_mapping subsystem program dma fast)
 add_test(NAME subsystem.program.configuration COMMAND "${CMAKE_COMMAND}"
     "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/subsystem/system/program_load_configuration_test.cmake")

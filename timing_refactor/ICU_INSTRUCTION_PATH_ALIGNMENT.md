@@ -164,8 +164,8 @@ ProgramImage list
 ProgramLoader ClockedModule
       |
       v
-C2cDmaEngine + shared DDR model
-32-byte physical vectors, finite credits
+InstructionFetchDma + shared DDR model
+ID FIFO 16 + RX FIFO 16 + 256-bit response beats
       |
       v
 64-byte reassembly
@@ -239,13 +239,62 @@ existing MEM/MXM FU accept path
 
 证据：`include/ftlpu/system/program_loader.hpp:47-53,568-651`。
 
+### 3.2.1 A.1 MEM Relay Mapping 修正
+
+本地 RTL 的实际公式为：
+
+```text
+4 slices/group × 2 banks/slice × 2 groups/relay = 16 banks/relay
+52 slices/hemisphere × 2 banks/slice = 104 MEM queues/hemisphere
+ceil(104/16) = 7 relays
+```
+
+CModel 原代码只使用 `2 * banks_per_slice = 4`，导致 Queue 4～95 过早
+进入远端 Relay。现将 `mem_groups_per_relay=2` 纳入 JSON/CMake 生成配置，
+并在 `hardware_params.hpp` 集中生成 `kProgramLoadMemBanksPerRelay=16`。
+两个半区都按以下范围消费：R0 0–15、R1 16–31、R2 32–47、R3 48–63、
+R4 64–79、R5 80–95、R6 96–103。MXM Load/Dequant/Compute 仍走 R6。
+
+RTL 证据：
+
+- `rtl/program_load/lpu_program_distribute_system.sv:59-67,365-370`
+- `rtl/program_load/lpu_program_distribute_relay_chain.sv:5-14,120-156`
+- `rtl/program_load/lpu_program_distribute_relay.sv:63-65,166-180`
+- `rtl/core/lpu_pkg.sv:14-19`
+
+### 3.2.2 A.2 Instruction DMA 实际接入
+
+`ProgramLoader::begin_queue()` 现在提交 `InstructionFetchProgram`，实际数据来自
+`InstructionFetchDma`，不再用 `C2cDmaEngine::issue()` 假装指令 DMA。新路径包含：
+
+- RTL 默认 8-bit command ID、16-entry ordered outstanding FIFO；
+- 16-entry 256-bit response FIFO，保存 valid-byte count、last、ID、error；
+- 32/64-bit 控制记录和 96/128-bit iMEM word 的有界 assembler；
+- RX full/word sink stall 到共享 DDR completion 的反压；
+- sticky ID/response/length fault 和 reset 后 orphan response drain；
+- 独立 command/RX/assembler occupancy、full/stall/read/write 统计。
+
+Instruction DMA 与 C2C Data DMA 仍是两个对象，只共享同一个 `Ddr4Model`。
+SystemPhase 顺序仍为 Instruction DMA LOW → C2C Data DMA LOW → DDR LOW，DDR
+每物理周期只调用一次；共同带宽竞争由 `Ddr4Model` 的 request queue、latency、
+channel 和 byte budget 统一处理。
+
+RTL 对应：`rtl/program_load/lpu_instruction_dma.sv:1-45,75-158` 和
+`rtl/program_load/lpu_program_load_path.sv:104-218`。CModel 对应：
+`include/ftlpu/icu/instruction_fetch_dma.hpp`、
+`include/ftlpu/system/program_loader.hpp`、
+`include/ftlpu/system/tsp_slice_system.hpp:282-301,773-810`。
+
 限制：
 
 - ProgramImage 仍按 image 串行，不实现 RTL command RAM/PC。
 - 没有 BOTH record 的两分支复制与独立完成。
 - 没有 endpoint round-robin、VXM direct、PRIME FIFO 的逐对象模型。
-- 当前 instruction load 继续复用 C2C DMA 行为模型，不等同于 RTL
-  `lpu_instruction_dma` 的 ID/RX FIFO 协议。
+- ProgramImage 仍串行提交 image，因此实际 ProgramLoader 工作负载通常只有
+  一个 command ID 在途；独立 DMA 测试已覆盖多个 command outstanding。
+- Instruction DMA 通过共享 `Ddr4Model` 的 32-byte read request 适配 RTL
+  256-bit response beat；本地 RTL 没有独立 DMA testbench，因此完整接口逐周期
+  Trace 仍是 PARTIAL。
 
 ### 3.3 local iMEM / Macro / timed issue
 
@@ -272,7 +321,7 @@ existing MEM/MXM FU accept path
 | 功能阶段 | 本地 VMODEL RTL | CModel C++ | 映射 | 当前判断 |
 |---|---|---|---|---|
 | Program API | command RAM + controller | `ProgramImage` + `ProgramLoader::submit` | Merged/Different | 保留高层 API；没有命令 PC/WAIT/JUMP |
-| Instruction DMA | `lpu_instruction_dma` | `C2cDmaEngine` | Partial/Different | 都有限 credit；协议/ID/RX 结构不同 |
+| Instruction DMA | `lpu_instruction_dma` | `InstructionFetchDma` | Direct/Partial | 8-bit ID、16 outstanding、16-entry RX、keep/last/error、下游反压已建模；共享 DDR 适配仍非逐端口同构 |
 | Reassembly | 64 B reassembler | 64 B reassembly | Partial | 容量对应，握手细节不同 |
 | Word FIFO | 8×164b | bounded 8-entry semantic FIFO | Partial | 深度和反压对应 |
 | Distribution ingress | 2×165b elastic | bounded 2-entry semantic FIFO | Partial/Direct | 逐拍边界对应 |
@@ -330,9 +379,14 @@ relay 使用 `full_replacement=false`：ready 只看 registered occupancy，满�
 关键结果：
 
 - raw Macro：`prime_cycles=20`，MEM context stall 被实际覆盖。
-- configured ProgramLoad：169 cycles。
+- configured ProgramLoad：170 cycles（Instruction DMA 实际路径）。
 - Program word/ingress/relay write/read 守恒检查通过。
-- 全量 CTest：70/77 PASS。
+- A.1 新增 East/West 全部 208 条 MEM Queue 穷举映射；A.2 新增单读、
+  多 outstanding、ID/error、RX FIFO full/recovery、reset/final drain 测试。
+- A.1 代表 Trace：Queue 4 从错误 R1 修正到 R0，9 words 的 relay writes
+  从错误预期 18 变为 9；Queue 16 从错误 R4 修正到 R1，实际 18；Queue 96
+  保持 R6，实际 63。
+- 全量 CTest：72/79 PASS。
 - 7 个失败与 Checkpoint 4～7B 冻结基线相同：4 个 MXM accumulator
   配置容量、1 个 MEM SRAM 配置容量、2 个 VXM active-bundle。
   ICU、ProgramLoader、C2C、MEM/MXM/SXM/VXM 单元和 timing 测试没有新增失败。
@@ -351,6 +405,7 @@ relay 使用 `full_replacement=false`：ready 只看 registered occupancy，满�
 | Program reassembler | PASS，7 checks |
 | Program elastic stage | PASS |
 | 7-stage relay chain | PASS，80 checks |
+| `lpu_instruction_dma` RTL compile | PASS；本地没有独立功能 TB，功能 Golden 为 PARTIAL |
 | MEM Macro frontend | PASS，2 scenarios |
 | MXM three Macro frontends | PASS |
 
@@ -394,7 +449,7 @@ MEM/MXM Macro frontend 模块均能编译并通过自检。
 ### RTL 有实现但 CModel 尚未逐对象同步
 
 - Program command RAM/PC/WAIT/JUMP/END。
-- Instruction DMA config/outstanding-ID/RX 三类 FIFO 的精确协议。
+- Program config FIFO 与 Instruction DMA command metadata 的完整多 image 并发配对。
 - BOTH branch、VXM direct、endpoint RR、commit-valid、PRIME FIFO。
 - Legacy 138-Queue Schedule 网络的完整 timing adapter。
 
@@ -417,7 +472,7 @@ MEM/MXM Macro frontend 模块均能编译并通过自检。
 1. 使用支持当前 SystemVerilog 的较新仿真器跑通完整
    `filelist_frontend_cluster_top.f`，建立 ProgramLoad→MEM/MXM issue 的同激励
    逐周期 Trace。
-2. 决定 FIFO 深度研究是否包含 RTL command/config/RX/BOTH/endpoint/PRIME
-   边界；若包含，必须先补齐 CModel 这些结构。
+2. 决定 FIFO 深度研究是否包含 RTL command/config/BOTH/endpoint/PRIME
+   边界；Instruction DMA outstanding/RX 已可统计，但其他结构若纳入扫描仍须补齐。
 
 本轮没有启动最优深度扫描，没有启动 Checkpoint 7C，也没有修改 VMODEL。

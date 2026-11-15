@@ -265,6 +265,7 @@
     "word_fifo_depth": 8,
     "ingress_fifo_depth": 2,
     "relay_buffer_depth": 2,
+    "mem_groups_per_relay": 2,
     "relays_per_hemisphere": 7,
     "prime_fifo_depth": 32,
     "reassembly_bytes": 64

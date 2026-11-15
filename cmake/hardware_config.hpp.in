@@ -39,6 +39,7 @@ inline constexpr std::size_t kProgramLoadResponseFifoDepth = @FTLPU_PROGRAM_RESP
 inline constexpr std::size_t kProgramLoadWordFifoDepth = @FTLPU_PROGRAM_WORD_FIFO_DEPTH@;
 inline constexpr std::size_t kProgramLoadIngressFifoDepth = @FTLPU_PROGRAM_INGRESS_FIFO_DEPTH@;
 inline constexpr std::size_t kProgramLoadRelayBufferDepth = @FTLPU_PROGRAM_RELAY_BUFFER_DEPTH@;
+inline constexpr std::size_t kProgramLoadMemGroupsPerRelay = @FTLPU_PROGRAM_MEM_GROUPS_PER_RELAY@;
 inline constexpr std::size_t kProgramLoadRelaysPerHemisphere = @FTLPU_PROGRAM_RELAYS_PER_HEMISPHERE@;
 inline constexpr std::size_t kProgramLoadPrimeFifoDepth = @FTLPU_PROGRAM_PRIME_FIFO_DEPTH@;
 inline constexpr std::size_t kProgramLoadReassemblyBytes = @FTLPU_PROGRAM_REASSEMBLY_BYTES@;
