@@ -70,6 +70,38 @@ constexpr std::size_t kC2cSxmBoundaryStreamRegisterColumn =
 constexpr std::size_t kMxmBoundaryStreamRegisterColumn =
     kSystemStreamRegisterColumns - 1;
 
+// Issue-to-consumer timing for MEM group zero. The actual SR fabric uses
+// these generated endpoint bindings and advances exactly one column per tick.
+// SXM capture observes its input SR at the current cycle; MXM instruction
+// admission has one additional cycle. Per-group MEM timing subtracts the
+// source group index from these baselines.
+constexpr std::size_t kMemToSxmLatency =
+    config::kStreamTopology.sxm.forward_input.column;
+constexpr std::size_t kMemToMxmLatency =
+    config::kStreamTopology.mxm.activation_input.column + 1;
+
+constexpr std::size_t stream_issue_latency(
+    std::size_t source_column, std::size_t destination_column)
+{
+    return (source_column > destination_column
+        ? source_column - destination_column
+        : destination_column - source_column) + 1;
+}
+
+// A producer writes its endpoint SR at the end of its issue cycle. Each
+// following SR hop takes one tick; the consumer observes the destination on
+// the next issue cycle. ACC_READ emits immediately, while WS compute first
+// crosses the configured local MXM supercell rows before emitting its result.
+constexpr std::size_t kVxmWeightToIwLatency = stream_issue_latency(
+    config::kStreamTopology.vxm.output.column,
+    config::kStreamTopology.mxm.weight_input.column);
+constexpr std::size_t kAccumulatorReadToVxmLatency = stream_issue_latency(
+    config::kStreamTopology.mxm.result_output.column,
+    config::kStreamTopology.vxm.input.column);
+constexpr std::size_t kMxmFirstResultLatency = kTileRows - 1;
+constexpr std::size_t kAccumulatorToVxmLatency =
+    kMxmFirstResultLatency + kAccumulatorReadToVxmLatency;
+
 // Compatibility names used by the existing code.  New code should use the
 // MEM-specific names above instead of assuming that the whole chip has only
 // a fixed number of SR columns.
@@ -248,6 +280,8 @@ static_assert(config::kStreamTopology.mem_slices_per_group
     == kMemSlicesPerGroup);
 static_assert(config::kStreamTopology.mem_boundary_columns.size()
     == kMemBoundaryStreamRegisterColumns);
+static_assert(kMemToSxmLatency == kSystemStreamRegisterColumns - 2);
+static_assert(kMemToMxmLatency == kSystemStreamRegisterColumns);
 static_assert(kModeledSramBlocks
     == kMemSliceColumns * kMemBanksPerSlice);
 static_assert(kEastStreams + kWestStreams == kStreams);
