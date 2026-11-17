@@ -254,8 +254,14 @@ int main() try
         require(system->cycle() < 20000, "multi-queue load timed out");
     }
     const auto previous = loader.statistics();
-    require(*previous.images[1].first_ddr_request > *previous.images[0].image_committed,
+    require(*previous.images[1].first_ddr_request >= *previous.images[0].image_committed,
         "queue switch preceded the last commit");
+    const auto expectedDmaRequests = a.vector_count() + b.vector_count();
+    require(previous.dma_bytes
+                == expectedDmaRequests * hw::kPhysicalVectorBytes
+            && loader.dma().statistics().ar_handshakes
+                == expectedDmaRequests,
+        "multi-image ProgramLoader accounting missed a DMA request");
     require(previous.word_fifo_writes == a.word_count()+b.word_count()
             && previous.word_fifo_reads == previous.word_fifo_writes
             && previous.ingress_fifo_writes == previous.word_fifo_writes

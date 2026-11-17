@@ -1508,14 +1508,15 @@ public:
     void configure_mem_transport_owner(std::size_t queue, std::size_t pc,
         std::uint64_t generation, std::uint32_t launch, bool transport_store = true)
     {
-        if (queue >= kMemQueues || !generation || !launch
-            || mem_transport_owner_count_ >= 65535)
+        if (queue >= kMemQueues || !generation || !launch)
             throw std::invalid_argument("invalid or oversized MEM transport owner table");
-        auto& owners=transport_store ? mem_transport_owners_ : mem_native_owners_;
-        if (owners.empty()) owners.resize(kMemQueues);
-        if (!owners[queue].emplace(pc, TransportOwner{generation, launch}).second)
-            throw std::invalid_argument("duplicate MEM transport descriptor owner");
-        ++mem_transport_owner_count_;
+        if (clock_managed_) {
+            stage_program_operation(PendingProgramOperation::transport_owner(
+                queue,pc,generation,launch,transport_store));
+            return;
+        }
+        configure_mem_transport_owner_immediate(
+            queue,pc,generation,launch,transport_store);
     }
     void configure_queue_completion_events(std::uint64_t generation,
         const std::vector<IcuCommonEventBinding>& bindings)
@@ -2211,13 +2212,17 @@ private:
             WriteWord,
             SealImage,
             TickFrontends,
+            ConfigureTransportOwner,
         };
 
         Kind kind{Kind::Reset};
         ProgramImage image{};
         std::vector<std::uint8_t> bytes{};
         std::size_t address{0};
+        std::size_t queue{0};
+        std::size_t pc{0};
         std::uint64_t generation{0};
+        std::uint32_t launch{0};
         bool flag{false};
 
         static PendingProgramOperation reset()
@@ -2267,6 +2272,19 @@ private:
             operation.kind=Kind::TickFrontends;
             return operation;
         }
+        static PendingProgramOperation transport_owner(std::size_t queue,
+            std::size_t pc, std::uint64_t generation, std::uint32_t launch,
+            bool transport_store)
+        {
+            PendingProgramOperation operation{};
+            operation.kind=Kind::ConfigureTransportOwner;
+            operation.queue=queue;
+            operation.pc=pc;
+            operation.generation=generation;
+            operation.launch=launch;
+            operation.flag=transport_store;
+            return operation;
+        }
     };
 
     struct PendingRuntimeEvent {
@@ -2311,6 +2329,22 @@ private:
             return event;
         }
     };
+
+    void configure_mem_transport_owner_immediate(std::size_t queue,
+        std::size_t pc, std::uint64_t generation, std::uint32_t launch,
+        bool transport_store)
+    {
+        if (mem_transport_owner_count_ >= 65535)
+            throw std::invalid_argument(
+                "invalid or oversized MEM transport owner table");
+        auto& owners=transport_store ? mem_transport_owners_ : mem_native_owners_;
+        if (owners.empty()) owners.resize(kMemQueues);
+        if (!owners[queue].emplace(
+                pc,TransportOwner{generation,launch}).second)
+            throw std::invalid_argument(
+                "duplicate MEM transport descriptor owner");
+        ++mem_transport_owner_count_;
+    }
 
     void buffer_runtime_event(PendingRuntimeEvent event)
     {
@@ -2359,6 +2393,11 @@ private:
             return;
         case PendingProgramOperation::Kind::TickFrontends:
             tick_program_frontends();
+            return;
+        case PendingProgramOperation::Kind::ConfigureTransportOwner:
+            configure_mem_transport_owner_immediate(operation.queue,
+                operation.pc,operation.generation,operation.launch,
+                operation.flag);
             return;
         }
         throw std::logic_error("unknown pending ICU program operation");

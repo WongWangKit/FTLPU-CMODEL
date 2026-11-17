@@ -402,7 +402,14 @@ private:
             if (++current_ == images_.size()) {
                 stats_.all_images_committed = cycle;
                 state_ = State::AllCommitted;
-            } else begin_queue();
+            } else {
+                begin_queue();
+                // begin_queue() stages the next InstructionFetchDma command.
+                // Its first DDR request can fire in the DMA LOW later in this
+                // same SystemPhase, so this transition cycle must participate
+                // in the post-DMA observation just like an ordinary load cycle.
+                observe_dma_low_ = images_[current_].word_count() != 0;
+            }
             return; // queue n+1 cannot issue before queue n commits
         }
 
