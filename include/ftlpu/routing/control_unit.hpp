@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ftlpu/vxm/slice.hpp"
+
 #include "ftlpu/mem/mem_array.hpp"
 #include "ftlpu/routing/instruction.hpp"
 #include <algorithm>
@@ -173,6 +175,13 @@ public:
       break;
     }
     case RoutingOpcode::Plan:
+      if (d.plan.softmax_selected && d.plan.weights.present())
+        throw std::invalid_argument("route normalization and supplied weights are mutually exclusive");
+      if (d.plan.shared_gate_logits.present()) {
+        d.plan.shared_gate_logits.validate(depth);
+        if (d.plan.shared_gate_logits.element != RoutingElement::F32)
+          throw std::invalid_argument("shared gate logits must be FP32");
+      }
       if (!d.plan.context_id)
         throw std::invalid_argument("routing PLAN context");
       if (d.plan.weights.present()) {
@@ -268,6 +277,11 @@ private:
     if (d.opcode == RoutingOpcode::Plan && d.plan.weights.present() &&
         (d.plan.weights.rows != t_ || d.plan.weights.columns != k_))
       throw std::invalid_argument("routing weight shape mismatch");
+    if (d.opcode == RoutingOpcode::Plan && d.plan.shared_gate_logits.present() &&
+        (e_ == RoutingConfig::max_experts || k_ == RoutingConfig::max_k ||
+         d.plan.shared_gate_logits.rows != t_ ||
+         d.plan.shared_gate_logits.columns != e_ + 1))
+      throw std::invalid_argument("shared gate view shape or plan capacity");
     if (d.opcode == RoutingOpcode::Address &&
         (!planned_ || d.address.active_index >= active_.size() ||
          d.address.source.rows < t_))
@@ -313,12 +327,16 @@ private:
       next_ = d.opcode == RoutingOpcode::ImportTopK ? State::ImportSramId : State::SelectClear;
     } else if (d.opcode == RoutingOpcode::Plan) {
       add(d.plan.weights);
-      counts_.resize(e_);
-      offsets_.resize(e_ + 1);
-      cursors_.resize(e_);
+      add(d.plan.shared_gate_logits);
+      const bool shared = d.plan.shared_gate_logits.present();
+      plan_experts_ = e_ + shared;
+      plan_k_ = k_ + shared;
+      counts_.resize(plan_experts_);
+      offsets_.resize(plan_experts_ + 1);
+      cursors_.resize(plan_experts_);
       active_.clear();
-      assignments_.resize(t_ * k_);
-      inverse_.resize(t_ * k_);
+      assignments_.resize(t_ * plan_k_);
+      inverse_.resize(assignments_.size());
       pos_ = 0;
       planned_ = false;
       next_ = State::ClearCounts;
@@ -344,15 +362,16 @@ private:
 
 public:
   void tick(std::array<MemArrayModel, hw::kHemispheres> &mems,
-            std::array<StreamRegisterFabric, hw::kHemispheres> &fabrics) {
+            std::array<StreamRegisterFabric, hw::kHemispheres> &fabrics,
+            VxmSlice *vxm = nullptr) {
     ++clock_;
     cycle_trace_={};
     if(cycle_trace_enabled_) {
       auto &tr=cycle_trace_;tr.valid=state_!=State::Idle || metadata_request_.has_value();tr.sequence=clock_;
       tr.step=state_name(state_);tr.opcode=instruction_.opcode;tr.descriptor=instruction_.descriptor;tr.completion=instruction_.completion;
-      tr.token=static_cast<std::uint32_t>(instruction_.opcode==RoutingOpcode::Plan && k_?pos_/k_:token_);
+      tr.token=static_cast<std::uint32_t>(instruction_.opcode==RoutingOpcode::Plan && plan_k_?pos_/plan_k_:token_);
       tr.expert=instruction_.opcode==RoutingOpcode::Plan?current_expert_:static_cast<std::uint32_t>(expert_);
-      tr.slot=static_cast<std::uint32_t>(instruction_.opcode==RoutingOpcode::Plan && k_?pos_%k_:slot_);
+      tr.slot=static_cast<std::uint32_t>(instruction_.opcode==RoutingOpcode::Plan && plan_k_?pos_%plan_k_:slot_);
       tr.position=static_cast<std::uint32_t>(pos_);tr.assignment=static_cast<std::uint32_t>(dest_);
       tr.value=io_value_;tr.raw_bits=incoming_.raw;
       if(state_==State::Idle && metadata_request_) {tr.step="MetadataRead";tr.position=metadata_request_->index;tr.value=static_cast<std::uint32_t>(metadata_request_->kind);}
@@ -385,7 +404,7 @@ public:
           metadata_response_ = offsets_.at(q.index);
           break;
         case RouteMetadataKind::Tokens: metadata_response_=t_;break;
-        case RouteMetadataKind::K: metadata_response_=k_;break;
+        case RouteMetadataKind::K: metadata_response_=plan_k_;break;
         case RouteMetadataKind::Inverse: metadata_response_=inverse_.at(q.index);break;
         case RouteMetadataKind::AssignmentWeight: metadata_response_=assignments_.at(q.index).weight_bits;break;
         }
@@ -409,6 +428,12 @@ public:
           ++stats_.bank_wait_cycles;
           return;
         }
+      if (instruction_.opcode == RoutingOpcode::Plan && descriptor_.plan.extended()) {
+        if (!vxm)
+          throw std::logic_error("route weight transform requires VXM");
+        if (!vxm->acquire_control(owner_))
+          return;
+      }
       for (auto [h, s, b] : banks_)
         if (!mems[h].acquire_routing_bank(s, b, owner_))
           throw std::logic_error("routing bank lease race");
@@ -588,13 +613,13 @@ public:
     case State::ClearCounts:
       counts_[pos_++] = 0;
       ++stats_.metadata_accesses;
-      if (pos_ == e_) {
+      if (pos_ == plan_experts_) {
         pos_ = 0;
         state_ = State::CountId;
       }
       break;
     case State::CountId:
-      current_expert_ = ids_[pos_];
+      current_expert_ = plan_expert(pos_);
       ++stats_.metadata_accesses;
       state_ = State::CountRead;
       break;
@@ -614,7 +639,7 @@ public:
       state_ = State::CountNext;
       break;
     case State::CountNext:
-      if (++pos_ == ids_.size()) {
+      if (++pos_ == assignments_.size()) {
         pos_ = sum_ = 0;
         state_ = State::PrefixCount;
       } else
@@ -634,21 +659,21 @@ public:
       cursors_[pos_] = sum_;
       sum_ += temp_;
       ++stats_.metadata_accesses;
-      if (++pos_ == e_)
+      if (++pos_ == plan_experts_)
         state_ = State::PrefixEnd;
       else
         state_ = State::PrefixCount;
       break;
     case State::PrefixEnd:
-      offsets_[e_] = sum_;
+      offsets_[plan_experts_] = sum_;
       ++stats_.metadata_accesses;
-      if (sum_ != ids_.size())
+      if (sum_ != assignments_.size())
         throw std::logic_error("routing count conservation");
       pos_ = 0;
       state_ = State::AssignId;
       break;
     case State::AssignId:
-      current_expert_ = ids_[pos_];
+      current_expert_ = plan_expert(pos_);
       ++stats_.metadata_accesses;
       state_ = State::AssignCursor;
       break;
@@ -658,11 +683,60 @@ public:
       state_ = State::AssignWeight;
       break;
     case State::AssignWeight:
-      if (descriptor_.plan.weights.present())
-        read(descriptor_.plan.weights, pos_ / k_, pos_ % k_, State::WeightRead);
-      else {
-        weight_ = raw_[pos_];
+      if (pos_ % plan_k_ == k_) {
+        read(descriptor_.plan.shared_gate_logits, pos_ / plan_k_, e_, State::SharedExp);
+      } else if (descriptor_.plan.softmax_selected) {
+        if (pos_ % plan_k_ == 0) {
+          normalization_slot_ = 0;
+          vxm->route_weights(owner_).begin_softmax(raw_[plan_score_index()]);
+          ++stats_.metadata_accesses;
+          state_ = State::NormalizeExp;
+        } else {
+          state_ = State::NormalizeWeight;
+        }
+      } else if (descriptor_.plan.weights.present()) {
+        read(descriptor_.plan.weights, pos_ / plan_k_, pos_ % plan_k_, State::WeightRead);
+      } else {
+        weight_ = raw_[plan_score_index()];
         ++stats_.metadata_accesses;
+        state_ = State::AssignToken;
+      }
+      break;
+    case State::NormalizeExp:
+      vxm->route_weights(owner_).selected_exp(
+          raw_[pos_ / plan_k_ * k_ + normalization_slot_], normalization_slot_);
+      ++stats_.metadata_accesses;
+      state_ = State::NormalizeExpWait;
+      break;
+    case State::NormalizeExpWait:
+      if (vxm->route_weights(owner_).take_ready())
+        state_ = ++normalization_slot_ == k_ ? State::NormalizeReciprocal : State::NormalizeExp;
+      break;
+    case State::NormalizeReciprocal:
+      vxm->route_weights(owner_).selected_reciprocal();
+      state_ = State::NormalizeReciprocalWait;
+      break;
+    case State::NormalizeReciprocalWait:
+      if (vxm->route_weights(owner_).take_ready())
+        state_ = State::NormalizeWeight;
+      break;
+    case State::NormalizeWeight:
+      weight_ = vxm->route_weights(owner_).selected_weight(static_cast<unsigned>(pos_ % plan_k_));
+      state_ = State::AssignToken;
+      break;
+    case State::SharedExp:
+      vxm->route_weights(owner_).shared_exp(io_value_);
+      state_ = State::SharedExpWait;
+      break;
+    case State::SharedExpWait:
+      if (vxm->route_weights(owner_).take_ready()) {
+        vxm->route_weights(owner_).shared_reciprocal();
+        state_ = State::SharedWeightWait;
+      }
+      break;
+    case State::SharedWeightWait:
+      if (vxm->route_weights(owner_).take_ready()) {
+        weight_ = vxm->route_weights(owner_).shared_weight();
         state_ = State::AssignToken;
       }
       break;
@@ -671,12 +745,12 @@ public:
       state_ = State::AssignToken;
       break;
     case State::AssignToken:
-      assignments_[dest_].token = static_cast<std::uint32_t>(pos_ / k_);
+      assignments_[dest_].token = static_cast<std::uint32_t>(pos_ / plan_k_);
       ++stats_.metadata_accesses;
       state_ = State::AssignSlot;
       break;
     case State::AssignSlot:
-      assignments_[dest_].slot = static_cast<std::uint32_t>(pos_ % k_);
+      assignments_[dest_].slot = static_cast<std::uint32_t>(pos_ % plan_k_);
       ++stats_.metadata_accesses;
       state_ = State::AssignBits;
       break;
@@ -693,7 +767,7 @@ public:
     case State::AssignAdvance:
       cursors_[current_expert_] = static_cast<std::uint32_t>(dest_ + 1);
       ++stats_.metadata_accesses;
-      if (++pos_ == ids_.size()) {
+      if (++pos_ == assignments_.size()) {
         planned_ = true;
         state_ = State::Finish;
       } else
@@ -771,8 +845,11 @@ public:
         mems[h].release_routing_bank(s, b, owner_);
       banks_.clear();
       trace_.back().end_cycle = clock_;
-      if (instruction_.opcode == RoutingOpcode::Plan)
+      if (instruction_.opcode == RoutingOpcode::Plan) {
+        if (descriptor_.plan.extended())
+          vxm->release_control(owner_);
         ++plan_epoch_;
+      }
       completion_ = RoutingCompletion{generation_, instruction_.completion,
                                       instruction_.opcode, internal_task_id_};
       state_ = State::Idle;
@@ -818,6 +895,14 @@ private:
     AssignCursor,
     AssignWeight,
     WeightRead,
+    NormalizeExp,
+    NormalizeExpWait,
+    NormalizeReciprocal,
+    NormalizeReciprocalWait,
+    NormalizeWeight,
+    SharedExp,
+    SharedExpWait,
+    SharedWeightWait,
     AssignToken,
     AssignSlot,
     AssignBits,
@@ -848,6 +933,9 @@ private:
       RCU_STATE_NAME(PrefixCount) RCU_STATE_NAME(PrefixOffset) RCU_STATE_NAME(PrefixCursor)
       RCU_STATE_NAME(PrefixEnd) RCU_STATE_NAME(AssignId) RCU_STATE_NAME(AssignCursor)
       RCU_STATE_NAME(AssignWeight) RCU_STATE_NAME(WeightRead) RCU_STATE_NAME(AssignToken)
+      RCU_STATE_NAME(NormalizeExp) RCU_STATE_NAME(NormalizeExpWait)
+      RCU_STATE_NAME(NormalizeReciprocal) RCU_STATE_NAME(NormalizeReciprocalWait) RCU_STATE_NAME(NormalizeWeight)
+      RCU_STATE_NAME(SharedExp) RCU_STATE_NAME(SharedExpWait) RCU_STATE_NAME(SharedWeightWait)
       RCU_STATE_NAME(AssignSlot) RCU_STATE_NAME(AssignBits) RCU_STATE_NAME(AssignInverse)
       RCU_STATE_NAME(AssignAdvance) RCU_STATE_NAME(AddressExpert) RCU_STATE_NAME(AddressCount)
       RCU_STATE_NAME(AddressOffset) RCU_STATE_NAME(AddressRow) RCU_STATE_NAME(AddressGenerate)
@@ -865,6 +953,13 @@ private:
     RoutingPlane source, destination;
     std::size_t source_row, destination_row;
   };
+  std::size_t plan_score_index() const {
+    return pos_ / plan_k_ * k_ + pos_ % plan_k_;
+  }
+  std::uint32_t plan_expert(std::size_t position) const {
+    const auto slot = position % plan_k_;
+    return slot == k_ ? e_ : ids_[position / plan_k_ * k_ + slot];
+  }
   bool has_distinct_raw() const {
     return descriptor_.select.raw_scores.present() &&
            descriptor_.select.raw_scores != descriptor_.select.choice_scores;
@@ -1080,7 +1175,8 @@ private:
   std::uint64_t generation_{}, owner_{}, tag_{}, next_tag_{}, next_owner_{};
   std::optional<RoutingCompletion> completion_{};
   std::vector<std::tuple<std::size_t, std::size_t, std::size_t>> banks_{};
-  std::uint32_t context_{}, t_{}, e_{}, k_{};
+  std::uint32_t context_{}, t_{}, e_{}, k_{}, plan_experts_{}, plan_k_{};
+  unsigned normalization_slot_{};
   bool selected_{}, planned_{};
   bool plan_pinned_{};
   std::uint64_t plan_epoch_{}, internal_task_id_{};

@@ -12,6 +12,7 @@ class ExpertMacroExecutor final : public ExpertTaskConsumer {
 public:
   bool idle() const { return state_ == State::Idle && !done_; }
   const std::deque<ExpertMacroTaskTrace> &trace() const { return trace_; }
+  std::uint64_t gate_weight_hits() const { return gate_weight_hits_; }
   void reset() { *this = ExpertMacroExecutor{}; }
   void configure(const ExpertMacroTemplateDescriptor &t,
                  const RouteAddressDescriptor &a,
@@ -21,6 +22,20 @@ public:
     template_ = &t;
     address_ = &a;
     weights_ = w;
+    gate_weight_reuse_ = std::ranges::any_of(t.queues, [](const auto &q) {
+      return std::ranges::any_of(q.bindings, [](const auto &b) {
+        return b.parameter == MacroTaskParameter::GateLoadCount;
+      });
+    });
+    early_compute_queue_.reset();
+    if (t.gate_hit_cycle_advance) {
+      const auto compute = std::ranges::find_if(t.queues, [](const auto &q) {
+        return q.kind == static_cast<unsigned>(IcuMacroQueueKind::MxmCompute);
+      });
+      if (compute != t.queues.end())
+        early_compute_queue_ = std::size_t(compute - t.queues.begin());
+    }
+    gate_weight_owner_.reset();
   }
   bool accept_task(const ExpertTaskContext &task) override {
     if (!idle())
@@ -96,10 +111,25 @@ public:
         m.begin_expert_output(task_.identity.generation,
                               task_.identity.task_id);
       queue_index_ = 0;
+      // The MoE template reserves one MXM buffer for Gate across tasks.
+      // Only a completed task from this plan can establish its contents.
+      gate_weight_hit_ = gate_weight_reuse_ && gate_weight_owner_ &&
+          gate_weight_owner_->identity.generation == task_.identity.generation &&
+          gate_weight_owner_->identity.plan_epoch == task_.identity.plan_epoch &&
+          gate_weight_owner_->expert_id == task_.expert_id;
+      gate_weight_hits_ += gate_weight_hit_;
       state_ = State::Bind;
       return;
     }
     if (state_ == State::Bind) {
+      // The already-bound Compute decoder can fetch while the controller
+      // binds the last three queues. Keep one bind per physical cycle.
+      constexpr std::size_t compute_decode_overlap = 3;
+      if (early_compute_queue_ && *early_compute_queue_ < queue_index_ &&
+          template_->queues.size() - queue_index_ <= compute_decode_overlap) {
+        const auto &compute = template_->queues[*early_compute_queue_];
+        icu.mxm_compute_iq(compute.index).prepare_task_cycle();
+      }
       const auto &q = template_->queues.at(queue_index_++);
       const auto p = parameters(q);
       icu.visit_program_queue(
@@ -118,10 +148,11 @@ public:
                                   ready &= queue.task_ready();
                                 });
       if (ready) {
+        const auto advance = gate_weight_hit_ ? template_->gate_hit_cycle_advance : 0;
         for (const auto &q : template_->queues)
           icu.visit_program_queue(static_cast<IcuMacroQueueKind>(q.kind),
                                   q.index, false,
-                                  [](auto &queue) { queue.launch_task(); });
+                                  [&](auto &queue) { queue.launch_task(advance); });
         if (trace_.size() == 256)
           trace_.pop_front();
         trace_.push_back({task_, cycle + 1, 0, 0, weight_buffer_});
@@ -155,6 +186,8 @@ public:
                                 [](auto &queue) { queue.finish_task(); });
       trace_.back().finish_cycle = cycle;
       trace_.back().output_segments = committed;
+      if (gate_weight_reuse_)
+        gate_weight_owner_ = task_;
       done_ = task_.identity;
       state_ = State::Done;
     }
@@ -173,6 +206,8 @@ private:
     p.values[4] = template_->workspace_base;
     p.values[5] = template_->scale_bf16;
     p.values[6] = task_.assignment_base;
+    p.values[static_cast<unsigned>(MacroTaskParameter::GateLoadCount)] =
+        gate_weight_hit_ ? 0 : kMoeGateWeightLoadCount;
     for (const auto &binding : q.bindings) {
       if (binding.parameter != MacroTaskParameter::InputBase &&
           binding.parameter != MacroTaskParameter::OutputBase &&
@@ -226,6 +261,10 @@ private:
   std::optional<ExpertTaskIdentity> done_;
   std::deque<ExpertMacroTaskTrace> trace_;
   bool input_{}, weight_ready_{};
+  bool gate_weight_reuse_{}, gate_weight_hit_{};
+  std::optional<std::size_t> early_compute_queue_;
+  std::optional<ExpertTaskContext> gate_weight_owner_;
+  std::uint64_t gate_weight_hits_{};
   std::size_t queue_index_{}, weight_buffer_{};
 };
 } // namespace ftlpu

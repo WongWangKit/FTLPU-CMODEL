@@ -3,6 +3,7 @@
 #include "ftlpu/core/instruction_codec.hpp"
 #include "ftlpu/icu/macro_task_binding.hpp"
 #include "ftlpu/routing/expert_weight_descriptor.hpp"
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdint>
@@ -15,7 +16,7 @@ namespace ftlpu {
 // Version 1 is a finite, single-context, area-oriented device implementation.
 struct RoutingConfig {
   bool enabled{hw::config::kRoutingEnabled};
-  static constexpr std::uint32_t isa_version = 7;
+  static constexpr std::uint32_t isa_version = 9;
   static constexpr std::size_t max_experts = 1024, max_k = 16, max_tokens = 128;
   static constexpr std::size_t block_rows = 32, address_depth = 8;
   static constexpr std::size_t imem_depth = 256, iq_depth = 4,
@@ -106,6 +107,13 @@ struct RoutePlanDescriptor {
   std::uint32_t context_id{1};
   // Absent means selected raw scores are already the final routing weights.
   RoutingTensorView weights{};
+  // For softmax followed by selected-probability renormalization, the
+  // compiler can select on logits and normalize only the selected logits.
+  bool softmax_selected{};
+  // An always-active expert is appended after the routed experts. Its gate
+  // logit occupies column E of this FP32 view.
+  RoutingTensorView shared_gate_logits{};
+  bool extended() const { return softmax_selected || shared_gate_logits.present(); }
 };
 struct RouteAddressDescriptor {
   std::uint32_t context_id{1}, active_index{}, row_offset{}, max_rows{32};
@@ -144,6 +152,8 @@ struct ExpertMacroTemplateDescriptor {
   RoutingTensorView output;
   std::uint32_t workspace_base{}, scale_bf16{0x3f80};
   std::vector<ExpertTemplateQueue> queues;
+  std::uint32_t vxm_output_east_mask{};
+  std::uint32_t gate_hit_cycle_advance{};
 };
 struct RouteCombineDescriptor {
   std::uint32_t context_id{1};
@@ -165,6 +175,16 @@ inline void validate_route_combine(const RouteCombineDescriptor &d,
 inline void
 validate_expert_macro_template(const ExpertMacroTemplateDescriptor &t,
                                std::size_t depth = hw::kSramDepthRows) {
+  if (t.vxm_output_east_mask & ~0xffu)
+    throw std::invalid_argument("invalid expert output mux mask");
+  if (t.gate_hit_cycle_advance &&
+      (t.gate_hit_cycle_advance > 32 ||
+       !std::ranges::any_of(t.queues, [](const auto &q) {
+         return q.kind == 1 && std::ranges::any_of(q.bindings, [](const auto &b) {
+           return b.parameter == MacroTaskParameter::GateLoadCount;
+         });
+       })))
+    throw std::invalid_argument("expert launch advance requires conditional Gate weights");
   t.output.validate(depth);
   if (t.output.columns % hw::kPhysicalVectorBytes || t.queues.empty() ||
       t.queues.size() > 64)
@@ -258,12 +278,20 @@ validate_routing_descriptor_references(const std::vector<RoutingDescriptor> &ds,
                                        std::uint32_t capability) {
   if (capability > RoutingConfig::isa_version || (!capability && !ds.empty()))
     throw std::invalid_argument("unsupported routing capability");
+  const auto has_shared = [&](std::uint32_t context) {
+    return std::ranges::any_of(ds, [&](const auto &d) {
+      return d.opcode == RoutingOpcode::Plan && d.plan.context_id == context &&
+             d.plan.shared_gate_logits.present();
+    });
+  };
   bool table_seen = false, template_seen = false;
   for (const auto &d : ds) {
     if (d.opcode == RoutingOpcode::SelectVxm && capability < 6)
       throw std::invalid_argument("VXM SELECT requires Routing v6");
     if (d.opcode == RoutingOpcode::ImportTopK && capability < 7)
       throw std::invalid_argument("TOPK import requires Routing v7");
+    if (d.opcode == RoutingOpcode::Plan && d.plan.extended() && capability < 8)
+      throw std::invalid_argument("route weight transform requires Routing v8");
     if (d.opcode == RoutingOpcode::Combine) {
       if (capability < 5) throw std::invalid_argument("combine requires Routing v5");
       validate_route_combine(d.combine);
@@ -271,7 +299,7 @@ validate_routing_descriptor_references(const std::vector<RoutingDescriptor> &ds,
       for (const auto &x:ds) {
         if (x.opcode==RoutingOpcode::ExpertTemplate && x.expert_template.output==d.combine.source) template_match=true;
         if (is_routing_select(x.opcode) && x.select.context_id==d.combine.context_id) {
-          if (d.combine.source.rows != std::uint64_t(x.select.tokens)*x.select.k || d.combine.destination.rows!=x.select.tokens)
+          if (d.combine.source.rows != std::uint64_t(x.select.tokens) * (x.select.k + has_shared(x.select.context_id)) || d.combine.destination.rows!=x.select.tokens)
             throw std::invalid_argument("combine shape must match current routing plan");
           select_match=true;
         }
@@ -283,6 +311,10 @@ validate_routing_descriptor_references(const std::vector<RoutingDescriptor> &ds,
         throw std::invalid_argument(
             "expert template requires Routing v4; only one template supported");
       template_seen = true;
+      if (d.expert_template.vxm_output_east_mask && capability < 8)
+        throw std::invalid_argument("expert output mux requires Routing v8");
+      if (d.expert_template.gate_hit_cycle_advance && capability < 9)
+        throw std::invalid_argument("expert launch advance requires Routing v9");
       validate_expert_macro_template(d.expert_template);
     }
     if (d.opcode == RoutingOpcode::WeightTable) {
@@ -315,7 +347,7 @@ validate_routing_descriptor_references(const std::vector<RoutingDescriptor> &ds,
         for (const auto &s : ds)
           if (is_routing_select(s.opcode) &&
               s.select.context_id == d.dispatch.context_id &&
-              s.select.experts != table->experts)
+              s.select.experts + has_shared(s.select.context_id) != table->experts)
             throw std::invalid_argument("weight table expert count mismatch");
         for (std::size_t i = 0; i < table->segments; ++i) {
           const auto s = expert_weight_segment(*table, i);
@@ -452,7 +484,16 @@ inline std::vector<std::uint32_t>
 encode_routing_descriptors(const std::vector<RoutingDescriptor> &ds) {
   if (ds.size() > RoutingConfig::descriptor_depth)
     throw std::invalid_argument("routing descriptor capacity");
-  std::vector<std::uint32_t> w{0x31554352u,
+  const bool retimed = std::ranges::any_of(ds, [](const auto &d) {
+    return d.opcode == RoutingOpcode::ExpertTemplate &&
+           d.expert_template.gate_hit_cycle_advance;
+  });
+  const bool extended = retimed || std::ranges::any_of(ds, [](const auto &d) {
+    return (d.opcode == RoutingOpcode::Plan && d.plan.extended()) ||
+           (d.opcode == RoutingOpcode::ExpertTemplate &&
+            d.expert_template.vxm_output_east_mask);
+  });
+  std::vector<std::uint32_t> w{retimed ? 0x33554352u : extended ? 0x32554352u : 0x31554352u,
                                static_cast<std::uint32_t>(ds.size())};
   for (const auto &d : ds) {
     w.push_back(static_cast<std::uint32_t>(d.opcode));
@@ -478,6 +519,10 @@ encode_routing_descriptors(const std::vector<RoutingDescriptor> &ds) {
     case RoutingOpcode::Plan:
       w.push_back(d.plan.context_id);
       routing_pack_view(w, d.plan.weights);
+      if (extended) {
+        w.push_back(d.plan.softmax_selected ? 1 : 0);
+        routing_pack_view(w, d.plan.shared_gate_logits);
+      }
       break;
     case RoutingOpcode::Address:
       w.insert(w.end(), {d.address.context_id, d.address.active_index,
@@ -504,6 +549,8 @@ encode_routing_descriptors(const std::vector<RoutingDescriptor> &ds) {
     case RoutingOpcode::ExpertTemplate: {
       const auto &t = d.expert_template;
       routing_pack_view(w, t.output);
+      if (extended) w.push_back(t.vxm_output_east_mask);
+      if (retimed) w.push_back(t.gate_hit_cycle_advance);
       w.insert(w.end(), {t.workspace_base, t.scale_bf16,
                          static_cast<std::uint32_t>(t.queues.size())});
       for (const auto &q : t.queues) {
@@ -533,7 +580,10 @@ decode_routing_descriptors(const std::vector<std::uint32_t> &w) {
       throw std::invalid_argument("truncated routing descriptors");
     return w[at++];
   };
-  if (get() != 0x31554352u)
+  const auto magic = get();
+  const bool retimed = magic == 0x33554352u;
+  const bool extended = retimed || magic == 0x32554352u;
+  if (magic != 0x31554352u && !extended)
     throw std::invalid_argument("routing descriptor magic");
   auto n = get();
   if (n > RoutingConfig::descriptor_depth)
@@ -584,6 +634,13 @@ decode_routing_descriptors(const std::vector<std::uint32_t> &w) {
     case RoutingOpcode::Plan:
       d.plan.context_id = get();
       d.plan.weights = view();
+      if (extended) {
+        const auto mode = get();
+        if (mode > 1)
+          throw std::invalid_argument("invalid route weight transform");
+        d.plan.softmax_selected = mode != 0;
+        d.plan.shared_gate_logits = view();
+      }
       break;
     case RoutingOpcode::Address:
       d.address.context_id = get();
@@ -616,6 +673,8 @@ decode_routing_descriptors(const std::vector<std::uint32_t> &w) {
     case RoutingOpcode::ExpertTemplate: {
       auto &t = d.expert_template;
       t.output = view();
+      if (extended) t.vxm_output_east_mask = get();
+      if (retimed) t.gate_hit_cycle_advance = get();
       t.workspace_base = get();
       t.scale_bf16 = get();
       const auto n = get();

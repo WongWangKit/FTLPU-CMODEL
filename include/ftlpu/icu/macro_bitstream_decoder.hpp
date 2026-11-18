@@ -1612,6 +1612,16 @@ private:
             return;
         }
         if(ddb_size_==DdbDepth)return;
+        if (d.descriptor_template.schedule.inner_count == 0 &&
+            std::ranges::any_of(task_bindings_, [&](const auto& b) {
+                return b.record == d.first_record_index &&
+                       b.parameter == MacroTaskParameter::GateLoadCount;
+            })) {
+            // Decode this record normally to preserve the packed Delta
+            // history, then omit its physical weight issue.
+            binding_descriptor_.reset();
+            return;
+        }
         auto instruction=d.descriptor_template.instruction;
         set_operand(instruction,static_cast<std::size_t>(d.next_operand));
         auto schedule=d.descriptor_template.schedule;schedule.start_cycle=d.next_start_cycle;

@@ -1018,8 +1018,22 @@ public:
         if(raw_macro_mode_)return macro_ready_impl();
         return configured_ && pending_fetches_.empty() && (fetch_pc_==program_end_pc_ || iq_.size()==IqDepth);
     }
-    void launch_task() {
+    void launch_task(std::size_t cycle_advance = 0) {
         if(!task_ready())throw StaticScheduleError("launching unprimed task queue");
+        if (cycle_advance && !raw_macro_mode_) {
+            if constexpr (QueueRole == IcuQueueRole::Vxm) {
+                if (iq_.empty() ||
+                    detail::raw_icu_opcode(iq_.front()) != isa::IcuCommandOpcode::Nop)
+                    throw StaticScheduleError("expert launch advance requires an initial VXM NOP");
+                auto delay = decode_control_word(iq_.front());
+                if (delay.count <= cycle_advance)
+                    throw StaticScheduleError("expert launch advance exceeds initial VXM NOP");
+                iq_.front().lanes[0] = isa::encode_icu_nop(delay.count - cycle_advance);
+            } else {
+                throw StaticScheduleError("expert launch advance requires packed Macro or native VXM");
+            }
+        }
+        cycle_ = cycle_advance;
         task_preparing_=false;task_running_=true;
     }
     void finish_task() {

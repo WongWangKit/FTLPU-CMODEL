@@ -13,8 +13,11 @@ enum class MacroTaskParameter : std::uint32_t {
   WorkspaceBase,
   ScaleBits,
   AssignmentBase,
-  Zero
+  Zero,
+  GateLoadCount
 };
+inline constexpr std::uint32_t kMoeGateWeightLoadCount = 4;
+
 enum class MacroBindingTarget : std::uint32_t {
   InnerCount,
   OuterCount,
@@ -31,7 +34,7 @@ struct MacroTaskBinding {
   bool relative{};
 };
 struct MacroTaskParameters {
-  std::array<std::uint32_t, 8> values{};
+  std::array<std::uint32_t, 9> values{};
   std::uint64_t generation{}, task_id{};
   bool alternate_weight_bank{};
 };
@@ -41,7 +44,10 @@ validate_macro_task_bindings(const std::vector<MacroTaskBinding> &bindings) {
     throw std::invalid_argument("macro task binding capacity");
   for (const auto &b : bindings)
     if (static_cast<unsigned>(b.target) > 4 ||
-        static_cast<unsigned>(b.parameter) > 7 || b.multiplier > 65536)
+        static_cast<unsigned>(b.parameter) > 8 || b.multiplier > 65536 ||
+        (b.parameter == MacroTaskParameter::GateLoadCount &&
+         (b.target != MacroBindingTarget::InnerCount || b.multiplier != 1 ||
+          b.addend || b.relative)))
       throw std::invalid_argument("invalid macro task binding");
   for (std::size_t i = 0; i < bindings.size(); ++i) {
     const auto &b = bindings[i];
@@ -49,7 +55,8 @@ validate_macro_task_bindings(const std::vector<MacroTaskBinding> &bindings) {
          b.target == MacroBindingTarget::OuterCount ||
          b.target == MacroBindingTarget::NativeRepeatCount) &&
         b.parameter != MacroTaskParameter::Rows &&
-        b.parameter != MacroTaskParameter::Zero)
+        b.parameter != MacroTaskParameter::Zero &&
+        b.parameter != MacroTaskParameter::GateLoadCount)
       throw std::invalid_argument(
           "task counts must depend on valid_rows or a constant");
     for (std::size_t j = 0; j < i; ++j)

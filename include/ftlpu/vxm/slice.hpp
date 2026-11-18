@@ -4,6 +4,7 @@
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/vxm/input_buffer.hpp"
 #include "ftlpu/vxm/route_topk.hpp"
+#include "ftlpu/vxm/route_weights.hpp"
 #include "ftlpu/vxm/superlane.hpp"
 
 #include <array>
@@ -37,6 +38,7 @@ public:
     {
         control_owner_=0;
         topk_ = {};
+        route_weights_ = {};
         for (auto& queue : instruction_queues_) {
             queue.clear();
         }
@@ -70,7 +72,7 @@ public:
     // captured input bundle, including data that has not launched yet.
     bool idle() const
     {
-        if (topk_.active()) return false;
+        if (topk_.active() || !route_weights_.idle()) return false;
         for (const auto& queue : instruction_queues_)
             if (!queue.empty()) return false;
         for (const auto& rows : instruction_rows_)
@@ -96,6 +98,13 @@ public:
     void release_control(std::uint64_t owner) {
         if(owner!=control_owner_ || !idle())throw std::logic_error("release active VXM command port");
         control_owner_=0;
+    }
+
+    VxmRouteWeightArithmetic& route_weights(std::uint64_t owner)
+    {
+        if (!owner || owner != control_owner_)
+            throw std::logic_error("VXM route weights require control ownership");
+        return route_weights_;
     }
 
     bool topk_available() const { return !control_owner_ && idle(); }
@@ -253,6 +262,8 @@ public:
             ++cycle_;
             return;
         }
+        if (!route_weights_.idle())
+            route_weights_.tick(superlanes_[0].special_alu());
         execute_instructions(os, log_tile);
         tick_superlanes(os, log_tile);
         advance_instructions();
@@ -623,6 +634,7 @@ private:
     std::array<OutputSlot, kTileCount> output_slots_{};
     std::array<std::vector<Superlane::Output>, kTileCount> output_slots_multi_{};
     VxmRouteTopK topk_{};
+    VxmRouteWeightArithmetic route_weights_{};
     std::array<std::optional<RequiredStreams>, kTileCount> required_streams_{};
     std::array<Hemisphere, VxmLane::kStreamGroupCount>
         input_group_sources_{};

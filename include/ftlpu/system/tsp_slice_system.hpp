@@ -557,7 +557,7 @@ private:
                 vxm_.topk().wait_submission();
             }
         }
-        routing_.tick(mems_,streams_);
+        routing_.tick(mems_,streams_,&vxm_);
         if(auto completed=routing_.take_completion()) {
             if(completed->task_id)expert_tasks_.input_committed(*completed);
             else icu_.routing_completion(completed->generation,completed->instance);
