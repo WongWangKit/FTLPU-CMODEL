@@ -30,6 +30,7 @@ public:
     {
         program_loader_.set_drain_checker([this]{return chip_.can_load_program();});
         program_loader_.set_program_reset([this]{chip_.reset_program();});
+        program_loader_.set_reload_drain_checker([this]{return chip_.program_resources_drained();});
         for (std::size_t index = 0; index < hw::kHemispheres; ++index) {
             const auto hemisphere = static_cast<Hemisphere>(index);
             chip_.attach_c2c_dma(hemisphere, dmas_[index]);

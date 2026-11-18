@@ -116,6 +116,8 @@ public:
     bool started() const noexcept { return stats_.program_start.has_value(); }
     bool kernel_done() const noexcept {return stats_.kernel_done_cycle.has_value();}
     void set_drain_checker(std::function<bool()> checker) {drain_checker_=std::move(checker);}
+    void set_reload_drain_checker(std::function<bool()> checker) {reload_drain_checker_=std::move(checker);}
+    void set_continuation_pending(bool pending) noexcept {continuation_pending_=pending;}
     bool can_load_program() const {
         return !busy() && (!started() || kernel_done()) && dma_.drained()
             && commits_.empty() && reassembly_.empty()
@@ -123,7 +125,7 @@ public:
             && icu_.program_queues_done() && ddr_.drained() && (!drain_checker_ || drain_checker_());
     }
     void observe_completion(std::size_t edge) {
-        if(!started() || kernel_done()) return;
+        if(!started() || kernel_done() || continuation_pending_) return;
         if(icu_.program_queues_done()) state_=State::Draining;
         if(state_==State::Draining && dma_.drained() && ddr_.drained()
             && (!drain_checker_ || drain_checker_())) {
@@ -134,6 +136,7 @@ public:
     void begin_direct_program(std::size_t cycle,std::uint64_t generation=0) {
         last_generation_=std::max(last_generation_,generation);
         stats_={};stats_.program_start=cycle;state_=State::Started;
+        continuation_pending_=false;
         images_.clear();route_.clear();reassembly_.clear();commits_.clear();
         icu_.set_program_loading(false);icu_.set_program_issue_enabled(true);
     }
@@ -148,12 +151,28 @@ public:
         last_generation_=0;
         images_.clear(); route_.clear(); reassembly_.clear(); commits_.clear();
         start_requested_ = dependencies_ready_ = false;
+        continuation_pending_=false;
     }
 
     // Validation precedes any mutation, including clearing the old program.
-    void submit(std::vector<ProgramImage> images, std::size_t physical_cycle)
+    void submit(std::vector<ProgramImage> images, std::size_t physical_cycle, bool reload = false)
     {
-        if (!can_load_program()) throw std::logic_error("previous program has not completed and drained");
+        if (reload) {
+            if(images.empty()) throw std::invalid_argument("i-MEM reload requires explicit target queues");
+            if (busy() || !started() || kernel_done() || !dma_.drained() || !ddr_.drained()
+                || !commits_.empty() || !reassembly_.empty()
+                || std::any_of(route_.begin(),route_.end(),[](const auto& p){return p.has_value();})
+                || !reload_drain_checker_ || !reload_drain_checker_())
+                throw std::logic_error("i-MEM reload requires drained execution and transport resources");
+            for (const auto& image : images) {
+                if (image.storage != ProgramStorage::Imem || static_cast<unsigned>(image.kind)>6
+                    || image.generation != icu_.program_generation())
+                    throw std::invalid_argument("i-MEM reload cannot replace transport or synchronization state");
+                icu_.visit_program_queue(image.kind,image.queue_index,false,[](auto& queue) {
+                    if (!queue.done()) throw std::logic_error("i-MEM reload crosses an active ICU instruction");
+                });
+            }
+        } else if (!can_load_program()) throw std::logic_error("previous program has not completed and drained");
         const auto group=[](ProgramStorage store) {
             return store==ProgramStorage::Imem?0:store==ProgramStorage::TransportImem?1:
                 (store==ProgramStorage::Qctl || store==ProgramStorage::Barr)?2:3;
@@ -189,7 +208,7 @@ public:
             if(last_generation()==UINT64_MAX) throw std::overflow_error("program generation exhausted");
             generation=last_generation()+1;
         }
-        if(generation && *generation<=last_generation())
+        if(!reload && generation && *generation<=last_generation())
             throw std::invalid_argument("program generation must increase across task switches");
         if((qctl && !queueEvents) || (barr && (!barrierEvents || !barrierRam)))
             throw std::invalid_argument("missing committed event or barrier configuration");
@@ -204,7 +223,17 @@ public:
         while (dma_.take_completion_notification()) {}
         while (dma_.take_completion_sync_tag()) {}
         dma_.clear_completion_history();
-        if(program_reset_) program_reset_(); else icu_.reset_program();
+        if (reload) {
+            for (const auto& image : images)
+                icu_.visit_program_queue(image.kind,image.queue_index,false,[](auto& queue){queue.reset();});
+            // Freeze all dispatch and the common logical clock. SRAM, weight
+            // buffers, pending event latches and other queue PCs survive.
+            icu_.set_program_loading(true);
+            icu_.set_program_issue_enabled(false);
+        } else {
+            continuation_pending_=false;
+            if(program_reset_) program_reset_(); else icu_.reset_program();
+        }
         if(generation) {last_generation_=*generation;icu_.set_program_generation(*generation);}
         images_ = std::move(images);
         stats_ = {};
@@ -387,6 +416,7 @@ private:
     C2cDmaEngine dma_;
     Ddr4Model& ddr_;
     std::function<bool()> drain_checker_{};
+    std::function<bool()> reload_drain_checker_{};
     std::function<void()> program_reset_{};
     InstructionControlUnit& icu_;
     ProgramLoadConfig config_;
@@ -399,6 +429,7 @@ private:
     std::size_t current_{0}, routed_bytes_{0}, vector_offset_{0}, accepted_words_{0}, next_write_cycle_{0};
     std::uint64_t last_generation_{0};
     bool start_requested_{false}, dependencies_ready_{false};
+    bool continuation_pending_{false};
 };
 
 } // namespace ftlpu
