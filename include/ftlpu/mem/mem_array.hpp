@@ -258,16 +258,6 @@ public:
         return last_transport_commit_segments_;
     }
 
-    // Current RTL ties execution_issue_ready high for both native and legacy
-    // MEM execution paths.  Keeping this as an explicit sink query prevents
-    // the ICU Scheduler adapter from inventing an implicit ready value.
-    bool mem_issue_ready(std::size_t mem_slice, std::size_t bank) const
-    {
-        check_mem_slice(mem_slice);
-        check_bank(bank);
-        return true;
-    }
-
     void enqueue_instruction(std::size_t mem_slice, MemInstruction instruction)
     {
         enqueue_instruction(mem_slice, 0, std::move(instruction));

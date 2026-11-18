@@ -29,87 +29,44 @@ std::size_t prime(Queue& queue)
 }
 
 const std::vector<ftlpu::IcuRawImemWord96> kMemImage{
-    {{{0x00000025u, 0x00000000u, 0x00000000u}}},
+    {{{0x00000027u, 0x00000000u, 0x00000000u}}},
     {{{0x02000021u, 0x00000180u, 0x00303200u}}},
     {{{0x00000400u, 0x00000000u, 0x00000000u}}},
 };
 
 const std::vector<ftlpu::IcuRawImemWord128> kMxmLoadImage{
-    {{{0x00000015u, 0x00000000u, 0x00000000u, 0x00000000u}}},
+    {{{0x00000017u, 0x00000000u, 0x00000000u, 0x00000000u}}},
     {{{0x00000028u, 0x04000008u, 0x00000000u, 0x00000000u}}},
 };
 
 const std::vector<ftlpu::IcuRawImemWord128> kMxmComputeImage{
-    {{{0x00000015u, 0x00000000u, 0x00000000u, 0x00000000u}}},
+    {{{0x00000017u, 0x00000000u, 0x00000000u, 0x00000000u}}},
     {{{0x00000030u, 0x00040320u, 0x40004000u, 0x00000060u}}},
 };
 
 const std::vector<ftlpu::IcuRawImemWord128> kMxmDequantImage{
-    {{{0x00000015u, 0x00000000u, 0x00000000u, 0x00000000u}}},
+    {{{0x00000017u, 0x00000000u, 0x00000000u, 0x00000000u}}},
     {{{0x00000010u, 0x0007f000u, 0x00000000u, 0x00000000u}}},
 };
 
 const std::vector<ftlpu::IcuRawImemWord96> kMemExtendedImage{
-    {{{0x00000015u, 0x00000000u, 0x00000000u}}},
+    {{{0x00000017u, 0x00000000u, 0x00000000u}}},
     {{{0x000000a0u, 0x00627ff8u, 0x40041ffeu}}},
     {{{0x000c0000u, 0xfff80000u, 0x000bffffu}}},
     {{{0x38800000u, 0x01000001u, 0x00040000u}}},
 };
 
 const std::vector<ftlpu::IcuRawImemWord96> kMemCompactEscapeImage{
-    {{{0x00000025u, 0x00000000u, 0x00000000u}}},
+    {{{0x00000027u, 0x00000000u, 0x00000000u}}},
     {{{0x00000008u, 0x00030050u, 0x0011f020u}}},
     {{{0x00000100u, 0x00000000u, 0x00000000u}}},
 };
 
 const std::vector<ftlpu::IcuRawImemWord96> kMemWideEscapeImage{
-    {{{0x00000025u, 0x00000000u, 0x00000000u}}},
+    {{{0x00000027u, 0x00000000u, 0x00000000u}}},
     {{{0x00000008u, 0x00030050u, 0x2cfff020u}}},
     {{{0x00040131u, 0x00000000u, 0x00000000u}}},
 };
-
-std::vector<ftlpu::IcuRawImemWord96> make_mem_repeat_image()
-{
-    // Test-side assembler for one compact MEM Macro:
-    // Read addresses 100, 101, 102, 103 at cycles 0, 1, 2, 3.
-    std::vector<ftlpu::IcuRawImemWord96> result(1);
-    result[0].lanes[0] = 5u | (1u << 4); // MacroPacked v1, one descriptor; bit 1 is reserved.
-    std::size_t offset = 96;
-    const auto bits = [&](std::uint64_t value, unsigned width) {
-        for (unsigned bit = 0; bit < width; ++bit, ++offset) {
-            if (result.size() <= offset / 96) result.emplace_back();
-            result[offset / 96].lanes[(offset % 96) / 32]
-                |= std::uint32_t((value >> bit) & 1u) << (offset % 32);
-        }
-    };
-    bits(0, 3);   // No delta dictionary.
-    bits(0, 32);  // Initial absolute start cycle.
-    bits(100, 13);// Initial MEM address operand.
-    bits(0, 1);   // One-template run.
-    bits(0, 1);   // Compact template.
-    bits(1, 2);   // Inner1D schedule.
-    bits(0, 1);   // Read, not Write.
-    bits(0, 6);   // East stream 0.
-    bits(0, 1);   // Preserve is irrelevant for Read.
-    bits(3, 11);  // inner_count = 4.
-    bits(0, 8);   // inner_interval = 1.
-    bits(1, 10);  // address stride = 1.
-    return result;
-}
-
-void assign_mem_stream_bits(std::vector<ftlpu::IcuRawImemWord96>& image,
-    std::size_t offset, std::uint64_t value, unsigned width)
-{
-    for (unsigned bit = 0; bit < width; ++bit) {
-        const auto position = offset + bit;
-        const auto mask = std::uint32_t{1} << (position % 32);
-        auto& lane = image[position / 96].lanes[(position % 96) / 32];
-        if (((value >> bit) & 1u) != 0)
-            lane |= mask;
-        else
-            lane &= ~mask;
-    }
-}
 
 std::vector<ftlpu::DecodedIcuMacroContext<ftlpu::MemInstruction>>
 decode_mem_image(const std::vector<ftlpu::IcuRawImemWord96>& image)
@@ -154,75 +111,11 @@ try {
         zeroStartImage[offset / 96].lanes[(offset % 96) / 32]
             &= ~(std::uint32_t{1} << (offset % 32));
     }
-    InstructionControlUnit::MemIcu zeroStart;
+    DistributedIcuQueue<MemInstruction, 96, 16, 4> zeroStart;
     zeroStart.load_raw_macro(IcuMacroQueueKind::Mem, zeroStartImage);
     prime(zeroStart);
     require(zeroStart.tick().has_value(),
         "cold-start priming did not make cycle-zero Macro issue visible");
-
-    InstructionControlUnit::MemIcu consecutiveMem;
-    consecutiveMem.load_raw_macro(
-        IcuMacroQueueKind::Mem, make_mem_repeat_image());
-    prime(consecutiveMem);
-    require(consecutiveMem.issued_count() == 0
-            && consecutiveMem.timed_issue_writes() == 0
-            && consecutiveMem.timed_issue_reads() == 0,
-        "MEM PRIME executed or pre-generated an FU instruction");
-    for (std::size_t cycle = 0; cycle < 4; ++cycle) {
-        const auto instruction = consecutiveMem.tick();
-        require(instruction.has_value()
-                && instruction->opcode == MemOpcode::Read
-                && instruction->address == 100 + cycle,
-            "direct MEM Macro issue missed a consecutive cycle");
-    }
-    require(!consecutiveMem.tick().has_value()
-            && consecutiveMem.issued_count() == 4
-            && consecutiveMem.timed_issue_occupancy() == 0
-            && consecutiveMem.peak_timed_issue_occupancy() == 0,
-        "direct MEM Macro issue did not retire exactly four operations");
-
-    InstructionControlUnit::MemIcu canonicalLoad;
-    const auto repeatImage = make_mem_repeat_image();
-    for (std::size_t address = 0; address < repeatImage.size(); ++address) {
-        std::array<std::uint32_t,4> loadData{};
-        std::copy(repeatImage[address].lanes.begin(),
-            repeatImage[address].lanes.end(),loadData.begin());
-        canonicalLoad.load_mem_program_word(address,loadData,0x7,
-            address+1==repeatImage.size());
-        const auto& load = canonicalLoad.mem_local_imem_load_port_signals();
-        require(load.load_valid_i && load.load_ready_o && load.load_fire
-                && load.load_imem_address_i==address
-                && load.load_strb_i==0x7,
-            "MEM Program load adapter lost canonical load pins");
-    }
-    canonicalLoad.prime_mem_program(
-        IcuMacroQueueKind::Mem,repeatImage.size());
-    require(canonicalLoad.mem_local_imem_load_port_signals().prime_fire,
-        "MEM Program PRIME did not fire through the canonical adapter");
-    prime(canonicalLoad);
-    const auto canonicalIssue = canonicalLoad.dispatch_mem_issue(true);
-    const auto& issuePins = canonicalLoad.mem_issue_port_signals();
-    require(canonicalIssue.has_value() && issuePins.mem_issue_valid_o
-            && issuePins.mem_issue_ready_i && issuePins.mem_issue_fire
-            && issuePins.mem_issue_instruction_o.has_value()
-            && issuePins.mem_issue_cycle_o==0 && !issuePins.fault_o,
-        "direct MEM Scheduler issue pins do not describe the accepted issue");
-
-    InstructionControlUnit::MemIcu backpressured;
-    backpressured.load_raw_macro(
-        IcuMacroQueueKind::Mem,make_mem_repeat_image());
-    prime(backpressured);
-    auto sawBackpressureFault=false;
-    try { static_cast<void>(backpressured.dispatch_mem_issue(false)); }
-    catch (const StaticScheduleError&) { sawBackpressureFault=true; }
-    const auto& blockedPins=backpressured.mem_issue_port_signals();
-    require(sawBackpressureFault && blockedPins.mem_issue_valid_o
-            && !blockedPins.mem_issue_ready_i && !blockedPins.mem_issue_fire
-            && blockedPins.fault_o
-            && blockedPins.fault_code_o==static_cast<std::uint8_t>(
-                MemMacroSchedulerFault::IssueBackpressure)
-            && backpressured.issued_count()==0,
-        "due-cycle MEM backpressure was retried or lost its terminal fault");
 
     const auto memDdbLayout =
         IcuMacroV1Decoder<MemInstruction, 96>(
@@ -236,8 +129,14 @@ try {
     const auto dequantDdbLayout =
         IcuMacroV1Decoder<MxmDequantInstruction, 128>(
             IcuMacroQueueKind::MxmDequant, kMxmDequantImage).ddb_layout();
-    require(memDdbLayout.entry_bits == 0,
-        "RTL-equivalent MEM decoder still exposes the retired generic DDB");
+    require(memDdbLayout.instruction_bits == 32
+            && memDdbLayout.schedule_bits == 192
+            && memDdbLayout.next_start_cycle_bits == 32
+            && memDdbLayout.next_operand_bits == 13
+            && memDdbLayout.expansion_state_bits == 6
+            && memDdbLayout.delta_bits == 448
+            && memDdbLayout.entry_bits == 723,
+        "MEM DDB physical layout has the wrong bit width");
     require(loadDdbLayout.entry_bits == 710
             && computeDdbLayout.entry_bits == 741
             && dequantDdbLayout.entry_bits == 630,
@@ -254,64 +153,9 @@ try {
         IcuMacroQueueKind::Mem, kMemImage);
     NonPipelinedFetchDecoder nonPipelinedFetch(
         IcuMacroQueueKind::Mem, kMemImage);
-    PipelinedFetchDecoder pinNamedFetch(
-        IcuMacroQueueKind::Mem,kMemImage);
-    static_cast<void>(pinNamedFetch.tick(true));
-    const auto descriptorStart=pinNamedFetch.imem_read_port_signals();
-    require(pinNamedFetch.fetch_descriptor_started()
-            && pinNamedFetch.fetch_descriptor_active()
-            && !descriptorStart.imem_read_req_valid_o
-            && !descriptorStart.imem_read_req_fire,
-        "fetch descriptor start did not retain its registered boundary");
-
-    for (std::size_t address = 0; address < kMemImage.size(); ++address) {
-        static_cast<void>(pinNamedFetch.tick(true));
-        const auto& pins=pinNamedFetch.imem_read_port_signals();
-        require(pins.imem_read_req_valid_o
-                && pins.imem_read_req_ready_i
-                && pins.imem_read_req_fire
-                && pins.imem_read_req_address_o == address,
-            "descriptor fetch did not issue consecutive local iMEM reads");
-        require(!pins.imem_read_rsp_fire,
-            "local iMEM response arrived before all pipelined requests fired");
-    }
-    require(!pinNamedFetch.control_latched()
-            && pinNamedFetch.pending_fetch_level()
-                    + pinNamedFetch.response_fifo_level() >= 2,
-        "payload fetches waited for control decode or lost outstanding reads");
-
-    static_cast<void>(pinNamedFetch.tick(true));
-    const auto firstRead=pinNamedFetch.imem_read_port_signals();
-    require(firstRead.imem_read_rsp_valid_i
-            && firstRead.imem_read_rsp_ready_o
-            && firstRead.imem_read_rsp_fire
-            && firstRead.imem_read_rsp_data_i.has_value()
-            && !pinNamedFetch.fetch_complete(),
-        "local iMEM request-to-response latency or completion boundary changed");
-    for (std::size_t cycle = 0;
-         cycle < kMemImage.size() && !pinNamedFetch.fetch_complete(); ++cycle)
-        static_cast<void>(pinNamedFetch.tick(true));
-    require(pinNamedFetch.fetch_complete()
-            && !pinNamedFetch.fetch_descriptor_active(),
-        "descriptor fetch did not complete on the last accepted response");
-
-    DistributedIcuQueue<MemInstruction, 96, 16, 4, 2, 4>
-        fetchCompleteReady;
-    fetchCompleteReady.load_raw_macro(IcuMacroQueueKind::Mem, kMemImage);
-    for (std::size_t cycle = 0; !fetchCompleteReady.raw_macro_ready(); ++cycle) {
-        if (cycle > 64)
-            throw std::runtime_error(
-                "fetch-complete readiness probe did not finish");
-        fetchCompleteReady.prefetch_raw_macro();
-        if (!fetchCompleteReady.macro_fetch_complete())
-            require(!fetchCompleteReady.raw_macro_ready(),
-                "frontend became ready before descriptor fetch completed");
-    }
-    require(fetchCompleteReady.macro_fetch_complete(),
-        "frontend ready did not retain descriptor fetch completion");
     std::size_t pipelinedContexts = 0;
     std::size_t nonPipelinedContexts = 0;
-    for (std::size_t cycle = 0; cycle < 6; ++cycle) {
+    for (std::size_t cycle = 0; cycle < 8; ++cycle) {
         if (pipelinedFetch.tick(true).has_value()) ++pipelinedContexts;
         if (nonPipelinedFetch.tick(true).has_value())
             ++nonPipelinedContexts;
@@ -319,7 +163,7 @@ try {
     require(pipelinedFetch.statistics().response_fifo_writes == 3
             && nonPipelinedFetch.statistics().response_fifo_writes == 2,
         "Macro i-MEM read latency is still coupled to request II");
-    for (std::size_t cycle = 6;
+    for (std::size_t cycle = 8;
          (!pipelinedFetch.done() || !nonPipelinedFetch.done()); ++cycle) {
         if (cycle > 128)
             throw std::runtime_error(
@@ -353,8 +197,8 @@ try {
         IcuMacroQueueKind::Mem, kMemExtendedImage);
     require(extendedTiming.decoder_active_cycles
                 - extendedTiming.decoder_starvation_cycles
-            == 9,
-        "extended MEM template did not preserve the RTL header/payload/validate stages");
+            == 10,
+        "extended MEM template did not use prefix/payload/decode stages");
 
     const auto compactMxmTiming =
         decode_statistics<MxmControlInstruction, 128>(
@@ -364,29 +208,32 @@ try {
             == 6,
         "compact MXM template did not use prefix/decode stages");
 
-    using RtlMemDecoder = IcuMacroV1Decoder<
+    using DirectDdbCommitDecoder = IcuMacroV1Decoder<
         MemInstruction, 96, 1, 3, 64, 1, 8, 1>;
-    RtlMemDecoder heldContext(IcuMacroQueueKind::Mem, kMemImage);
-    for (std::size_t cycle = 0;
-         cycle < 64 && heldContext.rtl_mem_state_code() != 10; ++cycle)
-        static_cast<void>(heldContext.tick(false));
-    require(heldContext.rtl_mem_state_code() == 10
-            && heldContext.pending_decoded_contexts() == 1
-            && heldContext.ddb_occupancy() == 0,
-        "MEM decoder did not reach the RTL OUTPUT_CONTEXT holding state");
-    const auto heldBits = heldContext.reservoir_occupancy_bits();
-    for (unsigned cycle = 0; cycle < 3; ++cycle) {
-        require(!heldContext.tick(false).has_value()
-                && heldContext.rtl_mem_state_code() == 10
-                && heldContext.reservoir_occupancy_bits() == heldBits,
-            "OUTPUT_CONTEXT changed parser state under backpressure");
+    DirectDdbCommitDecoder directCommit(
+        IcuMacroQueueKind::Mem, kMemImage);
+    std::size_t directCommitContexts = 0;
+    for (std::size_t cycle = 0; !directCommit.done(); ++cycle) {
+        if (cycle > 64)
+            throw std::runtime_error(
+                "direct-commit Macro decoder did not finish");
+        if (directCommit.tick(true).has_value()) ++directCommitContexts;
     }
-    const auto releasedContext = heldContext.tick(true);
-    require(releasedContext.has_value()
-            && releasedContext->instruction.address == 100
-            && heldContext.rtl_mem_state_code() == 6
-            && heldContext.statistics().context_stall_cycles == 3,
-        "OUTPUT_CONTEXT did not fire exactly once when ready returned");
+    require(directCommitContexts == 2
+            && directCommit.statistics().ddb_entries_committed == 2
+            && directCommit.statistics().decoder_ddb_stall_cycles == 0,
+        "direct DDB commit did not sustain same-cycle pop/push progress");
+
+    DirectDdbCommitDecoder fullDdb(
+        IcuMacroQueueKind::Mem, kMemImage);
+    for (std::size_t cycle = 0; cycle < 32; ++cycle)
+        static_cast<void>(fullDdb.tick(false));
+    require(fullDdb.ddb_occupancy() == 1
+            && fullDdb.pending_decoded_contexts() == 1
+            && fullDdb.decoded_count() == 1
+            && fullDdb.statistics().ddb_entries_committed == 1
+            && fullDdb.statistics().decoder_ddb_stall_cycles != 0,
+        "full DDB retained a hidden completed descriptor outside its depth");
 
     using TwoWordReservoirDecoder = IcuMacroV1Decoder<
         MemInstruction, 96, 1, 2, 64, 8, 8, 8>;
@@ -404,16 +251,20 @@ try {
             && twoWordReservoir.statistics().peak_reservoir_bits <= 2 * 96,
         "two-word Macro reservoir changed decode semantics or overflowed");
 
-    IcuMacroV1Decoder<MemInstruction, 96> fifoBackpressure(
-        IcuMacroQueueKind::Mem, kMemExtendedImage);
-    for (std::size_t cycle = 0;
-         cycle < 64 && fifoBackpressure.rtl_mem_state_code() != 10; ++cycle)
-        static_cast<void>(fifoBackpressure.tick(
-            cycle, 1, 1, std::optional<std::size_t>{20}));
-    require(fifoBackpressure.rtl_mem_state_code() == 10
-            && !fifoBackpressure.tick(
-                64, 1, 1, std::optional<std::size_t>{20}).has_value(),
-        "full Context FIFO did not backpressure the MEM decoder");
+    bool rejectedInfeasibleCapacity = false;
+    try {
+        IcuMacroV1Decoder<MemInstruction, 96> infeasible(
+            IcuMacroQueueKind::Mem, kMemExtendedImage);
+        for (std::size_t cycle = 0; cycle < 64 && !infeasible.done();
+             ++cycle) {
+            static_cast<void>(infeasible.tick(
+                cycle, 1, 1, std::optional<std::size_t>{20}));
+        }
+    } catch (const StaticScheduleError&) {
+        rejectedInfeasibleCapacity = true;
+    }
+    require(rejectedInfeasibleCapacity,
+        "release-aware admission accepted an infeasible context lifetime");
 
     const auto compactEscape = decode_mem_image(kMemCompactEscapeImage);
     require(compactEscape.size() == 2
@@ -439,35 +290,22 @@ try {
         - compactEscapeTiming.decoder_starvation_cycles;
     const auto wideEscapeService = wideEscapeTiming.decoder_active_cycles
         - wideEscapeTiming.decoder_starvation_cycles;
-    require(wideEscapeService == compactEscapeService,
-        "RTL ESCAPE payload state did not consume narrow/wide fields in one state cycle");
+    require(wideEscapeService == compactEscapeService + 1,
+        "wide Delta payload did not use one extra stream-decode cycle");
 
-    require(kMemImage[0].bit(0) && !kMemImage[0].bit(1)
+    require(kMemImage[0].bit(0) && kMemImage[0].bit(1)
             && kMemImage[0].bit(2) && !kMemImage[0].bit(3)
             && !kMemImage[0].bit(4) && kMemImage[0].bit(5),
         "raw word does not map lane-0 bit 0 to the first stream bit");
-    auto reservedBitOneImage = kMemImage;
-    reservedBitOneImage[0].lanes[0] |= 0x2u;
-    bool rejectedReservedBitOne = false;
-    try {
-        IcuMacroV1Decoder<MemInstruction, 96> invalid(
-            IcuMacroQueueKind::Mem, reservedBitOneImage);
-        for (std::size_t cycle = 0; cycle < 6; ++cycle)
-            static_cast<void>(invalid.tick(true));
-    } catch (const StaticScheduleError&) {
-        rejectedReservedBitOne = true;
-    }
-    require(rejectedReservedBitOne,
-        "raw Macro decoder accepted reserved control bit 1");
     auto invalidControlImage = kMemImage;
     invalidControlImage[0].lanes[0] |= 0x10000000u;
     bool rejectedReservedControl = false;
     try {
         IcuMacroV1Decoder<MemInstruction, 96> invalid(
             IcuMacroQueueKind::Mem, invalidControlImage);
-        // Descriptor start, two-cycle SRAM read, response and word FIFO
-        // boundaries place the control word at the decoder on cycle six.
-        for (std::size_t cycle = 0; cycle < 6; ++cycle)
+        // Two-cycle SRAM read plus response and word FIFO boundaries place
+        // the control word at the decoder on the fifth frontend cycle.
+        for (std::size_t cycle = 0; cycle < 5; ++cycle)
             static_cast<void>(invalid.tick(true));
     } catch (const StaticScheduleError&) {
         rejectedReservedControl = true;
@@ -475,56 +313,13 @@ try {
     require(rejectedReservedControl,
         "raw Macro decoder accepted reserved control-word bits");
 
-    const auto requireMemFault = [&](
-        const std::vector<IcuRawImemWord96>& image,
-        std::uint8_t expectedCode, const char* message) {
-        IcuMacroV1Decoder<MemInstruction, 96> decoder(
-            IcuMacroQueueKind::Mem, image);
-        bool rejected = false;
-        try {
-            for (std::size_t cycle = 0; cycle < 128 && !decoder.done(); ++cycle)
-                static_cast<void>(decoder.tick(true));
-        } catch (const StaticScheduleError&) {
-            rejected = true;
-        }
-        require(rejected && decoder.rtl_mem_fault()
-                && decoder.rtl_mem_state_code() == 11
-                && decoder.rtl_mem_fault_code() == expectedCode,
-            message);
-    };
-
-    auto illegalNativeImage = kMemExtendedImage;
-    // Stream bit 145 is the Extended flag; native[28] is bit 174.
-    assign_mem_stream_bits(illegalNativeImage, 174, 1, 1);
-    requireMemFault(illegalNativeImage, 6,
-        "MEM decoder did not retain RTL FAULT_NATIVE semantics");
-
-    auto illegalScheduleImage = kMemExtendedImage;
-    // Extended schedule target occupies stream bits 371:370. Target zero is
-    // illegal for the MEM address induction path.
-    assign_mem_stream_bits(illegalScheduleImage, 370, 0, 2);
-    requireMemFault(illegalScheduleImage, 7,
-        "MEM decoder did not retain RTL FAULT_SCHEDULE semantics");
-
-    auto illegalDeltaImage = kMemImage;
-    // Dictionary[0] operand begins at stream bit 121. +8191 overflows the
-    // legal 13-bit MEM address after the first Context.
-    assign_mem_stream_bits(illegalDeltaImage, 121, 0x1fff, 14);
-    requireMemFault(illegalDeltaImage, 8,
-        "MEM decoder did not retain RTL FAULT_DELTA semantics");
-
-    auto truncatedImage = kMemImage;
-    truncatedImage.pop_back();
-    requireMemFault(truncatedImage, 3,
-        "MEM decoder did not retain RTL FAULT_TRUNCATED semantics");
-
     // The MEM image is a hard-coded physical golden vector. It contains two
     // singleton reads with one dictionary transition and crosses a 96-bit
     // payload-word boundary:
     //   cycle 3: Read(address=100, stream=2)
     //   cycle 7: Read(address=101, stream=2)
     using ConstrainedMemQueue =
-        DistributedIcuQueue<MemInstruction, 96, 16, 4, 1, 4>;
+        DistributedIcuQueue<MemInstruction, 96, 16, 4, 1, 1>;
     ConstrainedMemQueue constrained;
     constrained.load_raw_macro(IcuMacroQueueKind::Mem, kMemImage);
     const auto constrainedPrimeCycles = prime(constrained);
@@ -547,15 +342,21 @@ try {
         "raw MEM decoder fetched the wrong number of physical words");
     require(constrained.macro_decoder_statistics().decoded_contexts == 2,
         "raw MEM decoder produced the wrong number of contexts");
-    require(constrained.macro_decoder_statistics().descriptor_count != 0
-            && constrained.macro_decoder_statistics().ddb_entries_committed == 0,
-        "raw MEM frontend did not use the RTL decoder or retained the retired DDB");
+    require(constrained.macro_decoder_statistics().context_stall_cycles >= 2,
+        "raw MEM admission did not model context-full backpressure");
+    require(constrained.macro_decoder_statistics()
+                .capacity_feasible_wait_cycles
+            >= 2,
+        "raw MEM admission did not identify a safe release-aware wait");
+    require(constrained.macro_decoder_statistics().ddb_entries_committed != 0
+            && constrained.macro_decoder_statistics().descriptor_count != 0,
+        "raw MEM frontend bypassed the decoded descriptor buffer");
     require(constrained.macro_decoder_statistics().payload_bits_consumed != 0
             && constrained.macro_decoder_statistics().decoder_active_cycles
                 != 0,
         "raw MEM frontend did not expose cycle-accurate parser work");
-    require(constrained.peak_active_macros() == 2,
-        "raw MEM scheduler did not retain both primed Contexts");
+    require(constrained.peak_active_macros() == 1,
+        "raw MEM decoder exceeded the finite context RAM");
 
     InstructionControlUnit icu;
     for (std::size_t address = 0; address < kMemImage.size(); ++address)
@@ -617,18 +418,18 @@ try {
     require(dequantIssue.has_value()
             && dequantIssue->scale_bf16 == 0x3f80,
         "raw MXM dequant decoder reconstructed the wrong instruction");
-    require(icu.mem_iq(0).timed_issue_writes() == 0
-            && icu.mem_iq(0).timed_issue_reads() == 0
+    require(icu.mem_iq(0).timed_issue_writes() == 2
+            && icu.mem_iq(0).timed_issue_reads() == 2
             && icu.mxm_load_iq(0).timed_issue_writes() == 1
             && icu.mxm_load_iq(0).timed_issue_reads() == 1
             && icu.mxm_compute_iq(0).timed_issue_writes() == 1
             && icu.mxm_compute_iq(0).timed_issue_reads() == 1
             && icu.mxm_dequant_iq(0).timed_issue_writes() == 1
             && icu.mxm_dequant_iq(0).timed_issue_reads() == 1,
-        "MEM direct issue or MXM timed issue accounting changed");
-    require(icu.mem_iq(0).peak_timed_issue_occupancy() == 0
+        "RTL-aligned timed queues did not preserve one enqueue/dequeue per issue");
+    require(icu.mem_iq(0).peak_timed_issue_occupancy() != 0
             && icu.mem_iq(0).timed_issue_occupancy() == 0,
-        "MEM unexpectedly used the removed timed issue queue");
+        "MEM timed queue occupancy was not observable or did not drain");
 
     const auto statistics = icu.frontend_statistics();
     require(statistics.imem_entries == 9,
@@ -644,8 +445,8 @@ try {
         "raw Macro aggregate statistics omitted fetch or decoder activity");
     require(statistics.context_fifo_writes == 5
             && statistics.context_fifo_reads == 5
-            && statistics.timed_issue_writes == 3
-            && statistics.timed_issue_reads == 3,
+            && statistics.timed_issue_writes == 5
+            && statistics.timed_issue_reads == 5,
         "Macro Context/Timed FIFO aggregate accounting is not conserved");
     require(statistics.peak_imem_response_fifo_occupancy != 0
             && statistics.peak_macro_word_fifo_occupancy != 0
@@ -682,12 +483,10 @@ try {
             && dequantQueue->active_context_bits == 256,
         "raw Macro per-queue statistics reported the wrong context width");
     require(memQueue->context_fifo_depth == 4
-            && memQueue->timed_issue_depth == 0
-            && memQueue->timed_issue_lookahead == 0
-            && loadQueue->timed_issue_depth == 16
-            && loadQueue->timed_issue_lookahead == 2,
-        "raw Macro per-queue statistics lost MEM/MXM issue geometry");
-    require(memQueue->ddb_entry_bits == 0
+            && memQueue->timed_issue_depth == 16
+            && memQueue->timed_issue_lookahead == 2,
+        "raw Macro per-queue statistics lost RTL FIFO geometry");
+    require(memQueue->ddb_entry_bits == 723
             && loadQueue->ddb_entry_bits == 710
             && computeQueue->ddb_entry_bits == 741
             && dequantQueue->ddb_entry_bits == 630,

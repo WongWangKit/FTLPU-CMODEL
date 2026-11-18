@@ -453,23 +453,9 @@ public:
             visit_program_queue(image.kind,image.queue_index,image.storage==ProgramStorage::TransportImem,[&](auto& q) {
                 using Q=std::decay_t<decltype(q)>;
                 if(image.mode==IcuQueueMode::Macro) {
-                    if constexpr (Q::queue_role == IcuQueueRole::Mem) {
-                        std::array<std::uint32_t,4> load_data{};
-                        for(std::size_t b=0;b<image.word_bytes();++b)
-                            load_data[b/4] |= std::uint32_t(bytes[b])
-                                << (8*(b%4));
-                        const auto load_strb = static_cast<std::uint8_t>(
-                            (std::uint32_t{1}
-                                << ((image.word_bytes()+3)/4)) - 1);
-                        q.load_mem_program_word(address,load_data,load_strb,
-                            address+1==image.word_count());
-                    } else {
-                        typename Q::RawImemWord word{};
-                        for(std::size_t b=0;b<image.word_bytes();++b)
-                            word.lanes[b/4]|=std::uint32_t(bytes[b])
-                                <<(8*(b%4));
-                        q.write_raw_imem(address,word);
-                    }
+                    typename Q::RawImemWord word{};
+                    for(std::size_t b=0;b<image.word_bytes();++b) word.lanes[b/4]|=std::uint32_t(bytes[b])<<(8*(b%4));
+                    q.write_raw_imem(address,word);
                 } else {
                     typename Q::Entry word{};
                     for(std::size_t b=0;b<image.word_bytes();++b) word.lanes[b/4]|=std::uint32_t(bytes[b])<<(8*(b%4));
@@ -538,13 +524,7 @@ public:
     void seal_program_image(const ProgramImage& image) {
         if(image.storage==ProgramStorage::Imem || image.storage==ProgramStorage::TransportImem) {
             visit_program_queue(image.kind,image.queue_index,image.storage==ProgramStorage::TransportImem,[&](auto& q) {
-                using Q=std::decay_t<decltype(q)>;
-                if(image.mode==IcuQueueMode::Macro) {
-                    if constexpr (Q::queue_role == IcuQueueRole::Mem)
-                        q.prime_mem_program(image.kind,image.word_count());
-                    else
-                        q.configure_raw_macro(image.kind,image.word_count());
-                }
+                if(image.mode==IcuQueueMode::Macro) q.configure_raw_macro(image.kind,image.word_count());
                 else q.configure({0,image.word_count()}); // No synchronous IQ prefill.
             }); return;
         }
@@ -1843,17 +1823,9 @@ public:
 
         for (std::size_t queue = 0; queue < kMemQueues; ++queue) {
             queue_control_transport_ticked_[queue]=false;
-            const auto hemisphere = queue / kMemQueuesPerHemisphere;
-            const auto local_queue = queue % kMemQueuesPerHemisphere;
-            const auto mem_slice = local_queue / hw::kMemBanksPerSlice;
-            const auto bank = local_queue % hw::kMemBanksPerSlice;
             auto instruction = std::optional<MemInstruction>{};
-            if (compute_enabled_) {
-                instruction = mem_queues_[queue].raw_macro_mode()
-                    ? mem_queues_[queue].dispatch_mem_issue(
-                        mems[hemisphere].mem_issue_ready(mem_slice, bank))
-                    : mem_queues_[queue].dispatch_next();
-            }
+            if (compute_enabled_)
+                instruction = mem_queues_[queue].dispatch_next();
             else if (program_loading_) {} // No fetch/auto-launch while i-MEM is being written.
             else if (common_barriers_.configured())
                 mem_queues_[queue].hold_compute_cycle();
@@ -1890,6 +1862,10 @@ public:
             if (!instruction.has_value()) {
                 continue;
             }
+            const auto hemisphere = queue / kMemQueuesPerHemisphere;
+            const auto local_queue = queue % kMemQueuesPerHemisphere;
+            const auto mem_slice = local_queue / hw::kMemBanksPerSlice;
+            const auto bank = local_queue % hw::kMemBanksPerSlice;
             mems[hemisphere].enqueue_instruction(mem_slice, bank, *instruction);
             any = true;
             if (os != nullptr) {

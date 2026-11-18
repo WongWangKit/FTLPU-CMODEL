@@ -28,8 +28,8 @@ std::vector<std::uint8_t> image_bytes(bool mem, std::size_t words)
 {
     // Independent golden physical fixtures, also used by raw decoder tests.
     const std::vector<std::uint32_t> lanes = mem
-        ? std::vector<std::uint32_t>{0x25,0,0,0x02000021,0x180,0x00303200,0x400,0,0}
-        : std::vector<std::uint32_t>{0x15,0,0,0,0x28,0x04000008,0,0};
+        ? std::vector<std::uint32_t>{0x27,0,0,0x02000021,0x180,0x00303200,0x400,0,0}
+        : std::vector<std::uint32_t>{0x17,0,0,0,0x28,0x04000008,0,0};
     std::vector<std::uint8_t> bytes(words * (mem ? 12 : 16));
     for (std::size_t b = 0; b < bytes.size(); ++b)
         bytes[b] = b < lanes.size() * 4
@@ -84,7 +84,6 @@ ProgramLoadStatistics sweep(ProgramLoadConfig config, std::size_t depth = 16,
     C2cDmaEngine weights(system->ddr4(), 16);
     if (weight_reads) weights.issue(C2cDmaInstruction::Load(0x10000, 120));
     loader.start(); // Early start must stay held until every gate is satisfied.
-    bool sawMemProgramPort=false;
     for (std::size_t timeout = 0; !loader.ready_to_start(); ++timeout) {
         require(timeout < 20000, "program load did not finish");
         const auto words = loader.statistics().written_words;
@@ -93,27 +92,12 @@ ProgramLoadStatistics sweep(ProgramLoadConfig config, std::size_t depth = 16,
             while (weights.receive_ready()) weights.pop_received();
         }
         system->tick();
-        const auto& programPort=loader.mem_program_port_signals();
-        if(programPort.mem_program_valid_o) {
-            sawMemProgramPort=true;
-            require(programPort.mem_program_imem_address_o<160
-                    && programPort.mem_program_strb_o==0x7
-                    && programPort.mem_program_last_o
-                        ==(programPort.mem_program_imem_address_o==159)
-                    && programPort.mem_program_fire
-                        ==(programPort.mem_program_valid_o
-                            && programPort.mem_program_ready_i)
-                    && !programPort.mem_program_error_i,
-                "MEM Program port lost address/strobe/last handshake semantics");
-        }
         require(loader.statistics().written_words <= words + 1,
             "target committed more than one word per cycle");
         if (!loader.statistics().images[0].first_write_committed)
             rejects([&] { system->chip().icu().mem_iq(0).read_raw_imem(0); });
     }
     require(!loader.statistics().program_start, "start bypassed dependency gate");
-    require(sawMemProgramPort,
-        "MEM Program Distribution port was not observable");
     compare(*system, loader.statistics().images[0].image, bytes);
     const auto stats = loader.statistics();
     if (weight_reads)

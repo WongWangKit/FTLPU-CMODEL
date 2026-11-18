@@ -49,20 +49,15 @@ struct InstructionDmaResponseBeat {
 };
 
 struct InstructionDmaProtocolInputs {
-    bool rst_ni{true};
-    bool ctrl_dma_cmd_valid_i{false};
-    std::uint64_t ctrl_dma_cmd_address_i{0};
-    std::uint32_t ctrl_dma_cmd_length_i{0};
-    std::uint8_t ctrl_dma_cmd_id_i{0};
-    bool ddr_read_req_ready_i{false};
-    bool ddr_read_rsp_valid_i{false};
-    std::array<std::uint8_t, InstructionDmaResponseBeat::kDataBytes>
-        ddr_read_rsp_data_i{};
-    std::uint32_t ddr_read_rsp_keep_i{0};
-    bool ddr_read_rsp_last_i{false};
-    std::uint8_t ddr_read_rsp_id_i{0};
-    bool ddr_read_rsp_error_i{false};
-    bool reasm_rsp_ready_i{false};
+    bool reset_n{true};
+    bool command_valid{false};
+    std::uint64_t command_address{0};
+    std::uint32_t command_length{0};
+    std::uint8_t command_id{0};
+    bool request_ready{false};
+    bool response_valid{false};
+    InstructionDmaResponseBeat response{};
+    bool reassembler_ready{false};
 };
 
 // Pin-level behavioral counterpart of rtl/program_load/lpu_instruction_dma.sv.
@@ -82,7 +77,7 @@ public:
     {
         if (next_)
             throw std::logic_error("instruction DMA protocol inputs arrived after LOW");
-        if (!inputs.rst_ni)
+        if (!inputs.reset_n)
             reset(); // Models the RTL asynchronous active-low reset assertion.
         inputs_ = std::move(inputs);
         driven_ = true;
@@ -95,20 +90,20 @@ public:
         if (!driven_)
             throw std::logic_error("instruction DMA protocol LOW requires driven inputs");
 
-        if (!inputs_.rst_ni) {
+        if (!inputs_.reset_n) {
             next_ = make_state(config_);
             return;
         }
 
         next_ = state_;
-        const bool outEnqueue = ctrl_dma_cmd_fire();
+        const bool outEnqueue = command_fire();
         const bool outDequeue = outstanding_dequeue_fire();
-        const bool rxEnqueue = ddr_read_rsp_fire();
-        const bool rxDequeue = reasm_rsp_fire();
+        const bool rxEnqueue = response_input_fire();
+        const bool rxDequeue = response_fire();
 
         if (outEnqueue) {
             next_->outstanding_storage[state_.outstanding_write_pointer]
-                = inputs_.ctrl_dma_cmd_id_i;
+                = inputs_.command_id;
             next_->outstanding_write_pointer = increment(
                 state_.outstanding_write_pointer,
                 config_.outstanding_depth);
@@ -122,7 +117,7 @@ public:
 
         if (rxEnqueue) {
             next_->response_storage[state_.response_write_pointer]
-                = ddr_read_rsp_beat_i();
+                = inputs_.response;
             next_->response_write_pointer = increment(
                 state_.response_write_pointer,
                 config_.response_fifo_depth);
@@ -135,10 +130,10 @@ public:
         update_level(next_->response_level, rxEnqueue, rxDequeue);
 
         if (!state_.fault) {
-            if (ddr_read_rsp_id_invalid()) {
+            if (response_id_invalid()) {
                 next_->fault = true;
                 next_->fault_code = kInstructionDmaFaultId;
-            } else if (ddr_read_rsp_error()) {
+            } else if (response_error()) {
                 next_->fault = true;
                 next_->fault_code = kInstructionDmaFaultResponse;
             }
@@ -174,105 +169,80 @@ public:
         inputs_ = {};
     }
 
-    [[nodiscard]] bool ctrl_dma_cmd_ready_o() const noexcept
+    [[nodiscard]] bool command_ready() const noexcept
     {
-        return driven_ && inputs_.ddr_read_req_ready_i
-            && outstanding_enqueue_ready()
+        return driven_ && inputs_.request_ready && outstanding_enqueue_ready()
             && !state_.fault;
     }
-    [[nodiscard]] bool ctrl_dma_cmd_fire() const noexcept
+    [[nodiscard]] bool command_fire() const noexcept
     {
-        return driven_ && inputs_.ctrl_dma_cmd_valid_i
-            && ctrl_dma_cmd_ready_o();
+        return driven_ && inputs_.command_valid && command_ready();
     }
-    [[nodiscard]] bool ddr_read_req_valid_o() const noexcept
+    [[nodiscard]] bool request_valid() const noexcept
     {
-        return driven_ && inputs_.ctrl_dma_cmd_valid_i
-            && outstanding_enqueue_ready()
+        return driven_ && inputs_.command_valid && outstanding_enqueue_ready()
             && !state_.fault;
     }
-    [[nodiscard]] bool ddr_read_req_fire() const noexcept
+    [[nodiscard]] bool request_fire() const noexcept
     {
-        return ddr_read_req_valid_o() && inputs_.ddr_read_req_ready_i;
+        return request_valid() && inputs_.request_ready;
     }
-    [[nodiscard]] std::uint64_t ddr_read_req_address_o() const noexcept
+    [[nodiscard]] std::uint64_t request_address() const noexcept
     {
-        return inputs_.ctrl_dma_cmd_address_i;
+        return inputs_.command_address;
     }
-    [[nodiscard]] std::uint32_t ddr_read_req_length_o() const noexcept
+    [[nodiscard]] std::uint32_t request_length() const noexcept
     {
-        return inputs_.ctrl_dma_cmd_length_i;
+        return inputs_.command_length;
     }
-    [[nodiscard]] std::uint8_t ddr_read_req_id_o() const noexcept
+    [[nodiscard]] std::uint8_t request_id() const noexcept
     {
-        return inputs_.ctrl_dma_cmd_id_i;
+        return inputs_.command_id;
     }
 
-    [[nodiscard]] bool ddr_read_rsp_ready_o() const noexcept
+    [[nodiscard]] bool response_ready() const noexcept
     {
         return driven_ && !state_.fault && response_enqueue_ready();
     }
-    [[nodiscard]] bool ddr_read_rsp_fire() const noexcept
+    [[nodiscard]] bool response_input_fire() const noexcept
     {
-        return driven_ && inputs_.ddr_read_rsp_valid_i
-            && ddr_read_rsp_ready_o();
+        return driven_ && inputs_.response_valid && response_ready();
     }
-    [[nodiscard]] bool reasm_rsp_valid_o() const noexcept
+    [[nodiscard]] bool response_valid() const noexcept
     {
         return state_.response_level != 0;
     }
-    [[nodiscard]] const InstructionDmaResponseBeat& reasm_rsp_o() const
+    [[nodiscard]] const InstructionDmaResponseBeat& response_front() const
     {
-        if (!reasm_rsp_valid_o())
+        if (!response_valid())
             throw std::logic_error("instruction DMA response FIFO is empty");
         return state_.response_storage[state_.response_read_pointer];
     }
-    [[nodiscard]] const auto& reasm_rsp_data_o() const
+    [[nodiscard]] bool response_fire() const noexcept
     {
-        return reasm_rsp_o().data;
-    }
-    [[nodiscard]] std::uint32_t reasm_rsp_keep_o() const
-    {
-        return reasm_rsp_o().keep;
-    }
-    [[nodiscard]] bool reasm_rsp_last_o() const
-    {
-        return reasm_rsp_o().last;
-    }
-    [[nodiscard]] std::uint8_t reasm_rsp_id_o() const
-    {
-        return reasm_rsp_o().id;
-    }
-    [[nodiscard]] bool reasm_rsp_error_o() const
-    {
-        return reasm_rsp_o().error;
-    }
-    [[nodiscard]] bool reasm_rsp_fire() const noexcept
-    {
-        return driven_ && reasm_rsp_valid_o() && inputs_.reasm_rsp_ready_i;
+        return driven_ && response_valid() && inputs_.reassembler_ready;
     }
 
-    [[nodiscard]] bool ddr_read_rsp_id_invalid() const noexcept
+    [[nodiscard]] bool response_id_invalid() const noexcept
     {
-        if (!ddr_read_rsp_fire()) return false;
+        if (!response_input_fire()) return false;
         return state_.outstanding_level == 0
-            || inputs_.ddr_read_rsp_id_i
+            || inputs_.response.id
                 != state_.outstanding_storage[state_.outstanding_read_pointer];
     }
-    [[nodiscard]] bool ddr_read_rsp_error() const noexcept
+    [[nodiscard]] bool response_error() const noexcept
     {
-        return ddr_read_rsp_fire() && inputs_.ddr_read_rsp_error_i;
+        return response_input_fire() && inputs_.response.error;
     }
     [[nodiscard]] bool fault() const noexcept
     {
-        return state_.fault || ddr_read_rsp_id_invalid()
-            || ddr_read_rsp_error();
+        return state_.fault || response_id_invalid() || response_error();
     }
     [[nodiscard]] std::uint8_t fault_code() const noexcept
     {
         if (state_.fault) return state_.fault_code;
-        if (ddr_read_rsp_id_invalid()) return kInstructionDmaFaultId;
-        if (ddr_read_rsp_error()) return kInstructionDmaFaultResponse;
+        if (response_id_invalid()) return kInstructionDmaFaultId;
+        if (response_error()) return kInstructionDmaFaultResponse;
         return 0;
     }
 
@@ -341,8 +311,8 @@ private:
 
     [[nodiscard]] bool outstanding_dequeue_fire() const noexcept
     {
-        return state_.outstanding_level != 0 && ddr_read_rsp_fire()
-            && inputs_.ddr_read_rsp_last_i;
+        return state_.outstanding_level != 0 && response_input_fire()
+            && inputs_.response.last;
     }
 
     [[nodiscard]] bool outstanding_enqueue_ready() const noexcept
@@ -354,18 +324,7 @@ private:
     [[nodiscard]] bool response_enqueue_ready() const noexcept
     {
         return state_.response_level < config_.response_fifo_depth
-            || reasm_rsp_fire();
-    }
-
-    [[nodiscard]] InstructionDmaResponseBeat ddr_read_rsp_beat_i() const
-    {
-        InstructionDmaResponseBeat beat{};
-        beat.data = inputs_.ddr_read_rsp_data_i;
-        beat.keep = inputs_.ddr_read_rsp_keep_i;
-        beat.last = inputs_.ddr_read_rsp_last_i;
-        beat.id = inputs_.ddr_read_rsp_id_i;
-        beat.error = inputs_.ddr_read_rsp_error_i;
-        return beat;
+            || response_fire();
     }
 
     InstructionDmaProtocolConfig config_{};

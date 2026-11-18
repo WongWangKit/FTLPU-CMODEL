@@ -153,16 +153,6 @@ ftlpu_add_test(icu_macro_schedule_test tests/unit/icu/macro_schedule_test.cpp
     unit.icu.macro_schedule unit icu fast)
 ftlpu_add_test(icu_raw_macro_decoder_test tests/unit/icu/raw_macro_decoder_test.cpp
     unit.icu.raw_macro_decoder unit icu fast)
-add_executable(raw_macro_level1_trace_test
-    tests/unit/icu/raw_macro_level1_trace_test.cpp)
-target_link_libraries(raw_macro_level1_trace_test PRIVATE ftlpu_cmodel)
-target_include_directories(raw_macro_level1_trace_test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/tests/support)
-add_test(NAME unit.icu.raw_macro_level1_trace
-    COMMAND $<TARGET_FILE:raw_macro_level1_trace_test>
-        "${CMAKE_CURRENT_BINARY_DIR}/raw_macro_level1/cmodel_trace.jsonl")
-set_tests_properties(unit.icu.raw_macro_level1_trace PROPERTIES
-    LABELS "unit;icu;timing;trace")
 ftlpu_add_test(icu_vxm_sequential_instruction_test
     tests/unit/icu/vxm_sequential_instruction_test.cpp
     unit.icu.vxm_sequential unit icu fast)

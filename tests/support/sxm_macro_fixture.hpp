@@ -12,7 +12,7 @@ struct SxmMacroFixture {
     }
     std::vector<IcuRawImemWord96> image(bool transpose) const {
         std::vector<IcuRawImemWord96> result(1);
-        result[0].lanes[0]=5u | (static_cast<std::uint32_t>(entries.size())<<4);
+        result[0].lanes[0]=7u | (static_cast<std::uint32_t>(entries.size())<<4);
         if(entries.empty()) return result;
         std::size_t offset=96;
         const auto bits=[&](std::uint64_t value,unsigned width) {

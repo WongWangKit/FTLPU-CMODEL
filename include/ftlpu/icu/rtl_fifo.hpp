@@ -12,26 +12,6 @@
 
 namespace ftlpu {
 
-// Pin-named view of rtl/queue/lpu_queue_fifo.sv.  These records are the
-// maintainable RTL/CModel boundary; the legacy helpers below remain available
-// to callers that only need a container-style API.
-template<class T>
-struct RtlQueueFifoInputs {
-    bool enqueue_valid_i{false};
-    std::optional<T> enqueue_data_i{};
-    bool dequeue_ready_i{false};
-};
-
-template<class T>
-struct RtlQueueFifoOutputs {
-    bool enqueue_ready_o{false};
-    bool dequeue_valid_o{false};
-    std::optional<T> dequeue_data_o{};
-    std::size_t level_o{0};
-    bool enqueue_fire{false};
-    bool dequeue_fire{false};
-};
-
 struct RtlFifoStatistics {
     std::uint64_t samples{0};
     std::uint64_t occupancy_sum{0};
@@ -95,22 +75,6 @@ public:
         return enqueue_valid_i_ && enqueue_ready();
     }
 
-    // Canonical RTL port aliases.  fire is deliberately derived from the
-    // corresponding valid/ready pins rather than stored as independent state.
-    bool enqueue_ready_o() const noexcept { return enqueue_ready(); }
-    bool dequeue_valid_o() const noexcept { return dequeue_valid(); }
-    std::size_t level_o() const noexcept { return occupancy(); }
-    const T& dequeue_data_o() const { return front(); }
-
-    RtlQueueFifoOutputs<T> rtl_outputs() const
-    {
-        auto result = RtlQueueFifoOutputs<T>{
-            enqueue_ready_o(), dequeue_valid_o(), std::nullopt, level_o(),
-            enqueue_fire(), dequeue_fire()};
-        if (result.dequeue_valid_o) result.dequeue_data_o = front();
-        return result;
-    }
-
     const T& front() const
     {
         if (empty()) throw std::logic_error("RTL FIFO front on empty FIFO");
@@ -133,12 +97,6 @@ public:
         enqueue_data_i_ = std::move(enqueue_data);
         dequeue_ready_i_ = dequeue_ready;
         inputs_driven_ = true;
-    }
-
-    void drive(RtlQueueFifoInputs<T> inputs)
-    {
-        drive(inputs.enqueue_valid_i, std::move(inputs.enqueue_data_i),
-            inputs.dequeue_ready_i);
     }
 
     void drive_idle() { drive(false, std::nullopt, false); }
