@@ -40,7 +40,11 @@ void generic_fifo_contract()
     require(fifo.empty() && !fifo.dequeue_valid(), "reset FIFO not empty");
 
     fifo.drive(true, 10, false);
-    require(fifo.enqueue_fire() && !fifo.dequeue_valid(),
+    const auto emptyWrite = fifo.rtl_outputs();
+    require(emptyWrite.enqueue_ready_o && emptyWrite.enqueue_fire
+            && !emptyWrite.dequeue_valid_o
+            && !emptyWrite.dequeue_data_o.has_value()
+            && emptyWrite.level_o == 0,
         "empty FIFO unexpectedly bypassed enqueue data");
     fifo.low();
     require(fifo.empty(), "LOW exposed Next occupancy");
@@ -52,7 +56,11 @@ void generic_fifo_contract()
     require(fifo.full() && fifo.front() == 10, "FIFO did not fill in order");
 
     fifo.drive(true, 30, true);
-    require(fifo.enqueue_ready() && fifo.enqueue_fire() && fifo.dequeue_fire(),
+    const auto replacement = fifo.rtl_outputs();
+    require(replacement.enqueue_ready_o && replacement.enqueue_fire
+            && replacement.dequeue_valid_o && replacement.dequeue_fire
+            && replacement.dequeue_data_o == 10
+            && replacement.level_o == 2,
         "full replacement was not accepted");
     fifo.low(); fifo.posedge();
     require(fifo.full() && fifo.front() == 20,

@@ -12,7 +12,7 @@ template<class F> void rejects(F f) { bool failed=false;try {f();}catch(const St
 std::vector<IcuRawImemWord96> image()
 {
     std::vector<IcuRawImemWord96> words(2);
-    words[0].lanes[0]=0x17;
+    words[0].lanes[0]=0x15;
     unsigned offset=0;
     const auto put=[&](std::uint32_t value,unsigned width) {
         for(unsigned b=0;b<width;++b,++offset)
@@ -147,7 +147,7 @@ void trailing_nops()
 void overlapping_contexts()
 {
     std::vector<IcuRawImemWord96> words(3);
-    words[0].lanes[0]=0x27;
+    words[0].lanes[0]=0x25;
     unsigned offset=96;
     const auto put=[&](std::uint32_t value,unsigned width) {
         for(unsigned b=0;b<width;++b,++offset)
@@ -160,16 +160,16 @@ void overlapping_contexts()
         put(6,11);put(5,8);put(1,10);
         if(m==1)put(0,1); // a later descriptor's delta follows its template
     }
-    rejects([&] {
-        Queue raw;
-        raw.load_raw_macro(IcuMacroQueueKind::Mem,words);
-        raw.configure_queue_controls({{26,IcuControlOpcode::WaitEvent,7}},16,8,2);
-        while(!raw.raw_macro_ready())raw.prefetch_raw_macro();
-        for(unsigned p=0;p<90;++p) {
-            if(p==40)raw.notify(7);
-            raw.tick();
-        }
-    }); // A WAIT does not authorize interleaved execution of two Macros.
+    Queue raw;
+    raw.load_raw_macro(IcuMacroQueueKind::Mem,words);
+    raw.configure_queue_controls({{26,IcuControlOpcode::WaitEvent,7}},16,8,2);
+    while(!raw.raw_macro_ready())raw.prefetch_raw_macro();
+    for(unsigned p=0;p<90;++p) {
+        if(p==40)raw.notify(7);
+        raw.tick();
+    }
+    require(raw.issued_count()==14 && raw.done(),
+        "RTL-style active Contexts did not resume after a queue-local WAIT");
 }
 
 void response_during_wait()

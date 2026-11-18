@@ -62,6 +62,12 @@ constexpr std::size_t kProgramLoadMemBanksPerRelay =
     * kProgramLoadMemGroupsPerRelay;
 constexpr std::size_t kProgramLoadRelaysPerHemisphere =
     config::kProgramLoadRelaysPerHemisphere;
+// rtl/program_load/lpu_program_load_pkg.sv physical Program transport.
+constexpr std::size_t kProgramDestinationWidth = 12;
+constexpr std::size_t kProgramImemAddressWidth = 17;
+constexpr std::size_t kProgramWordBits = 128;
+constexpr std::size_t kProgramWordBytes = kProgramWordBits / 8;
+constexpr std::size_t kProgramWordStrbWidth = 4;
 constexpr std::size_t kMemBoundaryStreamRegisterColumns = kMemGroups + 1;
 constexpr std::size_t kC2cToSxmStreamRegisterColumns = 1;
 constexpr std::size_t kSxmToMxmStreamRegisterColumns = 1;

@@ -102,6 +102,20 @@ struct ProgramLoadStatistics {
     }
 };
 
+// Pin-named view of one active Program Distribution -> MEM Relay endpoint.
+// ProgramLoader serializes images, so this is a SEMANTIC adapter for the
+// selected physical port rather than an array of all RTL ports.
+struct MemProgramPortSignals {
+    bool mem_program_valid_o{false};
+    bool mem_program_ready_i{false};
+    std::size_t mem_program_imem_address_o{0};
+    std::array<std::uint8_t, hw::kProgramWordBytes> mem_program_data_o{};
+    std::uint8_t mem_program_strb_o{0};
+    bool mem_program_last_o{false};
+    bool mem_program_error_i{false};
+    bool mem_program_fire{false};
+};
+
 // One active program, one active destination. DDR is ticked by the enclosing
 // system, exactly once per physical cycle. This engine shares that DDR with
 // weight/data DMA. It has its own command, outstanding-ID and response state;
@@ -130,6 +144,11 @@ public:
         clock_managed_=true;
     }
     bool clocked_mode() const noexcept {return clock_managed_;}
+
+    const MemProgramPortSignals& mem_program_port_signals() const noexcept
+    {
+        return mem_program_ports_;
+    }
 
     // The ordered SystemPhase supplies physical time explicitly.  Clock only
     // validates and commits this transaction; it never calls LOW itself.
@@ -356,6 +375,7 @@ private:
     void tick_before_dma(std::size_t cycle)
     {
         observe_dma_low_=false;
+        mem_program_ports_ = {};
         // LOW at cycle C prepares state committed by edge C+1.
         observe_completion(cycle+1);
         if (!busy()) return;
@@ -425,7 +445,7 @@ private:
                         <= config_.imem_write_commit_latency_cycles;
             if (destination_ready) {
                 PendingWrite write{};
-                write.address = accepted_words_++;
+                write.program_imem_address = accepted_words_++;
                 for (std::size_t b = 0; b < image.word_bytes(); ++b) {
                     write.bytes[b] = reassembly_.front();
                     reassembly_.pop_front();
@@ -517,7 +537,11 @@ private:
             dma_.low_receive_queue_size());
     }
     struct Packet { std::array<std::uint8_t, hw::kPhysicalVectorBytes> bytes{}; std::size_t size{0}; };
-    struct PendingWrite { std::array<std::uint8_t, kReassemblyBytes> bytes{}; std::size_t address{0}, due{0}; };
+    struct PendingWrite {
+        std::array<std::uint8_t, kReassemblyBytes> bytes{};
+        std::size_t program_imem_address{0};
+        std::size_t due{0};
+    };
     struct Snapshot {
         State state{State::Idle};
         ProgramLoadStatistics stats{};
@@ -538,6 +562,7 @@ private:
         std::uint64_t last_generation{0};
         bool start_requested{false};
         bool dependencies_ready{false};
+        MemProgramPortSignals mem_program_ports{};
     };
 
     Snapshot capture_snapshot() const
@@ -546,7 +571,7 @@ private:
             word_fifo_,ingress_fifo_,relay_fifos_,
             current_,routed_bytes_,vector_offset_,accepted_words_,
             next_write_cycle_,last_generation_,start_requested_,
-            dependencies_ready_};
+            dependencies_ready_,mem_program_ports_};
     }
     void restore_snapshot(Snapshot snapshot)
     {
@@ -567,6 +592,7 @@ private:
         last_generation_=snapshot.last_generation;
         start_requested_=snapshot.start_requested;
         dependencies_ready_=snapshot.dependencies_ready;
+        mem_program_ports_=std::move(snapshot.mem_program_ports);
     }
 
     void validate_image(const ProgramImage& image) {
@@ -639,9 +665,30 @@ private:
             == hw::config::kProgramLoadIngressFifoDepth;
 
         auto& endpoint=relays[target_relay];
-        if (!endpoint.empty() && cycle>=next_write_cycle_
+        const bool endpoint_valid = !endpoint.empty();
+        const bool endpoint_ready = cycle>=next_write_cycle_
             && commits_.size()
-                <= config_.imem_write_commit_latency_cycles) {
+                <= config_.imem_write_commit_latency_cycles;
+        if (image.kind == IcuMacroQueueKind::Mem) {
+            mem_program_ports_.mem_program_valid_o = endpoint_valid;
+            mem_program_ports_.mem_program_ready_i = endpoint_ready;
+            mem_program_ports_.mem_program_fire =
+                endpoint_valid && endpoint_ready;
+            if (endpoint_valid) {
+                const auto& head = endpoint.front();
+                mem_program_ports_.mem_program_imem_address_o =
+                    head.program_imem_address;
+                std::copy_n(head.bytes.begin(), image.word_bytes(),
+                    mem_program_ports_.mem_program_data_o.begin());
+                mem_program_ports_.mem_program_strb_o =
+                    static_cast<std::uint8_t>(
+                        (std::uint32_t{1}
+                            << ((image.word_bytes() + 3) / 4)) - 1);
+                mem_program_ports_.mem_program_last_o =
+                    head.program_imem_address + 1 == image.word_count();
+            }
+        }
+        if (endpoint_valid && endpoint_ready) {
             auto write=std::move(endpoint.front());
             endpoint.pop_front();
             ++stats_.relay_reads;
@@ -701,7 +748,8 @@ private:
     }
 
     void commit_word(const ProgramImage& image,const PendingWrite& write) {
-        icu_.stage_program_word(image,write.address,write.bytes.data());
+        icu_.stage_program_word(image,write.program_imem_address,
+            write.bytes.data());
     }
     void configure_target(const ProgramImage& image) {icu_.stage_program_seal(image);}
 
@@ -725,6 +773,7 @@ private:
     std::size_t current_{0}, routed_bytes_{0}, vector_offset_{0}, accepted_words_{0}, next_write_cycle_{0};
     std::uint64_t last_generation_{0};
     bool start_requested_{false}, dependencies_ready_{false};
+    MemProgramPortSignals mem_program_ports_{};
     std::optional<Snapshot> next_snapshot_{};
     bool clock_managed_{false};
     bool low_started_{false}, low_complete_{false};

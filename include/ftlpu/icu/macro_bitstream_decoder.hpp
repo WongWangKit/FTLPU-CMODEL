@@ -153,6 +153,23 @@ public:
     using RawWord = IcuRawImemWord<WordBits>;
     using DecodedContext = DecodedIcuMacroContext<FuncInstruction>;
 
+    // Canonical local-iMEM read boundary.  The names match the formal RTL
+    // connection between lpu_mem_imem_fetch and lpu_mem_local_imem.  This is a
+    // cycle view: valid/ready are sampled before the modeled POSEDGE and fire
+    // is their conjunction for that cycle.
+    struct ImemReadPortSignals {
+        bool imem_read_req_valid_o{false};
+        bool imem_read_req_ready_i{false};
+        std::size_t imem_read_req_address_o{0};
+        bool imem_read_req_last_o{false};
+        bool imem_read_req_fire{false};
+        bool imem_read_rsp_valid_i{false};
+        bool imem_read_rsp_ready_o{false};
+        std::optional<RawWord> imem_read_rsp_data_i{};
+        bool imem_read_rsp_last_i{false};
+        bool imem_read_rsp_fire{false};
+    };
+
     static_assert(ImemReadLatency > 0);
     static_assert(ImemRequestInitiationInterval > 0);
     static_assert(ReservoirWords >= 2);
@@ -219,6 +236,8 @@ public:
 
     bool done() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_done();
         return disabled_ || (state_ == State::Done && ddb_size_ == 0);
     }
 
@@ -227,6 +246,13 @@ public:
     // admission stay frozen. No new request is issued until RUN resumes.
     void hold_cycle()
     {
+        imem_read_ports_ = {};
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            mem_cycle_state_ = mem_state_;
+            mem_cycle_phase_ = rtl_mem_parser_phase_code();
+            mem_cycle_reservoir_bits_ = mem_reservoir_bits_;
+        }
+        mem_word_fire_this_cycle_ = false;
         advance_fetch_frontend();
         age_pending_fetches();
     }
@@ -235,6 +261,8 @@ public:
     // consumed the image or the finite DDB is full.
     bool primed() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_done();
         return control_latched_
             && (disabled_
                 || state_ == State::Done
@@ -254,17 +282,36 @@ public:
             <= cycle;
     }
 
-    bool control_latched() const noexcept { return control_latched_; }
+    bool control_latched() const noexcept
+    {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_control_received_;
+        return control_latched_;
+    }
     bool enabled() const noexcept { return control_latched_ && !disabled_; }
     std::uint32_t command_count() const noexcept { return command_count_; }
-    std::size_t decoded_count() const noexcept { return decoded_count_; }
-    std::size_t ddb_occupancy() const noexcept { return ddb_size_; }
+    std::size_t decoded_count() const noexcept
+    {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_context_index_;
+        return decoded_count_;
+    }
+    std::size_t ddb_occupancy() const noexcept
+    {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return 0;
+        return ddb_size_;
+    }
     IcuMacroDdbLayout ddb_layout() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return {};
         return physical_ddb_layout();
     }
     std::size_t pending_decoded_contexts() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_state_ == MemState::OutputContext ? 1 : 0;
         std::size_t result = 0;
         for (std::size_t index = 0; index < ddb_size_; ++index) {
             const auto slot = (ddb_read_pointer_ + index) % DdbDepth;
@@ -276,7 +323,119 @@ public:
     }
     std::size_t reservoir_occupancy_bits() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_reservoir_bits_;
         return reservoir_.available_bits();
+    }
+
+    // Read-only RTL-state views used by cycle traces.  They deliberately
+    // expose the MEM decoder's architectural state, not the retired generic
+    // parser state.
+    std::uint8_t rtl_mem_state_code() const noexcept
+    {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return static_cast<std::uint8_t>(mem_state_);
+        return 0;
+    }
+    std::uint8_t rtl_mem_parser_phase_code() const noexcept
+    {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            switch (mem_state_) {
+            case MemState::DictStore: return mem_dict_entry_phase_ ? 1 : 0;
+            case MemState::RunHeader: return mem_run_length_phase_ ? 1 : 0;
+            case MemState::Template:
+                return static_cast<std::uint8_t>(mem_template_phase_);
+            case MemState::Escape: return mem_escape_payload_phase_ ? 1 : 0;
+            default: return 0;
+            }
+        }
+        return 0;
+    }
+    std::uint8_t rtl_mem_cycle_state_code() const noexcept
+    {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return static_cast<std::uint8_t>(mem_cycle_state_);
+        return 0;
+    }
+    std::uint8_t rtl_mem_cycle_phase_code() const noexcept
+    {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_cycle_phase_;
+        return 0;
+    }
+    std::size_t rtl_mem_cycle_reservoir_bits() const noexcept
+    {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_cycle_reservoir_bits_;
+        return 0;
+    }
+    bool rtl_mem_fault() const noexcept
+    {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_fault_;
+        return false;
+    }
+    std::uint8_t rtl_mem_fault_code() const noexcept
+    {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_fault_code_;
+        return 0;
+    }
+    // Trace-only read view of the physical fetch Word FIFO level. This does
+    // not expose storage contents or change the frontend credit contract.
+    std::size_t word_fifo_level() const noexcept
+    {
+        return word_fifo_.size();
+    }
+
+    // Internal fetch-front-end diagnostics.  These read-only views exist for
+    // cycle-alignment tests; they are not part of the architectural decoder
+    // interface.
+    bool fetch_descriptor_started() const noexcept
+    {
+        return fetch_descriptor_started_;
+    }
+    bool fetch_descriptor_active() const noexcept
+    {
+        return fetch_descriptor_active_;
+    }
+    bool fetch_complete() const noexcept { return fetch_complete_; }
+    std::size_t next_fetch_address() const noexcept
+    {
+        return next_fetch_address_;
+    }
+    std::size_t pending_fetch_level() const noexcept
+    {
+        return pending_fetches_.size();
+    }
+    std::optional<std::size_t> pending_fetch_front_address() const noexcept
+    {
+        if (pending_fetches_.empty()) return std::nullopt;
+        return pending_fetches_.front().address;
+    }
+    std::optional<std::size_t>
+    pending_fetch_front_remaining_cycles() const noexcept
+    {
+        if (pending_fetches_.empty()) return std::nullopt;
+        return pending_fetches_.front().remaining_cycles;
+    }
+    std::size_t response_fifo_level() const noexcept
+    {
+        return response_fifo_.size();
+    }
+    std::optional<std::size_t> response_fifo_front_address() const noexcept
+    {
+        if (response_fifo_.empty()) return std::nullopt;
+        return response_fifo_.front().address;
+    }
+    std::optional<std::size_t> word_fifo_front_address() const noexcept
+    {
+        if (word_fifo_.empty()) return std::nullopt;
+        return word_fifo_.front().address;
+    }
+    std::size_t outstanding_payload_fetches() const noexcept
+    {
+        return outstanding_payload_fetches_;
     }
 
     void record_context_completion(
@@ -294,6 +453,11 @@ public:
     const IcuMacroDecoderStatistics& statistics() const noexcept
     {
         return statistics_;
+    }
+
+    const ImemReadPortSignals& imem_read_port_signals() const noexcept
+    {
+        return imem_read_ports_;
     }
 
 private:
@@ -320,6 +484,42 @@ private:
         DeltaPayload,
         DeltaWait,
         Done,
+    };
+
+    // MEM no longer uses the generic Parser/DDB state machine above.  These
+    // values intentionally preserve the SystemVerilog enum order in
+    // lpu_mem_macro_decoder.sv so traces can be compared numerically.
+    enum class MemState : std::uint8_t {
+        IdleGlobal = 0,
+        DictStore = 1,
+        InitGlobal = 2,
+        RunHeader = 3,
+        Template = 4,
+        Idle = 5,
+        GetDelta = 6,
+        DictLookup = 7,
+        Escape = 8,
+        ApplyDelta = 9,
+        OutputContext = 10,
+        Fault = 11,
+    };
+
+    enum class MemTemplatePhase : std::uint8_t {
+        Header = 0,
+        Payload = 1,
+        Validate = 2,
+    };
+
+    enum class MemFault : std::uint8_t {
+        None = 0,
+        Control = 1,
+        Reserved = 2,
+        Truncated = 3,
+        Dictionary = 4,
+        RunLength = 5,
+        Native = 6,
+        Schedule = 7,
+        Delta = 8,
     };
 
     enum class Shape : std::uint8_t {
@@ -622,6 +822,9 @@ private:
             if (kind_ != IcuMacroQueueKind::Mem)
                 throw std::invalid_argument(
                     "MEM Macro decoder has a non-MEM queue kind");
+            if constexpr (WordBits != 96)
+                throw std::invalid_argument(
+                    "RTL-equivalent MEM Macro decoder requires 96-bit words");
         } else if constexpr (std::is_same_v<FuncInstruction,
                                  MxmControlInstruction>) {
             if (kind_ != IcuMacroQueueKind::MxmLoad
@@ -897,6 +1100,473 @@ private:
         --ddb_size_;
     }
 
+    bool mem_done() const noexcept
+    {
+        return (mem_state_ == MemState::IdleGlobal
+                   && mem_control_received_ && mem_queue_remaining_ == 0)
+            || (mem_state_ == MemState::Idle && mem_queue_remaining_ == 0);
+    }
+
+    bool mem_word_ready() const noexcept
+    {
+        if (mem_state_ == MemState::IdleGlobal)
+            return !mem_control_received_ && !mem_fault_;
+        return mem_state_ != MemState::OutputContext
+            && mem_state_ != MemState::Fault && !mem_done()
+            && !mem_input_last_ && mem_reservoir_bits_ <= 192;
+    }
+
+    bool mem_reservoir_bit(std::size_t index) const
+    {
+        if (index >= mem_reservoir_bits_)
+            throw std::out_of_range("MEM Macro reservoir bit is unavailable");
+        return ((mem_reservoir_[index / 64] >> (index % 64)) & 1u) != 0;
+    }
+
+    void mem_set_reservoir_bit(std::size_t index, bool value)
+    {
+        const auto mask = std::uint64_t{1} << (index % 64);
+        if (value)
+            mem_reservoir_[index / 64] |= mask;
+        else
+            mem_reservoir_[index / 64] &= ~mask;
+    }
+
+    std::uint64_t mem_peek(std::size_t width,
+        std::size_t offset = 0) const
+    {
+        if (width > 64 || offset + width > mem_reservoir_bits_)
+            throw std::out_of_range("MEM Macro reservoir field is unavailable");
+        std::uint64_t result = 0;
+        for (std::size_t bit = 0; bit < width; ++bit)
+            if (mem_reservoir_bit(offset + bit))
+                result |= std::uint64_t{1} << bit;
+        return result;
+    }
+
+    void mem_consume(std::size_t width)
+    {
+        if (width > mem_reservoir_bits_)
+            throw std::logic_error("MEM Macro reservoir underflow");
+        const auto remaining = mem_reservoir_bits_ - width;
+        for (std::size_t bit = 0; bit < remaining; ++bit)
+            mem_set_reservoir_bit(bit, mem_reservoir_bit(bit + width));
+        for (std::size_t bit = remaining; bit < mem_reservoir_bits_; ++bit)
+            mem_set_reservoir_bit(bit, false);
+        mem_reservoir_bits_ = remaining;
+        statistics_.payload_bits_consumed += width;
+    }
+
+    void mem_append_word(const RawWord& word)
+    {
+        if (mem_reservoir_bits_ > 192)
+            throw std::logic_error("MEM Macro reservoir overflow");
+        for (std::size_t bit = 0; bit < 96; ++bit)
+            mem_set_reservoir_bit(mem_reservoir_bits_ + bit, word.bit(bit));
+        mem_reservoir_bits_ += 96;
+        statistics_.peak_reservoir_bits = std::max(
+            statistics_.peak_reservoir_bits, mem_reservoir_bits_);
+    }
+
+    [[noreturn]] void set_mem_fault(MemFault code, const char* message)
+    {
+        mem_fault_ = true;
+        mem_fault_code_ = static_cast<std::uint8_t>(code);
+        mem_state_ = MemState::Fault;
+        throw StaticScheduleError(message);
+    }
+
+    bool mem_require_bits(std::size_t width)
+    {
+        if (mem_reservoir_bits_ >= width) return true;
+        waiting_for_bits_ = true;
+        if (mem_input_last_)
+            set_mem_fault(MemFault::Truncated,
+                "truncated MEM Macro v1 raw i-MEM image");
+        return false;
+    }
+
+    void mem_accept_word(const RawWord& word, bool last)
+    {
+        mem_word_fire_this_cycle_ = true;
+        ++statistics_.fetched_words;
+        if (mem_state_ == MemState::IdleGlobal) {
+            bool reserved = word.bit(1);
+            for (std::size_t bit = 28; bit < 96; ++bit)
+                reserved = reserved || word.bit(bit);
+            if (reserved)
+                set_mem_fault(MemFault::Reserved,
+                    "MEM Macro control word has non-zero reserved bits");
+            const auto low = word.lanes[0];
+            if ((low & 1u) == 0 || ((low >> 2) & 3u) != 1u)
+                set_mem_fault(MemFault::Control,
+                    "MEM Macro control word is invalid or not packed-v1");
+            mem_control_received_ = true;
+            control_latched_ = true;
+            mem_queue_remaining_ = (low >> 4) & 0x00ffffffu;
+            mem_first_macro_pending_ = mem_queue_remaining_ != 0;
+            mem_input_last_ = last;
+            mem_state_ = mem_queue_remaining_ == 0
+                ? MemState::IdleGlobal : MemState::DictStore;
+            return;
+        }
+        if (outstanding_payload_fetches_ == 0)
+            throw std::logic_error(
+                "MEM Macro payload response has no reserved reservoir slot");
+        --outstanding_payload_fetches_;
+        mem_append_word(word);
+        if (last) mem_input_last_ = true;
+    }
+
+    std::uint64_t mem_template_payload(
+        std::size_t offset, std::size_t width) const
+    {
+        if (width > 64 || offset + width > 194)
+            throw std::logic_error("invalid MEM template payload field");
+        std::uint64_t result = 0;
+        for (std::size_t bit = 0; bit < width; ++bit) {
+            const auto position = offset + bit;
+            if (((mem_template_payload_[position / 64]
+                    >> (position % 64)) & 1u) != 0)
+                result |= std::uint64_t{1} << bit;
+        }
+        return result;
+    }
+
+    void mem_write_template_payload(std::size_t offset,
+        std::size_t width, std::uint64_t value)
+    {
+        for (std::size_t bit = 0; bit < width; ++bit) {
+            const auto position = offset + bit;
+            const auto mask = std::uint64_t{1} << (position % 64);
+            if (((value >> bit) & 1u) != 0)
+                mem_template_payload_[position / 64] |= mask;
+            else
+                mem_template_payload_[position / 64] &= ~mask;
+        }
+    }
+
+    IcuMacroSchedule mem_decode_template_schedule() const
+    {
+        IcuMacroSchedule schedule{0, 1, 1, 0, 1, 1, 0,
+            IcuInductionTarget::MemAddress};
+        if (mem_template_extended_) {
+            schedule.inner_count = mem_template_payload(0, 32);
+            schedule.inner_interval = mem_template_payload(32, 32);
+            schedule.inner_stride = static_cast<std::int32_t>(
+                mem_template_payload(64, 32));
+            schedule.outer_count = mem_template_payload(96, 32);
+            schedule.outer_interval = mem_template_payload(128, 32);
+            schedule.outer_stride = static_cast<std::int32_t>(
+                mem_template_payload(160, 32));
+            schedule.induction_target = static_cast<IcuInductionTarget>(
+                mem_template_payload(192, 2));
+            return schedule;
+        }
+        if (mem_template_shape_ == 1 || mem_template_shape_ == 3) {
+            schedule.inner_count = mem_template_payload(0, 11) + 1;
+            schedule.inner_interval = mem_template_payload(11, 8) + 1;
+            schedule.inner_stride = signed_value(
+                mem_template_payload(19, 10), 10);
+        }
+        if (mem_template_shape_ == 2) {
+            schedule.outer_count = mem_template_payload(0, 9) + 1;
+            schedule.outer_interval = mem_template_payload(9, 15) + 1;
+            schedule.outer_stride = signed_value(
+                mem_template_payload(24, 12), 12);
+        } else if (mem_template_shape_ == 3) {
+            schedule.outer_count = mem_template_payload(29, 9) + 1;
+            const auto interval = mem_template_payload(38, 15) + 1
+                + (schedule.inner_count - 1) * schedule.inner_interval;
+            schedule.outer_interval = static_cast<std::uint32_t>(interval);
+            schedule.outer_stride = signed_value(
+                mem_template_payload(53, 12), 12);
+        }
+        return schedule;
+    }
+
+    bool mem_native_illegal() const noexcept
+    {
+        const auto opcode = mem_template_native_ & 7u;
+        return ((mem_template_native_ >> 28) & 7u) != 0
+            || !(opcode == 0 || opcode == 1 || opcode == 3 || opcode == 4)
+            || (((mem_template_native_ >> 31) & 1u) != 0 && opcode != 1);
+    }
+
+    static bool mem_schedule_illegal(const IcuMacroSchedule& schedule)
+    {
+        const auto inner_span = static_cast<std::uint64_t>(
+            schedule.inner_count - (schedule.inner_count != 0))
+            * schedule.inner_interval;
+        return schedule.induction_target != IcuInductionTarget::MemAddress
+            || schedule.inner_count == 0 || schedule.inner_interval == 0
+            || schedule.outer_count == 0 || schedule.outer_interval == 0
+            || (schedule.outer_count > 1
+                && schedule.outer_interval <= inner_span);
+    }
+
+    void mem_load_context(std::uint32_t start_cycle,
+        std::uint16_t address, const IcuMacroSchedule& base_schedule)
+    {
+        auto native = mem_template_native_;
+        native &= ~(std::uint32_t{0x1fff} << 15);
+        native |= std::uint32_t{address} << 15;
+        auto schedule = base_schedule;
+        schedule.start_cycle = start_cycle;
+        mem_context_holding_ = DecodedContext{
+            mem_context_index_, schedule, isa::decode_mem_instruction(native), 0};
+    }
+
+    std::optional<std::pair<std::size_t, std::size_t>>
+    mem_decode_delta_prefix() const
+    {
+        if (mem_reservoir_bits_ >= 1 && !mem_reservoir_bit(0))
+            return std::pair<std::size_t, std::size_t>{0, 1};
+        if (mem_reservoir_bits_ >= 2 && !mem_reservoir_bit(1))
+            return std::pair<std::size_t, std::size_t>{1, 2};
+        if (mem_reservoir_bits_ >= 4 && !mem_reservoir_bit(2))
+            return std::pair<std::size_t, std::size_t>{
+                mem_reservoir_bit(3) ? 3 : 2, 4};
+        if (mem_reservoir_bits_ >= 5 && mem_reservoir_bit(2)) {
+            const auto symbol = !mem_reservoir_bit(3)
+                ? (mem_reservoir_bit(4) ? 5u : 4u)
+                : (mem_reservoir_bit(4) ? 7u : 6u);
+            return std::pair<std::size_t, std::size_t>{symbol, 5};
+        }
+        return std::nullopt;
+    }
+
+    void mem_parser_step()
+    {
+        if (mem_state_ == MemState::IdleGlobal
+            || mem_state_ == MemState::Fault || mem_done()
+            || mem_state_ == MemState::OutputContext)
+            return;
+        record_decoder_activity();
+        switch (mem_state_) {
+        case MemState::IdleGlobal:
+        case MemState::OutputContext:
+        case MemState::Fault:
+            return;
+        case MemState::DictStore:
+            if (!mem_dict_entry_phase_) {
+                if (!mem_require_bits(3)) return;
+                mem_dictionary_count_ = mem_peek(3);
+                mem_dictionary_index_ = 0;
+                mem_consume(3);
+                if (mem_dictionary_count_ == 0)
+                    mem_state_ = MemState::InitGlobal;
+                else
+                    mem_dict_entry_phase_ = true;
+                return;
+            }
+            if (!mem_require_bits(36)) return;
+            mem_dictionary_[mem_dictionary_index_] = Delta{
+                static_cast<std::uint32_t>(mem_peek(22)),
+                static_cast<std::int32_t>(signed_value(
+                    mem_peek(14, 22), 14))};
+            mem_consume(36);
+            ++mem_dictionary_index_;
+            if (mem_dictionary_index_ == mem_dictionary_count_)
+                mem_state_ = MemState::InitGlobal;
+            return;
+        case MemState::InitGlobal:
+            if (!mem_require_bits(45)) return;
+            mem_running_start_ = mem_peek(32);
+            mem_running_address_ = mem_peek(13, 32);
+            mem_consume(45);
+            mem_state_ = MemState::RunHeader;
+            return;
+        case MemState::RunHeader:
+            if (!mem_run_length_phase_) {
+                if (!mem_require_bits(1)) return;
+                const bool long_run = mem_peek(1) != 0;
+                mem_consume(1);
+                ++statistics_.descriptor_count;
+                ++statistics_.mem_descriptor_count;
+                if (long_run) {
+                    mem_run_length_phase_ = true;
+                } else {
+                    mem_run_remaining_ = 1;
+                    mem_state_ = MemState::Template;
+                }
+                return;
+            }
+            if (!mem_require_bits(16)) return;
+            mem_run_remaining_ = static_cast<std::uint32_t>(mem_peek(16)) + 1;
+            if (mem_run_remaining_ > mem_queue_remaining_)
+                set_mem_fault(MemFault::RunLength,
+                    "MEM Macro run exceeds declared command count");
+            mem_consume(16);
+            mem_run_length_phase_ = false;
+            mem_state_ = MemState::Template;
+            return;
+        case MemState::Template:
+            if (mem_template_phase_ == MemTemplatePhase::Header) {
+                if (!mem_require_bits(1)) return;
+                const bool extended = mem_peek(1) != 0;
+                const auto width = extended ? 33u : 11u;
+                if (!mem_require_bits(width)) return;
+                mem_template_payload_.fill(0);
+                mem_template_payload_count_ = 0;
+                mem_template_extended_ = extended;
+                if (extended) {
+                    mem_template_shape_ = 0;
+                    mem_template_native_ = mem_peek(32, 1);
+                    mem_template_payload_target_ = 194;
+                } else {
+                    mem_template_shape_ = mem_peek(2, 1);
+                    const bool write = mem_peek(1, 3) != 0;
+                    mem_template_native_ = write ? 1u : 0u;
+                    mem_template_native_ |= mem_peek(6, 4) << 3;
+                    if (write && mem_peek(1, 10) != 0)
+                        mem_template_native_ |= std::uint32_t{1} << 31;
+                    constexpr std::array<std::size_t, 4> targets{
+                        0, 29, 36, 65};
+                    mem_template_payload_target_ =
+                        targets[mem_template_shape_];
+                }
+                mem_consume(width);
+                mem_template_phase_ = mem_template_payload_target_ == 0
+                    ? MemTemplatePhase::Validate
+                    : MemTemplatePhase::Payload;
+                return;
+            }
+            if (mem_template_phase_ == MemTemplatePhase::Payload) {
+                const auto remaining = mem_template_payload_target_
+                    - mem_template_payload_count_;
+                const auto width = std::min<std::size_t>(remaining, 64);
+                if (!mem_require_bits(width)) return;
+                mem_write_template_payload(mem_template_payload_count_,
+                    width, mem_peek(width));
+                mem_consume(width);
+                mem_template_payload_count_ += width;
+                if (mem_template_payload_count_
+                    == mem_template_payload_target_)
+                    mem_template_phase_ = MemTemplatePhase::Validate;
+                return;
+            }
+            if (mem_native_illegal())
+                set_mem_fault(MemFault::Native,
+                    "MEM Macro template has an illegal native instruction");
+            mem_template_schedule_ = mem_decode_template_schedule();
+            if (mem_schedule_illegal(mem_template_schedule_))
+                set_mem_fault(MemFault::Schedule,
+                    "MEM Macro template has an illegal schedule");
+            mem_template_phase_ = MemTemplatePhase::Header;
+            if (mem_first_macro_pending_) {
+                mem_load_context(mem_running_start_, mem_running_address_,
+                    mem_template_schedule_);
+                mem_state_ = MemState::OutputContext;
+            } else {
+                mem_state_ = MemState::GetDelta;
+            }
+            return;
+        case MemState::Idle:
+            if (mem_queue_remaining_ != 0)
+                mem_state_ = MemState::RunHeader;
+            return;
+        case MemState::GetDelta: {
+            const auto prefix = mem_decode_delta_prefix();
+            if (!prefix.has_value()) {
+                waiting_for_bits_ = true;
+                if (mem_input_last_)
+                    set_mem_fault(MemFault::Truncated,
+                        "truncated MEM Macro delta prefix");
+                return;
+            }
+            const auto [symbol, width] = *prefix;
+            if (symbol == 7) {
+                mem_consume(width);
+                mem_escape_payload_phase_ = false;
+                mem_state_ = MemState::Escape;
+            } else if (symbol < mem_dictionary_count_) {
+                mem_dictionary_lookup_index_ = symbol;
+                mem_consume(width);
+                mem_state_ = MemState::DictLookup;
+            } else {
+                set_mem_fault(MemFault::Dictionary,
+                    "MEM Macro delta references a missing dictionary entry");
+            }
+            return;
+        }
+        case MemState::DictLookup:
+            mem_pending_delta_ =
+                mem_dictionary_[mem_dictionary_lookup_index_];
+            mem_state_ = MemState::ApplyDelta;
+            return;
+        case MemState::Escape:
+            if (!mem_escape_payload_phase_) {
+                if (!mem_require_bits(1)) return;
+                mem_delta_wide_ = mem_peek(1) != 0;
+                mem_consume(1);
+                mem_escape_payload_phase_ = true;
+                return;
+            } else {
+                const auto width = mem_delta_wide_ ? 64u : 36u;
+                if (!mem_require_bits(width)) return;
+                if (mem_delta_wide_) {
+                    mem_pending_delta_ = Delta{
+                        static_cast<std::uint32_t>(mem_peek(32)),
+                        static_cast<std::int32_t>(mem_peek(32, 32))};
+                } else {
+                    mem_pending_delta_ = Delta{
+                        static_cast<std::uint32_t>(mem_peek(22)),
+                        static_cast<std::int32_t>(signed_value(
+                            mem_peek(14, 22), 14))};
+                }
+                mem_consume(width);
+                mem_escape_payload_phase_ = false;
+                mem_state_ = MemState::ApplyDelta;
+                return;
+            }
+        case MemState::ApplyDelta: {
+            const auto start = static_cast<std::uint64_t>(mem_running_start_)
+                + mem_pending_delta_.start_cycle;
+            const auto address = static_cast<std::int64_t>(
+                mem_running_address_) + mem_pending_delta_.operand;
+            if (start > std::numeric_limits<std::uint32_t>::max()
+                || address < 0 || address > 8191)
+                set_mem_fault(MemFault::Delta,
+                    "MEM Macro delta result is out of range");
+            mem_running_start_ = static_cast<std::uint32_t>(start);
+            mem_running_address_ = static_cast<std::uint16_t>(address);
+            mem_load_context(mem_running_start_, mem_running_address_,
+                mem_template_schedule_);
+            mem_state_ = MemState::OutputContext;
+            return;
+        }
+        }
+    }
+
+    std::optional<DecodedContext> mem_tick(std::size_t current_cycle,
+        bool context_ready)
+    {
+        if (mem_state_ == MemState::OutputContext) {
+            if (!context_ready) {
+                ++statistics_.context_stall_cycles;
+                return std::nullopt;
+            }
+            auto result = mem_context_holding_;
+            result.admission_cycle = current_cycle
+                == std::numeric_limits<std::size_t>::max()
+                ? 0 : current_cycle;
+            --mem_queue_remaining_;
+            --mem_run_remaining_;
+            mem_first_macro_pending_ = false;
+            ++mem_context_index_;
+            ++statistics_.decoded_contexts;
+            ++statistics_.contexts_generated;
+            ++statistics_.admission_count;
+            mem_state_ = mem_run_remaining_ > 0
+                ? MemState::GetDelta : MemState::Idle;
+            return result;
+        }
+        if (!mem_word_fire_this_cycle_)
+            mem_parser_step();
+        return std::nullopt;
+    }
+
     std::optional<DecodedContext> tick_impl(std::size_t current_cycle,
         std::size_t active_occupancy, std::size_t active_capacity,
         std::optional<std::size_t> earliest_active_release_cycle)
@@ -904,7 +1574,37 @@ private:
         ++statistics_.cycles;
         waiting_for_bits_ = false;
         decoder_active_this_cycle_ = false;
+        imem_read_ports_ = {};
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            mem_cycle_state_ = mem_state_;
+            mem_cycle_phase_ = rtl_mem_parser_phase_code();
+            mem_cycle_reservoir_bits_ = mem_reservoir_bits_;
+        }
+        mem_word_fire_this_cycle_ = false;
         advance_fetch_frontend();
+
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            auto admitted = mem_tick(current_cycle,
+                active_occupancy < active_capacity);
+            begin_fetch_if_possible();
+            age_pending_fetches();
+            if (waiting_for_bits_) {
+                ++statistics_.bit_wait_cycles;
+                ++statistics_.decoder_starvation_cycles;
+            }
+            if (mem_reservoir_bits_ == 0)
+                ++statistics_.reservoir_empty_cycles;
+            statistics_.reservoir_occupancy_bit_samples +=
+                mem_reservoir_bits_;
+            if (mem_reservoir_bits_ > 192)
+                ++statistics_.reservoir_full_cycles;
+            statistics_.active_occupancy_samples += active_occupancy
+                + (admitted.has_value() ? 1 : 0);
+            statistics_.peak_active_occupancy = std::max(
+                statistics_.peak_active_occupancy,
+                active_occupancy + (admitted.has_value() ? 1 : 0));
+            return admitted;
+        }
 
         auto admitted = expand_and_admit(
             current_cycle, active_occupancy, active_capacity,
@@ -946,6 +1646,8 @@ private:
     bool word_fifo_head_ready() const
     {
         if (word_fifo_.empty()) return false;
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_word_ready();
         return word_fifo_.front().address == 0
             || reservoir_.can_refill(0);
     }
@@ -953,11 +1655,15 @@ private:
     void consume_fetched_word(std::size_t address)
     {
         const auto& word = (*image_)[address];
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            mem_accept_word(word, address + 1 == image_->size());
+            return;
+        }
         ++statistics_.fetched_words;
 
         if (address == 0) {
             const std::uint32_t low = word.lanes[0];
-            if ((low & 0xf0000000u) != 0)
+            if ((low & 0xf0000002u) != 0)
                 throw StaticScheduleError(
                     "Macro control word has non-zero reserved bits");
             for (std::size_t lane = 1; lane < word.lanes.size(); ++lane)
@@ -965,7 +1671,6 @@ private:
                     throw StaticScheduleError(
                         "Macro control word has non-zero reserved bits");
             const bool valid = (low & 1u) != 0;
-            const bool enable = (low & 2u) != 0;
             const auto mode =
                 static_cast<IcuQueueMode>((low >> 2) & 3u);
             if (!valid)
@@ -976,8 +1681,8 @@ private:
                     "Macro raw i-MEM queue has a non-Macro QueueMode");
             command_count_ = (low >> 4) & 0x00ffffffu;
             control_latched_ = true;
-            disabled_ = !enable;
-            state_ = disabled_ || command_count_ == 0
+            disabled_ = false;
+            state_ = command_count_ == 0
                 ? State::Done : State::DictionaryCount;
             return;
         }
@@ -998,6 +1703,19 @@ private:
     void advance_fetch_frontend()
     {
         const bool consume_word=word_fifo_head_ready();
+        const bool response_valid = !response_fifo_.empty();
+        const bool response_ready = word_fifo_.size() < word_fifo_depth
+            || consume_word;
+        imem_read_ports_.imem_read_rsp_valid_i = response_valid;
+        imem_read_ports_.imem_read_rsp_ready_o = response_ready;
+        imem_read_ports_.imem_read_rsp_fire =
+            response_valid && response_ready;
+        if (response_valid) {
+            const auto address = response_fifo_.front().address;
+            imem_read_ports_.imem_read_rsp_data_i = (*image_)[address];
+            imem_read_ports_.imem_read_rsp_last_i =
+                address + 1 == image_->size();
+        }
         if (consume_word) {
             const auto address=word_fifo_.front().address;
             word_fifo_.pop_front();
@@ -1005,13 +1723,17 @@ private:
             ++statistics_.word_fifo_reads;
         }
 
-        const bool move_response=!response_fifo_.empty()
-            && word_fifo_.size() < word_fifo_depth;
+        const bool move_response = imem_read_ports_.imem_read_rsp_fire;
         if (move_response) {
+            const auto address = response_fifo_.front().address;
             word_fifo_.push_back(response_fifo_.front());
             response_fifo_.pop_front();
             ++statistics_.response_fifo_reads;
             ++statistics_.word_fifo_writes;
+            if (address + 1 == image_->size()) {
+                fetch_descriptor_active_ = false;
+                fetch_complete_ = true;
+            }
         }
 
         if (!pending_fetches_.empty()
@@ -1042,17 +1764,29 @@ private:
 
     void begin_fetch_if_possible()
     {
-        if (fetch_issue_cooldown_ != 0 || disabled_
-            || state_ == State::Done
-            || next_fetch_address_ == image_->size())
+        // RTL accepts the fetch descriptor one cycle after PRIME and only
+        // exposes its first local-iMEM request on the following cycle.  Keep
+        // this boundary independent from control-word parsing.
+        if (!fetch_descriptor_started_) {
+            fetch_descriptor_started_ = true;
+            fetch_descriptor_active_ = true;
             return;
-        if (pending_fetches_.size()+response_fifo_.size()
-            >= response_fifo_depth)
-            return;
-        // The control word is deliberately non-speculative. Payload fetches
-        // may then fill the bounded response/word FIFOs independently of the
-        // parser reservoir, matching the RTL local-iMEM credit boundary.
-        if (next_fetch_address_ != 0 && !control_latched_) return;
+        }
+        const bool request_valid = fetch_descriptor_active_
+            && fetch_issue_cooldown_ == 0
+            && next_fetch_address_ != image_->size();
+        const bool request_ready =
+            pending_fetches_.size() + response_fifo_.size()
+                < response_fifo_depth;
+        imem_read_ports_.imem_read_req_valid_o = request_valid;
+        imem_read_ports_.imem_read_req_ready_i = request_ready;
+        imem_read_ports_.imem_read_req_address_o = next_fetch_address_;
+        imem_read_ports_.imem_read_req_last_o = request_valid
+            && next_fetch_address_ + 1 == image_->size();
+        imem_read_ports_.imem_read_req_fire = request_valid && request_ready;
+        if (!imem_read_ports_.imem_read_req_fire) return;
+        // The descriptor fetcher streams the whole image independently from
+        // Decoder control-word parsing, matching lpu_mem_imem_fetch.
         pending_fetches_.push_back(PendingFetch{
             next_fetch_address_, ImemReadLatency});
         if (next_fetch_address_ != 0)
@@ -1912,6 +2646,10 @@ private:
     std::size_t outstanding_payload_fetches_{0};
     std::size_t fetch_issue_cooldown_{0};
     std::size_t next_fetch_address_{0};
+    bool fetch_descriptor_started_{false};
+    bool fetch_descriptor_active_{false};
+    bool fetch_complete_{false};
+    ImemReadPortSignals imem_read_ports_{};
     Reservoir reservoir_{};
     State state_{State::WaitingForControl};
     bool control_latched_{false};
@@ -1947,6 +2685,44 @@ private:
     std::size_t delta_payload_count_{0};
     std::size_t delta_payload_target_{0};
     bool delta_payload_wide_{false};
+
+    // RTL-equivalent MEM decoder state.  The generic parser/DDB members above
+    // remain solely for queues whose RTL frontend has not yet migrated.
+    MemState mem_state_{MemState::IdleGlobal};
+    MemState mem_cycle_state_{MemState::IdleGlobal};
+    std::uint8_t mem_cycle_phase_{0};
+    std::size_t mem_cycle_reservoir_bits_{0};
+    MemTemplatePhase mem_template_phase_{MemTemplatePhase::Header};
+    std::array<std::uint64_t, 5> mem_reservoir_{};
+    std::size_t mem_reservoir_bits_{0};
+    bool mem_input_last_{false};
+    bool mem_word_fire_this_cycle_{false};
+    bool mem_control_received_{false};
+    bool mem_first_macro_pending_{false};
+    bool mem_dict_entry_phase_{false};
+    bool mem_run_length_phase_{false};
+    bool mem_escape_payload_phase_{false};
+    bool mem_delta_wide_{false};
+    bool mem_fault_{false};
+    std::uint8_t mem_fault_code_{0};
+    std::uint32_t mem_queue_remaining_{0};
+    std::uint32_t mem_run_remaining_{0};
+    std::array<Delta, 7> mem_dictionary_{};
+    std::size_t mem_dictionary_count_{0};
+    std::size_t mem_dictionary_index_{0};
+    std::size_t mem_dictionary_lookup_index_{0};
+    std::uint32_t mem_running_start_{0};
+    std::uint16_t mem_running_address_{0};
+    Delta mem_pending_delta_{};
+    bool mem_template_extended_{false};
+    std::uint8_t mem_template_shape_{0};
+    std::uint32_t mem_template_native_{0};
+    std::array<std::uint64_t, 4> mem_template_payload_{};
+    std::size_t mem_template_payload_count_{0};
+    std::size_t mem_template_payload_target_{0};
+    IcuMacroSchedule mem_template_schedule_{};
+    DecodedContext mem_context_holding_{};
+    std::size_t mem_context_index_{0};
     IcuMacroDecoderStatistics statistics_{};
 };
 

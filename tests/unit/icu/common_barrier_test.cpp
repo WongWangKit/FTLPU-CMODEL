@@ -20,14 +20,14 @@ template <typename Function> void rejects(Function function)
 }
 
 const std::vector<IcuRawImemWord96> image{
-    {{{0x00000027u, 0x00000000u, 0x00000000u}}},
+    {{{0x00000025u, 0x00000000u, 0x00000000u}}},
     {{{0x02000021u, 0x00000180u, 0x00303200u}}},
     {{{0x00000400u, 0x00000000u, 0x00000000u}}},
 };
 std::vector<IcuRawImemWord96> make_long_image()
 {
     std::vector<IcuRawImemWord96> result(2);
-    result[0].lanes[0] = 0x17; // enabled packed-v1, one descriptor
+    result[0].lanes[0] = 0x15; // valid packed-v1, one descriptor; bit 1 reserved
     unsigned offset = 0;
     const auto put = [&](std::uint32_t value, unsigned width) {
         for (unsigned bit = 0; bit < width; ++bit, ++offset)
