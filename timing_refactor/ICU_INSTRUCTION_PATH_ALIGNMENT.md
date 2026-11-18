@@ -5,17 +5,18 @@
 本轮以 `D:\LPU\FTLPU-VMODEL-main` 当前磁盘工作树为 RTL
 依据，不以 GitHub main 或 HEAD 的干净内容替代未提交/未跟踪文件。冻结版本：
 
-- branch：`rtl-handshake-naming`
+- branch：`main`
 - HEAD：`2cbaa104090c6df099894559794c0f981d4aafda`
-- status：116 modified、10 deleted、55 untracked
+- status（2026-11-18 本轮核对时）：135 modified、13 deleted、55 untracked
 
-VMODEL 顶层有两种互斥的 ICU 输入模式：
+VMODEL 历史上有两种互斥的 ICU 输入模式：
 
-1. 默认 `ENABLE_DISTRIBUTED_PROGRAM_FRONTEND=0`：138 条 legacy
+1. 旧 `ENABLE_DISTRIBUTED_PROGRAM_FRONTEND=0`：138 条 legacy
    Schedule Queue，由 `lpu_icu/lpu_icu_queue` 执行基础指令、NOP 和
    Repeat。
-2. 测试显式打开 `ENABLE_DISTRIBUTED_PROGRAM_FRONTEND=1`：
-   ProgramLoad→分发→FU-local iMEM→Macro Frontend→timed issue。
+2. 当前正式链：
+   ProgramLoad→分发→FU-local iMEM→Macro Frontend；MEM 为 direct issue，
+   MXM 暂保留 timed issue。
 
 本轮 CModel 的主要同步范围是第二条 **MEM/MXM distributed
 ProgramLoad/Macro 路径**。VXM/SXM 的 Program boundary 虽已在当前 RTL
@@ -25,7 +26,7 @@ CModel 原有 VXM/SXM、Native Queue、NOP/Repeat、QCTL 和 FU datapath
 
 ## 2. VMODEL 当前真实指令链路
 
-### 2.1 Legacy Schedule 模式
+### 2.1 Legacy Schedule 模式（OBSOLETE / NOT_APPLICABLE）
 
 ```text
 schedule_valid/queue/is_instruction/command/payload
@@ -53,8 +54,9 @@ schedule_valid/queue/is_instruction/command/payload
 - NOP、Repeat、interval、MEM stride、运行期 refill 和满队列同拍替换：
   `rtl/icu/lpu_icu_queue.sv:1-190`。
 
-该模式不是 ProgramLoad/local-iMEM/Macro 路径。分布式模式打开时，legacy
-`run` 和 Schedule enqueue 被显式关断。
+当前磁盘 RTL 已删除 `rtl/icu/lpu_icu.sv`、`lpu_icu_queue.sv`、
+`rtl/frontend/lpu_frontend_cluster.sv` 和 MEM `lpu_mem_bank_queue.sv`。
+这部分只保留为历史说明，不再作为 CModel 当前正式链的接口依据。
 
 ### 2.2 Distributed ProgramLoad 模式
 
@@ -118,17 +120,21 @@ Program endpoint
   -> 3-word reservoir + dictionary 7
   -> context FIFO 4
   -> scheduler ingress + active contexts 4
-  -> timed bank queue 16
-  -> MEM issue
+  -> direct mem_issue valid/ready boundary
+  -> MEM execution
 ```
 
 每个 physical MEM bank 一套，共 208 套。证据：
 
-- `rtl/mem/lpu_mem_subsystem.sv:130-184`
-- `rtl/mem/lpu_mem_local_imem.sv:35-117`
-- `rtl/mem/lpu_mem_macro_frontend.sv:76-178`
-- `rtl/mem/lpu_mem_macro_scheduler.sv:65-88,299-340`
-- `rtl/mem/lpu_mem_bank_queue.sv:19-65`
+- `rtl/mem/lpu_mem_subsystem.sv:176-200,219-220,255-256`
+- `rtl/mem/lpu_mem_local_imem.sv:17-30,60-74,98-140`
+- `rtl/mem/lpu_mem_macro_frontend.sv:127-173`
+- `rtl/mem/lpu_mem_macro_scheduler.sv:24-36,326-388`
+
+`lpu_mem_bank_queue.sv` 已删除。MEM Scheduler 直接由当前 Active Context
+组合产生最终 `mem_issue_*` 边界，没有独立的 Scheduler 输出寄存器或额外一级
+输出流水；当前 MEM subsystem 两种执行后端都把 `execution_issue_ready`
+正式拉高，不存在隐藏的 timed Instruction Queue。
 
 ### 2.4 MXM local frontends
 
@@ -190,10 +196,10 @@ FU-local iMEM
 two-cycle request/return + response FIFO 4
       |
       v
-word FIFO 4 -> generic Macro parser/reservoir
-      |
+word FIFO 4 -> MEM RTL-equivalent 288-bit reservoir / Moore FSM
+      |        (12 states, append/consume mutually exclusive)
       v
-CModel packed DDB 8 (CModel-only internal boundary)
+decoded MEM Context holding register (valid held until ready)
       |
       v
 decoded context FIFO 4
@@ -201,11 +207,9 @@ decoded context FIFO 4
       v
 active contexts 4
       |
-      v
-timed issue FIFO 16, C+2 lookahead
-      |
-      v
-existing MEM/MXM FU accept path
+      +--> MEM：direct `mem_issue_*`，无 timed issue FIFO/lookahead
+      `--> MXM：保留现有 timed issue FIFO 16 / C+2 lookahead
+              -> existing MXM FU accept path
 ```
 
 ### 3.1 ProgramLoader 和统一时钟
@@ -296,17 +300,27 @@ RTL 对应：`rtl/program_load/lpu_instruction_dma.sv:1-45,75-158` 和
   256-bit response beat；本地 RTL 没有独立 DMA testbench，因此完整接口逐周期
   Trace 仍是 PARTIAL。
 
-### 3.3 local iMEM / Macro / timed issue
+### 3.3 local iMEM / Macro / MEM direct issue
 
 - fetch latency 从 1 修正为 2；加入 response FIFO 4 和 word FIFO 4，
   空 FIFO 不做写到读旁路。
+- MEM 已停止使用旧 generic Parser/DDB FSM；`IcuMacroV1Decoder<MemInstruction,96>`
+  现在走独立 RTL 等价路径：12 个 RTL 同序状态、288-bit LSB-first reservoir、
+  96-bit word append 与字段 consume 互斥、Template Header/Payload/Validate 分拍、
+  `GET_DELTA→DICT_LOOKUP→APPLY_DELTA→OUTPUT_CONTEXT` 保留寄存边界。
+- `OUTPUT_CONTEXT` 在 Context FIFO 不 ready 时保持 payload、状态、remaining counter
+  和 reservoir 不变；MEM 的 `ddb_layout().entry_bits==0`，旧 DDB 仅保留给尚未迁移的
+  MXM/SXM generic decoder 路径。
 - MEM/MXM 新增 decoded context FIFO 4；新 decoder context 先进入 FIFO，
   下一周期才可 admission 到 active context。
-- MEM/MXM active context 都改为 4。
-- 新增 timed issue FIFO 16。scheduler 在目标周期前 2 拍形成 entry，
-  只有到 due cycle 才可向 FU issue。
-- PRIME 需要覆盖 fetch、context admission 和 timed-issue lookahead，当前
-  raw Macro 测试的实际 prime 为 20 cycles。
+- MEM/MXM active context 都为 4。
+- MEM 不再写入 `timed_issues_`；Scheduler 在当前 `schedule_cycle` 直接产生
+  `mem_issue_valid_o/instruction_o/cycle_o`。MXM 暂时保留 timed issue FIFO 16。
+- MEM PRIME 不执行或预生成基础指令；必须等 fetch 完成、Decoder done、
+  Context FIFO 排空到 Active Context 后才 ready。当前 raw Macro 测试实际
+  PRIME 为 21 cycles。
+- Active Context 在本拍 retire 时不能同拍为 Context FIFO 提供空槽旁路；
+  Context FIFO 自身允许 full+dequeue replacement，但 empty 时无 bypass。
 - VXM/SXM 没有强制套用 MEM/MXM timed queue；保持原 CModel 功能并标为
   CModel-only / RTL Not Integrated。
 
@@ -316,29 +330,51 @@ RTL 对应：`rtl/program_load/lpu_instruction_dma.sv:1-45,75-158` 和
 - `include/ftlpu/icu/macro_bitstream_decoder.hpp:922-1054`
 - `include/ftlpu/icu/distributed_queue.hpp:1972-2050,2730-2792`
 
-## 4. 模块映射
+### 3.4 与 RTL Instruction Path Cycle Specification 的关系
 
-| 功能阶段 | 本地 VMODEL RTL | CModel C++ | 映射 | 当前判断 |
-|---|---|---|---|---|
-| Program API | command RAM + controller | `ProgramImage` + `ProgramLoader::submit` | Merged/Different | 保留高层 API；没有命令 PC/WAIT/JUMP |
-| Instruction DMA | `lpu_instruction_dma` | `InstructionFetchDma` | Direct/Partial | 8-bit ID、16 outstanding、16-entry RX、keep/last/error、下游反压已建模；共享 DDR 适配仍非逐端口同构 |
-| Reassembly | 64 B reassembler | 64 B reassembly | Partial | 容量对应，握手细节不同 |
-| Word FIFO | 8×164b | bounded 8-entry semantic FIFO | Partial | 深度和反压对应 |
-| Distribution ingress | 2×165b elastic | bounded 2-entry semantic FIFO | Partial/Direct | 逐拍边界对应 |
-| Scope/BOTH | distributor branch done | 无 | Missing | 尚未对齐 |
-| Relay chain | East/West 7×depth2 | East/West 7×depth2 | Partial | hop/ready/depth对应；无多源仲裁 |
-| Endpoint arbitration | RR + commit-valid | single active image endpoint | Missing/Merged | 尚未对齐 |
-| local iMEM | MEM96/MXM128 finite SRAM | finite local program backing | Partial | 容量/宽度对应 |
-| fetch response | two-stage + FIFO4 | two-cycle + FIFO4 | Direct/Partial | 共同事件时序已对齐 |
-| decoder word FIFO | depth4 | depth4 | Direct/Partial | 有限反压对应 |
-| Macro decoder | FU-specific RTL | generic decoder + FU codec | Merged/Partial | 语义保留；内部状态不完全同构 |
-| context FIFO | depth4 | depth4 | Direct/Partial | MEM/MXM common path |
-| active contexts | 4 | 4 | Direct/Partial | MEM/MXM common path |
-| timed issue | depth16 | depth16 | Direct/Partial | due-cycle/occupancy对应 |
-| legacy NOP/Repeat | `lpu_icu_queue` | Native queue controls | Different/Compatibility | 功能保留，未纳入 distributed Golden |
-| VXM Program Macro | boundary ready=0；standalone source | Native queue可用，Macro image拒绝 | Not Integrated/Different | 不纳入 Golden |
-| SXM Program Macro | boundary ready=0；standalone source | CModel Macro可用 | RTL Not Integrated/CModel-only | 不纳入 Golden |
-| QCTL | shared pool/controller/fabric | shared pool/frontend | Partial | 保留 CP6 功能，本轮未重写 |
+VMODEL 已建立独立周期规范目录：
+`D:\LPU\FTLPU-VMODEL-main\docs\rtl_instruction_path_spec\`。
+
+- 本文件只维护 RTL canonical signal/state 到 CModel member/view、方向/位宽、fire、
+  采样点和 Mapping Status。
+- RTL Spec 维护 RTL 内部 FSM、enable、寄存器、SRAM、FIFO、credit、backpressure、
+  fault 和逐周期证据。
+- 两份资料互相引用但不复制完整映射表。RTL 周期契约变化时，先更新对应 Spec，再
+  复核本文件和 Scoreboard 规则。
+- 首份正式 Spec 是
+  `docs/rtl_instruction_path_spec/fu_frontend/mem_frontend.md`，版本 1.0；其源码绑定、
+  VCS Trace 和未覆盖场景以该文档为准。
+
+## 4. 正式接口映射
+
+本表是本文件唯一的 pin/member 映射表。`Direct` 表示名称和握手语义可逐 pin
+对应；`SEMANTIC` 表示 CModel 保留软件对象或原子 staged operation，不能伪装成
+完整 RTL pin；`NOT_APPLICABLE` 表示当前 RTL 已删除该级。
+
+| 阶段 / RTL canonical signal | CModel member / view | RTL / CModel 源码位置 | 方向 / 位宽 | fire 或语义 | 采样点 | Mapping Status |
+|---|---|---|---|---|---|---|
+| Program descriptor destination | `ProgramImage.kind/queue_index` | RTL `lpu_program_load_pkg.sv:8,61-73`；CModel `program_image.hpp` | RTL packed 12-bit；CModel typed fields | CModel 不构造虚假 packed pin；由 `relay_destination()` 解析 | submit validation | `SEMANTIC`；宽度常量为 `hw::kProgramDestinationWidth` |
+| DMA command `ctrl_dma_cmd_valid_i/ready_o/address_i/length_i/id_i` | `InstructionDmaProtocolInputs` + `InstructionDmaProtocolCore` | RTL `lpu_instruction_dma.sv:11-17,76-81`；CModel `instruction_dma_protocol_core.hpp:53-196` | in/out；1/64/32/8 bit | `ctrl_dma_cmd_fire=valid&&ready` | LOW 正沿前 | `Direct` |
+| DMA DDR request `ddr_read_req_valid_o/ready_i/address_o/length_o/id_o` | 同名 accessors/inputs | RTL `lpu_instruction_dma.sv:18-23,76-80`；CModel `instruction_dma_protocol_core.hpp:188-196` | out/in；1/64/32/8 bit | `ddr_read_req_fire=valid&&ready` | LOW 正沿前 | `Direct` |
+| DMA DDR response `ddr_read_rsp_valid_i/ready_o/data_i/keep_i/last_i/id_i/error_i` | 同名 `InstructionDmaProtocolInputs` | RTL `lpu_instruction_dma.sv:25-32,91`；CModel `instruction_dma_protocol_core.hpp:58-252` | in/out；1/256/32/1/8/1 bit | `ddr_read_rsp_fire=valid&&ready` | LOW 正沿前；FIFO Current 正沿后 | `Direct`，108-row Golden 逐周期一致 |
+| DMA reassembly output `reasm_rsp_valid_o/ready_i/data_o/keep_o/last_o/id_o/error_o` | `reasm_rsp_*` accessors | RTL `lpu_instruction_dma.sv:34-40,133-140`；CModel `instruction_dma_protocol_core.hpp:220-252` | out/in；同 response payload | `reasm_rsp_fire=valid&&ready` | LOW 正沿前 | `Direct` |
+| Distribution→MEM `mem_program_valid_o/ready_i/control_o/destination_o` | `MemProgramPortSignals` + typed `ProgramImage` | RTL `lpu_program_distribute_system.sv:18-31`；CModel `program_loader.hpp:108-118,148-152` | valid/ready 1 bit；control 1；destination 12 | 当前 CModel 每次只有一个 active image/endpoint | LOW 正沿前 view | `SEMANTIC`，多端口 RR/BOTH 未建模 |
+| `mem_program_imem_address_o` | `MemProgramPortSignals::mem_program_imem_address_o`、`PendingWrite::program_imem_address` | RTL `lpu_program_distribute_system.sv:25-26,410-411`；CModel `program_loader.hpp:111,542,679-688` | out；17-bit local iMEM **word address** | 随 endpoint valid 保持；只在 fire 后推进 | LOW 正沿前 | `Direct/SEMANTIC`（单 active endpoint） |
+| `mem_program_data_o/strb_o/last_o` | `MemProgramPortSignals` | RTL `lpu_program_distribute_system.sv:27-30,412-420`；CModel `program_loader.hpp:112-116,681-688` | out；128/4/1 bit | MEM96 必须 `strb=4'b0111`；`last` 对应 image 最后 word | LOW 正沿前 | `Direct/SEMANTIC`；ProgramLoader test 已检查 |
+| MEM local load `load_valid_i/ready_o/load_imem_address_i/load_data_i/load_strb_i/load_last_i` | `MemLocalImemLoadPortSignals`、`load_mem_program_word()` | RTL `lpu_mem_local_imem_frontend.sv:13-20,93-104`；CModel `distributed_queue.hpp:234-248,723-801` | in/out；1/17/128/4/1 bit | `load_fire=valid&&ready`；检查 0111、范围、连续、last 后禁止写 | staged ICU operation 在共同 POSEDGE 提交 | `SEMANTIC` staged pin adapter；错误用 terminal exception + fault view |
+| MEM PRIME `prime_valid_i/prime_ready_o` | `prime_mem_program()` + 同一 load view | 同上；CModel `distributed_queue.hpp:772-801` | in/out；1 bit | `prime_fire=valid&&ready`；要求 configured、last、非零 word count | Program image seal 的共同 POSEDGE | `SEMANTIC` staged pin adapter |
+| local iMEM request `imem_read_req_valid_o/ready_i/address_o/last_o` | `IcuMacroV1Decoder::ImemReadPortSignals` | RTL `lpu_mem_imem_fetch.sv:15-18,62-65`；CModel `macro_bitstream_decoder.hpp:160-174,1088-1102` | out/in；1/address/1；production 默认 address=17 bit，Level1 `IMEM_DEPTH=16` 实例为 4 bit | `imem_read_req_fire=valid&&ready`；阻塞时 address 不推进 | 每次 frontend tick 正沿前 view | `Direct/Partial`；Trace 按实例参数化宽度比较，不改变 production 17-bit 映射 |
+| local iMEM response `imem_read_rsp_valid_i/ready_o/data_i/last_i` | 同一 `ImemReadPortSignals` | RTL `lpu_mem_imem_fetch.sv:20-23,67-71`、`lpu_mem_local_imem.sv:60-71`；CModel `macro_bitstream_decoder.hpp:1028-1056` | in/out；1/96/1 | `imem_read_rsp_fire=valid&&ready`；two-stage SRAM + response FIFO4；无空旁路 | 正沿前 valid/fire，正沿后 FIFO Current | `Direct/Partial` |
+| 通用 FIFO `enqueue_valid_i/ready_o/data_i`、`dequeue_valid_o/ready_i/data_o`、`level_o` | `RtlQueueFifoInputs/Outputs`、`rtl_outputs()` | RTL `lpu_queue_fifo.sv:8-16,37-42`；CModel `rtl_fifo.hpp:19-33,90-138` | 参数化 data width；level=`clog2(depth+1)` | `fire=valid&&ready`；empty 无 bypass；full+pop 可 replacement | LOW 正沿前；POSEDGE 后更新 level/head | `Direct` |
+| Macro word FIFO | decoder 内 `word_fifo_` + statistics | RTL `lpu_mem_macro_frontend.sv:80-94`；CModel `macro_bitstream_decoder.hpp:998-1056` | 97-bit，depth4 | 同通用 FIFO；empty 无 bypass/full replacement | frontend tick | `Direct/Partial`，未改成独立 ClockedModule |
+| MEM Decoder state / subphase / reservoir | `MemState`、`MemTemplatePhase`、`mem_reservoir_`、`mem_*_phase_` | RTL `lpu_mem_macro_decoder.sv:43-75,77-185,345-721,733-1013`；CModel `macro_bitstream_decoder.hpp:MemState,mem_parser_step,mem_tick` | state 4 bit；reservoir 288 bit + count 9 bit | Control 直接接收；后续 Word append 与 consume 互斥；Context valid 只在 OUTPUT_CONTEXT | 每次 tick 保存本拍 Current state/phase/reservoir trace view | `Direct` for MEM；MXM/SXM 不假设同构 |
+| Context FIFO handshake/level | `MacroContextFifoPortSignals`、`context_fifo_port_signals()`、`context_fifo_occupancy()` | RTL `lpu_mem_macro_frontend.sv:127-140`；CModel `distributed_queue.hpp:250-258,975-980,2188-2230` | context 271-bit，depth4 | empty 无 bypass；full+dequeue replacement；Active full 本拍 retire 不提供 admission bypass | valid/ready/fire 在 LOW/PRE_POSEDGE；level 在 POSEDGE/POST_COMB | `Direct/Partial`，payload 保持 typed semantic object |
+| Scheduler Context admission / `active_count_o` | `decoded_context_fifo_`→`active_macro_storage_`、`active_macro_count()` | RTL `lpu_mem_macro_scheduler.sv:10-22,294-302,373-375`；CModel `distributed_queue.hpp:2207-2230,2278-2306` | valid/ready + typed schedule；count 3 bit（ACTIVE_CONTEXTS=4） | 运行时 `start_cycle < schedule_cycle+1` 为 late；新 Context 次周期可见 | 正沿提交；count 等组合 reduction 稳定后的 POSEDGE/POST_COMB | `Direct/Partial` |
+| Scheduler→MEM `mem_issue_valid_o/ready_i/instruction_o/cycle_o` | `MemIssuePortSignals`、`dispatch_mem_issue()` | RTL `lpu_pkg.sv:145-150`、`lpu_mem_macro_scheduler.sv:24-36,333-375`；CModel `instruction_codec.hpp:57,209-243`、`distributed_queue.hpp:220-228,1229-1247,3139-3201` | valid/ready 各 1 bit；正式 RTL instruction container 64 bit；CModel 使用 typed `MemInstruction`，物理编码为 64 bit；cycle 32 bit | `mem_issue_fire=valid&&ready`；到期 backpressure=terminal fault 11；冲突=9；missed=8 | RUN 周期正沿前 view；accept 后推进 Active | `Direct/SEMANTIC`；CModel exception 同时保留 fault view |
+| MEM sink ready | `MemArrayModel::mem_issue_ready()` | RTL `lpu_mem_subsystem.sv:219-220,255-256`；CModel `mem_array.hpp:264-270` | input to Scheduler；1 bit/queue | 当前 native/legacy execution 均正式 tie-high | ICU dispatch LOW | `Direct`；不是伪造 ready |
+| MEM timed Instruction Queue / C+2 lookahead | 无 | RTL `lpu_mem_bank_queue.sv` 已删除；CModel MEM `timed_issue_depth/lookahead=0` | N/A | MEM 不读写 `timed_issues_`；MXM 保留旧路径 | N/A | `NOT_APPLICABLE` for MEM |
+| legacy `lpu_icu_queue` | CModel Native/compatibility queue controls | RTL 文件已删除；CModel 保留软件兼容功能 | N/A | 不属于正式 distributed MEM chain | N/A | `OBSOLETE RTL / CModel compatibility-only` |
+| VXM/SXM Program Macro | 原有 CModel path | 本轮未接入 | N/A | 不扩展 B1 外部 adapter | N/A | `NOT_IN_SCOPE` |
 
 ## 5. 周期契约
 
@@ -365,31 +401,86 @@ relay 使用 `full_replacement=false`：ready 只看 registered occupancy，满�
 
 ## 6. 验证结果
 
+### 6.0 2026-11-18 MEM Decoder RTL 等价重构增量
+
+- `raw_two_issue`：Control C14；Context FIFO enqueue C24/C28；MEM issue C3/C7，
+  与现有 RTL trace 相同。
+- `raw_repeat4`：Control C12；Context FIFO enqueue C20；MEM issue C0/C1/C2/C3，
+  与现有 RTL trace 相同。
+- CModel 定向回归 9/9 PASS：instruction codec、macro schedule、RAW decoder、
+  Level1 trace、queue control、VXM sequential、C2C packet codec、RTL FIFO、
+  instruction fetch DMA。queue-control 的旧“两个 MEM Context 不得交错”断言已按
+  当前 Active Context Scheduler 语义改为：无 due-cycle 冲突即可交错，queue-local
+  WAIT 暂停逻辑 schedule cycle 后可继续。
+- RAW decoder 单测另覆盖 Context backpressure hold、跨 96-bit word、Dictionary
+  lookup、Narrow/Wide Escape、Extended Template，以及 fault 2/3/6/7/8。
+- Release 全量工程已成功构建。Decoder/ICU 相关定向 CTest 为 9/9 PASS。
+- Release 全量 CTest 为 66/80 PASS；其余 14 项中，`subsystem.program.loader`
+  的 stress fixture 在一个合法 3-word MEM Macro 后继续填充随机 word。RTL 等价的
+  decoder 在 terminal done 后会拉低 word-ready，因而不会吞掉这些 padding，Program
+  Loader 也就不能把 160-word 描述符判成 fetch complete。该失败是旧 fixture 与当前
+  正式 frontend 契约不兼容，不能通过让 done 后继续消费 word 或人为补拍来掩盖；
+  后续应把 fixture 改为精确长度的合法 Macro image，或明确改走 Native load-only 路径。
+  另外 13 项集中在既有 VXM/MXM/SXM 数据路径、SRAM 配置或权重到达时序，本轮没有
+  把它们归因于 MEM decoder。
+- Debug 全量工程在若干大型测试目标上触发 MSVC C1128（需要 `/bigobj`）；同一源码的
+  Release 全量构建通过，因此它记录为 Debug 构建配置限制，不作为 decoder 行为失败。
+- 修正 Monitor 层级与真实采样边界后，VCS/CModel 离线 Scoreboard 为
+  `CYCLE_PASS`：410/410 pair matched，0 differences。覆盖 load/PRIME、iMEM
+  request/response、Context FIFO enqueue/dequeue/level、完整 decoded Context、
+  MEM issue（含 Scheduler conflict/fault/fault_code）、Active Context count 和
+  Word FIFO level。
+- 修正内容不是 pipeline 补拍：Level1 iMEM 地址按 RTL test 实例
+  `IMEM_DEPTH=16` 比较 4-bit，production 映射仍为 17-bit；Scheduler status
+  直接取 4-bit Scheduler pin，不再误取 6-bit frontend fault；FIFO level 和
+  `active_count_o` 在 NBA 后等待组合逻辑稳定再以 `POSEDGE/POST_COMB` 采样；
+  START/MEM_ISSUE/CASE_END 顺序按同一 test harness 对齐。没有使用 cycle offset。
+- RTL VCS `X-2025.06-SP1_Full64` 编译和两个 directed case 均 PASS；运行输入为
+  `/home/RD/ryan/projects/LPU/build/raw_macro_level1/source` 局部精确快照，运行目录为
+  `/home/RD/ryan/projects/LPU/build/raw_macro_level1/run_rtl_alignment_20261118`。
+  VCS Trace 保留在虚拟机；本地临时副本在比较后删除。
+- 为首份 Instruction Path Spec 增加的 Fetch/iMEM 只读观测点已在 VCS
+  `run_instruction_path_spec_20261118` 重新运行：两个 case 和总测试 PASS；Trace
+  5391 行，SHA-256
+  `23b7f389effa917d177e421efffcff95132a0533e779071d40bcabf22abc8c41`。新增观测包括
+  Fetch `busy/done/address/request/response remaining`、local-iMEM 两级 valid、
+  `outstanding_q` 和 response FIFO level；没有改变 DUT 激励或正式 RTL。
+- 新 Trace 重新执行离线 Scoreboard，仍为 `CYCLE_PASS`：410/410 pair matched，
+  0 differences。报告位于
+  `out/icu_rtl_alignment/raw_macro_level1/scoreboard_instruction_path_spec_vcs/`。
+
 ### 6.1 CModel
 
-定向 Release 测试全部 PASS：
+以下是 MEM Decoder 重构前、同日完成的 ProgramLoad/ICU 历史定向基线；当前重构后的
+验证结论以 6.0 为准。当时重新构建并运行的定向 Release 测试 10/10 PASS：
 
 - `unit.icu.rtl_fifo`
 - `unit.icu.macro_schedule`
 - `unit.icu.raw_macro_decoder`
 - `subsystem.program.loader`
+- `subsystem.program.relay_mapping`
+- `subsystem.program.configuration`
+- `subsystem.icu.configuration`
 - `unit.icu.clocked`
 - `subsystem.system.timing`
 
 关键结果：
 
-- raw Macro：`prime_cycles=20`，MEM context stall 被实际覆盖。
+- raw Macro：`prime_cycles=21`；PRIME 不产生 FU issue，Cycle 0 的 direct
+  `mem_issue_*`、Repeat=4 连续四拍和 due-cycle backpressure fault 11 均通过。
 - configured ProgramLoad：170 cycles（Instruction DMA 实际路径）。
+- Program endpoint 的 17-bit word address、128-bit data、`strb=0111`、last
+  和 valid/ready/fire 关系已由 `program_loader_test` 检查。
 - Program word/ingress/relay write/read 守恒检查通过。
+- Stage A Instruction DMA Golden：108 rows，`mismatches=0`，
+  `semantic_failures=0`；临时 CModel trace 已删除。
 - A.1 新增 East/West 全部 208 条 MEM Queue 穷举映射；A.2 新增单读、
   多 outstanding、ID/error、RX FIFO full/recovery、reset/final drain 测试。
 - A.1 代表 Trace：Queue 4 从错误 R1 修正到 R0，9 words 的 relay writes
   从错误预期 18 变为 9；Queue 16 从错误 R4 修正到 R1，实际 18；Queue 96
   保持 R6，实际 63。
-- 全量 CTest：72/79 PASS。
-- 7 个失败与 Checkpoint 4～7B 冻结基线相同：4 个 MXM accumulator
-  配置容量、1 个 MEM SRAM 配置容量、2 个 VXM active-bundle。
-  ICU、ProgramLoader、C2C、MEM/MXM/SXM/VXM 单元和 timing 测试没有新增失败。
+- 当时没有重跑全量 79 项；旧 72/79 结果仅为历史基线，不能替代 6.0 中当前
+  Decoder 重构后的验证结论。
 
 ### 6.2 RTL 与跨模型 Golden
 
@@ -400,13 +491,13 @@ relay 使用 `full_replacement=false`：ready 只看 registered occupancy，满�
 |---|---|
 | `lpu_queue_fifo_tb` | PASS |
 | 相同激励 FIFO RTL/CModel，12 cycles×17 fields | PASS，逐字段一致 |
-| legacy ICU Queue NOP/Repeat/MEM stride | PASS |
+| legacy ICU Queue NOP/Repeat/MEM stride | 历史 PASS；当前 RTL 文件已删除，NOT_APPLICABLE |
 | Program config FIFO | PASS，5 checks |
 | Program reassembler | PASS，7 checks |
 | Program elastic stage | PASS |
 | 7-stage relay chain | PASS，80 checks |
 | `lpu_instruction_dma` RTL compile | PASS；本地没有独立功能 TB，功能 Golden 为 PARTIAL |
-| MEM Macro frontend | PASS，2 scenarios |
+| MEM Macro frontend | 历史 PASS；本轮以当前源码静态 pin/周期契约和 CModel 定向测试复核 |
 | MXM three Macro frontends | PASS |
 
 跨模型 FIFO trace 明确区分：
@@ -441,7 +532,8 @@ MEM/MXM Macro frontend 模块均能编译并通过自检。
 ### CModel-only 或保留抽象
 
 - VXM/SXM 的完整执行和现有 Macro 支持。
-- CModel packed DDB depth 8 和 lazy expansion。
+- MXM/SXM generic Macro 路径仍保留 CModel packed DDB depth 8 和 lazy expansion；
+  MEM 已切换为 RTL 等价逐状态 Decoder，不再使用该 DDB。
 - Native local iMEM/IQ 的 NOP、Repeat、WAIT、SYNC、NOTIFY、MEM transport。
 - QCTL shared-pool 高层控制语义。
 - ProgramImage、manifest/统计类软件元数据。
@@ -451,7 +543,8 @@ MEM/MXM Macro frontend 模块均能编译并通过自检。
 - Program command RAM/PC/WAIT/JUMP/END。
 - Program config FIFO 与 Instruction DMA command metadata 的完整多 image 并发配对。
 - BOTH branch、VXM direct、endpoint RR、commit-valid、PRIME FIFO。
-- Legacy 138-Queue Schedule 网络的完整 timing adapter。
+- 已删除的 Legacy 138-Queue Schedule 网络不再要求 formal adapter；只保留
+  CModel compatibility path。
 
 ### RTL Not Integrated
 
@@ -464,7 +557,8 @@ MEM/MXM Macro frontend 模块均能编译并通过自检。
 
 - Program word/ingress/relay occupancy 和 backpressure；
 - iMEM fetch response/word FIFO occupancy；
-- decoded context FIFO、active context、timed issue FIFO occupancy；
+- decoded context FIFO、active context；MXM timed issue FIFO occupancy；
+- MEM direct `mem_issue_*` valid/ready/fire/cycle/fault；
 - accepted/rejected writes、reads、full cycles、stall 和 issue cycles。
 
 在开始 FIFO depth sweep 前仍需先完成两项：

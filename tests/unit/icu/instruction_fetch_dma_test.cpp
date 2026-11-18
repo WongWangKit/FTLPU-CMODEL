@@ -156,11 +156,11 @@ void protocol_step(InstructionDmaProtocolCore& core,
 InstructionDmaProtocolInputs command(std::uint8_t id)
 {
     InstructionDmaProtocolInputs inputs{};
-    inputs.command_valid=true;
-    inputs.command_address=0x1000+id*0x100;
-    inputs.command_length=64;
-    inputs.command_id=id;
-    inputs.request_ready=true;
+    inputs.ctrl_dma_cmd_valid_i=true;
+    inputs.ctrl_dma_cmd_address_i=0x1000+id*0x100;
+    inputs.ctrl_dma_cmd_length_i=64;
+    inputs.ctrl_dma_cmd_id_i=id;
+    inputs.ddr_read_req_ready_i=true;
     return inputs;
 }
 
@@ -168,13 +168,13 @@ InstructionDmaProtocolInputs response(std::uint8_t id,bool error=false,
     bool reassemblerReady=false)
 {
     InstructionDmaProtocolInputs inputs{};
-    inputs.request_ready=true;
-    inputs.response_valid=true;
-    inputs.response.id=id;
-    inputs.response.keep=0xffffffffU;
-    inputs.response.last=true;
-    inputs.response.error=error;
-    inputs.reassembler_ready=reassemblerReady;
+    inputs.ddr_read_req_ready_i=true;
+    inputs.ddr_read_rsp_valid_i=true;
+    inputs.ddr_read_rsp_id_i=id;
+    inputs.ddr_read_rsp_keep_i=0xffffffffU;
+    inputs.ddr_read_rsp_last_i=true;
+    inputs.ddr_read_rsp_error_i=error;
+    inputs.reasm_rsp_ready_i=reassemblerReady;
     return inputs;
 }
 
@@ -187,8 +187,8 @@ void protocol_fault_and_reset_paths()
 
     auto mismatch=response(99,true);
     core.drive(mismatch);
-    require(core.response_input_fire()&&core.response_id_invalid()
-        &&core.response_error()&&core.fault()
+    require(core.ddr_read_rsp_fire()&&core.ddr_read_rsp_id_invalid()
+        &&core.ddr_read_rsp_error()&&core.fault()
         &&core.fault_code()==kInstructionDmaFaultId,
         "ID fault did not have RTL priority over response error");
     core.low();core.validate_posedge();core.posedge();
@@ -197,12 +197,12 @@ void protocol_fault_and_reset_paths()
         "mismatched last response did not enqueue and dequeue the head ID");
 
     auto blocked=response(8,false,true);
-    blocked.command_valid=true;
-    blocked.command_id=9;
-    blocked.command_length=32;
+    blocked.ctrl_dma_cmd_valid_i=true;
+    blocked.ctrl_dma_cmd_id_i=9;
+    blocked.ctrl_dma_cmd_length_i=32;
     core.drive(blocked);
-    require(!core.command_ready()&&!core.request_valid()
-        &&!core.response_ready()&&core.response_fire(),
+    require(!core.ctrl_dma_cmd_ready_o()&&!core.ddr_read_req_valid_o()
+        &&!core.ddr_read_rsp_ready_o()&&core.reasm_rsp_fire(),
         "sticky fault did not block new input while allowing RX drain");
     core.low();core.validate_posedge();core.posedge();
     require(core.outstanding()==1&&core.response_fifo_occupancy()==0
@@ -216,7 +216,7 @@ void protocol_fault_and_reset_paths()
         &&core.outstanding()==0&&core.response_fifo_occupancy()==1,
         "matching error response did not latch the RTL response fault");
     InstructionDmaProtocolInputs drain{};
-    drain.reassembler_ready=true;
+    drain.reasm_rsp_ready_i=true;
     protocol_step(core,drain);
     require(core.idle()&&core.fault(),
         "response fault did not preserve sticky fault after RX drain");

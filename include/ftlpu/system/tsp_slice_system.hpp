@@ -114,7 +114,9 @@ public:
 
     explicit TspSliceSystem(
         SystemHardwareConfiguration hardware = {},
-        SxmTransposeArchitecture sxm_architecture = SxmTransposeArchitecture::LocalBlocks)
+        SxmTransposeArchitecture sxm_architecture = SxmTransposeArchitecture::LocalBlocks,
+        MemArrayModel::ReadTiming mem_read_timing =
+            MemArrayModel::ReadTiming::RegisteredR1)
         : hardware_configuration_(hardware)
         , stream_layout_(make_configured_stream_layout())
         , active_stream_routes_ {
@@ -122,8 +124,10 @@ public:
             stream_layout_.topology.default_route_selection(),
         }
         , mems_ {
-            MemArrayModel(stream_layout_.mem_ports),
-            MemArrayModel(stream_layout_.mem_ports),
+            MemArrayModel(stream_layout_.mem_ports,
+                MemArrayModel::MissingStreamPolicy::Error, mem_read_timing),
+            MemArrayModel(stream_layout_.mem_ports,
+                MemArrayModel::MissingStreamPolicy::Error, mem_read_timing),
         }
         , streams_ {
             StreamRegisterFabric(stream_layout_.topology.column_count()),
