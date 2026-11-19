@@ -4,6 +4,23 @@ Current VXM ISA: [96-bit sequential configurations](icu_vxm_sequential.md). The 
 
 # Documentation layout
 
+- [Native MEM/MXM/VXM RTL alignment](rtl_alignment.md) documents the native
+  entry point, current instructions, cycle contracts and port-level RTL comparisons.
+
+- [MXM scheduling contract](mxm_scheduling_contract.md), [instruction encoding](mxm_instructions.md),
+  and [weight ingress](mxm_weight_ingress.md) are the shared VMODEL references.
+  The linked [Supercell](mxm_supercell.md) and [accumulator](mxm_accumulator.md) notes cover the datapath.
+  Run their RTL commands in VMODEL and the CModel comparisons from [RTL alignment](rtl_alignment.md).
+
+- [MEM instruction encoding](mem_instructions.md) and the [MEM scheduling contract](mem_scheduling_contract.md)
+  describe the native 32-bit word, 1/3-cycle propagation, valid management and compiler timing.
+- The [VMODEL hardware architecture](vmodel_architecture.md) explains the RTL module boundaries,
+  [VXM data paths and instructions](vmodel_architecture.md#vxm-module-boundaries), and the [C3 Log extension](vmodel_architecture.md#c3-log-extension).
+- [VXM RTL verification](vxm_rtl_verification.md), [Lane and Superlane chains](vxm_chain_verification.md),
+  and [physical ALU positions](vxm_alu_position_verification.md) describe the RTL test scope and commands.
+- Open the [MEM data wavefront](visualizations/mem-stream-edge.html) and [MEM/MXM timing view](visualizations/mem-mxm-phase-3d.html)
+  locally in a browser. These diagrams show scheduling examples.
+
 - `FTLPU.drawio` is the editable architecture source.
 - `figures/` contains rendered PNG and SVG documentation figures.
 - `traces/` contains generated schedule CSV files for Pipeline Viewer.

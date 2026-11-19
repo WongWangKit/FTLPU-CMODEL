@@ -2,6 +2,12 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+## 与 RTL 对齐的 MXM、MEM 和 VXM 模块
+
+独立的逐拍模型入口是 `ftlpu/cmodel.hpp` 和 `ftlpu::CModel`。
+配置选择、模块接口和 RTL 对拍见 [RTL 对齐说明](docs/rtl_alignment.md)。
+编译器时序约定和硬件参考见 [文档索引](docs/README.md)。
+
 FTLPU-CMODEL 是一个面向 FTLPU/TSP 风格处理器的 C++20 cycle model。它建模
 stream-register 时序、逐队列 ICU 控制、两个镜像 MEM hemisphere、四个 MXM、
 中心 VXM，以及每个 hemisphere 各一个 SXM。

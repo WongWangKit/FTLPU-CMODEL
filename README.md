@@ -2,6 +2,14 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+## RTL-aligned MXM, MEM and VXM blocks
+
+The standalone cycle models are exposed through `ftlpu/cmodel.hpp` and
+`ftlpu::CModel`. See the [RTL alignment guide](docs/rtl_alignment.md)
+for the native configuration, ports and differential tests. The
+[documentation index](docs/README.md) links the compiler contracts and
+hardware references for all three blocks.
+
 FTLPU-CMODEL is a cycle-oriented C++20 model of an FTLPU/TSP-style processor.
 It models stream-register timing, per-queue ICU control, two mirrored MEM
 hemispheres, four MXMs, a central VXM, and one SXM per hemisphere.

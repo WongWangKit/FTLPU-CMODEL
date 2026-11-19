@@ -28,6 +28,31 @@ target_include_directories(ftlpu_cmodel PUBLIC
 
 enable_testing()
 
+# Native replacement-block models use the same public boundary as current RTL.
+# The original TspSliceSystem remains the legacy whole-chip compatibility API.
+add_executable(rtl_native_test tests/unit/rtl/native_test.cpp)
+target_link_libraries(rtl_native_test PRIVATE ftlpu_cmodel)
+if(MSVC)
+    target_compile_options(rtl_native_test PRIVATE /UNDEBUG)
+else()
+    target_compile_options(rtl_native_test PRIVATE -UNDEBUG -ffp-contract=off)
+endif()
+add_test(NAME unit.rtl.native COMMAND rtl_native_test)
+set_tests_properties(unit.rtl.native PROPERTIES LABELS "unit;rtl;mem;mxm;fast")
+add_executable(rtl_probe tests/unit/rtl/probe.cpp)
+target_link_libraries(rtl_probe PRIVATE ftlpu_cmodel)
+add_executable(rtl_schedule_demo examples/rtl/schedule_demo.cpp)
+target_link_libraries(rtl_schedule_demo PRIVATE ftlpu_cmodel)
+add_test(NAME example.rtl.schedule COMMAND rtl_schedule_demo)
+set_tests_properties(example.rtl.schedule PROPERTIES LABELS "rtl;example;fast")
+
+set(_legacy_default ON)
+if(FTLPU_HARDWARE_CONFIG MATCHES "ftlpu-rtl-lpu")
+    set(_legacy_default OFF)
+endif()
+option(FTLPU_BUILD_LEGACY_TARGETS "Build the preserved legacy ABI tests and examples" ${_legacy_default})
+if(FTLPU_BUILD_LEGACY_TARGETS)
+
 function(ftlpu_add_test target source test_name)
     add_executable(${target} ${source})
     target_link_libraries(${target} PRIVATE ftlpu_cmodel)
@@ -244,3 +269,5 @@ foreach(pair IN ITEMS "sxm_matrix_test|tests/unit/sxm/matrix_test.cpp|unit.sxm.m
     add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${target}>)
     set_tests_properties(${test_name} PROPERTIES LABELS "sxm;matrix;fast")
 endforeach()
+
+endif()

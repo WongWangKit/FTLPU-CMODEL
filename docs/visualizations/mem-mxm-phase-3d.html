@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MEM 与 MXM 时序对齐</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --font-size-base: 16px;
+      --foreground: #172554;
+      --muted-foreground: #475569;
+      --background: #fff;
+      --border: #cbd5e1;
+      --blue: #2563eb;
+      --orange: #ea580c;
+      --purple: #7c3aed;
+      --red: #dc2626;
+    }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: var(--background);
+      color: var(--foreground);
+      font: var(--font-size-base)/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    main { max-width: 78rem; margin-inline: auto; }
+    button, select, input { font: inherit; }
+  </style>
+</head>
+<body>
+<main>
+<div id="mem-mxm-phase-3d">
+  <style>
+    #mem-mxm-phase-3d{display:grid;gap:calc(var(--font-size-base)*1);color:var(--foreground);--data-color:var(--viz-series-1,var(--blue));--compute-color:var(--viz-series-2,var(--orange));--memory-color:var(--viz-series-5,var(--purple));--gap-color:var(--red)}
+    #mem-mxm-phase-3d .heading{display:grid;gap:calc(var(--font-size-base)*.25)}
+    #mem-mxm-phase-3d .legend{display:flex;flex-wrap:wrap;gap:calc(var(--font-size-base)*.65) calc(var(--font-size-base)*1.2)}
+    #mem-mxm-phase-3d .key{display:inline-flex;align-items:center;gap:calc(var(--font-size-base)*.4)}
+    #mem-mxm-phase-3d .swatch{width:12px;height:12px;display:inline-block;flex:none}
+    #mem-mxm-phase-3d .memory{background:var(--memory-color);transform:rotate(45deg);width:9px;height:9px}
+    #mem-mxm-phase-3d .data{background:var(--data-color);border-radius:50%}
+    #mem-mxm-phase-3d .compute{background:var(--compute-color);clip-path:polygon(50% 0,100% 100%,0 100%)}
+    #mem-mxm-phase-3d .gap{height:3px;background:var(--gap-color)}
+    #mem-mxm-phase-3d .camera{width:min(23rem,100%)}
+    #mem-mxm-phase-3d .plot{width:100%;min-width:0}
+    #mem-mxm-phase-3d .space-plot{touch-action:pan-y;cursor:grab}
+    #mem-mxm-phase-3d .space-plot:active{cursor:grabbing}
+    #mem-mxm-phase-3d .scene{display:block;width:100%;overflow:visible;font:inherit;color:var(--foreground)}
+    #mem-mxm-phase-3d .scene text{fill:var(--foreground);font-weight:400}
+    #mem-mxm-phase-3d .scene .secondary{fill:var(--muted-foreground)}
+    #mem-mxm-phase-3d .scene .grid{stroke:var(--border);stroke-width:1;fill:none;pointer-events:none}
+    #mem-mxm-phase-3d .scene .axis{stroke:var(--muted-foreground);stroke-width:1.2;fill:none;pointer-events:none}
+    #mem-mxm-phase-3d .scene .data-line{stroke:var(--data-color);stroke-width:3;fill:none;stroke-linecap:round;stroke-linejoin:round}
+    #mem-mxm-phase-3d .scene .memory-line{stroke:var(--memory-color);stroke-width:2;fill:none}
+    #mem-mxm-phase-3d .scene .compute-line{stroke:var(--compute-color);stroke-width:3;fill:none}
+    #mem-mxm-phase-3d .scene .gap-line{stroke:var(--gap-color);stroke-width:2;stroke-dasharray:4 4;fill:none;pointer-events:none}
+    #mem-mxm-phase-3d .scene .dimension-cap{stroke:var(--gap-color);stroke-width:2;fill:none;pointer-events:none}
+    #mem-mxm-phase-3d .scene .data-mark{fill:var(--data-color)}
+    #mem-mxm-phase-3d .scene .memory-mark{fill:var(--memory-color)}
+    #mem-mxm-phase-3d .scene .compute-mark{fill:var(--compute-color)}
+    #mem-mxm-phase-3d .scene .label-halo{paint-order:stroke;stroke:var(--background);stroke-width:4px;stroke-linejoin:round}
+    #mem-mxm-phase-3d .scene .muted-point{fill:var(--data-color);opacity:.18}
+    #mem-mxm-phase-3d .caption{display:flex;flex-wrap:wrap;justify-content:space-between;gap:calc(var(--font-size-base)*.5)}
+    #mem-mxm-phase-3d [hidden]{display:none!important}
+  </style>
+  <div class="heading">
+    <h3>MEM → MXM：同批数据与指令的相位错配</h3>
+    <div class="text-small text-muted">约定推演 · 非整链实测 · 等长通路示例 · E0 为 SL0 的会合时刻</div>
+  </div>
+  <div class="legend text-small" aria-label="图例">
+    <span class="key"><span class="swatch memory" aria-hidden="true"></span>MEM 读指令：1 拍 / SL</span>
+    <span class="key"><span class="swatch data" aria-hidden="true"></span>同批数据 A0</span>
+    <span class="key"><span class="swatch compute" aria-hidden="true"></span>MXM 指令 I0：3 拍 / SL</span>
+    <span class="key"><span class="swatch gap" aria-hidden="true"></span>相位差</span>
+  </div>
+  <div class="viz-row">
+    <div class="viz-row" role="group" aria-label="查看方式">
+      <button class="btn" type="button" id="mem-mxm-view-space" aria-pressed="true">三维时空</button>
+      <button class="btn" type="button" id="mem-mxm-view-section" aria-pressed="false">MXM 输入截面</button>
+    </div>
+    <label class="form-label" for="mem-mxm-focus">关注 Superlane
+      <select class="form-select" id="mem-mxm-focus">
+        <option value="0">SL0</option><option value="1">SL1</option><option value="2">SL2</option><option value="3" selected>SL3</option>
+      </select>
+    </label>
+  </div>
+  <div class="camera" id="mem-mxm-camera">
+    <label class="form-label" for="mem-mxm-yaw">旋转视角 <span class="tabular-nums" id="mem-mxm-angle">−32°</span></label>
+    <input class="form-range" id="mem-mxm-yaw" type="range" min="-55" max="-15" value="-32" aria-label="三维图旋转角度">
+  </div>
+  <div class="plot space-plot" id="mem-mxm-space"></div>
+  <div class="plot" id="mem-mxm-section" hidden></div>
+  <div class="caption text-small text-muted" id="mem-mxm-axes">
+    <span>X 模块位置 · Y Superlane · Z 时钟周期</span><span>可左右拖动旋转</span>
+  </div>
+  <div class="tabular-nums" id="mem-mxm-detail" aria-live="polite"></div>
+  <span class="sr-only">本图基于 MEM 层间一拍、MXM 前端层间三拍以及等长传输路径的约定推演。
+  SL0 同拍会合；SL1、SL2、SL3 的同批数据分别提前二、四、六拍。红色线段仅度量相位差，不表示存在等待寄存器。
+  连续供数时，对应 I0 的采样时刻可能分别取得 A2、A4、A6。公共路径的示例阶段不代表已验证的完整 MEM、SRF、SXM、MXM 接线。</span>
+  <script>
+  (function(){
+    'use strict';
+    var root=document.getElementById('mem-mxm-phase-3d');
+    var el=function(name){return document.getElementById('mem-mxm-'+name);};
+    var state={focus:3,view:'space',yaw:-32};
+    var modules=['MEM 发射','读响应','SRF 寄存','MXM 输入'];
+    var NS='http://www.w3.org/2000/svg';
+    var focusedWidth=0,drag=null;
+    function restore(saved){
+      if(!saved)return;
+      var m=saved.modelContent||{},p=saved.privateContent||{};
+      if(Number.isInteger(m.focusSL)&&m.focusSL>=0&&m.focusSL<=3)state.focus=m.focusSL;
+      if(m.view==='space'||m.view==='section')state.view=m.view;
+      if(Number.isFinite(p.yaw))state.yaw=Math.max(-55,Math.min(-15,p.yaw));
+    }
+    restore(window.openai&&window.openai.widgetState);
+    function persist(){
+      if(window.openai&&window.openai.setWidgetState){
+        Promise.resolve(window.openai.setWidgetState({modelContent:{focusSL:state.focus,view:state.view,
+          assumption:'MEM 1 cycle/SL; MXM front end 3 cycles/SL; equal route latency',
+          phaseGapCycles:2*state.focus},privateContent:{yaw:state.yaw}})).catch(function(){});
+      }
+    }
+    function node(tag,attrs,parent){
+      var n=document.createElementNS(NS,tag);
+      Object.keys(attrs||{}).forEach(function(k){n.setAttribute(k,String(attrs[k]));});
+      if(parent)parent.appendChild(n);return n;
+    }
+    function text(parent,p,label,cls,anchor){
+      var n=node('text',{x:p[0],y:p[1],'class':cls||'','text-anchor':anchor||'start'},parent);
+      n.textContent=label;return n;
+    }
+    function line(parent,a,b,cls,extra){
+      return node('line',Object.assign({x1:a[0],y1:a[1],x2:b[0],y2:b[1],'class':cls},extra||{}),parent);
+    }
+    function marker(parent,p,kind,label,size){
+      var s=size||6,mark;
+      if(kind==='data')mark=node('circle',{cx:p[0],cy:p[1],r:s,'class':'data-mark'},parent);
+      else if(kind==='memory')mark=node('polygon',{points:[[p[0],p[1]-s],[p[0]+s,p[1]],[p[0],p[1]+s],[p[0]-s,p[1]]].map(function(v){return v.join(',');}).join(' '),'class':'memory-mark'},parent);
+      else mark=node('polygon',{points:[[p[0],p[1]-s],[p[0]+s,p[1]+s],[p[0]-s,p[1]+s]].map(function(v){return v.join(',');}).join(' '),'class':'compute-mark'},parent);
+      mark.setAttribute('data-tooltip',label);
+      mark.setAttribute('aria-label',label);
+      return mark;
+    }
+    function svg(parent,w,h,label){
+      parent.replaceChildren();
+      var s=node('svg',{width:w,height:h,viewBox:'0 0 '+w+' '+h,'class':'scene',role:'img','aria-label':label},parent);
+      var title=node('title',{},s);title.textContent=label;return s;
+    }
+    function clock(t){return 'E'+t;}
+    function scene3D(){
+      var w=Math.max(280,root.clientWidth),h=Math.max(350,Math.min(500,w*.68));
+      var s=svg(el('space'),w,h,'三维时空图。MEM 的一拍纵向相位使数据沿较缓的斜率到达；MXM 指令按三拍斜率到达，红色间隔逐层增加。');
+      var yaw=state.yaw*Math.PI/180,pitch=18*Math.PI/180;
+      function raw(x,r,t){var X=x*3,Y=r*1.6,Z=(t+3)*(w<430?.7:.32);
+        return [X*Math.cos(yaw)-Y*Math.sin(yaw),-(X*Math.sin(yaw)+Y*Math.cos(yaw))*Math.sin(pitch)-Z*Math.cos(pitch)];}
+      var corners=[];
+      [0,3.15].forEach(function(x){[0,3.2].forEach(function(r){[-3,9.5].forEach(function(t){corners.push(raw(x,r,t));});});});
+      var xs=corners.map(function(p){return p[0];}),ys=corners.map(function(p){return p[1];});
+      var minX=Math.min.apply(null,xs),maxX=Math.max.apply(null,xs),minY=Math.min.apply(null,ys),maxY=Math.max.apply(null,ys);
+      var margin=w<430?{l:39,r:28,t:30,b:45}:{l:54,r:55,t:35,b:48};
+      var scale=Math.min((w-margin.l-margin.r)/(maxX-minX),(h-margin.t-margin.b)/(maxY-minY));
+      var ox=margin.l+(w-margin.l-margin.r-(maxX-minX)*scale)/2-minX*scale;
+      var oy=margin.t+(h-margin.t-margin.b-(maxY-minY)*scale)/2-minY*scale;
+      function P(x,r,t){var v=raw(x,r,t);return [v[0]*scale+ox,v[1]*scale+oy];}
+      function label(p,value,dx,dy,cls,anchor){
+        var n=text(s,[p[0]+dx,Math.max(18,Math.min(h-5,p[1]+dy))],value,cls||'text-small label-halo',anchor);
+        var box=n.getBBox(),shift=box.x<4?4-box.x:box.x+box.width>w-4?w-4-box.x-box.width:0;
+        if(shift)n.setAttribute('x',Number(n.getAttribute('x'))+shift);
+        return n;
+      }
+      // Neutral floor and wall grids; none of these paths carries data.
+      for(var r=0;r<4;r++)line(s,P(0,r,-3),P(3,r,-3),'grid');
+      for(var x=0;x<4;x++)line(s,P(x,0,-3),P(x,3,-3),'grid');
+      [-3,0,3,6,9].forEach(function(t){line(s,P(0,3,t),P(3,3,t),'grid',{opacity:.65});line(s,P(3,0,t),P(3,3,t),'grid',{opacity:.65});
+        if(t>=0)label(P(0,3,t),clock(t),-9,4,'text-small secondary','end');});
+      line(s,P(0,0,-3),P(3.2,0,-3),'axis');line(s,P(0,0,-3),P(0,3.2,-3),'axis');line(s,P(0,3,-3),P(0,3,9.5),'axis');
+      label(P(0,3,9.5),'周期 ↑',-8,-11,'text-small secondary','end');
+      modules.forEach(function(name,i){label(P(i,0,-3),w<430?['MEM','读响应','SRF','MXM'][i]:name,0,23,'text-small secondary','middle');});
+      for(r=0;r<4;r++)if(w>=430||r===state.focus)label(P(0,r,-3),'SL'+r,-12,7,'text-small secondary','end');
+      var wedge=[P(3,0,0),P(3,3,3),P(3,3,9)];
+      node('polygon',{points:wedge.map(function(p){return p.join(',');}).join(' '),fill:'var(--gap-color)',opacity:.085,'pointer-events':'none'},s);
+      var memoryPoints=[],computePoints=[],arrivalPoints=[];
+      for(r=0;r<4;r++){memoryPoints.push(P(0,r,r-3));computePoints.push(P(3,r,3*r));arrivalPoints.push(P(3,r,r));}
+      [ [memoryPoints,'memory-line'],[computePoints,'compute-line'],[arrivalPoints,'data-line'] ].forEach(function(pair){
+        node('polyline',{points:pair[0].map(function(p){return p.join(',');}).join(' '),'class':pair[1],opacity:.65,fill:'none'},s);
+      });
+      // Draw farther rows first; the selected transaction is always on top.
+      var order=[3,2,1,0].filter(function(v){return v!==state.focus;});order.push(state.focus);
+      order.forEach(function(row){
+        var selected=row===state.focus,g=node('g',{opacity:selected?1:.38},s),points=[];
+        for(var mod=0;mod<4;mod++)points.push(P(mod,row,row-3+mod));
+        node('polyline',{points:points.map(function(p){return p.join(',');}).join(' '),'class':'data-line',fill:'none'},g);
+        for(mod=0;mod<4;mod++)marker(g,points[mod],mod===0?'memory':'data',
+          (mod===0?'MEM 读指令':'数据 A0')+'；SL'+row+'；'+modules[mod]+'；'+clock(row-3+mod),selected?5.5:4);
+        marker(g,P(3,row,3*row),'compute','MXM 指令 I0；SL'+row+'；'+clock(3*row),selected?7:5.5);
+      });
+      for(r=1;r<4;r++){
+        var a=P(3,r,r),b=P(3,r,3*r),strong=r===state.focus;
+        line(s,a,b,'gap-line',{opacity:strong?1:.6});
+        [a,b].forEach(function(p){line(s,[p[0]-4,p[1]],[p[0]+4,p[1]],'dimension-cap',{opacity:strong?1:.6});});
+        if(strong)label([(a[0]+b[0])/2,(a[1]+b[1])/2],(w<430?'早':'提前')+(2*r)+'拍',9,4,'text-small label-halo');
+      }
+      var f=state.focus;
+      label(P(3,f,f),'A0 · '+clock(f),-10,20,'text-small label-halo','end');
+      label(P(3,f,3*f),'I0 · '+clock(3*f),-10,-12,'text-small label-halo','end');
+      focusedWidth=w;
+    }
+    function scene2D(){
+      var w=Math.max(280,root.clientWidth),h=480,left=w<430?48:66,right=28,step=(w-left-right)/9;
+      var s=svg(el('section'),w,h,'MXM 输入截面：同批数据 A0 在 E0/E1/E2/E3 到达，I0 在 E0/E3/E6/E9 采样。连续流下，后三级可能分别取到 A2、A4、A6。');
+      function X(t){return left+t*step;}
+      function Y(r){return 82+(3-r)*105;}
+      for(var t=0;t<=9;t++){
+        line(s,[X(t),30],[X(t),435],'grid',{opacity:t%3===0?.85:.35});
+        if(w>=480||t%3===0)text(s,[X(t),21],clock(t),'text-small secondary','middle');
+      }
+      for(var r=3;r>=0;r--){
+        var y=Y(r),selected=r===state.focus,g=node('g',{opacity:selected?1:.6},s),a=[X(r),y+10],b=[X(3*r),y-10];
+        text(s,[8,y+5],'SL'+r,'');
+        line(g,[left,y+10],[X(9),y+10],'grid');
+        // Subsequent batches remain valid. The highlighted sample can therefore
+        // be numerically wrong even while the stream-valid signal stays high.
+        for(t=r;t<=9;t++)node('circle',{cx:X(t),cy:y+10,r:3,'class':'muted-point','data-tooltip':'连续输入 A'+(t-r)+'；SL'+r+'；'+clock(t)},g);
+        marker(g,a,'data','数据 A0；SL'+r+'；'+clock(r),6);
+        marker(g,b,'compute','指令 I0；SL'+r+'；'+clock(3*r),6.5);
+        text(g,[a[0],y+33],'A0','text-small','middle');text(g,[b[0],y-22],'I0','text-small','middle');
+        if(r>0){
+          var c=[X(3*r),y+10];
+          marker(g,c,'data','此采样时刻的实际数据 A'+(2*r)+'；SL'+r+'；'+clock(3*r),4.5);
+          text(g,[c[0],y+33],'A'+(2*r),'text-small','middle');
+          var top=y-35;line(s,[a[0],top],[b[0],top],'gap-line',{opacity:selected?1:.55});
+          line(s,[a[0],top-4],[a[0],top+4],'dimension-cap');line(s,[b[0],top-4],[b[0],top+4],'dimension-cap');
+          text(s,[(a[0]+b[0])/2,top-8],(w<430?'早':'提前')+(2*r)+'拍','text-small label-halo','middle');
+        }else text(g,[X(0)+20,y+5],'同拍','text-small secondary');
+      }
+      text(s,[w-12,h-10],'时钟周期 →','text-small secondary','end');
+    }
+    function update(){
+      el('view-space').setAttribute('aria-pressed',String(state.view==='space'));
+      el('view-section').setAttribute('aria-pressed',String(state.view==='section'));
+      el('focus').value=String(state.focus);el('yaw').value=String(state.yaw);
+      el('angle').textContent=String(Math.round(state.yaw))+'°';
+      el('camera').hidden=state.view!=='space';el('space').hidden=state.view!=='space';el('section').hidden=state.view!=='section';
+      el('axes').hidden=state.view!=='space';
+      if(state.view==='space')scene3D();else scene2D();
+      var r=state.focus;
+      el('detail').textContent=r===0?'SL0：A0 与 I0 在 E0 同拍对齐。':
+        'SL'+r+'：A0 在 '+clock(r)+' 到达，I0 在 '+clock(3*r)+' 采样；连续流此时已到 A'+(2*r)+'。';
+    }
+    el('view-space').addEventListener('click',function(){state.view='space';update();persist();});
+    el('view-section').addEventListener('click',function(){state.view='section';update();persist();});
+    el('focus').addEventListener('change',function(){state.focus=Number(el('focus').value);update();persist();});
+    el('yaw').addEventListener('input',function(){state.yaw=Number(el('yaw').value);update();});
+    el('yaw').addEventListener('change',persist);
+    el('space').addEventListener('pointerdown',function(e){
+      if(e.pointerType==='touch')return;drag={x:e.clientX,yaw:state.yaw};el('space').setPointerCapture(e.pointerId);
+    });
+    el('space').addEventListener('pointermove',function(e){if(!drag)return;
+      state.yaw=Math.max(-55,Math.min(-15,drag.yaw+(e.clientX-drag.x)*.17));update();
+    });
+    el('space').addEventListener('pointerup',function(){if(drag){drag=null;persist();}});
+    el('space').addEventListener('pointercancel',function(){drag=null;});
+    window.addEventListener('openai:set_globals',function(e){if(e.detail&&e.detail.globals&&e.detail.globals.widgetState){restore(e.detail.globals.widgetState);update();}});
+    new ResizeObserver(function(){if(Math.abs(root.clientWidth-focusedWidth)>1||state.view==='section')update();}).observe(root);
+    update();
+  })();
+  </script>
+</div>
+</main>
+</body>
+</html>

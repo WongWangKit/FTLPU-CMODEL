@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MEM 数据波前</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --font-size-base: 16px;
+      --foreground: #172554;
+      --muted-foreground: #475569;
+      --background: #fff;
+      --border: #cbd5e1;
+      --blue: #2563eb;
+      --orange: #ea580c;
+      --purple: #7c3aed;
+      --red: #dc2626;
+    }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: var(--background);
+      color: var(--foreground);
+      font: var(--font-size-base)/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    main { max-width: 78rem; margin-inline: auto; }
+    button, select, input { font: inherit; }
+  </style>
+</head>
+<body>
+<main>
+<div id="mem-stream-edge">
+  <style>
+    #mem-stream-edge{display:grid;gap:calc(var(--font-size-base)*1);color:var(--foreground);--mem:#3b82f6;--front:#facc15;--following:#fb923c}
+    #mem-stream-edge .heading{display:grid;gap:calc(var(--font-size-base)*.25)}
+    #mem-stream-edge .legend{display:flex;flex-wrap:wrap;gap:calc(var(--font-size-base)*.5) calc(var(--font-size-base)*1.25)}
+    #mem-stream-edge .key{display:inline-flex;align-items:center;gap:calc(var(--font-size-base)*.4)}
+    #mem-stream-edge .swatch{width:14px;height:14px;display:inline-block;forced-color-adjust:none}
+    #mem-stream-edge .mem-swatch{background:#3b82f6;opacity:.55}
+    #mem-stream-edge .front-swatch{background:#facc15}
+    #mem-stream-edge .following-swatch{background:#fb923c}
+    #mem-stream-edge .clock{display:grid;gap:calc(var(--font-size-base)*.4)}
+    #mem-stream-edge .clock-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:calc(var(--font-size-base)*.5)}
+    #mem-stream-edge .clock-field{display:grid;grid-template-columns:auto 7rem;align-items:center;gap:calc(var(--font-size-base)*.5)}
+    #mem-stream-edge .diagram{width:100%;min-width:0}
+    #mem-stream-edge .edge-scene{display:block;width:100%;font:inherit;color:var(--foreground);forced-color-adjust:none}
+    #mem-stream-edge .edge-scene text{fill:var(--foreground);font-weight:400}
+    #mem-stream-edge .edge-scene .secondary{fill:var(--muted-foreground)}
+    #mem-stream-edge .edge-scene .reg{fill:none;stroke:var(--border);stroke-width:1}
+    #mem-stream-edge .edge-scene .wire{fill:none;stroke:var(--muted-foreground);stroke-width:1.2}
+    #mem-stream-edge .edge-scene .instruction-wire{fill:none;stroke:var(--mem);stroke-width:1.5}
+    #mem-stream-edge .edge-scene .edge-link{fill:none;stroke:var(--front);stroke-width:2;pointer-events:none}
+    #mem-stream-edge .edge-scene .front-data{fill:#facc15}
+    #mem-stream-edge .edge-scene .following-data{fill:#fb923c}
+    #mem-stream-edge .edge-scene .front-edge{stroke:var(--front);stroke-width:3;fill:none;pointer-events:none}
+    #mem-stream-edge .edge-scene .mem-unit{fill:#3b82f6;fill-opacity:.25;stroke:var(--border);stroke-width:1}
+    #mem-stream-edge .edge-scene .edge-note{paint-order:stroke;stroke:var(--background);stroke-width:4;stroke-linejoin:round}
+  </style>
+  <div class="heading">
+    <h3>MEM 数据前沿，逐拍向右传播</h3>
+    <div class="text-small text-muted">4 个 Superlane · 连续读出 D0–D3 · 每格右移 1 拍</div>
+  </div>
+  <div class="viz-controls">
+    <label class="form-label" for="mem-edge-delay">相邻 Superlane 的指令间隔
+      <select class="form-select" id="mem-edge-delay">
+        <option value="0">0 拍：同时发射</option>
+        <option value="1" selected>1 拍：当前 MEM</option>
+        <option value="2">2 拍</option>
+        <option value="3">3 拍：对照 MXM 间隔</option>
+        <option value="4">4 拍</option>
+        <option value="5">5 拍</option>
+        <option value="6">6 拍</option>
+      </select>
+    </label>
+  </div>
+  <div class="clock">
+    <div class="clock-header">
+      <div class="viz-row" role="group" aria-label="逐拍播放">
+        <button class="btn btn-primary" type="button" id="mem-edge-play" aria-pressed="false">播放</button>
+        <button class="btn" type="button" id="mem-edge-prev">上一拍</button>
+        <button class="btn" type="button" id="mem-edge-next">下一拍</button>
+      </div>
+      <label class="form-label clock-field" for="mem-edge-cycle">周期 E
+        <input class="form-control tabular-nums" id="mem-edge-cycle" type="number" min="0" max="999999" step="1" value="6">
+      </label>
+    </div>
+    <input class="form-range" id="mem-edge-scrub" type="range" min="0" max="64" step="1" value="6" aria-label="观察周期">
+  </div>
+  <div class="legend text-small" aria-label="图例">
+    <span class="key"><span class="swatch mem-swatch" style="background-color:#3b82f6" aria-hidden="true"></span>MEM 单元</span>
+    <span class="key"><span class="swatch front-swatch" style="background-color:#facc15" aria-hidden="true"></span>D0：数据最前沿</span>
+    <span class="key"><span class="swatch following-swatch" style="background-color:#fb923c" aria-hidden="true"></span>D1–D3：后续数据</span>
+  </div>
+  <div class="diagram" id="mem-edge-diagram"></div>
+  <div class="text-small text-muted tabular-nums" id="mem-edge-detail" aria-live="polite"></div>
+  <span class="sr-only">相对时序示意，公共读取与注入延时已折叠。E0 定义为 SL0 的 D0 首次进入 SR0。
+    SL0 位于最下方，SL3 位于最上方，指令由 SL0 向上传递。每个 Superlane 连续输出四项数据；
+    最先发出的 D0 用黄色表示，其后三项用橙色表示。数据每周期向右经过一级寄存器。
+    改变相邻 Superlane 的指令间隔，会改变各行首数据的进入时间。下游寄存器链视为无限长，窗口自动跟随前沿。
+    此图是可调参数的示意模型，不表示现有 RTL 已支持可变间隔。</span>
+  <script>
+  (function(){
+    'use strict';
+    var root=document.getElementById('mem-stream-edge');
+    var get=function(n){return document.getElementById('mem-edge-'+n);};
+    var NS='http://www.w3.org/2000/svg',ROWS=4,ITEMS=4;
+    var palette={mem:'#3b82f6',front:'#facc15',following:'#fb923c',chipInk:'#17202a'};
+    var state={delay:1,cycle:6},playing=false,timer=null,rangeMax=64;
+    var previous={},lastWidth=0,resizeFrame=0;
+    var reduced=window.matchMedia('(prefers-reduced-motion: reduce)');
+    function restore(saved){
+      var m=saved&&saved.modelContent;
+      if(!m||m.model!=='mem-front-v1')return;
+      if(Number.isInteger(m.instructionHop)&&m.instructionHop>=0&&m.instructionHop<=6)state.delay=m.instructionHop;
+      if(Number.isInteger(m.cycle)&&m.cycle>=0&&m.cycle<=999999)state.cycle=m.cycle;
+    }
+    restore(window.openai&&window.openai.widgetState);
+    function persist(){
+      if(window.openai&&window.openai.setWidgetState)Promise.resolve(window.openai.setWidgetState({
+        modelContent:{model:'mem-front-v1',instructionHop:state.delay,cycle:state.cycle,
+          itemsPerSuperlane:ITEMS,origin:'E0 = SL0 D0 enters SR0; common memory latency folded out'},
+        privateContent:null
+      })).catch(function(){});
+    }
+    function node(tag,attrs,parent){
+      var n=document.createElementNS(NS,tag);
+      Object.keys(attrs||{}).forEach(function(k){n.setAttribute(k,String(attrs[k]));});
+      // Explicit SVG paint also works when host color tokens or chart CSS
+      // cannot be resolved. Only categorical colors are fixed; structure
+      // and unfilled labels inherit the host foreground in either theme.
+      var cls=String(attrs&&attrs['class']||'').split(' ');
+      function paint(key,value){n.setAttribute(key,value);n.style.setProperty(key,value);}
+      if(cls.indexOf('front-data')>=0)paint('fill',palette.front);
+      if(cls.indexOf('following-data')>=0)paint('fill',palette.following);
+      if(cls.indexOf('chip-label')>=0)paint('fill',palette.chipInk);
+      if(cls.indexOf('mem-unit')>=0){
+        paint('fill',palette.mem);paint('fill-opacity','.25');
+        paint('stroke','currentColor');paint('stroke-opacity','.18');
+      }
+      if(cls.indexOf('reg')>=0||cls.indexOf('wire')>=0){
+        paint('fill','none');paint('stroke','currentColor');
+        paint('stroke-opacity',cls.indexOf('reg')>=0?'.16':'.5');
+      }
+      if(cls.indexOf('instruction-wire')>=0){paint('fill','none');paint('stroke',palette.mem);}
+      if(cls.indexOf('front-edge')>=0||cls.indexOf('edge-link')>=0){paint('fill','none');paint('stroke',palette.front);}
+      if(parent)parent.appendChild(n);return n;
+    }
+    function text(parent,x,y,value,cls,anchor){
+      var n=node('text',{x:x,y:y,'class':cls||'','text-anchor':anchor||'start'},parent);
+      n.textContent=value;return n;
+    }
+    function line(parent,x1,y1,x2,y2,cls,extra){
+      return node('line',Object.assign({x1:x1,y1:y1,x2:x2,y2:y2,'class':cls},extra||{}),parent);
+    }
+    function clampText(n,lo,hi){
+      var b=n.getBBox(),shift=b.x<lo?lo-b.x:b.x+b.width>hi?hi-b.x-b.width:0;
+      if(shift)n.setAttribute('x',Number(n.getAttribute('x'))+shift);
+    }
+    function draw(animate){
+      var width=root.clientWidth;if(width<1)return;
+      var narrow=width<470,memX=5,memW=narrow?73:103;
+      var left=memX+memW+(narrow?24:36),right=14,available=width-left-right;
+      var base=Math.max(6,Math.floor(available/43));
+      var fronts=[],minTail=Infinity;
+      for(var r=0;r<ROWS;r++){
+        var f=state.cycle-r*state.delay;fronts.push(f);
+        if(f>=0)minTail=Math.min(minTail,Math.max(0,f-ITEMS+1));
+      }
+      var start=Math.min(Math.max(0,state.cycle-base+2),Math.max(0,minTail-1));
+      var columns=Math.max(base,state.cycle-start+2),cell=available/columns;
+      var top=63,pitch=88,cellH=45,height=top+pitch*ROWS+8;
+      var host=get('diagram');host.replaceChildren();
+      var svg=node('svg',{width:width,height:height,viewBox:'0 0 '+width+' '+height,
+        'class':'edge-scene',role:'img','aria-label':'E'+state.cycle+'；相邻 Superlane 指令间隔 '+state.delay+' 拍。黄色为每行 D0 数据前沿，橙色为 D1 至 D3。'},host);
+      svg.style.setProperty('forced-color-adjust','none');
+      var title=node('title',{},svg);title.textContent='MEM 与无限长 Stream Register 链的逐拍数据前沿';
+      var desc=node('desc',{},svg);desc.textContent='当前前沿位置：'+fronts.map(function(f,i){return 'SL'+i+(f<0?' 尚未输出':' 的 D0 在 SR'+f);}).join('；');
+      text(svg,memX+memW/2,23,'MEM ↑','','middle');
+      text(svg,left,23,narrow?'Stream Reg → ∞':'Stream Register 链 → ∞','text-small secondary');
+      node('rect',{x:memX,y:top-6,width:memW,height:pitch*(ROWS-1)+cellH+12,'class':'mem-unit'},svg);
+      var tickSpacing=Math.max(narrow?48:52,('SR'+(start+columns-1)).length*8+10);
+      var tickStep=Math.max(1,Math.ceil(tickSpacing/cell)),lastTickEnd=left-8;
+      for(var c=0;c<columns;c++){
+        if(c%tickStep===0){
+          var tick=text(svg,left+(c+.5)*cell,46,'SR'+(start+c),'text-small secondary','middle');
+          clampText(tick,left,width-3);var box=tick.getBBox();
+          if(box.x<lastTickEnd+8)tick.remove();else lastTickEnd=box.x+box.width;
+        }
+      }
+      var edgeLayer=node('g',{'aria-hidden':'true'},svg);
+      var frontBoxes=[],nextPositions={};
+      for(r=0;r<ROWS;r++){
+        var y=top+(ROWS-1-r)*pitch,age=fronts[r];
+        text(svg,memX+memW/2,y+18,'SL'+r,'','middle');
+        text(svg,memX+memW/2,y+37,'E'+(r*state.delay)+' 起','text-small','middle');
+        if(r<ROWS-1){
+          var middle=y+(cellH-pitch)/2,arrowEnd=y-pitch+cellH+5;
+          line(svg,memX+12,y-8,memX+12,arrowEnd,'instruction-wire');
+          node('polyline',{points:(memX+8)+','+(arrowEnd+6)+' '+(memX+12)+','+arrowEnd+' '+(memX+16)+','+(arrowEnd+6),'class':'instruction-wire',fill:'none'},svg);
+          text(svg,memX+memW*.62,middle+4,'+'+state.delay+' 拍','text-small','middle');
+        }
+        line(svg,memX+memW,y+cellH/2,left-5,y+cellH/2,'wire');
+        if(start>0){
+          var breakX=memX+memW+(left-memX-memW)/2;
+          node('rect',{x:breakX-5,y:y+cellH/2-5,width:10,height:10,fill:'var(--background)'},svg);
+          text(svg,breakX,y+cellH/2+4,'⋯','text-small secondary','middle');
+        }
+        for(c=0;c<columns;c++)node('rect',{x:left+c*cell,y:y,width:cell,height:cellH,'class':'reg'},svg);
+        for(var k=ITEMS-1;k>=0;k--){
+          var position=age-k;if(position<0)continue;
+          var x=left+(position-start)*cell,key=r+':'+k;
+          var group=node('g',{'data-row':r,'data-item':k,'data-sr':position},svg);
+          var rect=node('rect',{x:x+1.5,y:y+1.5,width:Math.max(1,cell-3),height:cellH-3,
+            'class':k===0?'front-data':'following-data',
+            'data-tooltip':'SL'+r+' · D'+k+' · SR'+position+' · E'+state.cycle,
+            'aria-label':'SL'+r+' 的 D'+k+' 当前在 SR'+position},group);
+          if(cell>=24)text(group,x+cell/2,y+cellH/2+5,'D'+k,'text-small chip-label','middle');
+          if(k===0){
+            line(group,x+cell-1.5,y+2,x+cell-1.5,y+cellH-2,'front-edge');
+            frontBoxes.push({x:x+cell-1.5,y:y,row:r});
+          }
+          if(animate&&!reduced.matches&&previous[key]){
+            var delta=previous[key].x-x;
+            if(Math.abs(delta)>.1&&group.animate)group.animate([
+              {transform:'translate('+delta+'px,0px)'},{transform:'translate(0px,0px)'}
+            ],{duration:240,easing:'cubic-bezier(.2,.7,.3,1)'});
+          }
+          nextPositions[key]={x:x};
+        }
+        if(age>=0){
+          var center=left+(age-start+.5)*cell;
+          var note=text(svg,center,y+cellH+22,'D0 · SR'+age,'text-small edge-note','middle');
+          clampText(note,left,width-3);
+        }else text(svg,left+8,y+cellH+22,'等待 E'+(r*state.delay),'text-small secondary');
+      }
+      for(var i=1;i<frontBoxes.length;i++){
+        var a=frontBoxes[i-1],b=frontBoxes[i];
+        line(edgeLayer,a.x,a.y-2,b.x,b.y+cellH+1,'edge-link',{'stroke-dasharray':'3 4',opacity:.8});
+      }
+      previous=nextPositions;lastWidth=width;
+      get('detail').textContent='窗口 SR'+start+'–SR'+(start+columns-1)+' · '+
+        (state.delay===0?'各行前沿齐平':'相邻行首数据相差 '+state.delay+' 拍')+' · 指令自下向上传递 ↑';
+    }
+    function sync(animate){
+      rangeMax=Math.max(64,Math.ceil((state.cycle+1)/32)*32);
+      get('delay').value=String(state.delay);get('cycle').value=String(state.cycle);
+      get('scrub').max=String(rangeMax);get('scrub').value=String(state.cycle);
+      get('prev').disabled=state.cycle===0;get('next').disabled=state.cycle===999999;
+      get('play').textContent=playing?'暂停':'播放';get('play').setAttribute('aria-pressed',String(playing));
+      draw(animate);
+    }
+    function stop(save){
+      playing=false;clearTimeout(timer);timer=null;
+      get('detail').setAttribute('aria-live','polite');
+      get('play').textContent='播放';get('play').setAttribute('aria-pressed','false');
+      if(save)persist();
+    }
+    function tick(){
+      if(!playing)return;
+      if(state.cycle>=999999){stop(true);return;}
+      state.cycle++;sync(true);timer=setTimeout(tick,750);
+    }
+    function seek(value,save){
+      stop(false);
+      if(Number.isFinite(value))state.cycle=Math.max(0,Math.min(999999,Math.floor(value)));
+      sync(true);if(save)persist();
+    }
+    get('play').addEventListener('click',function(){
+      if(playing){stop(true);return;}
+      playing=true;get('detail').setAttribute('aria-live','off');
+      get('play').textContent='暂停';get('play').setAttribute('aria-pressed','true');
+      timer=setTimeout(tick,350);
+    });
+    get('prev').addEventListener('click',function(){seek(state.cycle-1,true);});
+    get('next').addEventListener('click',function(){seek(state.cycle+1,true);});
+    get('cycle').addEventListener('change',function(){seek(Number(get('cycle').value),true);});
+    get('scrub').addEventListener('input',function(){seek(Number(get('scrub').value),false);});
+    get('scrub').addEventListener('change',persist);
+    get('delay').addEventListener('change',function(){stop(false);state.delay=Number(get('delay').value);sync(true);persist();});
+    window.addEventListener('openai:set_globals',function(e){
+      if(e.detail&&e.detail.globals&&e.detail.globals.widgetState){stop(false);restore(e.detail.globals.widgetState);sync(false);}
+    });
+    new ResizeObserver(function(){
+      if(Math.abs(root.clientWidth-lastWidth)>1){cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(function(){previous={};draw(false);});}
+    }).observe(root);
+    document.addEventListener('visibilitychange',function(){if(document.hidden&&playing)stop(true);});
+    sync(false);
+  })();
+  </script>
+</div>
+</main>
+</body>
+</html>
