@@ -44,6 +44,8 @@ public:
             ? kMultiplyLatency : kDefaultLatency;
     }
 
+    static bool max_prefers_rhs(float lhs, float rhs) { return lhs < rhs; }
+
     static float execute(const VxmAluInstruction& instruction,
                          float lhs, float rhs = 0.0f)
     {
@@ -59,7 +61,7 @@ public:
         case VxmAluOpcode::Subtract: result = lhs - rhs; break;
         case VxmAluOpcode::Multiply: result = lhs * rhs; break;
         case VxmAluOpcode::Negate: result = -lhs; break;
-        case VxmAluOpcode::Max: result = std::max(lhs, rhs); break;
+        case VxmAluOpcode::Max: result = max_prefers_rhs(lhs, rhs) ? rhs : lhs; break;
         }
 
         return instruction.precision == VxmAluPrecision::Float16

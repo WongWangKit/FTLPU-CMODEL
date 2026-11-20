@@ -1,4 +1,9 @@
 #pragma once
+#include "ftlpu/routing/control_unit.hpp"
+#include "ftlpu/routing/expert_task_controller.hpp"
+#include "ftlpu/routing/expert_weight_loader.hpp"
+#include "ftlpu/routing/expert_macro_executor.hpp"
+#include "ftlpu/routing/combine_controller.hpp"
 
 #include "ftlpu/c2c/dma.hpp"
 #include "ftlpu/c2c/link.hpp"
@@ -95,6 +100,7 @@ public:
     {
         require_phase(CyclePhase::Idle, "configuring hardware");
         hardware.validate();
+        routing_.configure(hardware.routing);
         hardware_configuration_ = hardware;
         for (auto& mem : mems_)
             mem.set_sram_depth_rows(hardware.sram_depth_rows);
@@ -374,6 +380,7 @@ public:
     {
         begin_cycle_phase(sinks);
         dispatch_phase(sinks);
+        routing_phase(sinks.icu);
         mxm_phase(sinks);
         vxm_phase(sinks);
         mem_sxm_commit_phase(sinks);
@@ -397,6 +404,7 @@ public:
     }
 
     bool program_resources_drained() const noexcept {
+        if(!routing_.idle() || routing_.plan_in_use() || !expert_tasks_.idle() || !expert_weights_.idle() || !expert_macros_.idle() || !routing_combine_.idle() || routing_pending_)return false;
         if (!common_barrier_resources_drained()) return false;
         for (std::size_t h=0;h<hw::kHemispheres;++h) {
             if (c2cs_[h] && (!c2cs_[h]->tx().idle() || !c2cs_[h]->rx().idle())) return false;
@@ -413,15 +421,16 @@ public:
             while(dma->take_completion_sync_tag()) {}
             while(dma->take_completion_notification()) {}
         }
+        expert_tasks_.reset_program();expert_tasks_.disconnect_if(&expert_macros_);expert_weights_.reset();expert_macros_.reset();routing_combine_.reset();routing_.reset_program();routing_pending_.reset();
         icu_.reset_program();
     }
 
-    bool common_compute_resources_drained() const noexcept
+    bool common_compute_resources_drained(std::uint64_t ignored_routing_owner = 0) const noexcept
     {
         if (!vxm_.idle()) return false;
         for (const auto& mxm : mxms_) if (!mxm.idle()) return false;
         for (std::size_t h = 0; h < hw::kHemispheres; ++h)
-            if (!mems_[h].compute_idle() || !sxms_[h].idle()
+            if (!mems_[h].compute_idle(ignored_routing_owner) || !sxms_[h].idle()
                 || !streams_[h].compute_empty()) return false;
         return true;
     }
@@ -457,6 +466,7 @@ public:
     void reset_execution_state()
     {
         require_phase(CyclePhase::Idle, "resetting execution state");
+        expert_tasks_.reset();expert_tasks_.disconnect_if(&expert_macros_);expert_weights_.reset();expert_macros_.reset();routing_combine_.reset();routing_.reset();routing_pending_.reset();
         for (auto& mem : mems_) mem.reset_execution_state();
         for (auto& streams : streams_) streams.reset();
         vxm_.reset();
@@ -474,7 +484,112 @@ public:
         }
     }
 
+    RoutingControlUnit& routing() {return routing_;}
+    const RoutingControlUnit& routing() const {return routing_;}
+    ExpertTaskController& expert_tasks() {return expert_tasks_;}
+    const ExpertTaskController& expert_tasks() const {return expert_tasks_;}
+    ExpertWeightLoader& expert_weights() {return expert_weights_;}
+    const ExpertWeightLoader& expert_weights() const {return expert_weights_;}
+    ExpertMacroExecutor& expert_macros() {return expert_macros_;}
+    const ExpertMacroExecutor& expert_macros() const {return expert_macros_;}
+    RoutingCombineController& routing_combine() {return routing_combine_;}
+    const RoutingCombineController& routing_combine() const {return routing_combine_;}
+    const std::optional<RoutingInstruction>& routing_descriptor_pending() const {return routing_pending_;}
+    std::size_t routing_descriptor_ready_cycle() const {return routing_descriptor_due_;}
 private:
+    void routing_phase(std::ostream* log) {
+        if(!hardware_configuration_.routing.enabled || !icu_.program_issue_enabled() || icu_.program_loading())return;
+        auto& queue=icu_.routing_iq();
+        if(routing_pending_) {
+            queue.hold_and_prefetch_cycle();
+            const auto& scheduled = icu_.routing_descriptors().at(routing_pending_->descriptor);
+            const bool start_due =
+                (routing_pending_->opcode != RoutingOpcode::SelectVxm ||
+                 icu_.logical_cycle() + 4 >= scheduled.vxm_select.first_bundle_cycle) &&
+                (routing_pending_->opcode != RoutingOpcode::ImportTopK ||
+                 icu_.logical_cycle() >= scheduled.import_after_cycle);
+            if (cycle_ >= routing_descriptor_due_ && start_due) {
+                const auto instruction=*routing_pending_;routing_pending_.reset();
+                if(instruction.opcode==RoutingOpcode::Dispatch) {
+                    routing_combine_.invalidate_outputs();
+                    const ExpertWeightTableDescriptor *table=nullptr;
+                    for(const auto &d:icu_.routing_descriptors())if(d.opcode==RoutingOpcode::WeightTable)table=&d.weight_table;
+                    expert_weights_.configure(table);
+                    expert_tasks_.connect_weights(table?&expert_weights_:nullptr);
+                    bool has_template = false;
+                    for(const auto &d:icu_.routing_descriptors())if(d.opcode==RoutingOpcode::ExpertTemplate) {
+                        const auto &a=icu_.routing_descriptors().at(icu_.routing_descriptors()[instruction.descriptor].dispatch.address_template_descriptor_id).address;
+                        expert_macros_.configure(d.expert_template,a,table);
+                        if (expert_weights_.supports_prefetch()) expert_macros_.validate_double_buffer_layout(icu_);
+                        expert_tasks_.connect(&expert_macros_);
+                        has_template = true;
+                    }
+                    if (expert_weights_.supports_prefetch() && !has_template)
+                        throw std::invalid_argument("expert double buffering requires a resident expert template");
+                    expert_tasks_.start(instruction,icu_.routing_descriptors(),icu_.routing_generation(),routing_);
+                }
+                else if(instruction.opcode==RoutingOpcode::Combine) {
+                    const auto &d=icu_.routing_descriptors().at(instruction.descriptor);
+                    if(d.opcode!=RoutingOpcode::Combine)throw std::invalid_argument("combine descriptor opcode mismatch");
+                    routing_combine_.start(instruction,d.combine,icu_.routing_generation(),routing_);
+                } else {
+                    const auto& descriptor = icu_.routing_descriptors()[instruction.descriptor];
+                    const bool vxm_select = instruction.opcode == RoutingOpcode::SelectVxm;
+                    if (vxm_select && icu_.logical_cycle() >= descriptor.vxm_select.first_bundle_cycle)
+                        throw std::logic_error("VXM SELECT descriptor missed its first input window");
+                    if (vxm_select && !vxm_.topk_available())
+                        throw std::logic_error("ROUTE_SELECT_VXM overlaps an active VXM program");
+                    if (is_routing_select(instruction.opcode) || instruction.opcode == RoutingOpcode::Plan)
+                        routing_combine_.invalidate_outputs();
+                    routing_.start(instruction, descriptor, icu_.routing_generation());
+                    if (vxm_select)
+                        vxm_.begin_topk(descriptor, icu_.routing_generation(), instruction.completion);
+                }
+                if(log)*log<<"  RCU cycle="<<cycle_<<' '<<routing_opcode_name(instruction.opcode)<<" descriptor="<<instruction.descriptor<<" instance="<<instruction.completion<<" generation="<<icu_.routing_generation()<<" start\n";
+            }
+        } else if(routing_.idle() && expert_tasks_.idle() && routing_combine_.idle()) {
+            if(!queue.done())if(auto instruction=queue.dispatch_next()) {
+                if(instruction->descriptor>=icu_.routing_descriptors().size())throw std::invalid_argument("routing descriptor reference");
+                const auto words=encode_routing_descriptors({icu_.routing_descriptors()[instruction->descriptor]}).size()-2;
+                routing_.observe_descriptor_fetch(words);routing_pending_=*instruction;routing_descriptor_due_=cycle_+words;
+            }
+        } else queue.hold_and_prefetch_cycle();
+        if (auto word = vxm_.topk().submission_word()) {
+            if (routing_.submit_vxm_selection(*word)) {
+                vxm_.topk().accept_submission();
+                if (log) *log << "  VXM SELECT commit word=" << word->index
+                              << " generation=" << word->generation << '\n';
+            } else {
+                vxm_.topk().wait_submission();
+            }
+        }
+        routing_.tick(mems_,streams_,&vxm_);
+        if(auto completed=routing_.take_completion()) {
+            if(completed->task_id)expert_tasks_.input_committed(*completed);
+            else icu_.routing_completion(completed->generation,completed->instance);
+            if(log)*log<<"  RCU cycle="<<cycle_<<' '<<routing_opcode_name(completed->opcode)<<" instance="<<completed->instance<<" generation="<<completed->generation<<" committed\n";
+        }
+        std::array<C2cEndpoint*,hw::kHemispheres> endpoints{};
+        for(std::size_t h=0;h<hw::kHemispheres;++h)if(c2cs_[h])endpoints[h]=&*c2cs_[h];
+        expert_weights_.tick(mems_,endpoints,c2c_dmas_);
+        const auto expert_drained = expert_weights_.supports_prefetch()
+            ? common_compute_resources_drained(ExpertWeightLoader::owner)
+            : common_barrier_resources_drained();
+        expert_macros_.tick(icu_,mems_,expert_drained,cycle_);
+        expert_tasks_.tick(routing_);
+        if(auto completed=expert_tasks_.take_completion()) {
+            for(const auto &d:icu_.routing_descriptors())if(d.opcode==RoutingOpcode::ExpertTemplate) {
+                const auto &last=expert_macros_.trace().back().task;
+                routing_combine_.publish_outputs(completed->generation,last.identity.plan_epoch,last.route_context_id,d.expert_template.output);
+            }
+            icu_.routing_completion(completed->generation,completed->instance);
+        }
+        routing_combine_.tick(routing_,mems_,streams_,vxm_,common_barrier_resources_drained(),stream_layout_.vxm_input.column,stream_layout_.vxm_output.column);
+        if(auto completed=routing_combine_.take_completion()) {
+            icu_.routing_completion(completed->generation,completed->instance);
+            if(log)*log<<"  RCU cycle="<<cycle_<<" ROUTE_COMBINE instance="<<completed->instance<<" generation="<<completed->generation<<" committed\n";
+        }
+    }
     void require_active_mxm(std::size_t mxm) const
     {
         if (mxm >= kMxmCount
@@ -623,12 +738,14 @@ private:
             auto* dma = c2c_dmas_[hemisphere];
             if (dma == nullptr) continue;
             dma->tick();
+            bool internal_weight_completion=false;
             if (const auto tag = dma->take_completion_sync_tag()) {
-                if(!icu_.program_loading()) icu_.notify_tagged(IcuLocation::C2cDma(
+                internal_weight_completion=expert_weights_.matches(hemisphere,*tag);
+                if(!icu_.program_loading() && !internal_weight_completion) icu_.notify_tagged(IcuLocation::C2cDma(
                     static_cast<Hemisphere>(hemisphere)), *tag);
             }
             if (dma->take_completion_notification()) {
-                if(!icu_.program_loading()) icu_.notify(IcuLocation::C2cDma(
+                if(!icu_.program_loading() && !internal_weight_completion) icu_.notify(IcuLocation::C2cDma(
                     static_cast<Hemisphere>(hemisphere)));
             }
         }
@@ -660,6 +777,10 @@ private:
                         ? request->stream_index : request->sync_tag);
             }
             const auto notify = [this](C2cReceiveNotification received) {
+                const auto h=hemisphere_index(received.consumer.hemisphere);
+                if(expert_weights_.matches(h,received.sync_tag)) {
+                    expert_weights_.notify_vector(received.vector_tag);return;
+                }
                 const auto& consumer = received.consumer;
                 if (consumer.notify_mem) {
                     const auto location = IcuLocation::Mem(
@@ -676,6 +797,8 @@ private:
                 }
             };
             const auto ready = [this](const C2cInstruction& received) {
+                const auto h=hemisphere_index(received.consumer.hemisphere);
+                if(expert_weights_.matches(h,received.sync_tag))return expert_weights_.can_receive();
                 const auto& consumer = received.consumer;
                 if (!consumer.notify_mem) return true;
                 const auto location = IcuLocation::Mem(
@@ -1289,6 +1412,13 @@ private:
         std::ostream stream_{&buffer_};
     };
 
+    RoutingControlUnit routing_{};
+    ExpertTaskController expert_tasks_{};
+    ExpertWeightLoader expert_weights_{};
+    ExpertMacroExecutor expert_macros_{};
+    RoutingCombineController routing_combine_{};
+    std::optional<RoutingInstruction> routing_pending_{};
+    std::size_t routing_descriptor_due_{};
     SystemHardwareConfiguration hardware_configuration_{};
     StreamLayout stream_layout_;
     std::array<StreamTopology::RouteSelection, hw::kHemispheres>

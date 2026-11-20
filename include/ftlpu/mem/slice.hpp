@@ -36,6 +36,9 @@ struct MemInstruction {
     // Control sideband, attached after ISA decode; never encoded in a FU word.
     std::uint64_t transport_generation{0};
     std::uint32_t transport_launch{0};
+    // Routing sideband, attached after decode; never encoded in a FU word.
+    std::uint64_t routing_owner{0}, routing_transfer{0};
+    std::uint64_t expert_task_generation{0},expert_task_id{0};
 
     StreamId stream_id() const
     {

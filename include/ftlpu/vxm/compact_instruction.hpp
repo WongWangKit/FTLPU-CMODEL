@@ -36,6 +36,19 @@ public:
     static constexpr std::uint64_t kDepthMask = 0x3ull;
     static constexpr std::uint64_t kRepeatMask = 0xffffffffull;
 
+    static std::uint32_t repeat_count(VxmCompactInstruction packet)
+    {
+        return static_cast<std::uint32_t>(extract(packet.control, kRepeatShift, kRepeatMask));
+    }
+
+    static VxmCompactInstruction with_repeat_count(VxmCompactInstruction packet, std::uint32_t count)
+    {
+        if (!count) throw std::invalid_argument("zero VXM repeat count");
+        packet.control &= ~(kRepeatMask << kRepeatShift);
+        insert(packet.control, count, kRepeatShift, kRepeatMask);
+        return packet;
+    }
+
     static VxmCompactInstruction encode(
         std::size_t stage, VxmChainDepth depth,
         const VxmLaneAluInstruction& instruction)

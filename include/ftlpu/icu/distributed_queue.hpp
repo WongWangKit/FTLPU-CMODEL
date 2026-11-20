@@ -4,6 +4,7 @@
 #include "ftlpu/icu/native_word.hpp"
 #include "ftlpu/icu/instruction.hpp"
 #include "ftlpu/icu/vxm_instruction.hpp"
+#include "ftlpu/routing/instruction.hpp"
 #include "ftlpu/icu/active_macro_context.hpp"
 #include "ftlpu/icu/macro_bitstream_decoder.hpp"
 #include "ftlpu/icu/queue_control.hpp"
@@ -11,6 +12,7 @@
 #include "ftlpu/mxm/control_slice.hpp"
 #include "ftlpu/sxm/instruction.hpp"
 #include "ftlpu/vxm/compact_instruction.hpp"
+#include "ftlpu/vxm/topk_instruction.hpp"
 
 #include <algorithm>
 #include <array>
@@ -76,6 +78,7 @@ enum class IcuQueueRole : std::uint8_t {
     C2cTx,
     C2cRx,
     C2cDma,
+    Routing,
 };
 
 constexpr bool is_fu_loop_queue_role(IcuQueueRole role) noexcept
@@ -155,6 +158,8 @@ template <typename FuncInstruction>
 struct IqEntryForRole<FuncInstruction, IcuQueueRole::C2cDma> {
     using Type = C2cEndpointIcuPacket;
 };
+
+template <typename F> struct IqEntryForRole<F,IcuQueueRole::Routing> {using Type=RoutingWord;};
 
 template <typename FuncInstruction,
     IcuQueueRole Role = IcuQueueRole::Legacy>
@@ -461,6 +466,7 @@ public:
     static_assert(QueueRole==IcuQueueRole::Legacy || InstructionBits==IcuNativeGeometry<QueueRole>::bits,
         "native word width must match the physical i-MEM");
     static_assert(QueueRole == IcuQueueRole::Legacy
+            || (QueueRole == IcuQueueRole::Routing && std::is_same_v<FuncInstruction,RoutingInstruction>)
             || (QueueRole == IcuQueueRole::Mem
                 && std::is_same_v<FuncInstruction, MemInstruction>)
             || (QueueRole == IcuQueueRole::MxmLoad
@@ -523,6 +529,7 @@ public:
 
     void reset()
     {
+        task_owned_=false;task_running_=false;task_preparing_=false;task_output_queue_=false;task_bindings_.clear();task_parameters_={};
         imem_.clear();
         raw_imem_.clear();
         raw_macro_mode_ = false;
@@ -660,6 +667,71 @@ public:
     }
 
     bool raw_macro_mode() const noexcept { return raw_macro_mode_; }
+    void reserve_task_queue(bool output=false) {
+        if(cycle_ || issued_count_)throw StaticScheduleError("reserving a queue after execution");
+        task_owned_=true;task_running_=task_preparing_=false;task_output_queue_=output;
+    }
+    void begin_task(MacroTaskParameters parameters,const std::vector<MacroTaskBinding> &bindings) {
+        if(!task_owned_ || task_running_ || task_preparing_)throw StaticScheduleError("task queue is not available");
+        validate_macro_task_bindings(bindings);
+        if (!raw_macro_mode_) {
+            if constexpr (QueueRole == IcuQueueRole::Vxm) {
+                for (const auto &b : bindings)
+                    if (b.target != MacroBindingTarget::NativeRepeatCount
+                        || b.record >= imem_.size() || !imem_[b.record]
+                        || detail::raw_icu_opcode(*imem_[b.record]) != isa::IcuCommandOpcode::Instruction
+                        || is_vxm_topk(isa::decode_vxm_icu_instruction(*imem_[b.record])))
+                        throw StaticScheduleError("native VXM binding requires an ALU instruction");
+            } else if (!bindings.empty()) {
+                throw StaticScheduleError("native task bindings are only supported for VXM");
+            }
+        }
+        task_parameters_=parameters;task_bindings_=bindings;
+        if(raw_macro_mode_) {
+            reset_execution();
+            macro_decoder_->configure_task_bindings(parameters,bindings);
+            configured_=launched_=true;
+        } else {
+            if constexpr(QueueRole!=IcuQueueRole::Vxm && !is_sxm_queue_role(QueueRole))
+                throw StaticScheduleError("task MEM/MXM queues must be packed Macro");
+            configure({0,imem_.size()});
+        }
+        cycle_=0;task_preparing_=true;
+    }
+    void prepare_task_cycle() {
+        if(!task_preparing_)throw StaticScheduleError("task queue is not preparing");
+        prime_frontend_cycle();
+    }
+    bool task_ready() const {
+        if(!task_preparing_)return false;
+        if(raw_macro_mode_)return macro_ready_impl();
+        return configured_ && pending_fetches_.empty() && (fetch_pc_==program_end_pc_ || iq_.size()==IqDepth);
+    }
+    void launch_task(std::size_t cycle_advance = 0) {
+        if(!task_ready())throw StaticScheduleError("launching unprimed task queue");
+        if (cycle_advance && !raw_macro_mode_) {
+            if constexpr (QueueRole == IcuQueueRole::Vxm) {
+                if (iq_.empty() ||
+                    detail::raw_icu_opcode(iq_.front()) != isa::IcuCommandOpcode::Nop)
+                    throw StaticScheduleError("expert launch advance requires an initial VXM NOP");
+                auto delay = decode_control_word(iq_.front());
+                if (delay.count <= cycle_advance)
+                    throw StaticScheduleError("expert launch advance exceeds initial VXM NOP");
+                iq_.front().lanes[0] = isa::encode_icu_nop(delay.count - cycle_advance);
+            } else {
+                throw StaticScheduleError("expert launch advance requires packed Macro or native VXM");
+            }
+        }
+        cycle_ = cycle_advance;
+        task_preparing_=false;task_running_=true;
+    }
+    void finish_task() {
+        if(!task_running_ || !done())throw StaticScheduleError("finishing an active task queue");
+        task_running_=false;
+    }
+    bool task_uses_alternate_weight_bank() const {
+        return task_running_ && task_parameters_.alternate_weight_bank;
+    }
 
     const RawImemWord& read_raw_imem(std::size_t address) const
     {
@@ -712,6 +784,10 @@ public:
 
     bool raw_macro_ready() const noexcept
     {
+        if(task_owned_ && !task_preparing_ && !task_running_)return true;
+        return macro_ready_impl();
+    }
+    bool macro_ready_impl() const noexcept {
         return raw_macro_mode_ && static_cast<bool>(macro_decoder_)
             && macro_decoder_->primed()
             && queue_controls_.primed()
@@ -980,7 +1056,16 @@ public:
 
     std::optional<FuncInstruction> dispatch_next()
     {
-        return tick();
+        if(task_owned_ && !task_running_) {
+            notify_emitted_=false;begin_trace(IcuQueueAction::ProgramPaused);finish_trace();return std::nullopt;
+        }
+        auto result=tick();
+        if constexpr(std::is_same_v<FuncInstruction,MemInstruction>) {
+            if(result && task_output_queue_ && result->opcode==MemOpcode::Write) {
+                result->expert_task_generation=task_parameters_.generation;result->expert_task_id=task_parameters_.task_id;
+            }
+        }
+        return result;
     }
 
     // Physical response capture remains live while all execution coordinates,
@@ -1029,6 +1114,7 @@ public:
     // Read committed physical storage without fetching or executing it.
     Entry read_committed_imem(std::size_t address) const { return read_imem(address); }
     bool frontend_ready() const {
+        if(task_owned_ && !task_preparing_ && !task_running_)return true;
         if (raw_macro_mode_) return raw_macro_ready();
         return configured_ && pending_fetches_.empty()
             && (fetch_pc_ == program_end_pc_ || iq_.size() == IqDepth);
@@ -1037,6 +1123,18 @@ public:
         if (raw_macro_mode_) { if (!raw_macro_ready()) prefetch_raw_macro(); return; }
         if (!configured_ || frontend_ready()) return;
         commit_ready_fetch(); begin_fetch_if_possible(); age_pending_fetches();
+    }
+
+    // A resource owner can hold command execution while the finite frontend
+    // keeps fetching. Clear the previous issue trace even when IQ is full.
+    void hold_and_prefetch_cycle() {
+        if(task_owned_ && !task_preparing_ && !task_running_){begin_trace(IcuQueueAction::ProgramPaused);finish_trace();return;}
+        ensure_configured();
+        notify_emitted_ = false;
+        begin_trace(IcuQueueAction::ProgramPaused);
+        prime_frontend_cycle();
+        age_synchronized_notifications();
+        finish_trace();
     }
 
     void configure_all()
@@ -1117,6 +1215,7 @@ public:
         return tick();
     }
 
+    void set_external_event_probe(std::function<bool(std::size_t)> probe) {external_event_probe_=std::move(probe);}
     void notify()
     {
         ++notification_tokens_;
@@ -1358,6 +1457,7 @@ public:
 
     bool done() const
     {
+        if(task_owned_ && !task_running_)return true;
         if (!configured_) {
             return imem_.empty() && raw_imem_.empty();
         }
@@ -1449,6 +1549,7 @@ public:
     }
 
 private:
+    std::function<bool(std::size_t)> external_event_probe_{};
     static constexpr std::uint8_t kSyncExtendedSubtype = 3;
     static constexpr std::uint8_t kNotifyExtendedSubtype = 4;
     static constexpr std::uint8_t kWaitEventExtendedSubtype = 5;
@@ -1590,6 +1691,7 @@ private:
                 "legacy ICU entries do not use the raw-word encoder");
         } else {
             validate_native_instruction_role(instruction);
+            if constexpr (QueueRole == IcuQueueRole::Routing) return encode_routing_instruction(instruction);
             Entry word{};
             std::uint64_t encoded = 0;
             if constexpr (QueueRole == IcuQueueRole::Mem) {
@@ -1622,6 +1724,8 @@ private:
         if constexpr (QueueRole == IcuQueueRole::Legacy) {
             throw std::logic_error(
                 "legacy ICU entries do not use the raw-word decoder");
+        } else if constexpr (QueueRole == IcuQueueRole::Routing) {
+            return decode_routing_instruction(word);
         } else if constexpr (QueueRole == IcuQueueRole::Mem) {
             if (!detail::raw_icu_bits_are_zero(
                     word, 66, InstructionBits))
@@ -1648,7 +1752,9 @@ private:
                 static_cast<isa::EncodedMxmDequantInstruction>(
                     detail::read_raw_icu_bits(word, 2, 16)));
         } else if constexpr (QueueRole == IcuQueueRole::Vxm) {
-            return isa::decode_vxm_icu_instruction(word);
+            const auto packet = isa::decode_vxm_icu_instruction(word);
+            if (is_vxm_topk(packet)) (void)decode_vxm_topk(packet);
+            return packet;
         } else if constexpr (QueueRole == IcuQueueRole::C2cTx) {
             return C2cIcuPacketCodec::decode_tx(word).to_legacy();
         } else if constexpr (QueueRole == IcuQueueRole::C2cRx) {
@@ -2007,7 +2113,20 @@ private:
         if (address >= imem_.size() || !imem_[address].has_value()) {
             throw StaticScheduleError("ICU fetched an uninitialized local i-MEM address");
         }
-        return *imem_[address];
+        auto word = *imem_[address];
+        if constexpr (QueueRole == IcuQueueRole::Vxm) {
+            if (task_owned_ && (task_preparing_ || task_running_)) {
+                for (const auto& binding : task_bindings_) {
+                    if (binding.record != address) continue;
+                    const auto packet = isa::decode_vxm_icu_instruction(word);
+                    const auto rows = macro_task_binding_value(binding, task_parameters_,
+                        VxmCompactInstructionCodec::repeat_count(packet));
+                    return isa::encode_vxm_icu_instruction(
+                        VxmCompactInstructionCodec::with_repeat_count(packet, rows));
+                }
+            }
+        }
+        return word;
     }
 
     void commit_ready_fetch()
@@ -2033,7 +2152,7 @@ private:
         }
         last_trace_.fetch_started_pc = fetch_pc_;
         pending_fetches_.push_back(PendingFetch {
-            fetch_pc_, read_imem(fetch_pc_), FetchLatency});
+            fetch_pc_, read_imem(fetch_pc_), FetchLatency+(task_owned_ && !task_bindings_.empty()?1:0)});
         ++fetch_pc_;
     }
 
@@ -2223,6 +2342,9 @@ private:
         case IcuControlOpcode::WaitEvent: {
             const auto token=std::ranges::find_if(synchronized_notifications_,
                 [&](const auto& value) { return value.tag == control.event_tag; });
+            if (token == synchronized_notifications_.end() && external_event_probe_ && external_event_probe_(control.event_tag)) {
+                last_trace_.action=IcuQueueAction::EventRelease;return ControlResult::Continue;
+            }
             if (token == synchronized_notifications_.end()) {
                 last_trace_.action=IcuQueueAction::EventWait;
                 return ControlResult::Wait;
@@ -2813,6 +2935,9 @@ private:
     bool launched_{false};
     bool underflowed_{false};
     IcuQueueCycleTrace last_trace_{};
+    bool task_owned_{},task_running_{},task_preparing_{},task_output_queue_{};
+    MacroTaskParameters task_parameters_{};
+    std::vector<MacroTaskBinding> task_bindings_;
 };
 
 } // namespace ftlpu

@@ -3,6 +3,8 @@
 #include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/vxm/input_buffer.hpp"
+#include "ftlpu/vxm/route_topk.hpp"
+#include "ftlpu/vxm/route_weights.hpp"
 #include "ftlpu/vxm/superlane.hpp"
 
 #include <array>
@@ -34,6 +36,9 @@ public:
 
     void reset()
     {
+        control_owner_=0;
+        topk_ = {};
+        route_weights_ = {};
         for (auto& queue : instruction_queues_) {
             queue.clear();
         }
@@ -67,6 +72,7 @@ public:
     // captured input bundle, including data that has not launched yet.
     bool idle() const
     {
+        if (topk_.active() || !route_weights_.idle()) return false;
         for (const auto& queue : instruction_queues_)
             if (!queue.empty()) return false;
         for (const auto& rows : instruction_rows_)
@@ -79,11 +85,45 @@ public:
     }
 
     void issue_south(
-        std::size_t alu, CompactInstruction instruction)
+        std::size_t alu, CompactInstruction instruction, std::uint64_t owner=0)
     {
+        if(topk_.active() || control_owner_!=owner)throw std::logic_error("VXM command port owned by another producer");
         check_alu(alu);
         instruction_queues_[alu].push_back(instruction);
     }
+    bool acquire_control(std::uint64_t owner) {
+        if(!owner || control_owner_ || !idle())return false;
+        control_owner_=owner;return true;
+    }
+    void release_control(std::uint64_t owner) {
+        if(owner!=control_owner_ || !idle())throw std::logic_error("release active VXM command port");
+        control_owner_=0;
+    }
+
+    VxmRouteWeightArithmetic& route_weights(std::uint64_t owner)
+    {
+        if (!owner || owner != control_owner_)
+            throw std::logic_error("VXM route weights require control ownership");
+        return route_weights_;
+    }
+
+    bool topk_available() const { return !control_owner_ && idle(); }
+
+    void begin_topk(const RoutingDescriptor& descriptor, std::uint64_t generation,
+                    std::uint32_t completion)
+    {
+        require_topk_available();
+        topk_.begin(descriptor, generation, completion);
+    }
+
+    void begin_topk(VxmTopKInstruction instruction)
+    {
+        require_topk_available();
+        topk_.begin(instruction);
+    }
+
+    VxmRouteTopK& topk() { return topk_; }
+    const VxmRouteTopK& topk() const { return topk_; }
 
     void set_chain_depth(VxmChainDepth depth)
     {
@@ -159,7 +199,7 @@ public:
             throw std::out_of_range(
                 "VXM input group source is outside the fixed group set");
         }
-        return input_group_sources_[group];
+        return topk_.active() ? topk_.group_source(group) : input_group_sources_[group];
     }
 
     void configure_output_block_destination(
@@ -211,6 +251,19 @@ public:
             log_status(*os, log_tile);
         }
 
+        if (topk_.active()) {
+            clear_outputs();
+            for (std::size_t tile = 0; tile < kTileCount; ++tile)
+                topk_.tick_tile(tile, input_buffers_[tile], [&](std::size_t lane) -> VxmLane& {
+                    return superlanes_[tile].lane(lane);
+                });
+            emit_topk_outputs();
+            prepared_ = false;
+            ++cycle_;
+            return;
+        }
+        if (!route_weights_.idle())
+            route_weights_.tick(superlanes_[0].special_alu());
         execute_instructions(os, log_tile);
         tick_superlanes(os, log_tile);
         advance_instructions();
@@ -223,8 +276,19 @@ public:
         if (prepared_) {
             return;
         }
-        dispatch_instruction_queues();
-        refresh_required_streams();
+        if (topk_.active()) {
+            for (std::size_t tile = 0; tile < kTileCount; ++tile) {
+                required_streams_[tile].reset();
+                if (topk_.wants_input(tile)) {
+                    required_streams_[tile].emplace();
+                    for (std::size_t stream = 0; stream < RouteVxmSelectSchedule::streams; ++stream)
+                        (*required_streams_[tile])[stream] = true;
+                }
+            }
+        } else {
+            dispatch_instruction_queues();
+            refresh_required_streams();
+        }
         prepared_ = true;
     }
 
@@ -271,6 +335,42 @@ public:
     }
 
 private:
+    void clear_outputs()
+    {
+        for (auto& slot : output_slots_) slot.reset();
+        for (auto& outputs : output_slots_multi_) outputs.clear();
+    }
+
+    void require_topk_available()
+    {
+        if (!topk_available())
+            throw std::logic_error("VXM Top-K requires drained VXM resources");
+        clear_outputs();
+    }
+
+    void emit_topk_outputs()
+    {
+        for (std::size_t tile = 0; tile < kTileCount; ++tile) {
+            const auto rank = topk_.stream_rank(tile);
+            if (!rank) continue;
+            Superlane::Output indices{}, values{};
+            indices.stream = VxmTopKInstruction::index_stream;
+            values.stream = VxmTopKInstruction::value_stream;
+            indices.byte_count = values.byte_count = 4;
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                const auto result = topk_.result(tile * hw::kLanesPerTile + lane, *rank);
+                for (std::size_t byte = 0; byte < 4; ++byte) {
+                    indices.byte_values[lane][byte] = static_cast<std::uint8_t>(result.expert >> (8 * byte));
+                    values.byte_values[lane][byte] = static_cast<std::uint8_t>(result.bits >> (8 * byte));
+                }
+            }
+            output_slots_[tile] = indices;
+            output_slots_multi_[tile].push_back(indices);
+            output_slots_multi_[tile].push_back(values);
+        }
+        topk_.tick_stream_output();
+    }
+
     static void check_tile(std::size_t tile)
     {
         if (tile >= kTileCount) {
@@ -535,6 +635,8 @@ private:
     std::array<InputBuffer, kTileCount> input_buffers_{};
     std::array<OutputSlot, kTileCount> output_slots_{};
     std::array<std::vector<Superlane::Output>, kTileCount> output_slots_multi_{};
+    VxmRouteTopK topk_{};
+    VxmRouteWeightArithmetic route_weights_{};
     std::array<std::optional<RequiredStreams>, kTileCount> required_streams_{};
     std::array<Hemisphere, VxmLane::kStreamGroupCount>
         input_group_sources_{};
@@ -542,6 +644,7 @@ private:
         output_block_destinations_{};
     std::size_t cycle_{0};
     bool prepared_{false};
+    std::uint64_t control_owner_{};
 };
 
 } // namespace ftlpu

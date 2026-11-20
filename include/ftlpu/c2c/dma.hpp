@@ -14,6 +14,14 @@ namespace ftlpu {
 
 class C2cDmaEngine {
 public:
+    struct CycleTrace {
+        const char *stage{};
+        C2cDmaInstruction instruction;
+        std::uint64_t address{}, tag{};
+        std::size_t vector_index{}, next_vector{}, completed{}, outstanding{}, fifo{};
+    };
+    void enable_cycle_trace(bool enabled=true){cycle_trace_enabled_=enabled;}
+    const std::vector<CycleTrace>& last_cycle_trace() const {return cycle_trace_;}
     struct BeatTrace {
         C2cDmaDirection direction{C2cDmaDirection::Ddr4ToC2c};
         std::uint64_t ddr4_address{0};
@@ -52,6 +60,7 @@ public:
 
     void reset()
     {
+        cycle_trace_.clear();
         for (auto& queue : queues_) queue.clear();
         for (auto& active : active_) active.reset();
         for (auto& fifo : outbound_) fifo.clear();
@@ -187,6 +196,7 @@ public:
 
     void tick()
     {
+        cycle_trace_.clear();
         last_beat_.reset();
         last_read_request_.reset();
         load_credit_wait_ = false;
@@ -195,8 +205,10 @@ public:
                 active_[stream] = ActiveTransfer {
                     std::move(queues_[stream].front()), 0, 0};
                 queues_[stream].pop_front();
+                trace("activate",stream,active_[stream]->instruction.ddr4_address,0,0);
             }
             if (!active_[stream].has_value()) continue;
+            trace("active",stream,active_[stream]->instruction.ddr4_address,active_[stream]->next_vector_index,0);
             if (active_[stream]->instruction.direction
                 == C2cDmaDirection::Ddr4ToC2c) {
                 tick_load(stream);
@@ -208,6 +220,11 @@ public:
     }
 
 private:
+    void trace(const char *stage,std::size_t stream,std::uint64_t address,std::size_t index,std::uint64_t tag) {
+        if(!cycle_trace_enabled_)return;
+        const auto &a=*active_[stream];
+        cycle_trace_.push_back({stage,a.instruction,address,tag,index,a.next_vector_index,a.completed_vectors,pending_requests_[stream].size(),inbound_[stream].size()});
+    }
     struct ActiveTransfer {
         C2cDmaInstruction instruction{};
         std::size_t next_vector_index{0};
@@ -238,6 +255,7 @@ private:
                 request.vector_index,
                 completion.vector.vector_tag,
             };
+            trace("data_return",stream,completion.address,request.vector_index,completion.vector.vector_tag);
             inbound_[stream].push_back(std::move(completion.vector));
             ++active.completed_vectors;
         }
@@ -246,6 +264,7 @@ private:
             && ddr4_.can_accept_request()) {
             const auto vector_index = active.next_vector_index++;
             last_read_request_ = active.instruction.vector_address(vector_index);
+            trace("ddr_read_request",stream,*last_read_request_,vector_index,active.instruction.vector_tag_base+vector_index);
             pending.push_back(PendingRequest {
                 ddr4_.request_read(
                     active.instruction.vector_address(vector_index),
@@ -255,7 +274,7 @@ private:
         }
         else if (active.next_vector_index < active.instruction.vector_count
             && pending.size() + inbound_[stream].size() >= fifo_depth_vectors_)
-            load_credit_wait_ = true;
+            {load_credit_wait_ = true;trace("credit_wait",stream,active.instruction.ddr4_address,active.next_vector_index,0);}
         finish_transfer_if_complete(stream);
     }
 
@@ -275,6 +294,7 @@ private:
                 request.vector_index,
                 request.vector_tag,
             };
+            trace("write_complete",stream,completion.address,request.vector_index,request.vector_tag);
             ++active.completed_vectors;
         }
         finish_transfer_if_complete(stream);
@@ -286,6 +306,7 @@ private:
             outbound_[stream].pop_front();
             const auto vector_index = active.next_vector_index++;
             const auto tag = vector.vector_tag;
+            trace("ddr_write_request",stream,active.instruction.vector_address(vector_index),vector_index,tag);
             pending.push_back(PendingRequest {
                 ddr4_.request_write(
                     active.instruction.vector_address(vector_index),
@@ -308,6 +329,7 @@ private:
             active->instruction.vector_count,
             active->instruction.sync_tag,
         });
+        trace("complete",stream,active->instruction.ddr4_address,active->completed_vectors,0);
         active.reset();
         ++pending_completion_notifications_;
         pending_completion_sync_tags_.push_back(
@@ -322,6 +344,8 @@ private:
     }
 
     Ddr4Model& ddr4_;
+    bool cycle_trace_enabled_{};
+    std::vector<CycleTrace> cycle_trace_; // One tick only; bounded by streams and finite outstanding credits.
     std::size_t fifo_depth_vectors_{hw::config::kDmaFifoDepthVectors};
     std::size_t stream_count_{1};
     std::size_t transport_lane_base_{0};

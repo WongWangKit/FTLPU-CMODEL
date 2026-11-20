@@ -3,7 +3,7 @@
 #include <limits>
 #include <tuple>
 namespace ftlpu {
-enum class ProgramStorage { Imem, TransportImem, Qctl, Barr, QueueEvents, BarrierEvents };
+enum class ProgramStorage { Imem, TransportImem, Qctl, Barr, QueueEvents, BarrierEvents, RoutingDescriptors };
 // Lengths describe physical words, excluding the final DMA vector padding.
 struct ProgramImage {
     std::uint64_t source_address{0};
@@ -19,7 +19,7 @@ struct ProgramImage {
         switch(storage) {
         case ProgramStorage::Qctl: return 12;
         case ProgramStorage::Barr: return 8;
-        case ProgramStorage::QueueEvents: case ProgramStorage::BarrierEvents: return 4;
+        case ProgramStorage::QueueEvents: case ProgramStorage::BarrierEvents: case ProgramStorage::RoutingDescriptors: return 4;
         default: return kind==IcuMacroQueueKind::MxmLoad || kind==IcuMacroQueueKind::MxmCompute
             || kind==IcuMacroQueueKind::MxmDequant ? 16 : 12;
         }
