@@ -5,9 +5,11 @@ CMake 配置阶段读取它并生成编译期常量，Software 编译器也可�
 
 ## 默认配置和 JSON 格式
 
-默认配置为 [`config/ftlpu-lpu32.json`](../config/ftlpu-lpu32.json)。未指定
-`FTLPU_HARDWARE_CONFIG` 时，CModel 使用该文件；Software 使用
-`${FTLPU_CMODEL_DIR}/config/ftlpu-lpu32.json`。以下为基础结构示意，完整字段及当前默认值以配置文件为准：
+新构建不指定 `FTLPU_HARDWARE_CONFIG` 时，两仓均选 [LPU32 广域配置](../config/ftlpu-lpu32-mixed.json)，
+P/RT/Q 为 192/128/384；16 档可显式选 [LPU16 广域配置](../config/ftlpu-lpu16-mixed.json)，为 112/128/832。
+P 是32 B程序包数；RT 是每 lane 的 RX 与 TX 各自的向量槽数；Q 是共享在途事务额度。这是 CModel 默认选型，不是 RTL 物理深度。
+原生 LPU32 和 LPU16-decode 文件未替换；已配置的 CMake 缓存也不自动迁移。
+以下为基础结构示意，完整字段及当前默认值以所选文件为准：
 
 ```json
 {

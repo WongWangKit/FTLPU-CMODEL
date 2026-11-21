@@ -11,16 +11,16 @@ int main()
         payload[lane] = static_cast<std::uint8_t>(lane);
     }
 
-    fabric.begin_cycle();
+    fabric.low();
     ftlpu::StreamOutputPort producer(
         fabric, 0, ftlpu::StreamDirection::East, "producer");
     constexpr auto kTile = ftlpu::hw::kTileRows - 1;
     producer.write_payload_segment(kTile, 7, payload, 123);
     producer.write_cell(
         0, 0, 9, ftlpu::StreamCell::Valid(0xa5, true, 456));
-    fabric.commit_cycle();
+    fabric.validate_posedge(); fabric.posedge();
 
-    fabric.begin_cycle();
+    fabric.low();
     ftlpu::StreamInputPort consumer_a(
         fabric, 0, ftlpu::StreamDirection::East, "consumer A");
     ftlpu::StreamInputPort consumer_b(
@@ -42,7 +42,7 @@ int main()
         assert(segment_b[lane].vector_tag == segment_a[lane].vector_tag);
     }
     fabric.stage_linear_links();
-    fabric.commit_cycle();
+    fabric.validate_posedge(); fabric.posedge();
 
     // Broadcast consumption still suppresses passive forwarding once.
     assert(!fabric.cell(1, kTile, 0, ftlpu::StreamId::East(7)).valid);

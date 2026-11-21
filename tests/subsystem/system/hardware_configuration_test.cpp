@@ -46,19 +46,17 @@ try {
         [&] { system.initialize_mem_sram_lane_byte(0, 0, 1024, 0, 0); },
         "configured SRAM depth was not enforced");
 
-    (void)system.mxm_unit(0);
-    (void)system.mxm_unit(2);
-    require_out_of_range(
-        [&] { (void)system.mxm_unit(1); },
-        "disabled east-hemisphere MXM remained addressable");
-    require_out_of_range(
-        [&] { (void)system.mxm_unit(3); },
-        "disabled west-hemisphere MXM remained addressable");
+    for(std::size_t h=0;h<ftlpu::hw::kHemispheres;++h){
+        const auto base=h*ftlpu::hw::kMxmsPerHemisphere;
+        (void)system.mxm_unit(base);
+        for(std::size_t j=1;j<ftlpu::hw::kMxmsPerHemisphere;++j)
+            require_out_of_range([&]{(void)system.mxm_unit(base+j);},"disabled MXM remained addressable");
+    }
+    require_out_of_range([&]{(void)system.mxm_unit(ftlpu::hw::kMxmCount);},"out-of-range MXM enabled");
 
     auto full = ftlpu::SystemHardwareConfiguration {};
     system.configure_hardware(full);
-    (void)system.mxm_unit(1);
-    (void)system.mxm_unit(3);
+    for(std::size_t j=0;j<ftlpu::hw::kMxmCount;++j)(void)system.mxm_unit(j);
     system.initialize_mem_sram_lane_byte(
         0, 0, ftlpu::hw::kSramDepthRows - 1, 0, 0xa5);
 

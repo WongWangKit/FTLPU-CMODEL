@@ -172,6 +172,8 @@ public:
 
     DecodeHarness()
     {
+        // The offline calendar includes the product MEM read-response register.
+        system_.set_mem_read_timing(ftlpu::MemArrayModel::ReadTiming::RegisteredR1);
         initialize_prefill_cache();
     }
 
@@ -254,6 +256,17 @@ public:
     std::array<float, kSequenceLength> qk_scores(
         const Vector& query)
     {
+        std::array<float, kSequenceLength> scores{};
+        constexpr auto capacity = ftlpu::hw::kMxmAccumulatorRows - kAccumulatorAddress;
+        static_assert(capacity > 0);
+        for (std::size_t base = 0; base < kSequenceLength; base += capacity)
+            qk_page(query, base, std::min(capacity, kSequenceLength - base), scores);
+        return scores;
+    }
+
+    void qk_page(const Vector& query, std::size_t base, std::size_t length,
+                 std::array<float, kSequenceLength>& scores)
+    {
         system_.reset_execution_state();
         initialize_weight_tile(Matrix{});
         initialize_vector(kColumnSlices, kColumnAddress, query);
@@ -296,11 +309,11 @@ public:
 
         constexpr std::size_t kComputeStart = kColumnCycle + 8;
         for (std::size_t block_start = 0;
-             block_start < kSequenceLength;
+             block_start < length;
              block_start += ftlpu::hw::kMxmRows) {
             const auto count = std::min(
                 ftlpu::hw::kMxmRows,
-                kSequenceLength - block_start);
+                length - block_start);
             const auto compute_cycle = kComputeStart + block_start;
             for (std::size_t byte = 0;
                  byte < kKeyCacheSlices.size();
@@ -310,7 +323,7 @@ public:
                     mem_queue(slice),
                     compute_cycle - east_read_to_mxm_latency(slice),
                     ftlpu::MemInstruction::Read(
-                        block_start,
+                        base + block_start,
                         ftlpu::StreamId::East(byte)),
                     count,
                     1);
@@ -340,21 +353,21 @@ public:
             "decode Q: IWColumn inner=0 streams=2");
         trace(
             phase_start + kComputeStart,
-            phase_start + kComputeStart + kSequenceLength,
+            phase_start + kComputeStart + length,
             "MEM.E.Read",
-            "stream K cache rows 0..128");
+            "stream K cache from row " + std::to_string(base));
         trace(
             phase_start + kComputeStart,
-            phase_start + kComputeStart + kSequenceLength,
+            phase_start + kComputeStart + length,
             "MXM.E0.Compute",
-            "QK decode: 129 cached K rows");
+            "QK decode rows: " + std::to_string(length));
         run(schedule.end_cycle() + 16, "QK decode");
 
-        std::array<float, kSequenceLength> scores{};
-        for (std::size_t token = 0; token < kSequenceLength; ++token) {
+        for (std::size_t offset = 0; offset < length; ++offset) {
+            const auto token = base + offset;
             scores[token] =
                 system_.mxm_unit(0).accumulator().value(
-                    kAccumulatorAddress + token, 0);
+                    kAccumulatorAddress + offset, 0);
             auto expected = 0.0f;
             for (std::size_t dimension = 0;
                  dimension < kHidden;
@@ -368,7 +381,6 @@ public:
                     "QK score mismatch at token " + std::to_string(token));
             }
         }
-        return scores;
     }
 
     void append_cache(

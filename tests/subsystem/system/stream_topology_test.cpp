@@ -116,11 +116,13 @@ int main()
     // ACC_READ emits from the MXM endpoint without traversing the local MAC
     // pipeline. Check the real return path all the way to the VXM input.
     system.reset_execution_state();
+    system.mxm_unit(0).accumulator().low();
     for (std::size_t block = 0; block < ftlpu::hw::kTileRows; ++block) {
         ftlpu::MxmAccumulator::Segment values{};
         values.fill(1.0f);
         system.mxm_unit(0).accumulator().accumulate(0, block, values);
     }
+    system.mxm_unit(0).accumulator().posedge();
     system.icu().enqueue_mxm(0,
         ftlpu::MxmControlInstruction::AccumulatorRead(0, 0, true));
     for (std::size_t cycle = 0;
@@ -190,9 +192,9 @@ int main()
         ftlpu::StreamCell::Valid(42));
 
     auto routes = topology.default_route_selection();
-    fabric.begin_cycle();
+    fabric.low();
     topology.stage_active_routes(fabric, routes);
-    fabric.commit_cycle();
+    fabric.validate_posedge(); fabric.posedge();
     assert(fabric.cell(dst_out, 0, 0, stream).valid);
     assert(fabric.cell(dst_out, 0, 0, stream).data == 42);
     assert(!fabric.cell(acc_in, 0, 0, stream).valid);
@@ -206,9 +208,9 @@ int main()
         ftlpu::StreamCell::Valid(99));
     routes.disable("normal.tx_to_dst");
     routes.enable("bypass.tx_to_acc");
-    fabric.begin_cycle();
+    fabric.low();
     topology.stage_active_routes(fabric, routes);
-    fabric.commit_cycle();
+    fabric.validate_posedge(); fabric.posedge();
     assert(!fabric.cell(dst_out, 0, 0, stream).valid);
     assert(fabric.cell(acc_in, 0, 0, stream).data == 99);
 
@@ -218,7 +220,7 @@ int main()
     routes.enable("normal.tx_to_dst");
     bool rejected = false;
     try {
-        fabric.begin_cycle();
+        fabric.low();
         topology.stage_active_routes(fabric, routes);
     } catch (const std::logic_error&) {
         rejected = true;

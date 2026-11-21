@@ -47,6 +47,7 @@ int main() try
     MxmAccumulator accumulator;
     MxmAccumulator::Segment segment{};
     segment.fill(2.5f);
+    accumulator.low();
     accumulator.accumulate(address,column,segment);
     require(accumulator.read(address,column)==segment && accumulator.value(address,hw::kMxmColumns-1)==2.5f,
         "last context/column is not physically backed by accumulator storage");
@@ -54,6 +55,8 @@ int main() try
     try { accumulator.accumulate(hw::kMxmAccumulatorRows, column, segment); }
     catch (const std::exception&) { rejected = true; }
     require(rejected, "accumulator accepted the first row beyond configured capacity");
+    accumulator.validate_posedge();
+    accumulator.posedge();
     C2cVector vector;
     vector.vector_tag=91;
     for (std::size_t i=0;i<hw::kPhysicalVectorBytes;++i)
@@ -78,15 +81,15 @@ int main() try
     Ddr4Model ddr(config);
     ddr.initialize_vector(0x1000,vector);
     const auto request=ddr.request_read(0x1000);
-    for (std::size_t i=0;i<beats;++i) {
+    for (std::size_t i=0;i<beats+1;++i) {
         ddr.tick();
-        require(ddr.read_completion_ready(request)==(i+1==beats),"DDR completed a partial vector");
-        require(ddr.read_bytes_transferred()==std::min<std::size_t>((i+1)*beatBytes,hw::kPhysicalVectorBytes),
+        require(ddr.read_completion_ready(request)==(i==beats),"DDR completed a partial vector");
+        require(ddr.read_bytes_transferred()==std::min<std::size_t>(i*beatBytes,hw::kPhysicalVectorBytes),
             "DDR byte accounting used link beats as logical vectors");
     }
     require(ddr.pop_read_completion(request).vector.payload==vector.payload,"DDR read lost upper vector lanes");
-    // Multiple pending requests share a physical lane rather than creating
-    // extra link bandwidth. Other lanes retain independent DDR capacity.
+    // All logical lanes share one physical R channel. Retirement is ordered
+    // within a client even if separate IDs finish out of order.
     config.transfer_channels=2;
     config.peak_bandwidth_bytes_per_second=config.lpu_clock_hz*2*beatBytes;
     Ddr4Model concurrent(config);
@@ -94,7 +97,7 @@ int main() try
     concurrent.initialize_vector(0x1100,vector);
     const auto first=concurrent.request_read(0x1000,0);
     const auto second=concurrent.request_read(0x1100,0);
-    for (std::size_t i=0;i<2*beats;++i) {
+    for (std::size_t i=0;i<2*beats+1;++i) {
         const auto before=concurrent.read_bytes_transferred();
         concurrent.tick();
         require(concurrent.read_bytes_transferred()-before<=beatBytes,
@@ -103,17 +106,27 @@ int main() try
             require(!(concurrent.read_completion_ready(first)&&concurrent.read_completion_ready(second)),
                 "two vectors on one C2C lane completed faster than physical link bandwidth");
     }
-    require(concurrent.read_completion_ready(first)&&concurrent.read_completion_ready(second),
-        "per-lane transport arbitration did not complete both requests");
+    require(concurrent.read_completion_ready(first) && !concurrent.read_completion_ready(second),
+        "client retirement order was not preserved");
+    require(concurrent.pop_read_completion(first).vector.payload==vector.payload
+        && concurrent.read_completion_ready(second)
+        && concurrent.pop_read_completion(second).vector.payload==vector.payload
+        && concurrent.drained(),"ordered read retirement lost payload or credit");
     Ddr4Model independent(config);
     independent.initialize_vector(0x1000,vector);
     independent.initialize_vector(0x1100,vector);
     const auto left=independent.request_read(0x1000,0);
     const auto right=independent.request_read(0x1100,2);
-    for (std::size_t i=0;i<beats;++i) independent.tick();
+    for (std::size_t i=0;i<2*beats+1;++i) {
+        const auto before=independent.read_bytes_transferred();independent.tick();
+        require(independent.read_bytes_transferred()-before<=beatBytes,"logical clients multiplied physical AXI bandwidth");
+    }
     require(independent.read_completion_ready(left)&&independent.read_completion_ready(right)
         && independent.read_bytes_transferred()==2*hw::kPhysicalVectorBytes,
-        "per-lane arbitration unnecessarily serialized independent C2C lanes");
+        "shared AXI clients did not complete at physical channel rate");
+    require(independent.pop_read_completion(left).vector.payload==vector.payload
+        && independent.pop_read_completion(right).vector.payload==vector.payload
+        && independent.drained(),"independent AXI client routing/credit failed");
     std::cout << "wide_transport_codec_test passed: lanes=" << hw::kPhysicalVectorBytes
         << " address_bits=" << hw::kMxmAccumulatorAddressBits << " column_bits=" << hw::kMxmColumnBits
         << " compute_words=" << Codec::word_count << " c2c_beats=" << beats << '\n';

@@ -1,6 +1,5 @@
 {
   "schema_version": 2,
-
   "icu": {
     "mem_instruction_bits": 96,
     "mem_imem_depth": 131072,
@@ -24,7 +23,12 @@
     "c2c_macro_contexts": 4,
     "mem_macro_context_bits": 256,
     "mxm_macro_context_bits": 256,
-    "fetch_latency_cycles": 1,
+    "fetch_latency_cycles": 2,
+    "local_imem_response_depth": 4,
+    "macro_word_fifo_depth": 4,
+    "macro_context_fifo_depth": 4,
+    "fu_timed_queue_depth": 16,
+    "fu_issue_lookahead_cycles": 2,
     "macro_imem_request_ii_cycles": 1,
     "barrier_latency_cycles": 35,
     "macro_reservoir_words": 3,
@@ -44,32 +48,30 @@
     "queue_control_pool_capacity": 512,
     "queue_control_pool_read_ii": 1
   },
-
   "target": {
     "name": "ftlpu-lpu32"
   },
-
   "topology": {
     "hemispheres": 2,
     "tiles_per_slice": 4,
     "lanes_per_tile": 8
   },
-
   "mem": {
     "slices_per_hemisphere": 52,
     "banks_per_slice": 2,
     "rows_per_bank": 8192,
     "bytes_per_lane": 1
   },
-
   "sr": {
     "registers_per_lane": 64,
     "bytes_per_stream_per_lane": 1
   },
-
   "stream_topology": {
     "fabric_template": {
-      "replicas": ["east", "west"],
+      "replicas": [
+        "east",
+        "west"
+      ],
       "columns": [
         "mem.b0",
         "mem.b1",
@@ -139,23 +141,56 @@
         ]
       },
       "sxm": {
-        "forward_input": {"column": "c2c_sxm", "flow": "forward"},
-        "forward_output": {"column": "sxm_mxm", "flow": "forward"},
-        "reverse_input": {"column": "sxm_mxm", "flow": "reverse"},
-        "reverse_output": {"column": "c2c_sxm", "flow": "reverse"}
+        "forward_input": {
+          "column": "c2c_sxm",
+          "flow": "forward"
+        },
+        "forward_output": {
+          "column": "sxm_mxm",
+          "flow": "forward"
+        },
+        "reverse_input": {
+          "column": "sxm_mxm",
+          "flow": "reverse"
+        },
+        "reverse_output": {
+          "column": "c2c_sxm",
+          "flow": "reverse"
+        }
       },
       "mxm": {
-        "weight_input": {"column": "sxm_mxm", "flow": "forward"},
-        "activation_input": {"column": "sxm_mxm", "flow": "forward"},
-        "result_output": {"column": "sxm_mxm", "flow": "reverse"}
+        "weight_input": {
+          "column": "sxm_mxm",
+          "flow": "forward"
+        },
+        "activation_input": {
+          "column": "sxm_mxm",
+          "flow": "forward"
+        },
+        "result_output": {
+          "column": "sxm_mxm",
+          "flow": "reverse"
+        }
       },
       "vxm": {
-        "input": {"column": "mem.b0", "flow": "reverse"},
-        "output": {"column": "mem.b0", "flow": "forward"}
+        "input": {
+          "column": "mem.b0",
+          "flow": "reverse"
+        },
+        "output": {
+          "column": "mem.b0",
+          "flow": "forward"
+        }
       },
       "c2c": {
-        "tx_input": {"column": "mem.b13", "flow": "forward"},
-        "rx_output": {"column": "mem.b13", "flow": "reverse"}
+        "tx_input": {
+          "column": "mem.b13",
+          "flow": "forward"
+        },
+        "rx_output": {
+          "column": "mem.b13",
+          "flow": "reverse"
+        }
       }
     },
     "system_transfers": [
@@ -191,11 +226,9 @@
       }
     ]
   },
-
   "c2c": {
     "beat_bytes": 32
   },
-
   "mxm": {
     "accum_contexts": 4,
     "is_columns": 4,
@@ -206,26 +239,36 @@
       "is-block"
     ]
   },
-
   "vxm": {
     "alus": 16
   },
-
   "memory": {
     "dedicated_slice_roles": 1,
     "w8a16_weight_slice_base": 20,
     "w8a16_weight_slice_stride": 4,
-    "w8a16_output_weight_spare_slices": [22, 38],
+    "w8a16_output_weight_spare_slices": [
+      22,
+      38
+    ],
     "w8a16_activation_slice_base": 0,
     "w8a16_hidden_slice_base": 0,
     "w8a16_hidden_base_row": 0,
-    "w8a16_fused_gate_temp_slices": [0, 4, 8, 12],
-    "w8a16_fused_up_temp_slices": [1, 5, 9, 13],
+    "w8a16_fused_gate_temp_slices": [
+      0,
+      4,
+      8,
+      12
+    ],
+    "w8a16_fused_up_temp_slices": [
+      1,
+      5,
+      9,
+      13
+    ],
     "attention_mask_base_row": 7936,
     "matmul_result_base_row": 1600,
     "w8a16_result_slice_base": 16
   },
-
   "throughput": {
     "mxm_prefill_weight_streams": 1,
     "mxms_per_hemisphere": 1,
@@ -236,9 +279,8 @@
     "vxm_cross_hemisphere_streams_enabled": 1,
     "vxm_fma_enabled": 1
   },
-
   "external_memory": {
-    "dma_fifo_depth_vectors": 16,
+    "dma_fifo_depth_vectors": 128,
     "lpu_clock_mhz": 500,
     "ddr_peak_bandwidth_mbytes_per_second": 51200,
     "ddr_scheduling_efficiency_percent": 90,
@@ -246,13 +288,23 @@
     "ddr_write_latency_cycles": 25,
     "ddr_read_latency_jitter_cycles": 15,
     "ddr_write_latency_jitter_cycles": 10,
-    "ddr_request_queue_depth": 256,
+    "ddr_request_queue_depth": 136,
     "ddr_latency_random_seed": 1179929680
   },
   "program_load": {
     "bus_bytes_per_cycle": 32,
     "route_latency_cycles": 1,
     "imem_write_ii_cycles": 1,
-    "imem_write_commit_latency_cycles": 1
+    "imem_write_commit_latency_cycles": 1,
+    "config_fifo_depth": 16,
+    "outstanding_depth": 4,
+    "response_fifo_depth": 80,
+    "word_fifo_depth": 8,
+    "ingress_fifo_depth": 2,
+    "relay_buffer_depth": 2,
+    "mem_groups_per_relay": 2,
+    "relays_per_hemisphere": 7,
+    "prime_fifo_depth": 32,
+    "reassembly_bytes": 64
   }
 }

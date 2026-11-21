@@ -6,6 +6,7 @@
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/core/stream_port.hpp"
+#include "ftlpu/core/timing.hpp"
 #include "ftlpu/mem/mem_array.hpp"
 #include "ftlpu/mxm/mxm.hpp"
 #include "ftlpu/sxm/slice.hpp"
@@ -18,6 +19,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iomanip>
 #include <optional>
 #include <ostream>
@@ -27,6 +29,67 @@
 #include <vector>
 
 namespace ftlpu {
+
+class C2cEndpointClockSlot final : public timing::ClockedModule {
+public:
+    void bind(std::optional<C2cEndpoint>& endpoint) noexcept
+    {
+        endpoint_ = &endpoint;
+    }
+
+    void low() override {}
+
+    void validate_posedge() const override
+    {
+        if (endpoint_ != nullptr && endpoint_->has_value())
+            endpoint_->value().validate_posedge();
+    }
+
+    void posedge() override
+    {
+        if (endpoint_ != nullptr && endpoint_->has_value())
+            endpoint_->value().posedge();
+    }
+
+    void high() override
+    {
+        if (endpoint_ != nullptr && endpoint_->has_value())
+            endpoint_->value().high();
+    }
+
+private:
+    std::optional<C2cEndpoint>* endpoint_{};
+};
+
+// Optional DMA/DDR objects are attached after TspSliceSystem construction.
+// Register a permanent forwarding slot with Clock so the global commit set is
+// stable and independent of attachment order. LOW remains owned exclusively by
+// SystemPhase and therefore is intentionally not forwarded here.
+class OptionalClockedModuleSlot final : public timing::ClockedModule {
+public:
+    void bind(timing::ClockedModule* module) noexcept { module_ = module; }
+
+    void low() override {}
+    void validate_posedge() const override
+    {
+        if (module_ != nullptr) module_->validate_posedge();
+    }
+    void posedge() override
+    {
+        if (module_ != nullptr) module_->posedge();
+    }
+    void high() override
+    {
+        if (module_ != nullptr) module_->high();
+    }
+    void negedge() override
+    {
+        if (module_ != nullptr) module_->negedge();
+    }
+
+private:
+    timing::ClockedModule* module_{};
+};
 
 class TspSliceSystem {
 public:
@@ -89,11 +152,72 @@ public:
             }
         }
         configure_hardware(hardware_configuration_);
+
+        // Clock registration defines only the shared edge/commit set. The
+        // SystemPhase node order below independently defines combinational and
+        // legacy evaluate topology. The same StreamRegisterFabric objects are
+        // referenced by both mechanisms, but each phase callback has one owner.
+        icu_.enable_clocked_mode();
+        clock_.register_module(icu_);
+        clock_.register_module(program_loader_clock_slot_);
+        clock_.register_module(program_loader_dma_clock_slot_);
+        for (auto& stream : streams_) clock_.register_module(stream);
+        for (auto& mem : mems_) clock_.register_module(mem);
+        for (auto& mxm : mxms_) {
+            clock_.register_module(mxm.control());
+            clock_.register_module(mxm);
+        }
+        clock_.register_module(vxm_);
+        for (auto& sxm : sxms_) clock_.register_module(sxm);
+        for (std::size_t index = 0; index < hw::kHemispheres; ++index) {
+            c2c_clock_slots_[index].bind(c2cs_[index]);
+            clock_.register_module(c2c_clock_slots_[index]);
+            clock_.register_module(c2c_dma_clock_slots_[index]);
+        }
+        clock_.register_module(c2c_ddr_clock_slot_);
+        system_phase_.add_node("ProgramLoader control LOW", [this] {
+            if (program_loader_begin_low_)
+                program_loader_begin_low_(cycle());
+        });
+        system_phase_.add_node("stream-register LOW", [this] {
+            begin_cycle_phase(active_sinks_);
+        });
+        system_phase_.add_node("ICU dispatch", [this] {
+            dispatch_phase(active_sinks_);
+        });
+        system_phase_.add_node("MXM control then datapath", [this] {
+            mxm_phase(active_sinks_);
+        });
+        system_phase_.add_node("VXM capture then execute then route", [this] {
+            vxm_phase(active_sinks_);
+        });
+        system_phase_.add_node("MEM SXM C2C and passive-route staging", [this] {
+            mem_sxm_stage_phase(active_sinks_);
+        });
+        system_phase_.add_node("C2C DMA DDR and barrier progression", [this] {
+            advance_dma_ddr_and_barrier_phase();
+        });
+        system_phase_.add_node("postedge observations", {}, [this] {
+            postedge_observation_phase(active_sinks_);
+        });
+    }
+
+    // SystemPhase callbacks capture this object's address, and Clock keeps
+    // non-owning pointers to its StreamRegisterFabric members.
+    TspSliceSystem(const TspSliceSystem&) = delete;
+    TspSliceSystem& operator=(const TspSliceSystem&) = delete;
+    TspSliceSystem(TspSliceSystem&&) = delete;
+    TspSliceSystem& operator=(TspSliceSystem&&) = delete;
+
+    void set_mem_read_timing(MemArrayModel::ReadTiming timing) {
+        require_idle("configuring MEM timing");
+        for(const auto& mem:mems_)if(!mem.idle())throw std::logic_error("MEM timing change while active");
+        for(auto& mem:mems_)mem.set_read_timing(timing);
     }
 
     void configure_hardware(SystemHardwareConfiguration hardware)
     {
-        require_phase(CyclePhase::Idle, "configuring hardware");
+        require_idle("configuring hardware");
         hardware.validate();
         hardware_configuration_ = hardware;
         for (auto& mem : mems_)
@@ -127,25 +251,71 @@ public:
         C2cLink& outbound_link,
         C2cLink& inbound_link)
     {
-        require_phase(CyclePhase::Idle, "attaching C2C");
+        require_idle("attaching C2C");
         const auto index = hemisphere_index(hemisphere);
         c2cs_[index].emplace(stream_layout_.c2c_ports);
         c2c_outbound_links_[index] = &outbound_link;
         c2c_inbound_links_[index] = &inbound_link;
         c2c_dmas_[index] = nullptr;
+        c2c_dma_clock_slots_[index].bind(nullptr);
     }
 
     void attach_c2c_dma(
         Hemisphere hemisphere,
         C2cDmaEngine& dma)
     {
-        require_phase(CyclePhase::Idle, "attaching C2C DMA");
+        require_idle("attaching C2C DMA");
         const auto index = hemisphere_index(hemisphere);
         c2cs_[index].emplace(stream_layout_.c2c_ports, "C2C DMA",
             true);
         c2c_outbound_links_[index] = nullptr;
         c2c_inbound_links_[index] = nullptr;
+        if (!dma.clocked_mode()) dma.enable_clocked_mode();
         c2c_dmas_[index] = &dma;
+        c2c_dma_clock_slots_[index].bind(&dma);
+    }
+
+    void attach_c2c_ddr(Ddr4Model& ddr4)
+    {
+        require_idle("attaching C2C DDR4");
+        if (c2c_ddr_ != nullptr && c2c_ddr_ != &ddr4)
+            throw std::logic_error("TSP already has a different C2C DDR4");
+        if (c2c_ddr_ == nullptr) ddr4.enable_clocked_mode();
+        c2c_ddr_ = &ddr4;
+        c2c_ddr_clock_slot_.bind(&ddr4);
+    }
+
+    template<class Loader>
+    void attach_program_loader(Loader& loader)
+    {
+        require_idle("attaching ProgramLoader");
+        if (program_loader_begin_low_)
+            throw std::logic_error(
+                "TSP already has a ProgramLoader");
+        if (!loader.clocked_mode()) loader.enable_clocked_mode();
+        program_loader_clock_slot_.bind(&loader);
+        program_loader_dma_clock_slot_.bind(&loader.dma());
+        program_loader_begin_low_=[&loader](std::size_t cycle) {
+            loader.begin_clocked_low(cycle);
+        };
+        program_loader_advance_low_=[&loader](std::size_t cycle) {
+            loader.advance_clocked_dma_low(cycle);
+        };
+        program_loader_high_=[&loader] {
+            loader.high();
+            loader.dma().high();
+        };
+    }
+
+    void stage_program_reset()
+    {
+        require_idle("staging a program reset");
+        for(auto& mem:mems_)mem.retire_task_transport_commits();
+        for(auto* dma:c2c_dmas_) if(dma) {
+            while(dma->take_completion_sync_tag()) {}
+            while(dma->take_completion_notification()) {}
+        }
+        icu_.stage_program_reset();
     }
 
     C2cDmaEngine& c2c_dma(Hemisphere hemisphere)
@@ -176,22 +346,24 @@ public:
 
     void detach_c2c(Hemisphere hemisphere)
     {
-        require_phase(CyclePhase::Idle, "detaching C2C");
+        require_idle("detaching C2C");
         const auto index = hemisphere_index(hemisphere);
         c2cs_[index].reset();
         c2c_outbound_links_[index] = nullptr;
         c2c_inbound_links_[index] = nullptr;
         c2c_dmas_[index] = nullptr;
+        c2c_dma_clock_slots_[index].bind(nullptr);
     }
 
     void detach_c2c()
     {
-        require_phase(CyclePhase::Idle, "detaching all C2C endpoints");
+        require_idle("detaching all C2C endpoints");
         for (std::size_t index = 0; index < hw::kHemispheres; ++index) {
             c2cs_[index].reset();
             c2c_outbound_links_[index] = nullptr;
             c2c_inbound_links_[index] = nullptr;
             c2c_dmas_[index] = nullptr;
+            c2c_dma_clock_slots_[index].bind(nullptr);
         }
     }
 
@@ -372,18 +544,33 @@ public:
 
     void tick(LogSinks sinks)
     {
-        begin_cycle_phase(sinks);
-        dispatch_phase(sinks);
-        mxm_phase(sinks);
-        vxm_phase(sinks);
-        mem_sxm_commit_phase(sinks);
-        end_cycle_phase();
+        require_idle("starting a physical clock cycle");
+        active_sinks_ = sinks;
+        try {
+            // LOW topology and POSEDGE edge control are deliberately separate.
+            system_phase_.low();
+            clock_.complete_low();
+            clock_.validate_all();
+            clock_.commit_all();
+            system_phase_.high();
+            clock_.complete_high();
+            clock_.negedge_all();
+        } catch (...) {
+            system_phase_.mark_faulted();
+            clock_.mark_faulted();
+            active_sinks_ = {};
+            throw;
+        }
+        active_sinks_ = {};
     }
 
     std::size_t cycle() const
     {
-        return cycle_;
+        return static_cast<std::size_t>(clock_.cycle());
     }
+
+    std::uint64_t phase_count() const noexcept { return clock_.phase_count(); }
+    timing::ClockPhase clock_phase() const noexcept { return clock_.phase(); }
 
     // The runtime may query this after the last visible MEM commit before
     // notifying an event. Transport must leave shared issue/SR resources.
@@ -404,11 +591,16 @@ public:
         }
         return true;
     }
-    bool can_load_program() const {return phase_==CyclePhase::Idle && icu_.program_queues_done() && program_resources_drained();}
+    bool can_load_program() const
+    {
+        return timing_idle() && icu_.program_queues_done()
+            && program_resources_drained();
+    }
     // Only task execution state changes; SRAM, DDR/DMA and device time survive.
     void reset_program() {
-        require_phase(CyclePhase::Idle, "switching program");
+        require_idle("switching program");
         if (!can_load_program()) throw std::logic_error("previous kernel has not drained");
+        for(auto& mem:mems_)mem.retire_task_transport_commits();
         for(auto* dma:c2c_dmas_) if(dma) {
             while(dma->take_completion_sync_tag()) {}
             while(dma->take_completion_notification()) {}
@@ -454,9 +646,23 @@ public:
             : std::optional<std::size_t> {encoded - 1};
     }
 
+    // Failed-task cancellation discards transient FU/SR state. MEM bytes and
+    // physical time survive; results/weights in FU-private storage are invalid.
+    // The caller must separately drain every already-admitted AXI transaction.
+    void abort_task_execution() {
+        require_idle("aborting task execution");
+        for (auto& mem : mems_) mem.reset_execution_state(cycle());
+        for (auto& streams : streams_) streams.reset();
+        vxm_.reset(cycle());
+        for (auto& sxm : sxms_) sxm.reset(cycle());
+        for (auto& mxm : mxms_) mxm.reset(cycle());
+        icu_.reset_program();
+        for (auto& endpoint : c2cs_) if(endpoint)endpoint->reset();
+    }
+
     void reset_execution_state()
     {
-        require_phase(CyclePhase::Idle, "resetting execution state");
+        require_idle("resetting execution state");
         for (auto& mem : mems_) mem.reset_execution_state();
         for (auto& streams : streams_) streams.reset();
         vxm_.reset();
@@ -468,10 +674,12 @@ public:
         for (auto& endpoint : c2cs_) {
             if (endpoint.has_value()) endpoint->reset();
         }
-        cycle_ = 0;
+        clock_.reset_time();
+        system_phase_.reset();
         for (auto* dma : c2c_dmas_) {
             if (dma != nullptr) dma->reset();
         }
+        if (c2c_ddr_ != nullptr) c2c_ddr_->reset_execution_state();
     }
 
 private:
@@ -484,38 +692,33 @@ private:
                 "MXM unit is disabled by the system hardware configuration");
     }
 
-    enum class CyclePhase {
-        Idle,
-        Begun,
-        Dispatched,
-        MxmEvaluated,
-        VxmEvaluated,
-        MemSxmCommitted,
-    };
-
-    void require_phase(CyclePhase expected, const char* operation) const
+    [[nodiscard]] bool timing_idle() const noexcept
     {
-        if (phase_ != expected) {
+        return clock_.phase() == timing::ClockPhase::LOW
+            && !clock_.faulted()
+            && !system_phase_.faulted()
+            && system_phase_.ready_for_low();
+    }
+
+    void require_idle(const char* operation) const
+    {
+        if (!timing_idle())
             throw std::logic_error(
-                std::string("TSP cycle phase violation while ") + operation);
-        }
+                std::string("TSP timing boundary violation while ") + operation);
     }
 
     void begin_cycle_phase(LogSinks sinks)
     {
-        require_phase(CyclePhase::Idle, "beginning cycle");
         if (sinks.system != nullptr) {
-            *sinks.system << "system cycle " << cycle_ << '\n';
+            *sinks.system << "system cycle " << cycle() << '\n';
         }
         for (auto& streams : streams_) {
-            streams.begin_cycle();
+            streams.low();
         }
-        phase_ = CyclePhase::Begun;
     }
 
     void dispatch_phase(LogSinks sinks)
     {
-        require_phase(CyclePhase::Begun, "dispatching ICU instructions");
         // The first implementation only admits an already-drained boundary.
         // Active Macro Context RAM and SRAM/accumulator/transpose storage may
         // remain populated; transient FU pipelines and SR cannot cross HOLD.
@@ -546,38 +749,32 @@ private:
         }
         icu_.dispatch(
             mems_, vxm_, sxms_, mxms_, sinks.icu, c2c_endpoints, c2c_dmas);
-        phase_ = CyclePhase::Dispatched;
     }
 
     void mxm_phase(LogSinks sinks)
     {
-        require_phase(CyclePhase::Dispatched, "evaluating MXM");
         tick_mxm_controls(sinks);
         tick_mxm_datapaths(sinks);
-        phase_ = CyclePhase::MxmEvaluated;
     }
 
     void vxm_phase(LogSinks sinks)
     {
-        require_phase(CyclePhase::MxmEvaluated, "evaluating VXM");
         vxm_.prepare_cycle();
         transfer_mem_edges_to_vxm(sinks);
-        vxm_.tick(sinks.vxm, sinks.vxm_log_tile);
+        vxm_.evaluate(sinks.vxm, sinks.vxm_log_tile);
         transfer_vxm_to_mem_edges(sinks);
         transfer_unconsumed_streams_across_vxm(sinks);
-        phase_ = CyclePhase::VxmEvaluated;
     }
 
-    void mem_sxm_commit_phase(LogSinks sinks)
+    void mem_sxm_stage_phase(LogSinks sinks)
     {
-        require_phase(CyclePhase::VxmEvaluated, "committing MEM and SXM");
         for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
             try {
                 auto& fabric = streams_[hemisphere];
                 sxms_[hemisphere].set_trace_enabled(sinks.sxm != nullptr);
                 if (sinks.mem != nullptr) {
                     *sinks.mem << "mem." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
-                               << " cycle " << cycle_ << '\n';
+                               << " cycle " << cycle() << '\n';
                 }
 
                 mems_[hemisphere].evaluate(
@@ -589,40 +786,32 @@ private:
                 }
                 stream_layout_.topology.stage_active_routes(
                     fabric, active_stream_routes_[hemisphere]);
-                fabric.commit_cycle();
-
-                if (sinks.mem != nullptr) {
-                    mems_[hemisphere].log_cycle(
-                        *sinks.mem, sinks.mem_log_tile);
-                    log_streams(
-                        *sinks.mem, fabric, sinks.mem_log_tile);
-                }
             } catch (const std::exception& error) {
                 throw std::logic_error(
-                    "MEM/SXM commit failed at system cycle "
-                    + std::to_string(cycle_) + " in hemisphere "
+                    "MEM/SXM staging failed at system cycle "
+                    + std::to_string(cycle()) + " in hemisphere "
                     + hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
                     + ": " + error.what());
             }
-            if (sinks.sxm != nullptr) {
-                *sinks.sxm << "sxm."
-                            << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
-                            << " system_cycle " << cycle_ << '\n';
-                sxms_[hemisphere].log_cycle(*sinks.sxm);
-            }
         }
-        phase_ = CyclePhase::MemSxmCommitted;
     }
 
-    void end_cycle_phase()
+    // Endpoint interaction has already staged producer/consumer handshakes.
+    // DMA LOW consumes those inputs, DDR LOW consumes all ProgramLoader/DMA
+    // requests, and ICU barrier notifications target the already-prepared ICU
+    // Next snapshot. Every resulting state change commits at one POSEDGE.
+    void advance_dma_ddr_and_barrier_phase()
     {
-        require_phase(CyclePhase::MemSxmCommitted, "ending cycle");
+        // Preserve the existing arbitration priority: instruction loading
+        // presents its DDR request before data/weight DMA clients.
+        if (program_loader_advance_low_)
+            program_loader_advance_low_(cycle());
         for (std::size_t hemisphere = 0;
              hemisphere < hw::kHemispheres;
              ++hemisphere) {
             auto* dma = c2c_dmas_[hemisphere];
             if (dma == nullptr) continue;
-            dma->tick();
+            dma->low();
             if (const auto tag = dma->take_completion_sync_tag()) {
                 if(!icu_.program_loading()) icu_.notify_tagged(IcuLocation::C2cDma(
                     static_cast<Hemisphere>(hemisphere)), *tag);
@@ -632,9 +821,32 @@ private:
                     static_cast<Hemisphere>(hemisphere)));
             }
         }
+        if (c2c_ddr_ != nullptr) c2c_ddr_->low();
         icu_.advance_barrier_events();
-        ++cycle_;
-        phase_ = CyclePhase::Idle;
+    }
+
+    // HIGH is observation-only. All StreamRegisterFabric objects have already
+    // committed through the global Clock barrier when this callback runs.
+    void postedge_observation_phase(LogSinks sinks)
+    {
+        if (program_loader_high_) program_loader_high_();
+        for (auto* dma : c2c_dmas_)
+            if (dma != nullptr) dma->high();
+        if (c2c_ddr_ != nullptr) c2c_ddr_->high();
+        for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
+            auto& fabric = streams_[hemisphere];
+            fabric.high();
+            if (sinks.mem != nullptr) {
+                mems_[hemisphere].log_cycle(*sinks.mem, sinks.mem_log_tile);
+                log_streams(*sinks.mem, fabric, sinks.mem_log_tile);
+            }
+            if (sinks.sxm != nullptr) {
+                *sinks.sxm << "sxm."
+                            << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
+                            << " system_cycle " << cycle() << '\n';
+                sxms_[hemisphere].log_cycle(*sinks.sxm);
+            }
+        }
     }
 
     void evaluate_c2c(
@@ -731,7 +943,7 @@ private:
     {
         for (std::size_t mxm = 0; mxm < kMxmCount; ++mxm) {
             if (sinks.mxm != nullptr) {
-                *sinks.mxm << "mxm" << mxm << " cycle " << cycle_ << '\n';
+                *sinks.mxm << "mxm" << mxm << " cycle " << cycle() << '\n';
             }
             auto provider = [this, mxm, sinks](std::size_t tile) {
                 if (sinks.mxm != nullptr && (!sinks.mxm_log_tile.has_value() || tile == *sinks.mxm_log_tile)) {
@@ -749,15 +961,15 @@ private:
             };
             try {
                 if (sinks.mxm != nullptr) {
-                    mxms_[mxm].control().tick(*sinks.mxm, provider, false, sinks.mxm_log_tile);
+                    mxms_[mxm].control().low(*sinks.mxm, provider, false, sinks.mxm_log_tile);
                 } else {
                     static NullStream null_stream;
-                    mxms_[mxm].control().tick(null_stream.stream(), provider, false);
+                    mxms_[mxm].control().low(null_stream.stream(), provider, false);
                 }
             } catch (const std::exception& error) {
                 throw std::logic_error(
                     "MXM" + std::to_string(mxm)
-                    + " control at system cycle " + std::to_string(cycle_)
+                    + " control at system cycle " + std::to_string(cycle())
                     + ": " + error.what());
             }
         }
@@ -778,13 +990,13 @@ private:
                 stream_layout_.mxm_result_output.direction,
                 "MXM" + std::to_string(mxm) + " datapath");
             try {
-                mxms_[mxm].tick_datapath(
+                mxms_[mxm].low_datapath(
                     input, output, local_mxm_index(mxm), sinks.mxm,
                     sinks.mxm_log_tile);
             } catch (const std::exception& error) {
                 throw std::logic_error(
                     "MXM" + std::to_string(mxm)
-                    + " datapath at system cycle " + std::to_string(cycle_)
+                    + " datapath at system cycle " + std::to_string(cycle())
                     + ": " + error.what());
             }
         }
@@ -799,7 +1011,7 @@ private:
             stream_layout_.mxm_weight_input.column,
             stream_layout_.mxm_weight_input.direction,
             "MXM" + std::to_string(mxm) + " weight input");
-        const auto& instruction = mxms_[mxm].control().instruction_at(tile);
+        const auto& instruction = mxms_[mxm].control().low_instruction_at(tile);
         if (!instruction.has_value()
             || instruction->opcode != MxmControlOpcode::IW) {
             throw std::logic_error(
@@ -1134,7 +1346,7 @@ private:
                         destination.write_cell(tile, lane, stream, cell);
                     }
                     ++passive_bridge_transfer_counts_[source_index][stream];
-                    last_passive_bridge_cycles_[source_index][stream] = cycle_ + 1;
+                    last_passive_bridge_cycles_[source_index][stream] = cycle() + 1;
                     if (sinks.system != nullptr) {
                         *sinks.system << "  passive VXM bridge "
                                       << stream_layout_.fabric_names[source_index]
@@ -1299,16 +1511,27 @@ private:
     std::array<SxmSlice, hw::kHemispheres> sxms_;
     std::array<Mxm, kMxmCount> mxms_{};
     InstructionControlUnit icu_{};
+    OptionalClockedModuleSlot program_loader_clock_slot_{};
+    OptionalClockedModuleSlot program_loader_dma_clock_slot_{};
+    std::function<void(std::size_t)> program_loader_begin_low_{};
+    std::function<void(std::size_t)> program_loader_advance_low_{};
+    std::function<void()> program_loader_high_{};
     std::array<std::optional<C2cEndpoint>, hw::kHemispheres> c2cs_{};
+    std::array<C2cEndpointClockSlot, hw::kHemispheres> c2c_clock_slots_{};
+    std::array<OptionalClockedModuleSlot, hw::kHemispheres>
+        c2c_dma_clock_slots_{};
+    OptionalClockedModuleSlot c2c_ddr_clock_slot_{};
     std::array<C2cLink*, hw::kHemispheres> c2c_outbound_links_{};
     std::array<C2cLink*, hw::kHemispheres> c2c_inbound_links_{};
     std::array<C2cDmaEngine*, hw::kHemispheres> c2c_dmas_{};
-    std::size_t cycle_{0};
+    Ddr4Model* c2c_ddr_{};
+    timing::Clock clock_{};
+    timing::SystemPhase system_phase_{};
+    LogSinks active_sinks_{};
     std::array<std::array<std::size_t, hw::kWestStreams>, hw::kHemispheres>
         passive_bridge_transfer_counts_{};
     std::array<std::array<std::size_t, hw::kWestStreams>, hw::kHemispheres>
         last_passive_bridge_cycles_{};
-    CyclePhase phase_{CyclePhase::Idle};
 };
 
 } // namespace ftlpu

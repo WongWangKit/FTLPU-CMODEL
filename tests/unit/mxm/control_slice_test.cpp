@@ -83,6 +83,9 @@ int main()
     for (std::size_t cycle = 0; cycle < 2 * ftlpu::hw::kMxmSupercellsPerPlane - 1; ++cycle) {
         control.tick(log, provider);
     }
+    // LOW diagnostics observe Current. One idle observation sees the final
+    // edge-committed matrix; functional weights were not published early.
+    control.tick(log, provider);
 
     for (std::size_t tile = 0; tile < ftlpu::hw::kMxmSupercellsPerPlane; ++tile) {
         for (std::size_t column = 0; column < ftlpu::hw::kMxmSupercellsPerPlane; ++column) {

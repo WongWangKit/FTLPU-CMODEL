@@ -62,7 +62,18 @@ public:
         Layout::validate(mem_, fabric_);
         if (!depth_ || depth_ > 32768 || depth_ > hw::kSramDepthRows)
             throw std::invalid_argument("SXM reserved depth");
+        clock_.register_module(fabric_);
+        clock_.register_module(mem_);
+        system_phase_.add_node("SXM matrix StreamRegisterFabric", [this] {
+            fabric_.low();
+        }, [this] {
+            fabric_.high();
+        });
     }
+    SxmMatrixMemReference(const SxmMatrixMemReference&) = delete;
+    SxmMatrixMemReference& operator=(const SxmMatrixMemReference&) = delete;
+    SxmMatrixMemReference(SxmMatrixMemReference&&) = delete;
+    SxmMatrixMemReference& operator=(SxmMatrixMemReference&&) = delete;
     void start(const SxmMatrixStart& job, bool resources_reserved)
     {
         // Admission checks have no side effects. The owner must reserve the
@@ -87,7 +98,7 @@ public:
         const auto c = mem_.cycle();
         done_ = false; // RTL done_o is a one-cycle pulse; statistics retain the event.
         try {
-            fabric_.begin_cycle();
+            system_phase_.low();
             const auto outputs = core_.tick(inputs);
             if (active_) {
                 const auto age = c - launch_;
@@ -121,7 +132,12 @@ public:
             mem_.evaluate(fabric_); // keep real transfer traces for commit validation
             if (active_) check_commits(c);
             fabric_.stage_linear_links();
-            fabric_.commit_cycle();
+            clock_.complete_low();
+            clock_.validate_all();
+            clock_.commit_all();
+            system_phase_.high();
+            clock_.complete_high();
+            clock_.negedge_all();
             if (active_) {
                 const auto last_p = 9 + 8 * (std::uint64_t(job_.matrices) * T + T - 2);
                 // writer.active drops at last_P + max(H) + T. Completion sees
@@ -134,12 +150,18 @@ public:
                     active_ = false; done_ = true; stats_.done_cycle = c;
                 }
             }
-        } catch (...) { fault_ = true; throw; }
+        } catch (...) {
+            fault_ = true;
+            clock_.mark_faulted();
+            system_phase_.mark_faulted();
+            throw;
+        }
     }
     // Explicit coordinated abort; SRAM contents are intentionally retained.
     void reset_execution_state()
     {
         mem_.reset_execution_state(); fabric_.reset(); core_.reset();
+        clock_.reset_time(); system_phase_.reset();
         active_ = done_ = fault_ = false; stats_ = {};
     }
     bool busy() const { return active_; }
@@ -184,6 +206,8 @@ private:
     MemArrayModel& mem_;
     StreamRegisterFabric& fabric_;
     std::size_t depth_;
+    timing::Clock clock_{};
+    timing::SystemPhase system_phase_{};
     SxmMatrixCore core_{};
     SxmMatrixStart job_{};
     std::array<std::size_t, T> inverse_{};

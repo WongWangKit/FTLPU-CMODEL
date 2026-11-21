@@ -7,6 +7,9 @@ function(ftlpu_generate_hardware_config input_json output_header)
     get_filename_component(input_json "${input_json}" ABSOLUTE)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${input_json}")
     file(READ "${input_json}" FTLPU_HW_JSON)
+    # Exact target-file identity, including topology/ICU/program timing fields.
+    # Reformatting the file also requires a coordinated rebuild.
+    file(SHA256 "${input_json}" FTLPU_HW_FINGERPRINT)
 
     macro(ftlpu_json_get output)
         string(JSON ${output} ERROR_VARIABLE FTLPU_JSON_ERROR
@@ -76,7 +79,13 @@ function(ftlpu_generate_hardware_config input_json output_header)
             endif()
             set(FTLPU_HW_COMMON_TRANSPORT_OVERLAP_VERSION ${FTLPU_HW_OVERLAP_VALUE})
         endif()
-        if(NOT FTLPU_HW_COMMON_BARRIER_ENCODING_VERSION EQUAL 1 OR
+        # ICU sizing is independent of BARR. A sized native profile may
+        # explicitly declare the same absent capability as an omitted ICU.
+        if(FTLPU_HW_COMMON_BARRIER_ENCODING_VERSION STREQUAL "0" AND
+           FTLPU_HW_COMMON_BARRIER_CAPACITY STREQUAL "0" AND
+           FTLPU_HW_COMMON_TRANSPORT_OVERLAP_VERSION STREQUAL "0")
+            # No BARR RAM, encoding, or overlap protocol.
+        elseif(NOT FTLPU_HW_COMMON_BARRIER_ENCODING_VERSION STREQUAL "1" OR
            NOT FTLPU_HW_COMMON_BARRIER_CAPACITY MATCHES "^[1-9][0-9]*$" OR
            FTLPU_HW_COMMON_BARRIER_CAPACITY GREATER 1024)
             message(FATAL_ERROR "unsupported ICU common barrier capability")
@@ -133,8 +142,9 @@ function(ftlpu_generate_hardware_config input_json output_header)
         message(FATAL_ERROR "c2c.beat_bytes must be positive and fit within one physical vector")
     endif()
 
-    # Simulation timing knobs are optional for older target files. They are
-    # independent of the executable ISA/ABI.
+    # Optional timing/capacity fields do not change opcode encodings. The
+    # target JSON hash still binds compiled images to the selected profile;
+    # Q is also carried explicitly by the software's external-memory model.
     macro(ftlpu_timing_parameter output default_value section field)
         string(JSON FTLPU_TIMING_TYPE ERROR_VARIABLE FTLPU_SECTION_ERROR
             TYPE "${FTLPU_HW_JSON}" ${section})
@@ -159,10 +169,20 @@ function(ftlpu_generate_hardware_config input_json output_header)
         endif()
     endmacro()
     ftlpu_timing_parameter(FTLPU_DMA_FIFO_DEPTH 16 external_memory dma_fifo_depth_vectors)
+    ftlpu_timing_parameter(FTLPU_DDR_REQUEST_QUEUE_DEPTH 256 external_memory ddr_request_queue_depth)
     ftlpu_timing_parameter(FTLPU_PROGRAM_BUS_BYTES 32 program_load bus_bytes_per_cycle)
     ftlpu_timing_parameter(FTLPU_PROGRAM_ROUTE_LATENCY 1 program_load route_latency_cycles)
     ftlpu_timing_parameter(FTLPU_PROGRAM_WRITE_II 1 program_load imem_write_ii_cycles)
     ftlpu_timing_parameter(FTLPU_PROGRAM_COMMIT_LATENCY 1 program_load imem_write_commit_latency_cycles)
+    ftlpu_timing_parameter(FTLPU_PROGRAM_CONFIG_FIFO_DEPTH 16 program_load config_fifo_depth)
+    ftlpu_timing_parameter(FTLPU_PROGRAM_OUTSTANDING_DEPTH 16 program_load outstanding_depth)
+    ftlpu_timing_parameter(FTLPU_PROGRAM_RESPONSE_FIFO_DEPTH 16 program_load response_fifo_depth)
+    ftlpu_timing_parameter(FTLPU_PROGRAM_WORD_FIFO_DEPTH 8 program_load word_fifo_depth)
+    ftlpu_timing_parameter(FTLPU_PROGRAM_INGRESS_FIFO_DEPTH 2 program_load ingress_fifo_depth)
+    ftlpu_timing_parameter(FTLPU_PROGRAM_RELAY_BUFFER_DEPTH 2 program_load relay_buffer_depth)
+    ftlpu_timing_parameter(FTLPU_PROGRAM_MEM_GROUPS_PER_RELAY 2 program_load mem_groups_per_relay)
+    ftlpu_timing_parameter(FTLPU_PROGRAM_PRIME_FIFO_DEPTH 32 program_load prime_fifo_depth)
+    ftlpu_timing_parameter(FTLPU_PROGRAM_REASSEMBLY_BYTES 64 program_load reassembly_bytes)
 
     include("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/FTLPUIcuGeometry.cmake")
 
@@ -529,6 +549,13 @@ function(ftlpu_generate_hardware_config input_json output_header)
     if(NOT FTLPU_STREAM_MEM_GROUP_REMAINDER EQUAL 0)
         message(FATAL_ERROR "mem.slices_per_hemisphere must divide evenly into stream MEM groups")
     endif()
+    math(EXPR FTLPU_PROGRAM_EXPECTED_RELAYS
+        "(${FTLPU_HW_MEM_SLICES} / ${FTLPU_STREAM_MEM_SLICES_PER_GROUP} + ${FTLPU_PROGRAM_MEM_GROUPS_PER_RELAY} - 1) / ${FTLPU_PROGRAM_MEM_GROUPS_PER_RELAY}")
+    ftlpu_timing_parameter(FTLPU_PROGRAM_RELAYS_PER_HEMISPHERE ${FTLPU_PROGRAM_EXPECTED_RELAYS} program_load relays_per_hemisphere)
+    if(NOT FTLPU_PROGRAM_RELAYS_PER_HEMISPHERE EQUAL FTLPU_PROGRAM_EXPECTED_RELAYS)
+        message(FATAL_ERROR "program_load.relays_per_hemisphere must match the topology-derived count ${FTLPU_PROGRAM_EXPECTED_RELAYS}")
+    endif()
+
     math(EXPR FTLPU_STREAM_EXPECTED_MEM_BOUNDARIES
         "${FTLPU_HW_MEM_SLICES} / ${FTLPU_STREAM_MEM_SLICES_PER_GROUP} + 1")
     ftlpu_json_length(FTLPU_STREAM_MEM_BOUNDARY_COUNT

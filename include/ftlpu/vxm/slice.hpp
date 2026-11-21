@@ -2,12 +2,14 @@
 
 #include "ftlpu/core/hemisphere.hpp"
 #include "ftlpu/core/hardware_params.hpp"
+#include "ftlpu/core/timing.hpp"
 #include "ftlpu/vxm/input_buffer.hpp"
 #include "ftlpu/vxm/superlane.hpp"
 
 #include <array>
 #include <cstddef>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
@@ -15,7 +17,7 @@
 
 namespace ftlpu {
 
-class VxmSlice {
+class VxmSlice : public timing::ClockedModule {
 public:
     static constexpr std::size_t kTileCount = hw::kTileRows;
     static constexpr std::size_t kRows = hw::kTileRows * hw::kLanesPerTile;
@@ -32,48 +34,41 @@ public:
     using RequiredStreams = std::array<bool, hw::kStreams>;
     using InputBuffer = VxmInputBuffer;
 
-    void reset()
+    VxmSlice()
+        : current_(std::make_unique<State>())
+    {}
+
+    VxmSlice(const VxmSlice&) = delete;
+    VxmSlice& operator=(const VxmSlice&) = delete;
+    VxmSlice(VxmSlice&&) = delete;
+    VxmSlice& operator=(VxmSlice&&) = delete;
+
+    void reset(std::size_t cycle = 0)
     {
-        for (auto& queue : instruction_queues_) {
-            queue.clear();
-        }
-        for (auto& alu_rows : instruction_rows_) {
-            for (auto& slot : alu_rows) {
-                slot.reset();
-            }
-        }
-        for (auto& superlane : superlanes_) {
-            superlane.reset();
-        }
-        for (auto& buffer : input_buffers_) {
-            buffer.reset();
-        }
-        for (auto& output : output_slots_) {
-            output.reset();
-        }
-        for (auto& outputs : output_slots_multi_) {
-            outputs.clear();
-        }
-        for (auto& required : required_streams_) {
-            required.reset();
-        }
-        input_group_sources_.fill(Hemisphere::East);
-        output_block_destinations_.fill(Hemisphere::East);
-        cycle_ = 0;
-        prepared_ = false;
+        current_ = std::make_unique<State>();
+        current_->cycle = cycle;
+        for(auto& lane:current_->superlanes) lane.reset(cycle);
+        next_.reset();
+        for (auto& queue : pending_issues_) queue.clear();
+        low_started_ = false;
+        low_complete_ = false;
     }
 
     // Epoch release must wait for queued configs, lane pipelines, and any
     // captured input bundle, including data that has not launched yet.
     bool idle() const
     {
-        for (const auto& queue : instruction_queues_)
+        for (const auto& queue : pending_issues_)
             if (!queue.empty()) return false;
-        for (const auto& rows : instruction_rows_)
+        const auto& current = visible_state();
+        for (const auto& queue : current.instruction_queues)
+            if (!queue.empty()) return false;
+        for (const auto& rows : current.instruction_rows)
             for (const auto& slot : rows)
                 if (slot) return false;
         for (std::size_t tile = 0; tile < kTileCount; ++tile)
-            if (!input_buffers_[tile].empty() || !superlanes_[tile].idle())
+            if (!current.input_buffers[tile].empty()
+                || !current.superlanes[tile].idle())
                 return false;
         return true;
     }
@@ -82,12 +77,16 @@ public:
         std::size_t alu, CompactInstruction instruction)
     {
         check_alu(alu);
-        instruction_queues_[alu].push_back(instruction);
+        if (low_started_) {
+            throw std::logic_error(
+                "VXM instruction issue must precede prepare_cycle in LOW");
+        }
+        pending_issues_[alu].push_back(std::move(instruction));
     }
 
     void set_chain_depth(VxmChainDepth depth)
     {
-        for (auto& superlane : superlanes_) {
+        for (auto& superlane : writable_state().superlanes) {
             superlane.set_chain_depth(depth);
         }
     }
@@ -95,7 +94,7 @@ public:
     void set_chain_depth(std::size_t tile, VxmChainDepth depth)
     {
         check_tile(tile);
-        superlanes_[tile].set_chain_depth(depth);
+        writable_state().superlanes[tile].set_chain_depth(depth);
     }
 
     void request_chain_depth_transition(
@@ -103,14 +102,14 @@ public:
         bool feedback_required = true)
     {
         check_tile(tile);
-        superlanes_[tile].request_chain_depth_transition(
+        writable_state().superlanes[tile].request_chain_depth_transition(
             depth, feedback_required);
     }
 
     void configure_special_lut(VxmSpecialAluOpcode opcode, VxmLutConfig config,
                                const std::vector<VxmLutEntry>& entries)
     {
-        for (auto& superlane : superlanes_) {
+        for (auto& superlane : writable_state().superlanes) {
             superlane.configure_special_lut(opcode, config, entries);
         }
     }
@@ -118,7 +117,7 @@ public:
     void set_stream_inputs(std::size_t tile, const StreamMatrix& streams)
     {
         check_tile(tile);
-        input_buffers_[tile].load_complete(streams);
+        writable_state().input_buffers[tile].load_complete(streams);
     }
 
     void configure_input_buffer(
@@ -126,7 +125,7 @@ public:
         std::size_t expected_group_count)
     {
         check_tile(tile);
-        input_buffers_[tile].configure(
+        writable_state().input_buffers[tile].configure(
             expected_group_count);
     }
 
@@ -136,7 +135,7 @@ public:
         const InputBuffer::GroupVector& values)
     {
         check_tile(tile);
-        input_buffers_[tile].capture_group(group, values);
+        writable_state().input_buffers[tile].capture_group(group, values);
     }
 
     // Compiler-visible fixed mux configuration. The logical group position
@@ -150,7 +149,7 @@ public:
             throw std::out_of_range(
                 "VXM input group source is outside the fixed group set");
         }
-        input_group_sources_[group] = source;
+        writable_state().input_group_sources[group] = source;
     }
 
     Hemisphere input_group_source(std::size_t group) const
@@ -159,7 +158,7 @@ public:
             throw std::out_of_range(
                 "VXM input group source is outside the fixed group set");
         }
-        return input_group_sources_[group];
+        return visible_state().input_group_sources[group];
     }
 
     void configure_output_block_destination(
@@ -170,7 +169,7 @@ public:
             throw std::out_of_range(
                 "VXM output block destination is outside the fixed block set");
         }
-        output_block_destinations_[block] = destination;
+        writable_state().output_block_destinations[block] = destination;
     }
 
     Hemisphere output_block_destination(std::size_t block) const
@@ -179,7 +178,7 @@ public:
             throw std::out_of_range(
                 "VXM output block destination is outside the fixed block set");
         }
-        return output_block_destinations_[block];
+        return visible_state().output_block_destinations[block];
     }
 
     Hemisphere output_stream_destination(std::size_t stream) const
@@ -191,83 +190,133 @@ public:
     InputBuffer& input_buffer(std::size_t tile)
     {
         check_tile(tile);
-        return input_buffers_[tile];
+        return writable_state().input_buffers[tile];
     }
 
     const InputBuffer& input_buffer(std::size_t tile) const
     {
         check_tile(tile);
-        return input_buffers_[tile];
+        return visible_state().input_buffers[tile];
     }
 
-    void tick(std::ostream* os = nullptr, std::optional<std::size_t> log_tile = std::nullopt)
+    // Compatibility wrapper for direct unit-level use. Integrated systems call
+    // prepare_cycle()/evaluate() in LOW and let Clock perform the commit.
+    void tick(std::ostream* os = nullptr,
+              std::optional<std::size_t> log_tile = std::nullopt)
+    {
+        prepare_cycle();
+        evaluate(os, log_tile);
+        validate_posedge();
+        posedge();
+    }
+
+    void low() override
+    {
+        evaluate();
+    }
+
+    void evaluate(std::ostream* os = nullptr,
+                  std::optional<std::size_t> log_tile = std::nullopt)
     {
         if (log_tile.has_value()) {
             check_tile(*log_tile);
         }
         prepare_cycle();
+        if (low_complete_) {
+            throw std::logic_error("VXM LOW evaluated more than once");
+        }
+        auto& next = next_state();
         if (os != nullptr) {
-            *os << "vxm_slice cycle " << cycle_ << '\n';
+            *os << "vxm_slice cycle " << next.cycle << '\n';
             log_status(*os, log_tile);
         }
 
         execute_instructions(os, log_tile);
         tick_superlanes(os, log_tile);
         advance_instructions();
-        prepared_ = false;
-        ++cycle_;
+        ++next.cycle;
+        low_complete_ = true;
     }
 
     void prepare_cycle()
     {
-        if (prepared_) {
+        if (low_started_) {
             return;
         }
+        next_ = std::make_unique<State>(*current_);
+        for (std::size_t alu = 0; alu < kAluQueues; ++alu) {
+            auto& destination = next_->instruction_queues[alu];
+            auto& pending = pending_issues_[alu];
+            while (!pending.empty()) {
+                destination.push_back(std::move(pending.front()));
+                pending.pop_front();
+            }
+        }
+        low_started_ = true;
+        low_complete_ = false;
         dispatch_instruction_queues();
         refresh_required_streams();
-        prepared_ = true;
     }
+
+    void validate_posedge() const override
+    {
+        if (!low_started_ || !low_complete_ || !next_) {
+            throw std::logic_error(
+                "VXM posedge requires one complete LOW evaluation");
+        }
+    }
+
+    void posedge() override
+    {
+        validate_posedge();
+        current_.swap(next_);
+        next_.reset();
+        low_started_ = false;
+        low_complete_ = false;
+    }
+
+    void high() override {}
 
     std::size_t cycle() const
     {
-        return cycle_;
+        return current_->cycle;
     }
 
     const InstructionSlot& instruction_at(std::size_t alu, std::size_t tile) const
     {
         check_alu(alu);
         check_tile(tile);
-        return instruction_rows_[alu][tile];
+        return current_->instruction_rows[alu][tile];
     }
 
     const OutputSlot& output_at(std::size_t tile) const
     {
         check_tile(tile);
-        return output_slots_[tile];
+        return visible_state().output_slots[tile];
     }
 
     const std::vector<Superlane::Output>& outputs_at(std::size_t tile) const
     {
         check_tile(tile);
-        return output_slots_multi_[tile];
+        return visible_state().output_slots_multi[tile];
     }
 
     const std::optional<RequiredStreams>& required_streams_at(std::size_t tile) const
     {
         check_tile(tile);
-        return required_streams_[tile];
+        return visible_state().required_streams[tile];
     }
 
     const Superlane& superlane(std::size_t tile) const
     {
         check_tile(tile);
-        return superlanes_[tile];
+        return current_->superlanes[tile];
     }
 
     Superlane& superlane(std::size_t tile)
     {
         check_tile(tile);
-        return superlanes_[tile];
+        return writable_state().superlanes[tile];
     }
 
 private:
@@ -288,24 +337,28 @@ private:
 
     void dispatch_instruction_queues()
     {
+        auto& next = next_state();
         for (std::size_t alu = 0; alu < kAluQueues; ++alu) {
-            if (instruction_rows_[alu][0].has_value() || instruction_queues_[alu].empty()) {
+            if (next.instruction_rows[alu][0].has_value()
+                || next.instruction_queues[alu].empty()) {
                 continue;
             }
-            instruction_rows_[alu][0] = instruction_queues_[alu].front();
-            instruction_queues_[alu].pop_front();
+            next.instruction_rows[alu][0] =
+                next.instruction_queues[alu].front();
+            next.instruction_queues[alu].pop_front();
         }
     }
 
     void log_status(std::ostream& os, std::optional<std::size_t> log_tile) const
     {
+        const auto& next = next_state();
         std::size_t queued = 0;
-        for (const auto& queue : instruction_queues_) {
+        for (const auto& queue : next.instruction_queues) {
             queued += queue.size();
         }
 
         std::size_t active = 0;
-        for (const auto& alu_rows : instruction_rows_) {
+        for (const auto& alu_rows : next.instruction_rows) {
             for (const auto& slot : alu_rows) {
                 if (slot.has_value()) {
                     ++active;
@@ -314,7 +367,7 @@ private:
         }
 
         std::size_t inputs = 0;
-        for (const auto& buffer : input_buffers_) {
+        for (const auto& buffer : next.input_buffers) {
             if (!buffer.empty()) {
                 ++inputs;
             }
@@ -332,17 +385,18 @@ private:
 
     void execute_instructions(std::ostream* os, std::optional<std::size_t> log_tile)
     {
+        auto& next = next_state();
         bool any = false;
         bool any_logged = false;
         for (std::size_t tile = 0; tile < kTileCount; ++tile) {
             for (std::size_t alu = 0; alu < kAluQueues; ++alu) {
-                const auto& instruction = instruction_rows_[alu][tile];
+                const auto& instruction = next.instruction_rows[alu][tile];
                 if (!instruction.has_value()) {
                     continue;
                 }
 
                 any = true;
-                superlanes_[tile].enqueue_compact_instruction(
+                next.superlanes[tile].enqueue_compact_instruction(
                     alu, *instruction);
                 if (os != nullptr && (!log_tile.has_value() || tile == *log_tile)) {
                     any_logged = true;
@@ -365,20 +419,21 @@ private:
 
     void tick_superlanes(std::ostream* os, std::optional<std::size_t> log_tile)
     {
+        auto& next = next_state();
         for (std::size_t tile = 0; tile < kTileCount; ++tile) {
-            output_slots_[tile].reset();
-            output_slots_multi_[tile].clear();
+            next.output_slots[tile].reset();
+            next.output_slots_multi[tile].clear();
 
             auto stream_consumers =
                 std::array<bool, kAluQueues>{};
             bool will_consume_bundle = false;
             for (std::size_t alu = 0; alu < kAluQueues; ++alu) {
-                if (!superlanes_[tile]
+                if (!next.superlanes[tile]
                          .configuration_will_issue(alu)) {
                     continue;
                 }
                 const auto instruction =
-                    superlanes_[tile].next_instruction(alu);
+                    next.superlanes[tile].next_instruction(alu);
                 if (!instruction
                     || !instruction_uses_stream(*instruction)) {
                     continue;
@@ -389,24 +444,24 @@ private:
 
             auto supplied_bundle = false;
             if (will_consume_bundle
-                && !input_buffers_[tile].ready()) {
+                && !next.input_buffers[tile].ready()) {
                 throw std::logic_error(
                     "VXM compiler/static-schedule error: input Bundle is not ready on its scheduled issue cycle at tile "
                     + std::to_string(tile));
             }
             if (will_consume_bundle) {
-                superlanes_[tile].set_stream_inputs(
-                    input_buffers_[tile].bundle());
+                next.superlanes[tile].set_stream_inputs(
+                    next.input_buffers[tile].bundle());
                 supplied_bundle = true;
                 if (os != nullptr && (!log_tile.has_value() || tile == *log_tile)) {
                     *os << "  tile " << tile
                         << " input Bundle groups="
-                        << input_buffers_[tile].fill_count()
+                        << next.input_buffers[tile].fill_count()
                         << '\n';
                 }
             }
 
-            const auto executed = superlanes_[tile].tick();
+            const auto executed = next.superlanes[tile].tick();
             if (supplied_bundle) {
                 for (std::size_t alu = 0;
                      alu < kAluQueues;
@@ -427,13 +482,13 @@ private:
                 }
                 // The execution mask is an assertion of the compiler's
                 // schedule, not a ready/valid handshake or backpressure path.
-                input_buffers_[tile].release_after_issue();
+                next.input_buffers[tile].release_after_issue();
             }
-            output_slots_multi_[tile] = superlanes_[tile].outputs();
-            if (!output_slots_multi_[tile].empty()) {
-                output_slots_[tile] = output_slots_multi_[tile].front();
+            next.output_slots_multi[tile] = next.superlanes[tile].outputs();
+            if (!next.output_slots_multi[tile].empty()) {
+                next.output_slots[tile] = next.output_slots_multi[tile].front();
                 if (os != nullptr && (!log_tile.has_value() || tile == *log_tile)) {
-                    for (const auto& output : output_slots_multi_[tile]) {
+                    for (const auto& output : next.output_slots_multi[tile]) {
                         *os << "  tile " << tile << " output s" << output.stream;
                         for (const auto value : output.values) {
                             *os << ' ' << static_cast<int>(value);
@@ -447,7 +502,7 @@ private:
 
     void advance_instructions()
     {
-        for (auto& alu_rows : instruction_rows_) {
+        for (auto& alu_rows : next_state().instruction_rows) {
             for (std::size_t tile = kTileCount - 1; tile > 0; --tile) {
                 alu_rows[tile] = alu_rows[tile - 1];
             }
@@ -489,7 +544,8 @@ private:
 
     void refresh_required_streams()
     {
-        for (auto& required : required_streams_) {
+        auto& next = next_state();
+        for (auto& required : next.required_streams) {
             required.reset();
         }
 
@@ -499,11 +555,11 @@ private:
             for (std::size_t alu = 0; alu < kAluQueues; ++alu) {
                 // A held Current Config takes precedence over a new packet
                 // merely passing this tile toward the shared Superlane queue.
-                auto instruction = superlanes_[tile].next_instruction(alu);
-                if (!instruction && instruction_rows_[alu][tile]) {
+                auto instruction = next.superlanes[tile].next_instruction(alu);
+                if (!instruction && next.instruction_rows[alu][tile]) {
                     instruction =
                         VxmCompactInstructionCodec::decode(
-                            alu, *instruction_rows_[alu][tile])
+                            alu, *next.instruction_rows[alu][tile])
                             .instruction;
                 }
                 if (!instruction.has_value() || !instruction_uses_stream(*instruction)) {
@@ -520,28 +576,59 @@ private:
                 any = true;
             }
             if (any) {
-                required_streams_[tile] = required;
+                next.required_streams[tile] = required;
             }
         }
     }
 
-    std::array<std::deque<CompactInstruction>, kAluQueues>
-        instruction_queues_{};
-    std::array<std::array<InstructionSlot, kTileCount>, kAluQueues> instruction_rows_{};
-    // A complete Slice contains kTileCount configured Superlanes and every Lane owns real
-    // internal ALU pipeline state. Keep the fixed architectural count while
-    // placing the large C-model objects on the host heap instead of its stack.
-    std::vector<Superlane> superlanes_{kTileCount};
-    std::array<InputBuffer, kTileCount> input_buffers_{};
-    std::array<OutputSlot, kTileCount> output_slots_{};
-    std::array<std::vector<Superlane::Output>, kTileCount> output_slots_multi_{};
-    std::array<std::optional<RequiredStreams>, kTileCount> required_streams_{};
-    std::array<Hemisphere, VxmLane::kStreamGroupCount>
-        input_group_sources_{};
-    std::array<Hemisphere, VxmLane::kBlockCount>
-        output_block_destinations_{};
-    std::size_t cycle_{0};
-    bool prepared_{false};
+    struct State {
+        std::array<std::deque<CompactInstruction>, kAluQueues>
+            instruction_queues{};
+        std::array<std::array<InstructionSlot, kTileCount>, kAluQueues>
+            instruction_rows{};
+        // The Slice snapshot owns every hardware-visible Superlane state.
+        // VxmLane statistics remain shared software observation state.
+        std::vector<Superlane> superlanes{kTileCount};
+        std::array<InputBuffer, kTileCount> input_buffers{};
+        std::array<OutputSlot, kTileCount> output_slots{};
+        std::array<std::vector<Superlane::Output>, kTileCount>
+            output_slots_multi{};
+        std::array<std::optional<RequiredStreams>, kTileCount>
+            required_streams{};
+        std::array<Hemisphere, VxmLane::kStreamGroupCount>
+            input_group_sources{};
+        std::array<Hemisphere, VxmLane::kBlockCount>
+            output_block_destinations{};
+        std::size_t cycle{0};
+    };
+
+    State& writable_state()
+    {
+        return next_ ? *next_ : *current_;
+    }
+
+    const State& visible_state() const
+    {
+        return next_ ? *next_ : *current_;
+    }
+
+    State& next_state()
+    {
+        if (!next_) throw std::logic_error("VXM Next state is not prepared");
+        return *next_;
+    }
+
+    const State& next_state() const
+    {
+        if (!next_) throw std::logic_error("VXM Next state is not prepared");
+        return *next_;
+    }
+
+    std::unique_ptr<State> current_{};
+    std::unique_ptr<State> next_{};
+    std::array<std::deque<CompactInstruction>, kAluQueues> pending_issues_{};
+    bool low_started_{false};
+    bool low_complete_{false};
 };
 
 } // namespace ftlpu

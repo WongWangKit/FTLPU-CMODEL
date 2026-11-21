@@ -7,6 +7,7 @@
 #include <string_view>
 
 namespace ftlpu::hw::config {
+inline constexpr std::string_view kConfigurationFingerprint = "@FTLPU_HW_FINGERPRINT@";
 
 inline constexpr std::size_t kSchemaVersion = @FTLPU_HW_SCHEMA_VERSION@;
 inline constexpr std::size_t kQueueControlVersion = @FTLPU_HW_QUEUE_CONTROL_VERSION@;
@@ -33,6 +34,21 @@ inline constexpr std::size_t kProgramLoadBusBytesPerCycle = @FTLPU_PROGRAM_BUS_B
 inline constexpr std::size_t kProgramLoadRouteLatencyCycles = @FTLPU_PROGRAM_ROUTE_LATENCY@;
 inline constexpr std::size_t kProgramLoadImemWriteIiCycles = @FTLPU_PROGRAM_WRITE_II@;
 inline constexpr std::size_t kProgramLoadImemWriteCommitLatencyCycles = @FTLPU_PROGRAM_COMMIT_LATENCY@;
+inline constexpr std::size_t kProgramLoadConfigFifoDepth = @FTLPU_PROGRAM_CONFIG_FIFO_DEPTH@;
+inline constexpr std::size_t kProgramLoadOutstandingDepth = @FTLPU_PROGRAM_OUTSTANDING_DEPTH@;
+inline constexpr std::size_t kProgramLoadResponseFifoDepth = @FTLPU_PROGRAM_RESPONSE_FIFO_DEPTH@;
+// P: 32-byte program response packets; RT: vectors per FIFO per data
+// stream (RX and TX are separate); Q: shared DDR/AXI admission geometry.
+struct C2cDmaSizing { std::size_t p, rt, q; };
+inline constexpr C2cDmaSizing kC2cDmaSizing{
+    kProgramLoadResponseFifoDepth, kDmaFifoDepthVectors, @FTLPU_DDR_REQUEST_QUEUE_DEPTH@};
+inline constexpr std::size_t kProgramLoadWordFifoDepth = @FTLPU_PROGRAM_WORD_FIFO_DEPTH@;
+inline constexpr std::size_t kProgramLoadIngressFifoDepth = @FTLPU_PROGRAM_INGRESS_FIFO_DEPTH@;
+inline constexpr std::size_t kProgramLoadRelayBufferDepth = @FTLPU_PROGRAM_RELAY_BUFFER_DEPTH@;
+inline constexpr std::size_t kProgramLoadMemGroupsPerRelay = @FTLPU_PROGRAM_MEM_GROUPS_PER_RELAY@;
+inline constexpr std::size_t kProgramLoadRelaysPerHemisphere = @FTLPU_PROGRAM_RELAYS_PER_HEMISPHERE@;
+inline constexpr std::size_t kProgramLoadPrimeFifoDepth = @FTLPU_PROGRAM_PRIME_FIFO_DEPTH@;
+inline constexpr std::size_t kProgramLoadReassemblyBytes = @FTLPU_PROGRAM_REASSEMBLY_BYTES@;
 
 inline constexpr std::size_t kHemispheres = @FTLPU_HW_HEMISPHERES@;
 inline constexpr std::size_t kTilesPerSlice = @FTLPU_HW_TILES_PER_SLICE@;

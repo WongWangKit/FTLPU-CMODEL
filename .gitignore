@@ -61,3 +61,8 @@ id_rsa
 id_ed25519
 credentials.local.json
 secrets.local.json
+
+# Standalone clock experiments and migration archives (DMA product branch).
+/clock_experiment/
+/timing_refactor/*
+!/timing_refactor/rtl_golden/

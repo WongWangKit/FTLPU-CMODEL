@@ -1,5 +1,6 @@
 #include "ftlpu/sxm/slice.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
@@ -84,30 +85,24 @@ int main()
         }
     }
 
-    // Staging supplies the ten chunks for one query in reverse block order.
-    // Permute restores key order in the active lanes and zero-fills the rest
-    // of the configured MXM activation vector.
-    auto map = ftlpu::Permute320::identity_map();
-    for (std::size_t output = 0; output < kAttentionSize; ++output) {
-        const auto key_block = output / kBlockSize;
-        const auto key_local = output % kBlockSize;
-        map[output] = (kBlocks - 1 - key_block) * kBlockSize + key_local;
-    }
-
+    // Keep all 32 keys. The staging buffer selects one physical vector per
+    // invocation (two on LPU16); a permute source cannot span invocations.
+    constexpr auto planeBlocks=ftlpu::Permute320::kTotalLanes/kBlockSize;
+    static_assert(planeBlocks>0);
     Matrix row_stream_output{};
     for (std::size_t query = 0; query < kAttentionSize; ++query) {
-        Plane permute_input{};
-        for (std::size_t key_block = 0; key_block < kBlocks; ++key_block) {
-            const auto input_block = kBlocks - 1 - key_block;
-            permute_input[input_block] = transposed_chunks[query][key_block];
-        }
-
-        const auto permuted = ftlpu::SxmSlice::permute(permute_input, map);
-        for (std::size_t key = 0; key < kAttentionSize; ++key) {
-            row_stream_output[query][key] = permuted[key / kBlockSize][key % kBlockSize];
-        }
-        for (std::size_t lane = kAttentionSize; lane < ftlpu::Permute320::kTotalLanes; ++lane) {
-            assert(permuted[lane / kBlockSize][lane % kBlockSize] == 0);
+        for(std::size_t first=0;first<kBlocks;first+=planeBlocks){
+            const auto count=std::min(planeBlocks,kBlocks-first);
+            Plane permute_input{};auto map=ftlpu::Permute320::identity_map();
+            for(std::size_t k=0;k<count;k++){
+                permute_input[count-1-k]=transposed_chunks[query][first+k];
+                for(std::size_t n=0;n<kBlockSize;n++)map[k*kBlockSize+n]=(count-1-k)*kBlockSize+n;
+            }
+            const auto permuted=ftlpu::SxmSlice::permute(permute_input,map);
+            for(std::size_t n=0;n<count*kBlockSize;n++)
+                row_stream_output[query][first*kBlockSize+n]=permuted[n/kBlockSize][n%kBlockSize];
+            for(std::size_t n=count*kBlockSize;n<ftlpu::Permute320::kTotalLanes;n++)
+                assert(permuted[n/kBlockSize][n%kBlockSize]==0);
         }
     }
 

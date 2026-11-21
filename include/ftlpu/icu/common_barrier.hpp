@@ -92,6 +92,8 @@ public:
         }
         if (!instance_owners_.contains(instance))
             throw StaticScheduleError("common event has no linked page completion instance");
+        const auto event=instance_owners_.at(instance);
+        for(std::size_t i=0;i<next_;++i)if(entries_[i].event_id==event)return;
         completed_instances_.insert(instance); // Duplicates are idempotent.
     }
 
@@ -113,6 +115,9 @@ public:
                 enabled_ = false;
                 return false;
             }
+            // Bindings stay in finite configuration RAM. Dynamic completion
+            // tokens are reclaimed once the sole linked barrier consumes them.
+            for(auto instance:events_.at(current_->event_id))completed_instances_.erase(instance);
             ++next_;
             refresh_cache();
         }
@@ -142,6 +147,7 @@ public:
     bool configured() const noexcept { return configured_; }
     bool holding() const noexcept { return phase_ == Phase::Hold; }
     bool done() const noexcept { return next_ == entries_.size(); }
+    std::size_t live_completion_instances() const noexcept {return completed_instances_.size();}
     Phase phase() const noexcept { return phase_; }
 
 private:

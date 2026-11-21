@@ -257,6 +257,44 @@ void issued_data_keeps_flowing(bool transport)
         require(!icu.queue_completion_ready(7),"kernel switch reused old page completion");
     }
 }
+void staged_reset_preserves_transport_owner()
+{
+    auto system=std::make_unique<TspSliceSystem>();
+    auto& icu=system->icu();
+    constexpr std::size_t slice=0;
+    const auto writer=InstructionControlUnit::mem_queue(
+        Hemisphere::East,slice,0);
+    icu.stage_program_reset();
+    icu.configure_mem_transport_owner(writer,0,40,90,true);
+    system->tick(TspSliceSystem::LogSinks{});
+
+    icu.push_mem_transport_synchronized_raw(writer,
+        InstructionControlUnit::encode_mem_synchronized_packet(1,90,0,1,
+            MemInstruction::Write(30,StreamId::East(0)),1));
+    system->mem_array(Hemisphere::East).configure_transport_commit(
+        40,90,slice,0,1);
+    icu.mem_transport_iq(writer).launch();
+    icu.stage_program_loading(false);
+    icu.stage_program_issue_enabled(true);
+    system->tick(TspSliceSystem::LogSinks{});
+    icu.notify_mem_synchronized(IcuLocation::Mem(writer),90);
+    system->tick(TspSliceSystem::LogSinks{});
+
+    const auto column=system->mem_array(Hemisphere::East)
+        .ports().input_column(slice,StreamDirection::East);
+    for(std::size_t tile=0;tile<hw::kTileRows;++tile) {
+        for(std::size_t lane=0;lane<hw::kLanesPerTile;++lane) {
+            auto cell=StreamCell::Valid(static_cast<std::uint8_t>(42+tile));
+            cell.transport=true;
+            system->stream_fabric(Hemisphere::East).initialize_cell(
+                column,tile,lane,StreamId::East(0),cell);
+        }
+        system->tick(TspSliceSystem::LogSinks{});
+        require(system->mem_array(Hemisphere::East)
+                .transport_committed_segments(40,90,slice,0)==tile+1,
+            "staged reset discarded the new MEM transport owner");
+    }
+}
 void shared_pool_refill() {
     IcuQueueControlPool pool;pool.configure(512,4,4,2);
     std::vector<IcuQueueControlPool::Handle> handles;
@@ -298,6 +336,7 @@ void shared_pool_refill() {
 }
 int main() try {
     shared_pool_refill();compare(false,true);compare(true,true);
+    staged_reset_preserves_transport_owner();
     finite_frontend();compare(false);compare(true);transport_order();completion_generation();trailing_nops();
     overlapping_contexts();response_during_wait();
     issued_data_keeps_flowing(false);issued_data_keeps_flowing(true);

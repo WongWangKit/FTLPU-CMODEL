@@ -34,11 +34,11 @@ public:
         std::array<bool, hw::kStreams> produced{};
     };
 
-    void reset()
+    void reset(std::size_t cycle = 0)
     {
         issued_.clear();
         issued_stream_ops_ = 0;
-        cycle_ = 0;
+        cycle_ = cycle;
     }
 
     std::size_t cycle() const noexcept

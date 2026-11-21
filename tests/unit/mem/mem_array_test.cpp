@@ -11,6 +11,16 @@ constexpr std::size_t kReadLatency = 1;
 constexpr auto kReadTiming = ftlpu::MemArrayModel::ReadTiming::Main;
 constexpr std::size_t kReadLatency = 0;
 #endif
+
+void commit_cycle(
+    ftlpu::MemArrayModel& mem,
+    ftlpu::StreamRegisterFabric& fabric)
+{
+    mem.validate_posedge();
+    fabric.validate_posedge();
+    mem.posedge();
+    fabric.posedge();
+}
 }
 
 int main()
@@ -38,14 +48,14 @@ int main()
         // Main commits at the sampling edge; explicit R1 adds one response edge.
         mem.enqueue_instruction(kMemSlice, ftlpu::MemInstruction::Read(kAddress, stream));
         for (std::size_t cycle = 0; cycle <= kTile + kReadLatency; ++cycle) {
-            fabric.begin_cycle();
+            fabric.low();
             mem.evaluate(fabric);
             if (kReadLatency != 0 && cycle == kTile) {
-                assert(mem.read_responses().back().tile == kTile);
+                assert(mem.next_read_responses().back().tile == kTile);
                 assert(!fabric.staged_segment_valid(3, kTile, stream));
             }
             fabric.stage_linear_links();
-            fabric.commit_cycle();
+            commit_cycle(mem, fabric);
         }
 
         const auto source_column = mem.ports().output_column(kMemSlice, stream.direction());
@@ -77,7 +87,7 @@ int main()
                     ftlpu::MemInstruction::Write(kWriteAddress, stream));
             }
 
-            fabric.begin_cycle();
+            fabric.low();
             mem.evaluate(fabric);
             fabric.stage_linear_links();
 
@@ -94,7 +104,7 @@ int main()
                     cycle,
                     "test source");
             }
-            fabric.commit_cycle();
+            commit_cycle(mem, fabric);
         }
 
         for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
@@ -123,7 +133,7 @@ int main()
                     ftlpu::MemInstruction::WriteTap(kWriteAddress, stream));
             }
 
-            fabric.begin_cycle();
+            fabric.low();
             mem.evaluate(fabric);
             fabric.stage_linear_links();
             if (cycle < ftlpu::hw::kTileRows) {
@@ -134,7 +144,7 @@ int main()
                 fabric.stage_payload_segment(
                     0, cycle, stream, bytes, cycle, "tap source");
             }
-            fabric.commit_cycle();
+            commit_cycle(mem, fabric);
         }
 
         for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
@@ -185,7 +195,7 @@ int main()
                         kWriteAddress, write_stream));
             }
 
-            fabric.begin_cycle();
+            fabric.low();
             mem.evaluate(fabric);
             fabric.stage_linear_links();
             if (cycle < ftlpu::hw::kTileRows) {
@@ -195,7 +205,7 @@ int main()
                 }
                 fabric.stage_payload_segment(0, cycle, write_stream, bytes, cycle, "bank1 source");
             }
-            fabric.commit_cycle();
+            commit_cycle(mem, fabric);
         }
 
         const auto output_column = mem.ports().output_column(kMemSlice, read_stream.direction());
@@ -204,10 +214,10 @@ int main()
             // Read response through the existing SR commit boundary once.
             assert(mem.read_responses().back().tile == kLastTile);
             assert(!fabric.cell(output_column, kLastTile, 0, read_stream).valid);
-            fabric.begin_cycle();
+            fabric.low();
             mem.evaluate(fabric);
             fabric.stage_linear_links();
-            fabric.commit_cycle();
+            commit_cycle(mem, fabric);
         }
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
             const auto& read_cell = fabric.cell(output_column, kLastTile, lane, read_stream);
@@ -252,7 +262,7 @@ int main()
                     ftlpu::MemInstruction::WriteTap(
                         kWriteAddress, write_stream));
             }
-            fabric.begin_cycle();
+            fabric.low();
             mem.evaluate(fabric);
             fabric.stage_linear_links();
             if (cycle < ftlpu::hw::kTileRows) {
@@ -264,7 +274,7 @@ int main()
                 fabric.stage_payload_segment(0, cycle, write_stream,
                     bytes, cycle, "bank1 tap source");
             }
-            fabric.commit_cycle();
+            commit_cycle(mem, fabric);
         }
 
         for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
@@ -297,10 +307,10 @@ int main()
         mem.enqueue_instruction(kMemSlice, 0,
             ftlpu::MemInstruction::WriteTap(kAddress, stream));
         for (std::size_t cycle = 0; cycle < ftlpu::hw::kTileRows; ++cycle) {
-            fabric.begin_cycle();
+            fabric.low();
             mem.evaluate(fabric);
             fabric.stage_linear_links();
-            fabric.commit_cycle();
+            commit_cycle(mem, fabric);
         }
         for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile)
             for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane)

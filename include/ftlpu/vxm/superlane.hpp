@@ -32,7 +32,7 @@ public:
     using Configs = VxmLaneConfigs;
     using ExecutionMask = VxmLaneExecutionMask;
 
-    void reset()
+    void reset(std::size_t cycle = 0)
     {
         for (auto& queue : queues_) queue.clear();
         for (auto& decoding : decoding_) decoding.reset();
@@ -366,13 +366,41 @@ public:
         }
     }
 
-    void reset()
+    // A Slice prepares a complete transactional Next image during LOW.  The
+    // LUT contents and software statistics are immutable/shared for that
+    // evaluation, while every Lane datapath and control register is copied.
+    VxmSuperlane(const VxmSuperlane& other)
+        : special_alu_(other.special_alu_)
+        , instruction_control_(other.instruction_control_)
+        , output_(other.output_)
+        , outputs_(other.outputs_)
+        , cycle_(other.cycle_)
+        , pending_chain_depth_(other.pending_chain_depth_)
+        , pending_feedback_required_(other.pending_feedback_required_)
+    {
+        for (std::size_t lane = 0; lane < kLaneCount; ++lane) {
+            lanes_[lane] = std::make_unique<VxmLane>(*other.lanes_[lane]);
+        }
+    }
+
+    VxmSuperlane& operator=(const VxmSuperlane& other)
+    {
+        if (this == &other) return *this;
+        auto replacement = VxmSuperlane(other);
+        swap(replacement);
+        return *this;
+    }
+
+    VxmSuperlane(VxmSuperlane&&) noexcept = default;
+    VxmSuperlane& operator=(VxmSuperlane&&) noexcept = default;
+
+    void reset(std::size_t cycle = 0)
     {
         instruction_control_.reset();
-        for (auto& lane : lanes_) lane->reset();
+        for (auto& lane : lanes_) lane->reset(cycle);
         output_.reset();
         outputs_.clear();
-        cycle_ = 0;
+        cycle_ = cycle;
         pending_chain_depth_.reset();
         pending_feedback_required_ = false;
     }
@@ -622,6 +650,19 @@ public:
     void print_lane_trace(std::ostream& os, std::size_t lane_index) const { lane(lane_index).print_last_trace(os); }
 
 private:
+    void swap(VxmSuperlane& other) noexcept
+    {
+        using std::swap;
+        swap(special_alu_, other.special_alu_);
+        swap(instruction_control_, other.instruction_control_);
+        swap(lanes_, other.lanes_);
+        swap(output_, other.output_);
+        swap(outputs_, other.outputs_);
+        swap(cycle_, other.cycle_);
+        swap(pending_chain_depth_, other.pending_chain_depth_);
+        swap(pending_feedback_required_, other.pending_feedback_required_);
+    }
+
     static void check_control_stage(std::size_t stage)
     {
         if (stage >= VxmSuperlaneInstructionControl::kStageCount) {

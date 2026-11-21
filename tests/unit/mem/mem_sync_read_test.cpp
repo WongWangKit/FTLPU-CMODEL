@@ -20,13 +20,21 @@ void check_committed(const StreamRegisterFabric& fabric, const std::vector<Trans
     }
 }
 
+void commit_mem_cycle(MemArrayModel& mem, StreamRegisterFabric& fabric)
+{
+    mem.validate_posedge();
+    fabric.validate_posedge();
+    mem.posedge();
+    fabric.posedge();
+}
+
 void tick(MemArrayModel& mem, StreamRegisterFabric& fabric, bool capture = true)
 {
     const auto before = mem.read_responses();
-    fabric.begin_cycle();
+    fabric.low();
     mem.evaluate(fabric, capture);
     assert(mem.staged_read_responses().size() == before.size());
-    fabric.commit_cycle();
+    commit_mem_cycle(mem, fabric);
     check_committed(fabric, before);
 }
 }
@@ -100,18 +108,20 @@ int main()
         const auto output = StreamId::East(1), input = StreamId::East(2);
         mem->enqueue_instruction(0, MemInstruction::Read(7, output));
         tick(*mem, fabric);
-        fabric.reset(); fabric.begin_cycle();
+        fabric.reset(); fabric.low();
         for (std::size_t t = 0; t < hw::kTileRows; ++t) {
             StreamPayloadTileSegment bytes{}; bytes.fill(std::uint8_t(0x40+t));
             fabric.stage_payload_segment(0, t, input, bytes);
         }
-        fabric.commit_cycle();
+        fabric.validate_posedge(); fabric.posedge();
         mem->enqueue_instruction(0, tap ? MemInstruction::WriteTap(7, input) : MemInstruction::Write(7, input));
-        fabric.begin_cycle(); mem->evaluate(fabric);
+        fabric.low(); mem->evaluate(fabric);
         assert(mem->consumed_transfers().size() == (tap ? 0 : 1));
-        assert(mem->sram_lane_byte(0, 0, 7, 0) == 0x40);
+        assert(mem->sram_lane_byte(0, 0, 7, 0) == 0);
         assert(mem->staged_read_responses()[0].bytes[0] == 0);
-        fabric.stage_linear_links(); fabric.commit_cycle();
+        fabric.stage_linear_links();
+        commit_mem_cycle(*mem, fabric);
+        assert(mem->sram_lane_byte(0, 0, 7, 0) == 0x40);
         assert(fabric.cell(1, 0, 0, output).valid && fabric.cell(1, 0, 0, output).data == 0);
         assert(fabric.cell(1, 0, 0, input).valid == tap);
         // In-flight response/commands cancel but SRAM persists.
@@ -130,7 +140,7 @@ int main()
         StreamRegisterFabric fabric(16);
         mem->set_sram_depth_rows(64);
         mem->enqueue_instruction(0, MemInstruction::Read(64, 0));
-        fabric.begin_cycle(); bool rejected = false;
+        fabric.low(); bool rejected = false;
         try { mem->evaluate(fabric); } catch (const std::out_of_range&) { rejected = true; }
         assert(rejected && mem->read_responses().empty());
         mem->reset_execution_state(); fabric.reset();

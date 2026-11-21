@@ -6,6 +6,7 @@
 #include "ftlpu/c2c/slice.hpp"
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/hemisphere.hpp"
+#include "ftlpu/core/timing.hpp"
 #include "ftlpu/icu/distributed_queue.hpp"
 #include "ftlpu/icu/common_barrier.hpp"
 #include "ftlpu/icu/queue_completion.hpp"
@@ -23,6 +24,7 @@
 #include <deque>
 #include <limits>
 #include <map>
+#include <memory>
 #include <ostream>
 #include <optional>
 #include <sstream>
@@ -48,6 +50,12 @@ struct IcuFrontendStatistics {
     std::size_t macro_reservoir_empty_cycles{0};
     std::size_t macro_reservoir_full_cycles{0};
     std::size_t macro_reservoir_occupancy_bit_samples{0};
+    std::size_t imem_response_fifo_occupancy_samples{0};
+    std::size_t imem_response_fifo_full_cycles{0};
+    std::size_t peak_imem_response_fifo_occupancy{0};
+    std::size_t macro_word_fifo_occupancy_samples{0};
+    std::size_t macro_word_fifo_full_cycles{0};
+    std::size_t peak_macro_word_fifo_occupancy{0};
     std::size_t macro_descriptor_count{0};
     std::size_t macro_mem_descriptor_count{0};
     std::size_t macro_mxm_descriptor_count{0};
@@ -74,6 +82,14 @@ struct IcuFrontendStatistics {
     std::size_t macro_active_occupancy_samples{0};
     std::size_t macro_context_active_lifetime_cycles{0};
     std::size_t macro_max_context_active_lifetime_cycles{0};
+    std::size_t timed_issue_writes{0};
+    std::size_t timed_issue_reads{0};
+    std::size_t timed_issue_full_cycles{0};
+    std::size_t peak_timed_issue_occupancy{0};
+    std::size_t context_fifo_writes{0};
+    std::size_t context_fifo_reads{0};
+    std::size_t context_fifo_full_cycles{0};
+    std::size_t peak_context_fifo_occupancy{0};
 };
 
 struct IcuMacroQueueFrontendStatistics {
@@ -95,10 +111,21 @@ struct IcuMacroQueueFrontendStatistics {
     std::size_t ddb_entry_bits{0};
     std::size_t admission_lookahead{0};
     std::size_t context_expand_width{0};
+    std::size_t timed_issue_depth{0};
+    std::size_t timed_issue_lookahead{0};
+    std::size_t peak_timed_issue_occupancy{0};
+    std::size_t timed_issue_full_cycles{0};
+    std::size_t timed_issue_writes{0};
+    std::size_t timed_issue_reads{0};
+    std::size_t context_fifo_depth{0};
+    std::size_t peak_context_fifo_occupancy{0};
+    std::size_t context_fifo_full_cycles{0};
+    std::size_t context_fifo_writes{0};
+    std::size_t context_fifo_reads{0};
     IcuMacroDecoderStatistics decoder{};
 };
 
-class InstructionControlUnit {
+class InstructionControlUnit : public timing::ClockedModule {
 public:
     static constexpr std::size_t kVxmQueues = VxmSlice::kAluQueues;
     static constexpr std::size_t kMemQueuesPerHemisphere =
@@ -228,6 +255,42 @@ public:
         : barrier_latency_cycles_(barrier_latency_cycles)
     {
     }
+
+    void enable_clocked_mode()
+    {
+        if (clock_managed_ || cycle_ != 0 || next_)
+            throw std::logic_error(
+                "ICU clocked mode must be enabled before execution");
+        clock_managed_ = true;
+    }
+
+    bool clocked_mode() const noexcept { return clock_managed_; }
+
+    // SystemPhase owns dispatch LOW because the ICU has ordered FU outputs.
+    // Clock owns only the validation and atomic Current/Next boundary.
+    void low() override {}
+
+    void validate_posedge() const override
+    {
+        if (!clock_managed_) return;
+        if (!low_prepared_ || !low_complete_ || !next_)
+            throw std::logic_error(
+                "ICU posedge requires one complete SystemPhase LOW");
+    }
+
+    void posedge() override
+    {
+        if (!clock_managed_) return;
+        validate_posedge();
+        auto committed = std::move(next_);
+        committed->clock_managed_ = true;
+        committed->low_prepared_ = false;
+        committed->low_complete_ = false;
+        *this = std::move(*committed);
+        rebind_runtime_links();
+    }
+
+    void high() override {}
 
     void write_mem_raw_macro_imem(
         std::size_t queue, std::size_t address, MemRawImemWord word)
@@ -390,9 +453,23 @@ public:
             visit_program_queue(image.kind,image.queue_index,image.storage==ProgramStorage::TransportImem,[&](auto& q) {
                 using Q=std::decay_t<decltype(q)>;
                 if(image.mode==IcuQueueMode::Macro) {
-                    typename Q::RawImemWord word{};
-                    for(std::size_t b=0;b<image.word_bytes();++b) word.lanes[b/4]|=std::uint32_t(bytes[b])<<(8*(b%4));
-                    q.write_raw_imem(address,word);
+                    if constexpr (Q::queue_role == IcuQueueRole::Mem) {
+                        std::array<std::uint32_t,4> load_data{};
+                        for(std::size_t b=0;b<image.word_bytes();++b)
+                            load_data[b/4] |= std::uint32_t(bytes[b])
+                                << (8*(b%4));
+                        const auto load_strb = static_cast<std::uint8_t>(
+                            (std::uint32_t{1}
+                                << ((image.word_bytes()+3)/4)) - 1);
+                        q.load_mem_program_word(address,load_data,load_strb,
+                            address+1==image.word_count());
+                    } else {
+                        typename Q::RawImemWord word{};
+                        for(std::size_t b=0;b<image.word_bytes();++b)
+                            word.lanes[b/4]|=std::uint32_t(bytes[b])
+                                <<(8*(b%4));
+                        q.write_raw_imem(address,word);
+                    }
                 } else {
                     typename Q::Entry word{};
                     for(std::size_t b=0;b<image.word_bytes();++b) word.lanes[b/4]|=std::uint32_t(bytes[b])<<(8*(b%4));
@@ -404,6 +481,52 @@ public:
             if(ram.size()!=address*image.word_bytes()) throw std::logic_error("nonsequential control RAM write");
             ram.insert(ram.end(),bytes,bytes+image.word_bytes());
         }
+    }
+    // ProgramLoader is a peer clocked block.  Its LOW outputs are staged here
+    // and applied to the ICU transaction prepared later in the same
+    // SystemPhase LOW.  They therefore become visible only at the common
+    // POSEDGE, exactly like runtime notifications.
+    void stage_program_reset()
+    {
+        stage_program_operation(PendingProgramOperation::reset());
+    }
+    void stage_program_generation(std::uint64_t generation)
+    {
+        stage_program_operation(
+            PendingProgramOperation::generation_change(generation));
+    }
+    void stage_program_loading(bool loading)
+    {
+        stage_program_operation(
+            PendingProgramOperation::loading_change(loading));
+    }
+    void stage_program_issue_enabled(bool enabled)
+    {
+        stage_program_operation(
+            PendingProgramOperation::issue_enable_change(enabled));
+    }
+    void stage_program_word(const ProgramImage& image,std::size_t address,
+        const std::uint8_t* bytes)
+    {
+        stage_program_operation(
+            PendingProgramOperation::write(image,address,bytes));
+    }
+    void stage_program_seal(const ProgramImage& image)
+    {
+        stage_program_operation(PendingProgramOperation::seal(image));
+    }
+    void stage_segment_begin(const ProgramImage& image) {
+        PendingProgramOperation op{};op.kind=PendingProgramOperation::Kind::BeginSegment;op.image=image;stage_program_operation(op);
+    }
+    void stage_segment_end(const ProgramImage& image) {
+        PendingProgramOperation op{};op.kind=PendingProgramOperation::Kind::EndSegment;op.image=image;stage_program_operation(op);
+    }
+    void stage_segment_prime(const ProgramImage& image) {
+        PendingProgramOperation op{};op.kind=PendingProgramOperation::Kind::PrimeSegment;op.image=image;stage_program_operation(op);
+    }
+    void stage_program_frontend_tick()
+    {
+        stage_program_operation(PendingProgramOperation::frontend_tick());
     }
     std::vector<std::uint8_t> read_program_image(const ProgramImage& image) {
         if(image.storage!=ProgramStorage::Imem && image.storage!=ProgramStorage::TransportImem) {
@@ -424,7 +547,13 @@ public:
     void seal_program_image(const ProgramImage& image) {
         if(image.storage==ProgramStorage::Imem || image.storage==ProgramStorage::TransportImem) {
             visit_program_queue(image.kind,image.queue_index,image.storage==ProgramStorage::TransportImem,[&](auto& q) {
-                if(image.mode==IcuQueueMode::Macro) q.configure_raw_macro(image.kind,image.word_count());
+                using Q=std::decay_t<decltype(q)>;
+                if(image.mode==IcuQueueMode::Macro) {
+                    if constexpr (Q::queue_role == IcuQueueRole::Mem)
+                        q.prime_mem_program(image.kind,image.word_count());
+                    else
+                        q.configure_raw_macro(image.kind,image.word_count());
+                }
                 else q.configure({0,image.word_count()}); // No synchronous IQ prefill.
             }); return;
         }
@@ -525,6 +654,10 @@ public:
         compute_enabled_ = false;
         program_loading_ = true;
         program_issue_enabled_ = false;
+        next_.reset();
+        pending_runtime_events_.clear();
+        low_prepared_ = false;
+        low_complete_ = false;
     }
     void reset()
     {
@@ -563,6 +696,10 @@ public:
         compute_enabled_ = true;
         cycle_ = 0;
         program_generation_=0;
+        next_.reset();
+        pending_runtime_events_.clear();
+        low_prepared_ = false;
+        low_complete_ = false;
     }
 
     void enqueue_nop(std::size_t cycles)
@@ -811,22 +948,7 @@ public:
             throw StaticScheduleError("queue transport ownership requires Raw Macro mode");
         transport.launch();
         queue_control_transport_enabled_[queue]=true;
-        mem_iq(queue).set_queue_transport_executor([this,queue](std::uint32_t ordinal) {
-            auto& native=mem_transport_iq(queue);
-            if (native.synchronized_completed_count()+1 != ordinal)
-                throw StaticScheduleError("queue transport packet executed out of order");
-            auto instruction=native.dispatch_next();
-            queue_control_transport_ticked_[queue]=true;
-            const auto pc=native.last_trace().issue_pc;
-            if (instruction && !mem_transport_owners_.empty() && pc
-                && mem_transport_owners_[queue].contains(*pc)) {
-                const auto& owner=mem_transport_owners_[queue].at(*pc);
-                instruction->transport_generation=owner.generation;
-                instruction->transport_launch=owner.launch;
-            }
-            return MemIcu::QueueTransportResult{std::move(instruction),
-                native.synchronized_completed_count()==ordinal,native.last_trace().action,pc};
-        });
+        bind_queue_transport_executor(queue);
     }
     bool queue_control_transport_enabled(std::size_t queue) const
     { check_mem_queue(queue); return queue_control_transport_enabled_[queue]; }
@@ -1217,6 +1339,10 @@ public:
 
     void notify(IcuLocation location)
     {
+        if (clock_managed_) {
+            buffer_runtime_event(PendingRuntimeEvent::basic(location));
+            return;
+        }
         switch (location.kind) {
         case IcuLocationKind::Mem:
             check_mem_location(location);
@@ -1279,6 +1405,11 @@ public:
 
     void notify_tagged(IcuLocation location, std::size_t event_tag)
     {
+        if (clock_managed_) {
+            buffer_runtime_event(
+                PendingRuntimeEvent::tagged(location, event_tag));
+            return;
+        }
         switch (location.kind) {
         case IcuLocationKind::Mem:
             check_mem_location(location);
@@ -1322,6 +1453,8 @@ public:
     bool blocked_on_tagged_event(
         IcuLocation location, std::size_t event_tag)
     {
+        if (clock_managed_ && next_)
+            return next_->blocked_on_tagged_event(location, event_tag);
         switch (location.kind) {
         case IcuLocationKind::Mem:
             check_mem_location(location);
@@ -1385,6 +1518,11 @@ public:
     void notify_common_mem_commit(std::uint64_t generation,
         std::uint32_t completion_instance)
     {
+        if (clock_managed_) {
+            buffer_runtime_event(PendingRuntimeEvent::common_commit(
+                generation, completion_instance));
+            return;
+        }
         if(generation<program_generation_) return;
         common_barriers_.notify_mem_commit(generation, completion_instance);
     }
@@ -1394,11 +1532,24 @@ public:
     std::uint64_t common_barrier_wait_cycles() const noexcept { return common_barriers_.wait_cycles(); }
     bool compute_enabled() const noexcept { return compute_enabled_; }
     bool common_barrier_holding() const noexcept { return common_barriers_.holding(); }
-    void set_transport_overlap_enabled(bool enabled) { transport_overlap_enabled_ = enabled; }
+    void set_transport_overlap_enabled(bool enabled) {
+        if(clock_managed_) {
+            PendingProgramOperation op{};op.kind=PendingProgramOperation::Kind::TransportOverlap;
+            op.flag=enabled;stage_program_operation(std::move(op));return;
+        }
+        transport_overlap_enabled_ = enabled;
+    }
     bool transport_overlap_enabled() const noexcept { return transport_overlap_enabled_; }
     void configure_mem_transport_owner(std::size_t queue, std::size_t pc,
         std::uint64_t generation, std::uint32_t launch, bool transport_store = true)
     {
+        // Ordered after the accepted task reset, committed at the same edge.
+        // Mutating Current here would lose ownership when Reset builds Next.
+        if(clock_managed_) {
+            PendingProgramOperation op{};op.kind=PendingProgramOperation::Kind::TransportOwner;
+            op.queue=queue;op.address=pc;op.generation=generation;
+            op.launch=launch;op.flag=transport_store;stage_program_operation(std::move(op));return;
+        }
         if (queue >= kMemQueues || !generation || !launch
             || mem_transport_owner_count_ >= 65535)
             throw std::invalid_argument("invalid or oversized MEM transport owner table");
@@ -1412,15 +1563,59 @@ public:
         const std::vector<IcuCommonEventBinding>& bindings)
     { queue_completion_events_.configure(generation,bindings);program_generation_=generation; }
     void notify_queue_mem_commit(std::uint64_t generation,std::uint32_t instance)
-    { if(generation<program_generation_) return;queue_completion_events_.notify_mem_commit(generation,instance); }
+    {
+        if (clock_managed_) {
+            buffer_runtime_event(
+                PendingRuntimeEvent::queue_commit(generation, instance));
+            return;
+        }
+        if(generation<program_generation_) return;
+        queue_completion_events_.notify_mem_commit(generation,instance);
+    }
     bool queue_completion_ready(std::uint32_t event) const
-    { return queue_completion_events_.ready(event); }
+    {
+        if (clock_managed_ && next_)
+            return next_->queue_completion_ready(event);
+        if (!clock_managed_ || pending_runtime_events_.empty())
+            return queue_completion_events_.ready(event);
+
+        auto preview = queue_completion_events_;
+        for (const auto& pending : pending_runtime_events_) {
+            if (pending.kind != PendingRuntimeEvent::Kind::QueueCommit)
+                continue;
+            if (pending.generation < program_generation_) continue;
+            preview.notify_mem_commit(
+                pending.generation, pending.instance);
+        }
+        return preview.ready(event);
+    }
     bool common_barriers_done() const noexcept { return common_barriers_.done(); }
-    bool common_barrier_due() const noexcept { return common_barriers_.barrier_due(); }
+    bool common_barrier_due() const
+    {
+        if (clock_managed_ && next_)
+            return next_->common_barrier_due();
+        if (!clock_managed_ || pending_runtime_events_.empty())
+            return common_barriers_.barrier_due();
+
+        auto preview = common_barriers_;
+        for (const auto& pending : pending_runtime_events_) {
+            if (pending.kind != PendingRuntimeEvent::Kind::CommonCommit)
+                continue;
+            if (pending.generation < program_generation_) continue;
+            preview.notify_mem_commit(
+                pending.generation, pending.instance);
+        }
+        return preview.barrier_due();
+    }
 
     void notify_mem_synchronized(IcuLocation location,
         std::size_t synchronization_tag)
     {
+        if (clock_managed_) {
+            buffer_runtime_event(PendingRuntimeEvent::mem_synchronized(
+                location, synchronization_tag));
+            return;
+        }
         if (location.kind != IcuLocationKind::Mem)
             throw std::invalid_argument(
                 "C2C RX can only notify a target MEM ICU");
@@ -1438,6 +1633,9 @@ public:
     bool mem_accepts_synchronized_notification(IcuLocation location,
         std::size_t synchronization_tag) const
     {
+        if (clock_managed_ && next_)
+            return next_->mem_accepts_synchronized_notification(
+                location, synchronization_tag);
         if (location.kind != IcuLocationKind::Mem)
             throw std::invalid_argument(
                 "C2C RX readiness requires a target MEM ICU");
@@ -1453,6 +1651,13 @@ public:
 
     void advance_barrier_events()
     {
+        if (clock_managed_) {
+            if (!next_)
+                throw std::logic_error(
+                    "ICU barrier events advanced before dispatch LOW");
+            next_->advance_barrier_events();
+            return;
+        }
         for (auto& remaining : barrier_events_) {
             if (remaining != 0) --remaining;
         }
@@ -1512,6 +1717,12 @@ public:
     }
     void dispatch_vxm(VxmSlice& vxm, std::ostream* os = nullptr)
     {
+        if (clock_managed_) {
+            prepare_clocked_low();
+            next_->dispatch_vxm(vxm, os);
+            low_complete_ = true;
+            return;
+        }
         log_cycle_header(os);
         if (common_barriers_.barrier_due()
             && !vxm.idle())
@@ -1544,6 +1755,12 @@ public:
         std::array<C2cEndpoint*, hw::kHemispheres> c2cs = {},
         std::array<C2cDmaEngine*, hw::kHemispheres> c2c_dmas = {})
     {
+        if (clock_managed_) {
+            prepare_clocked_low();
+            next_->dispatch(mems, vxm, sxms, mxms, os, c2cs, c2c_dmas);
+            low_complete_ = true;
+            return;
+        }
         log_cycle_header(os);
         if(!program_loading_) queue_control_pool_.begin_cycle();
 
@@ -1561,7 +1778,9 @@ public:
         for (std::size_t hemisphere = 0;
              hemisphere < hw::kHemispheres;
              ++hemisphere) {
-            const auto c2c_tx = program_loading_ ? decltype(c2c_tx_queues_[hemisphere].dispatch_next()){} : c2c_tx_queues_[hemisphere].dispatch_next();
+            const bool txHeld=c2cs[hemisphere] && !c2cs[hemisphere]->tx().can_issue();
+            if(txHeld && !program_loading_)c2c_tx_queues_[hemisphere].hold_compute_cycle();
+            const auto c2c_tx = (program_loading_ || txHeld) ? decltype(c2c_tx_queues_[hemisphere].dispatch_next()){} : c2c_tx_queues_[hemisphere].dispatch_next();
             if (c2c_tx.has_value()) {
                 if (c2cs[hemisphere] == nullptr) {
                     throw std::logic_error(
@@ -1590,7 +1809,9 @@ public:
                 }
             }
 
-            const auto c2c_rx = program_loading_ ? decltype(c2c_rx_queues_[hemisphere].dispatch_next()){} : c2c_rx_queues_[hemisphere].dispatch_next();
+            const bool rxHeld=c2cs[hemisphere] && !c2cs[hemisphere]->rx().can_issue();
+            if(rxHeld && !program_loading_)c2c_rx_queues_[hemisphere].hold_compute_cycle();
+            const auto c2c_rx = (program_loading_ || rxHeld) ? decltype(c2c_rx_queues_[hemisphere].dispatch_next()){} : c2c_rx_queues_[hemisphere].dispatch_next();
             if (c2c_rx.has_value()) {
                 if (c2cs[hemisphere] == nullptr) {
                     throw std::logic_error(
@@ -1609,8 +1830,10 @@ public:
                 }
             }
 
+            const bool dmaHeld=c2c_dmas[hemisphere] && !c2c_dmas[hemisphere]->can_issue();
+            if(dmaHeld && !program_loading_)c2c_dma_queues_[hemisphere].hold_compute_cycle();
             const auto c2c_dma =
-                program_loading_ ? decltype(c2c_dma_queues_[hemisphere].dispatch_next()){} : c2c_dma_queues_[hemisphere].dispatch_next();
+                (program_loading_ || dmaHeld) ? decltype(c2c_dma_queues_[hemisphere].dispatch_next()){} : c2c_dma_queues_[hemisphere].dispatch_next();
             if (c2c_dma.has_value()) {
                 if (c2c_dmas[hemisphere] == nullptr) {
                     throw std::logic_error(
@@ -1866,6 +2089,17 @@ public:
                 queue.macro_ddb_layout().entry_bits,
                 queue.macro_admission_lookahead,
                 queue.macro_context_expand_width,
+                queue.timed_issue_depth,
+                queue.timed_issue_lookahead,
+                queue.peak_timed_issue_occupancy(),
+                queue.timed_issue_full_cycles(),
+                queue.timed_issue_writes(),
+                queue.timed_issue_reads(),
+                hw::kIcuMacroContextFifoDepth,
+                queue.peak_context_fifo_occupancy(),
+                queue.context_fifo_full_cycles(),
+                queue.context_fifo_writes(),
+                queue.context_fifo_reads(),
                 queue.macro_decoder_statistics()});
         };
         for (std::size_t index = 0; index < mem_queues_.size(); ++index)
@@ -1912,6 +2146,20 @@ public:
                 decoder.reservoir_full_cycles;
             statistics.macro_reservoir_occupancy_bit_samples +=
                 decoder.reservoir_occupancy_bit_samples;
+            statistics.imem_response_fifo_occupancy_samples +=
+                decoder.response_fifo_occupancy_samples;
+            statistics.imem_response_fifo_full_cycles +=
+                decoder.response_fifo_full_cycles;
+            statistics.peak_imem_response_fifo_occupancy=std::max(
+                statistics.peak_imem_response_fifo_occupancy,
+                decoder.response_fifo_peak_occupancy);
+            statistics.macro_word_fifo_occupancy_samples +=
+                decoder.word_fifo_occupancy_samples;
+            statistics.macro_word_fifo_full_cycles +=
+                decoder.word_fifo_full_cycles;
+            statistics.peak_macro_word_fifo_occupancy=std::max(
+                statistics.peak_macro_word_fifo_occupancy,
+                decoder.word_fifo_peak_occupancy);
             statistics.macro_descriptor_count += decoder.descriptor_count;
             statistics.macro_mem_descriptor_count +=
                 decoder.mem_descriptor_count;
@@ -1964,6 +2212,20 @@ public:
             statistics.macro_max_context_active_lifetime_cycles = std::max(
                 statistics.macro_max_context_active_lifetime_cycles,
                 decoder.max_context_active_lifetime_cycles);
+            statistics.timed_issue_writes += queue.timed_issue_writes();
+            statistics.timed_issue_reads += queue.timed_issue_reads();
+            statistics.timed_issue_full_cycles +=
+                queue.timed_issue_full_cycles();
+            statistics.peak_timed_issue_occupancy = std::max(
+                statistics.peak_timed_issue_occupancy,
+                queue.peak_timed_issue_occupancy());
+            statistics.context_fifo_writes += queue.context_fifo_writes();
+            statistics.context_fifo_reads += queue.context_fifo_reads();
+            statistics.context_fifo_full_cycles +=
+                queue.context_fifo_full_cycles();
+            statistics.peak_context_fifo_occupancy=std::max(
+                statistics.peak_context_fifo_occupancy,
+                queue.peak_context_fifo_occupancy());
             const auto peak = queue.peak_active_macros();
             statistics.macro_queues +=
                 queue.raw_macro_mode() || peak != 0 ? 1 : 0;
@@ -1988,6 +2250,268 @@ public:
     }
 
 private:
+    struct PendingProgramOperation {
+        enum class Kind : std::uint8_t {
+            Reset,
+            SetGeneration,
+            SetLoading,
+            SetIssueEnabled,
+            WriteWord,
+            SealImage,
+            TickFrontends,
+            BeginSegment, EndSegment, PrimeSegment, TransportOwner, TransportOverlap,
+        };
+
+        Kind kind{Kind::Reset};
+        ProgramImage image{};
+        std::vector<std::uint8_t> bytes{};
+        std::size_t address{0}, queue{0};
+        std::uint32_t launch{0};
+        std::uint64_t generation{0};
+        bool flag{false};
+
+        static PendingProgramOperation reset()
+        { return {}; }
+        static PendingProgramOperation generation_change(
+            std::uint64_t generation)
+        {
+            PendingProgramOperation operation{};
+            operation.kind=Kind::SetGeneration;
+            operation.generation=generation;
+            return operation;
+        }
+        static PendingProgramOperation loading_change(bool loading)
+        {
+            PendingProgramOperation operation{};
+            operation.kind=Kind::SetLoading;
+            operation.flag=loading;
+            return operation;
+        }
+        static PendingProgramOperation issue_enable_change(bool enabled)
+        {
+            PendingProgramOperation operation{};
+            operation.kind=Kind::SetIssueEnabled;
+            operation.flag=enabled;
+            return operation;
+        }
+        static PendingProgramOperation write(const ProgramImage& image,
+            std::size_t address,const std::uint8_t* bytes)
+        {
+            PendingProgramOperation operation{};
+            operation.kind=Kind::WriteWord;
+            operation.image=image;
+            operation.address=address;
+            operation.bytes.assign(bytes,bytes+image.word_bytes());
+            return operation;
+        }
+        static PendingProgramOperation seal(const ProgramImage& image)
+        {
+            PendingProgramOperation operation{};
+            operation.kind=Kind::SealImage;
+            operation.image=image;
+            return operation;
+        }
+        static PendingProgramOperation frontend_tick()
+        {
+            PendingProgramOperation operation{};
+            operation.kind=Kind::TickFrontends;
+            return operation;
+        }
+    };
+
+    struct PendingRuntimeEvent {
+        enum class Kind : std::uint8_t {
+            Basic,
+            Tagged,
+            MemSynchronized,
+            CommonCommit,
+            QueueCommit,
+        };
+
+        Kind kind{Kind::Basic};
+        IcuLocation location{};
+        std::size_t tag{0};
+        std::uint64_t generation{0};
+        std::uint32_t instance{0};
+
+        static PendingRuntimeEvent basic(IcuLocation location)
+        { return {Kind::Basic, location}; }
+        static PendingRuntimeEvent tagged(
+            IcuLocation location, std::size_t tag)
+        { return {Kind::Tagged, location, tag}; }
+        static PendingRuntimeEvent mem_synchronized(
+            IcuLocation location, std::size_t tag)
+        { return {Kind::MemSynchronized, location, tag}; }
+        static PendingRuntimeEvent common_commit(
+            std::uint64_t generation, std::uint32_t instance)
+        {
+            auto event = PendingRuntimeEvent {};
+            event.kind = Kind::CommonCommit;
+            event.generation = generation;
+            event.instance = instance;
+            return event;
+        }
+        static PendingRuntimeEvent queue_commit(
+            std::uint64_t generation, std::uint32_t instance)
+        {
+            auto event = PendingRuntimeEvent {};
+            event.kind = Kind::QueueCommit;
+            event.generation = generation;
+            event.instance = instance;
+            return event;
+        }
+    };
+
+    void buffer_runtime_event(PendingRuntimeEvent event)
+    {
+        // Events arriving during LOW are applied to the prepared transaction,
+        // but remain attached to Current until a successful POSEDGE replaces
+        // it. A later validation failure therefore cannot partially consume an
+        // external handshake.
+        if (next_) next_->apply_runtime_event(event);
+        pending_runtime_events_.push_back(std::move(event));
+    }
+
+    void stage_program_operation(PendingProgramOperation operation)
+    {
+        if (!clock_managed_) {
+            apply_program_operation(operation);
+            return;
+        }
+        // Program-load signals are normally produced before ICU dispatch.  If
+        // a later LOW node produces one, apply it to the already prepared Next
+        // as well so it cannot alter Current or wait an accidental extra edge.
+        if (next_) next_->apply_program_operation(operation);
+        pending_program_operations_.push_back(std::move(operation));
+    }
+
+    void apply_program_operation(const PendingProgramOperation& operation)
+    {
+        switch (operation.kind) {
+        case PendingProgramOperation::Kind::Reset:
+            reset_program();
+            return;
+        case PendingProgramOperation::Kind::SetGeneration:
+            set_program_generation(operation.generation);
+            return;
+        case PendingProgramOperation::Kind::SetLoading:
+            set_program_loading(operation.flag);
+            return;
+        case PendingProgramOperation::Kind::SetIssueEnabled:
+            set_program_issue_enabled(operation.flag);
+            return;
+        case PendingProgramOperation::Kind::WriteWord:
+            write_program_word(operation.image,operation.address,
+                operation.bytes.data());
+            return;
+        case PendingProgramOperation::Kind::SealImage:
+            seal_program_image(operation.image);
+            return;
+        case PendingProgramOperation::Kind::BeginSegment:
+            visit_program_queue(operation.image.kind,operation.image.queue_index,false,[](auto& q){q.reset();q.begin_instruction_update();});return;
+        case PendingProgramOperation::Kind::EndSegment:
+            visit_program_queue(operation.image.kind,operation.image.queue_index,false,[](auto& q){q.end_instruction_update();});return;
+        case PendingProgramOperation::Kind::PrimeSegment:
+            visit_program_queue(operation.image.kind,operation.image.queue_index,false,[](auto& q){q.prime_frontend_cycle();});return;
+        case PendingProgramOperation::Kind::TransportOwner:
+            configure_mem_transport_owner(operation.queue,operation.address,
+                operation.generation,operation.launch,operation.flag);return;
+        case PendingProgramOperation::Kind::TransportOverlap:
+            set_transport_overlap_enabled(operation.flag);return;
+        case PendingProgramOperation::Kind::TickFrontends:
+            tick_program_frontends();
+            return;
+        }
+        throw std::logic_error("unknown pending ICU program operation");
+    }
+
+    void prepare_clocked_low()
+    {
+        if (low_prepared_ || next_)
+            throw std::logic_error("ICU LOW executed more than once");
+        next_ = std::make_shared<InstructionControlUnit>(*this);
+        next_->next_.reset();
+        next_->clock_managed_ = false;
+        next_->low_prepared_ = false;
+        next_->low_complete_ = false;
+        next_->rebind_runtime_links();
+        for (const auto& event : pending_runtime_events_)
+            next_->apply_runtime_event(event);
+        next_->pending_runtime_events_.clear();
+        for (const auto& operation : pending_program_operations_)
+            next_->apply_program_operation(operation);
+        next_->pending_program_operations_.clear();
+        low_prepared_ = true;
+    }
+
+    void apply_runtime_event(const PendingRuntimeEvent& event)
+    {
+        switch (event.kind) {
+        case PendingRuntimeEvent::Kind::Basic:
+            notify(event.location);
+            return;
+        case PendingRuntimeEvent::Kind::Tagged:
+            notify_tagged(event.location, event.tag);
+            return;
+        case PendingRuntimeEvent::Kind::MemSynchronized:
+            notify_mem_synchronized(event.location, event.tag);
+            return;
+        case PendingRuntimeEvent::Kind::CommonCommit:
+            notify_common_mem_commit(event.generation, event.instance);
+            return;
+        case PendingRuntimeEvent::Kind::QueueCommit:
+            notify_queue_mem_commit(event.generation, event.instance);
+            return;
+        }
+        throw std::logic_error("unknown pending ICU runtime event");
+    }
+
+    void bind_queue_transport_executor(std::size_t queue)
+    {
+        mem_iq(queue).set_queue_transport_executor(
+            [this,queue](std::uint32_t ordinal) {
+                auto& native=mem_transport_iq(queue);
+                if (native.synchronized_completed_count()+1 != ordinal)
+                    throw StaticScheduleError(
+                        "queue transport packet executed out of order");
+                auto instruction=native.dispatch_next();
+                queue_control_transport_ticked_[queue]=true;
+                const auto pc=native.last_trace().issue_pc;
+                if (instruction && !mem_transport_owners_.empty() && pc
+                    && mem_transport_owners_[queue].contains(*pc)) {
+                    const auto& owner=mem_transport_owners_[queue].at(*pc);
+                    instruction->transport_generation=owner.generation;
+                    instruction->transport_launch=owner.launch;
+                }
+                return MemIcu::QueueTransportResult{
+                    std::move(instruction),
+                    native.synchronized_completed_count()==ordinal,
+                    native.last_trace().action,pc};
+            });
+    }
+
+    void rebind_runtime_links()
+    {
+        const auto rebind = [this](auto& queues) {
+            for (auto& queue : queues)
+                queue.rebind_shared_queue_control_pool(queue_control_pool_);
+        };
+        rebind(vxm_queues_);
+        rebind(mem_queues_);
+        rebind(mem_transport_queues_);
+        rebind(mxm_load_queues_);
+        rebind(mxm_dequant_queues_);
+        rebind(mxm_compute_queues_);
+        rebind(sxm_transpose_queues_);
+        rebind(sxm_permute_queues_);
+        rebind(c2c_tx_queues_);
+        rebind(c2c_rx_queues_);
+        rebind(c2c_dma_queues_);
+        for (std::size_t queue = 0; queue < kMemQueues; ++queue)
+            if (queue_control_transport_enabled_[queue])
+                bind_queue_transport_executor(queue);
+    }
+
     std::size_t take_emitted_notifications()
     {
         std::size_t count = 0;
@@ -2244,6 +2768,12 @@ private:
     bool transport_overlap_enabled_{false};
     IcuCommonBarrierController common_barriers_{};
     std::size_t cycle_{0};
+    std::shared_ptr<InstructionControlUnit> next_{};
+    std::deque<PendingRuntimeEvent> pending_runtime_events_{};
+    std::deque<PendingProgramOperation> pending_program_operations_{};
+    bool clock_managed_{false};
+    bool low_prepared_{false};
+    bool low_complete_{false};
 };
 
 } // namespace ftlpu

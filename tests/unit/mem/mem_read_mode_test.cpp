@@ -4,6 +4,18 @@
 #include <iostream>
 #include <memory>
 
+namespace {
+void commit_mem_cycle(
+    ftlpu::MemArrayModel& mem,
+    ftlpu::StreamRegisterFabric& fabric)
+{
+    mem.validate_posedge();
+    fabric.validate_posedge();
+    mem.posedge();
+    fabric.posedge();
+}
+}
+
 int main()
 {
     using namespace ftlpu;
@@ -22,13 +34,13 @@ int main()
                     mem->set_sram_lane_byte(0, 0, t, 3, l, std::uint8_t(1 + t * 8 + l));
             mem->enqueue_instruction(0, read);
             for (std::size_t c = 0; c <= hw::kTileRows; ++c) {
-                fabric.begin_cycle();
+                fabric.low();
                 mem->evaluate(fabric, false);
                 assert(mem->executed_transfers().empty());
                 for (std::size_t t = 0; t < hw::kTileRows; ++t)
                     assert(fabric.staged_segment_valid(1, t, StreamId::East(0))
                         == (c >= delay && t == c - delay));
-                fabric.commit_cycle();
+                commit_mem_cycle(*mem, fabric);
                 if (c >= delay && c - delay < hw::kTileRows) {
                     const auto t = c - delay;
                     for (std::size_t l = 0; l < hw::kLanesPerTile; ++l)
@@ -60,20 +72,23 @@ int main()
             write.transport_launch = 1;
             mem->enqueue_instruction(0, write);
             for (std::size_t t = 0; t < hw::kTileRows; ++t) {
-                fabric.begin_cycle();
+                fabric.low();
                 StreamPayloadTileSegment bytes{};
                 bytes.fill(std::uint8_t(0x30 + t));
                 StreamOutputPort source(fabric, 0, StreamDirection::East, "transport", true);
                 source.write_payload_segment(t, 0, bytes);
-                fabric.commit_cycle();
-                fabric.begin_cycle();
+                fabric.validate_posedge(); fabric.posedge();
+                fabric.low();
                 mem->evaluate(fabric, false);
+                assert(mem->last_transport_commit_segments() == (t == 0 ? 0 : 1));
+                assert(mem->transport_committed_segments(7, 1, 0, 0) == t);
+                assert(mem->consumed_transfers().size() == (tap ? 0 : 1));
+                assert(mem->sram_lane_byte(0, t, 5, 0) == 0);
+                fabric.stage_linear_links();
+                commit_mem_cycle(*mem, fabric);
                 assert(mem->last_transport_commit_segments() == 1);
                 assert(mem->transport_committed_segments(7, 1, 0, 0) == t + 1);
-                assert(mem->consumed_transfers().size() == (tap ? 0 : 1));
                 assert(mem->sram_lane_byte(0, t, 5, 0) == std::uint8_t(0x30 + t));
-                fabric.stage_linear_links();
-                fabric.commit_cycle();
             }
             assert(mem->idle());
             mem->reset_execution_state();
@@ -91,12 +106,12 @@ int main()
             write.transport_launch = 1;
             mem->enqueue_instruction(0, write);
             if (wrong_provenance) {
-                fabric.begin_cycle();
+                fabric.low();
                 StreamOutputPort source(fabric, 0, StreamDirection::East, "computation");
                 source.write_payload_segment(0, 0, StreamPayloadTileSegment{});
-                fabric.commit_cycle();
+                fabric.validate_posedge(); fabric.posedge();
             }
-            fabric.begin_cycle();
+            fabric.low();
             bool rejected = false;
             try { mem->evaluate(fabric, false); }
             catch (const std::logic_error&) { rejected = true; }

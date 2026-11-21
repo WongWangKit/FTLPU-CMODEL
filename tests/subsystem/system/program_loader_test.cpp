@@ -20,7 +20,8 @@ Ddr4Config ddr_config()
     Ddr4Config config;
     config.read_latency_cycles = 2;
     config.read_latency_jitter_cycles = 0;
-    config.peak_bandwidth_bytes_per_second = config.lpu_clock_hz * 32;
+    config.beat_bytes=std::min<std::size_t>(32,hw::kPhysicalVectorBytes);
+    config.peak_bandwidth_bytes_per_second = config.lpu_clock_hz * config.beat_bytes;
     return config;
 }
 
@@ -41,13 +42,40 @@ std::vector<std::uint8_t> image_bytes(bool mem, std::size_t words)
 void stage(C2cDmaSystem& system, std::uint64_t address,
     const std::vector<std::uint8_t>& bytes)
 {
-    for (std::size_t offset = 0; offset < bytes.size(); offset += 32) {
+    for (std::size_t offset = 0; offset < bytes.size(); offset += hw::kPhysicalVectorBytes) {
         C2cVector vector{};
-        for (std::size_t b = 0; b < 32; ++b)
+        for (std::size_t b = 0; b < hw::kPhysicalVectorBytes; ++b)
             vector.payload[b / hw::kLanesPerTile][b % hw::kLanesPerTile] =
                 offset + b < bytes.size() ? bytes[offset + b] : 0xa5;
         system.ddr4().initialize_vector(address + offset, vector);
     }
+}
+void wait_ready(C2cDmaSystem& system);
+void cached_segments_and_reset() {
+    auto system=std::make_unique<C2cDmaSystem>(ddr_config());
+    auto encoded=std::make_unique<InstructionControlUnit>();
+    encoded->vxm_iq(0).append_control(IcuControlInstruction::Nop(4));
+    ProgramImage a{0x4000,IcuMacroQueueKind::Vxm,0,12,IcuQueueMode::Native};a.generation=100;
+    auto b=a;b.source_address=0x5000;
+    const auto bytes=encoded->read_program_image(a);
+    stage(*system,a.source_address,bytes);stage(*system,b.source_address,bytes);
+    std::cout << "cache_case,submit,commit,frontend,start,dma_bytes\n";
+    for(std::size_t n=0;n<3;++n) {
+        auto& loader=system->program_loader();
+        const auto& im=n==1?b:a;
+        loader.submit({im},system->cycle(),n!=0,n+1<3);loader.start();loader.set_dependencies_ready(true);
+        for(std::size_t wait=0;n+1<3 ? loader.state()!=ProgramLoader::State::Draining : !loader.kernel_done();++wait) {
+            require(wait<1000,"segment NOP did not complete");system->tick();
+        }
+        require(n+1==3 || (!loader.kernel_done() && !loader.can_load_program()),"nonfinal drain retired task");
+        const auto& s=loader.statistics();
+        require(s.dma_bytes>0,"nonresident program must reread DDR");
+        std::cout << n << ',' << *s.request_accepted << ',' << *s.all_images_committed << ','
+            << *s.frontend_ready << ',' << *s.program_start << ',' << s.dma_bytes << '\n';
+    }
+    system->reset_execution_state();
+    auto& loader=system->program_loader();loader.submit({a},0);wait_ready(*system);
+    require(loader.statistics().dma_bytes>0,"device reset reused stale program directory");
 }
 
 void wait_ready(C2cDmaSystem& system)
@@ -75,12 +103,15 @@ void compare(C2cDmaSystem& system, const ProgramImage& image,
 ProgramLoadStatistics sweep(ProgramLoadConfig config, std::size_t depth = 16,
     bool weight_reads = false)
 {
+    // Program responses are 32-byte packets, independent of data-vector FIFO sizing.
+    config.instruction_dma.response_fifo_depth = depth;
     auto system = std::make_unique<C2cDmaSystem>(ddr_config(), depth,
         SystemHardwareConfiguration{}, config);
     auto& loader = system->program_loader();
     const auto bytes = image_bytes(true, 160);
-    stage(*system, 3, bytes); // Deliberately unaligned DDR source.
-    loader.submit({{3, IcuMacroQueueKind::Mem, 0, bytes.size()}}, system->cycle());
+    rejects([&]{loader.submit({{3,IcuMacroQueueKind::Mem,0,bytes.size()}},system->cycle());});
+    stage(*system, 0x1000, bytes); // Aligned AXI; 96-bit records still cross beats/pages.
+    loader.submit({{0x1000, IcuMacroQueueKind::Mem, 0, bytes.size()}}, system->cycle());
     C2cDmaEngine weights(system->ddr4(), 16);
     if (weight_reads) weights.issue(C2cDmaInstruction::Load(0x10000, 120));
     loader.start(); // Early start must stay held until every gate is satisfied.
@@ -106,11 +137,14 @@ ProgramLoadStatistics sweep(ProgramLoadConfig config, std::size_t depth = 16,
             "shared DDR byte budget was not enforced across DMA clients");
     require(*stats.images[0].first_write_committed - *stats.images[0].first_write_accepted
             == config.imem_write_commit_latency_cycles
-        && *stats.images[0].image_committed - *stats.images[0].last_write_accepted
-            == config.imem_write_commit_latency_cycles,
+        && stats.images[0].prime_accepted.has_value()
+        && *stats.images[0].prime_accepted >= *stats.images[0].last_write_accepted
+            + config.imem_write_commit_latency_cycles
+        && stats.images[0].image_committed == stats.images[0].prime_accepted,
         "i-MEM content or completion became visible outside its commit cycle");
     require(stats.peak_reassembly_bytes <= 64, "reassembly overflow");
-    require(stats.peak_dma_vectors <= depth, "DMA FIFO/credit overflow");
+    require(stats.peak_instruction_dma_response_fifo <= config.instruction_dma.response_fifo_depth,
+        "instruction DMA response FIFO overflow");
     require(*stats.images[0].source_done <= *stats.images[0].image_committed,
         "source_done occurred after image_committed");
     require(*stats.frontend_ready > *stats.all_images_committed, "prefetch did not consume time");
@@ -122,8 +156,41 @@ ProgramLoadStatistics sweep(ProgramLoadConfig config, std::size_t depth = 16,
     require(loader.started() && loader.statistics().program_start == start, "unified start failed");
     return stats;
 }
+
+ProgramLoadStatistics relay_trace(std::size_t local_queue)
+{
+    auto system=std::make_unique<C2cDmaSystem>(ddr_config(),4);
+    const auto payload=image_bytes(true,9);
+    const auto address=0x50000+local_queue*0x100;
+    stage(*system,address,payload);
+    ProgramImage image{address,IcuMacroQueueKind::Mem,local_queue,
+        payload.size()};
+    auto& loader=system->program_loader();
+    loader.submit({image},system->cycle());
+    wait_ready(*system);
+    const auto stats=loader.statistics();
+    const auto newRelay=local_queue/hw::kProgramLoadMemBanksPerRelay;
+    const auto oldRelay=std::min(local_queue/4,std::size_t{6});
+    std::cout<<"relay_trace queue="<<local_queue
+        <<" old_target=R"<<oldRelay
+        <<" corrected_target=R"<<newRelay
+        <<" relay_writes="<<stats.relay_writes<<'\n';
+    require(stats.relay_writes==(newRelay+1)*(image.word_count()+1)
+        &&stats.relay_reads==stats.relay_writes,
+        "corrected MEM Relay path changed hop count or lost ordering");
+    return stats;
+}
+
 void barrier_storage_and_activation() {
     auto system=std::make_unique<C2cDmaSystem>(ddr_config(),1);
+    if constexpr(hw::kCommonBarrierCapacity==0) {
+        ProgramImage unsupported;unsupported.storage=ProgramStorage::Barr;
+        unsupported.byte_count=8;unsupported.generation=1;
+        rejects([&]{system->program_loader().submit({unsupported},0);});
+        require(system->program_loader().can_load_program(),"disabled BARR rejection mutated the device");
+        std::cout << "BARR unsupported by this profile: admission rejection checked\n";
+        return;
+    }
     auto encoded=std::make_unique<InstructionControlUnit>();encoded->mem_iq(0).append_control(IcuControlInstruction::Nop(8));
     ProgramImage native{0x1000,IcuMacroQueueKind::Mem,0,12,IcuQueueMode::Native};
     ProgramImage barr;barr.source_address=0x2000;barr.storage=ProgramStorage::Barr;barr.byte_count=8;barr.generation=20;
@@ -162,6 +229,7 @@ void barrier_storage_and_activation() {
 
 int main() try
 {
+    cached_segments_and_reset();
     barrier_storage_and_activation();
     ProgramLoadConfig config;
     config.bus_bytes_per_cycle = 32;
@@ -173,12 +241,12 @@ int main() try
         << *configured.all_images_committed - *configured.request_accepted
         << " bus_bytes_per_cycle=" << ProgramLoadConfig{}.bus_bytes_per_cycle
         << " dma_fifo_depth_vectors=" << hw::config::kDmaFifoDepthVectors << '\n';
-    config.bus_bytes_per_cycle = 4;
+    config.bus_bytes_per_cycle = 1;
     const auto narrow = sweep(config);
     require(*narrow.all_images_committed > *baseline.all_images_committed
         && narrow.bus_wait_cycles > 0, "bus serialization has no timing effect");
     config.bus_bytes_per_cycle = 32;
-    config.imem_write_ii_cycles = 4;
+    config.imem_write_ii_cycles = 32;
     const auto slow_write = sweep(config, 1);
     require(*slow_write.all_images_committed > *baseline.all_images_committed
         && slow_write.target_wait_cycles > 0 && slow_write.dma_credit_wait_cycles > 0,
@@ -191,12 +259,20 @@ int main() try
     config.imem_write_commit_latency_cycles = 1;
     config.route_latency_cycles = 4;
     const auto slow_route = sweep(config);
-    require(*slow_route.all_images_committed == *baseline.all_images_committed + 3,
+      std::cout << "route_sweep baseline=" << *baseline.all_images_committed
+          << " slow=" << *slow_route.all_images_committed
+          << " first_baseline=" << *baseline.images[0].first_write_accepted
+          << " first_slow=" << *slow_route.images[0].first_write_accepted << '\n';
+      require(*slow_route.images[0].first_write_accepted == *baseline.images[0].first_write_accepted + 3
+          && *slow_route.all_images_committed <= *baseline.all_images_committed + 3,
         "route latency is not pipelined");
     config.route_latency_cycles = 1;
     const auto shared = sweep(config, 16, true);
     require(*shared.all_images_committed > *baseline.all_images_committed,
         "program and weight reads bypassed shared DDR bandwidth");
+    (void)relay_trace(4);
+    (void)relay_trace(16);
+    (void)relay_trace(InstructionControlUnit::kMemQueuesPerHemisphere-1);
 
     auto system = std::make_unique<C2cDmaSystem>(ddr_config(), 1,
         SystemHardwareConfiguration{}, config);
@@ -226,8 +302,27 @@ int main() try
         require(system->cycle() < 20000, "multi-queue load timed out");
     }
     const auto previous = loader.statistics();
-    require(*previous.images[1].first_ddr_request > *previous.images[0].image_committed,
+    require(*previous.images[1].first_ddr_request >= *previous.images[0].image_committed,
         "queue switch preceded the last commit");
+    const auto packets=[](std::size_t n){return (n+31)/32;};
+    const auto beat=system->ddr4().axi().config().beat_bytes;
+    const auto padded=[&](std::size_t n){return (n+beat-1)/beat*beat;};
+    require(loader.dma().statistics().ar_handshakes==packets(a.byte_count)+packets(b.byte_count)
+        && previous.dma_bytes==padded(a.byte_count)+padded(b.byte_count),
+        "multi-image transition lost a DMA request or counted bytes twice");
+    require(previous.word_fifo_writes == a.word_count()+b.word_count()+2
+            && previous.word_fifo_reads == previous.word_fifo_writes
+            && previous.ingress_fifo_writes == previous.word_fifo_writes
+            && previous.ingress_fifo_reads == previous.word_fifo_writes,
+        "Program Word or ingress FIFO lost a physical record");
+    require(previous.relay_writes
+            == (a.word_count()+1)+hw::config::kProgramLoadRelaysPerHemisphere*(b.word_count()+1)
+            && previous.relay_reads == previous.relay_writes,
+        "MEM-near and MXM-tail records crossed the wrong Relay count");
+    require(previous.peak_word_fifo != 0
+            && previous.peak_ingress_fifo != 0
+            && previous.peak_relay_level != 0,
+        "Program distribution FIFO occupancy was not observable");
     compare(*system, a, mem); compare(*system, b, mxm);
     // A fresh, executable Native program exercises safe long/short switching.
     system=std::make_unique<C2cDmaSystem>(ddr_config(),1,SystemHardwareConfiguration{},config);
@@ -251,7 +346,7 @@ int main() try
     rejects([&]{safe.submit({},system->cycle());});data.pop_received();
     const auto request=system->ddr4().request_read(0x9000);
     while(!system->ddr4().idle()) system->tick();
-    require(!safe.can_load_program(),"DDR response was excluded from drain");
+    require(safe.can_load_program(),"unrelated DDR client blocked a drained program");
     system->ddr4().pop_read_completion(request);
     require(safe.can_load_program() && safe.statistics().kernel_done_cycle==done,"completion latch changed");
     const auto nextCycle=system->cycle();

@@ -58,9 +58,11 @@ try {
         require(rejected,"different Macros interleaved on one ICU queue");
     }
 
-    static_assert(InstructionControlUnit::MxmIcu::macro_context_depth == 40);
+    // Context depth follows the selected CModel product profile;
+    // DEV RTL defaults do not select this merge-stage capacity.
+    static_assert(InstructionControlUnit::MxmIcu::macro_context_depth == hw::kIcuMxmMacroContextDepth);
     static_assert(
-        InstructionControlUnit::MxmIcu::macro_issue_compare_width == 40);
+        InstructionControlUnit::MxmIcu::macro_issue_compare_width == hw::kIcuMxmMacroContextDepth);
     static_assert(
         InstructionControlUnit::MxmIcu::macro_issue_cycle_bits == 32);
     static_assert(
@@ -178,3 +180,4 @@ try {
     std::cerr << "icu_macro_schedule_test failed: " << error.what() << '\n';
     return 1;
 }
+

@@ -1,6 +1,9 @@
 #pragma once
 
 #include "ftlpu/c2c/types.hpp"
+#include "ftlpu/core/timing.hpp"
+#include "ftlpu/c2c/axi_memory.hpp"
+#include <memory>
 
 #include <algorithm>
 #include <array>
@@ -22,9 +25,10 @@ struct Ddr4Config {
     // 51.2 GB/s corresponds to an average 102.4 bytes per LPU cycle.
     std::size_t read_latency_cycles{35};
     std::size_t write_latency_cycles{25};
-    std::size_t request_queue_depth{256};
-    // Maximum requests serviced in one cycle. Aggregate byte bandwidth is
-    // independently limited by peak_bandwidth_bytes_per_second.
+    std::size_t request_queue_depth{hw::config::kC2cDmaSizing.q};
+    // Platform logical lane count, retained in the platform configuration.
+    // This never multiplies the physical AXI width: at most one R and one W
+    // beat per edge, additionally limited by the aggregate DDR byte budget.
     std::size_t transfer_channels{
         hw::kHemispheres * hw::kC2cStreamsPerDirection};
     std::uint64_t lpu_clock_hz{500'000'000};
@@ -35,9 +39,9 @@ struct Ddr4Config {
 
     void validate() const
     {
-        if (beat_bytes == 0 || beat_bytes > hw::kPhysicalVectorBytes) {
+        if (beat_bytes == 0 || beat_bytes > 64 || (beat_bytes & (beat_bytes-1))) {
             throw std::invalid_argument(
-                "DDR4 beat_bytes must fit within one C2C vector");
+                "DDR4 beat_bytes must be a power of two up to 64 bytes");
         }
         if (request_queue_depth == 0) {
             throw std::invalid_argument(
@@ -57,408 +61,170 @@ struct Ddr4Config {
     }
 };
 
-class Ddr4Model {
+// Vector endpoint requests and program bytes share this one physical master.
+// Completed data retain their admission credits until the owner consumes them.
+class Ddr4Model : public timing::ClockedModule {
 public:
-    using RequestId = std::uint64_t;
-
-    struct ReadCompletion {
-        RequestId id{0};
-        std::uint64_t address{0};
-        C2cVector vector{};
-    };
-
-    struct WriteCompletion {
-        RequestId id{0};
-        std::uint64_t address{0};
-    };
-
-    struct BeatTrace {
-        RequestId id{0};
-        bool write{false};
-        std::uint64_t address{0};
-        std::size_t byte_count{0};
-    };
-
-    explicit Ddr4Model(Ddr4Config config = {})
-        : config_(config)
-    {
-        config_.validate();
+    using RequestId=AxiDmaMaster::Ticket;
+    static constexpr std::size_t kLaneClients=2*hw::kHemispheres*hw::kC2cStreamsPerDirection;
+    static constexpr std::size_t kDirectClient=kLaneClients, kProgramClient=kLaneClients+1;
+    struct ReadCompletion {RequestId id{};std::uint64_t address{};C2cVector vector{};bool error{},aborted{};std::size_t transferred_bytes{};};
+    struct WriteCompletion {RequestId id{};std::uint64_t address{};bool error{},aborted{};std::size_t transferred_bytes{};};
+    struct BeatTrace {RequestId id{};bool write{};std::uint64_t address{};std::size_t byte_count{};};
+    explicit Ddr4Model(Ddr4Config config={}) : config_(config), master_(geometry(config)) {make_memory();}
+    Ddr4Model(const Ddr4Model&)=delete;
+    Ddr4Model& operator=(const Ddr4Model&)=delete;
+    void enable_clocked_mode() {
+        if(clock_managed_ || cycle_)throw std::logic_error("DDR clock attachment after start");
+        clock_managed_=true;
     }
-
-    void configure(Ddr4Config config)
-    {
-        if (!idle())
-            throw std::logic_error(
-                "cannot reconfigure DDR4 while requests are active");
-        config.validate();
-        config_ = config;
-        bandwidth_remainder_ = 0;
-        round_robin_cursor_ = 0;
-        read_bytes_transferred_ = 0;
-        write_bytes_transferred_ = 0;
+    bool clocked_mode() const noexcept {return clock_managed_;}
+    // Client submission reserves bounded ownership during LOW. Physical bus
+    // handshakes, payload writes and response visibility occur only at POSEDGE.
+    void low() override {
+        if(master_.isolated())throw AxiResponseProtocolError("DDR link isolated");
+        if(low_prepared_)throw std::logic_error("DDR LOW twice");
+        low_prepared_=true;
     }
-
-    void reset_execution_state()
-    {
-        requests_.clear();
-        active_.clear();
-        read_completions_.clear();
-        write_completions_.clear();
-        cycle_ = 0;
-        next_request_id_ = 1;
+    void validate_posedge() const override {
+        if(!low_prepared_)throw std::logic_error("DDR edge without LOW");
+    }
+    void posedge() override {validate_posedge();tick_edge();low_prepared_=false;}
+    void high() override {}
+    AxiDmaMaster& axi() {return master_;}
+    const AxiDmaMaster& axi() const {return master_;}
+    void set_response_fault(std::function<std::uint8_t(std::uint64_t,bool)> fault) {
+        memory_->set_response_fault(std::move(fault));
+    }
+    // Test environment control; configure/reset deliberately clears schedules.
+    void set_channel_service(AxiMemory::ServiceSchedule schedule) {
+        memory_->set_channel_service(std::move(schedule));
+    }
+    void set_response_wire(AxiMemory::ResponseWire hook) {memory_->set_response_wire(std::move(hook));}
+    void configure(Ddr4Config config) {
+        if(!drained())throw std::logic_error("DDR reconfigure before drain");
+        config.validate();config_=config;master_=AxiDmaMaster(geometry(config));make_memory();cycle_=0;
+    }
+    void reset_execution_state() {
+        if(!drained())throw std::logic_error("drain accepted DDR transactions before reset");
+        master_=AxiDmaMaster(geometry(config_));owners_.clear();make_memory();cycle_=0;last_beat_.reset();
+    }
+    const Ddr4Config& config() const {return config_;}
+    std::size_t cycle() const {return cycle_;}
+    bool idle() const {return master_.transport_idle() && memory_->drained();}
+    bool drained() const {return !master_.isolated() && master_.drained() && owners_.empty() && memory_->drained();}
+    const std::optional<BeatTrace>& last_beat() const {return last_beat_;}
+    std::uint64_t read_bytes_transferred() const {return memory_->read_bytes();}
+    std::uint64_t write_bytes_transferred() const {return memory_->write_bytes();}
+    std::uint64_t bytes_transferred() const {return read_bytes_transferred()+write_bytes_transferred();}
+    std::size_t read_vector_service_cycles() const {
+        return config_.read_latency_cycles+config_.read_latency_jitter_cycles
+            +(hw::kPhysicalVectorBytes+config_.beat_bytes-1)/config_.beat_bytes+2;
+    }
+    bool can_accept_request(std::uint64_t address=0) const {
+        const auto slots=hw::kPhysicalVectorBytes>4096-address%4096?2u:1u;
+        return owners_.size()<config_.request_queue_depth
+            && master_.counters().live+slots<=master_.config().transactions
+            && master_.counters().live+slots<=master_.config().ids*master_.config().per_id
+            && master_.can_submit(hw::kPhysicalVectorBytes,false)
+            && master_.can_submit(hw::kPhysicalVectorBytes,true);
+    }
+    RequestId request_read(std::uint64_t address,std::optional<std::size_t> lane=std::nullopt) {
+        validate(address);const auto client=client_for(lane);
+        Owner o{};o.client=client;o.address=address;
+        for(const auto& range:plan_axi_bursts(master_.config(),address,hw::kPhysicalVectorBytes)) {
+            auto id=master_.submit_read(client,range.address,range.bytes);
+            if(!id)throw std::logic_error("DDR read admission without credit");
+            o.parts[o.count++]=*id;
+        }
+        o.ticket=o.parts[0];owners_.push_back(o);return o.ticket;
+    }
+    RequestId request_write(std::uint64_t address,C2cVector vector,std::optional<std::size_t> lane=std::nullopt) {
+        validate(address);const auto client=client_for(lane);std::vector<std::uint8_t> data;
+        for(const auto& tile:vector.payload)for(auto b:tile)data.push_back(b);
+        Owner o{};o.client=client;o.address=address;o.write=true;std::size_t offset=0;
+        for(const auto& range:plan_axi_bursts(master_.config(),address,data.size())) {
+            std::vector<std::uint8_t> fragment(data.begin()+offset,data.begin()+offset+range.bytes);
+            auto id=master_.submit_write(client,range.address,fragment);
+            if(!id)throw std::logic_error("DDR write admission without credit");
+            o.parts[o.count++]=*id;offset+=range.bytes;
+        }
+        o.ticket=o.parts[0];owners_.push_back(o);return o.ticket;
+    }
+    bool read_completion_ready(RequestId id) const {return ready(id,false);}
+    bool write_completion_ready(RequestId id) const {return ready(id,true);}
+    ReadCompletion pop_read_completion(RequestId id) {
+        auto c=pop(id,false);ReadCompletion r{id,c.address,{},c.error,c.aborted,c.transferred_bytes};
+        for(std::size_t b=0;b<c.bytes.size();++b)r.vector.payload[b/hw::kLanesPerTile][b%hw::kLanesPerTile]=c.bytes[b];
+        return r;
+    }
+    WriteCompletion pop_write_completion(RequestId id) {auto c=pop(id,true);return {id,c.address,c.error,c.aborted,c.transferred_bytes};}
+    void initialize_vector(std::uint64_t address,const C2cVector& vector) {
+        if(address>UINT64_MAX-hw::kPhysicalVectorBytes)throw std::out_of_range("DDR initialization range");
+        for(std::size_t b=0;b<hw::kPhysicalVectorBytes;++b)put(address+b,vector.payload[b/hw::kLanesPerTile][b%hw::kLanesPerTile]);
+    }
+    C2cVector read_vector(std::uint64_t address) const {
+        if(address>UINT64_MAX-hw::kPhysicalVectorBytes)throw std::out_of_range("DDR inspection range");
+        C2cVector v;for(std::size_t b=0;b<hw::kPhysicalVectorBytes;++b)v.payload[b/hw::kLanesPerTile][b%hw::kLanesPerTile]=byte(address+b);return v;
+    }
+    void tick() {low();posedge();high();}
+private:
+    void tick_edge() {
+        try {memory_->tick(master_);}
+        catch(const AxiResponseProtocolError&) {master_.isolate_link();throw;}
         last_beat_.reset();
-        bandwidth_remainder_ = 0;
-        round_robin_cursor_ = 0;
-        read_bytes_transferred_ = 0;
-        write_bytes_transferred_ = 0;
-    }
-
-    const Ddr4Config& config() const noexcept { return config_; }
-    std::size_t read_vector_service_cycles() const noexcept
-    {
-        const auto transferCycles = static_cast<std::size_t>(
-            (static_cast<std::uint64_t>(hw::kPhysicalVectorBytes)
-                    * config_.lpu_clock_hz
-                + config_.peak_bandwidth_bytes_per_second - 1)
-            / config_.peak_bandwidth_bytes_per_second);
-        const auto beatCycles = (hw::kPhysicalVectorBytes + config_.beat_bytes - 1)
-            / config_.beat_bytes;
-        return config_.read_latency_cycles
-            + config_.read_latency_jitter_cycles + std::max(transferCycles, beatCycles) + 1;
-    }
-    std::size_t cycle() const noexcept { return cycle_; }
-    bool idle() const noexcept
-    {
-        return requests_.empty() && active_.empty();
-    }
-    bool drained() const noexcept {
-        return idle() && read_completions_.empty() && write_completions_.empty();
-    }
-    const std::optional<BeatTrace>& last_beat() const noexcept
-    {
-        return last_beat_;
-    }
-    std::uint64_t read_bytes_transferred() const noexcept
-    {
-        return read_bytes_transferred_;
-    }
-    std::uint64_t write_bytes_transferred() const noexcept
-    {
-        return write_bytes_transferred_;
-    }
-    std::uint64_t bytes_transferred() const noexcept
-    {
-        return read_bytes_transferred_ + write_bytes_transferred_;
-    }
-    bool can_accept_request() const noexcept
-    {
-        return requests_.size() + active_.size()
-            < config_.request_queue_depth;
-    }
-
-    RequestId request_read(std::uint64_t address,
-        std::optional<std::size_t> transport_lane = std::nullopt)
-    {
-        validate_transport_lane(transport_lane);
-        require_request_credit();
-        validate_vector_range(address);
-        const auto id = allocate_request_id();
-        requests_.push_back(Request {
-            id, Operation::Read, address, {},
-            config_.read_latency_cycles
-                + latency_jitter(id, address, Operation::Read),transport_lane});
-        return id;
-    }
-
-    RequestId request_write(std::uint64_t address, C2cVector vector,
-        std::optional<std::size_t> transport_lane = std::nullopt)
-    {
-        validate_transport_lane(transport_lane);
-        require_request_credit();
-        validate_vector_range(address);
-        const auto id = allocate_request_id();
-        requests_.push_back(Request {
-            id,
-            Operation::Write,
-            address,
-            std::move(vector),
-            config_.write_latency_cycles
-                + latency_jitter(id, address, Operation::Write),
-            transport_lane,
-        });
-        return id;
-    }
-
-    bool read_completion_ready(RequestId id) const noexcept
-    {
-        return std::any_of(read_completions_.begin(), read_completions_.end(),
-            [id](const ReadCompletion& completion) {
-                return completion.id == id;
-            });
-    }
-
-    ReadCompletion pop_read_completion(RequestId id)
-    {
-        if (!read_completion_ready(id)) {
-            throw std::logic_error(
-                "DDR4 read completion is not ready or is out of order");
-        }
-        const auto it = std::find_if(
-            read_completions_.begin(), read_completions_.end(),
-            [id](const ReadCompletion& completion) {
-                return completion.id == id;
-            });
-        auto completion = std::move(*it);
-        read_completions_.erase(it);
-        return completion;
-    }
-
-    bool write_completion_ready(RequestId id) const noexcept
-    {
-        return std::any_of(write_completions_.begin(), write_completions_.end(),
-            [id](const WriteCompletion& completion) {
-                return completion.id == id;
-            });
-    }
-
-    WriteCompletion pop_write_completion(RequestId id)
-    {
-        if (!write_completion_ready(id)) {
-            throw std::logic_error(
-                "DDR4 write completion is not ready or is out of order");
-        }
-        const auto it = std::find_if(
-            write_completions_.begin(), write_completions_.end(),
-            [id](const WriteCompletion& completion) {
-                return completion.id == id;
-            });
-        const auto completion = *it;
-        write_completions_.erase(it);
-        return completion;
-    }
-
-    void initialize_vector(std::uint64_t address, const C2cVector& vector)
-    {
-        validate_vector_range(address);
-        write_payload(address, vector);
-    }
-
-    C2cVector read_vector(std::uint64_t address) const
-    {
-        validate_vector_range(address);
-        auto vector = C2cVector {};
-        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                const auto offset = tile * hw::kLanesPerTile + lane;
-                const std::uint64_t byte_address = address + offset;
-                const auto page = pages_.find(
-                    byte_address / kStoragePageBytes);
-                vector.payload[tile][lane] = page == pages_.end()
-                    ? 0
-                    : page->second[static_cast<std::size_t>(
-                          byte_address % kStoragePageBytes)];
-            }
-        }
-        return vector;
-    }
-
-    void tick()
-    {
-        last_beat_.reset();
-        while (!requests_.empty()) {
-            active_.push_back(
-                ActiveRequest {std::move(requests_.front()), 0});
-            requests_.pop_front();
-        }
-
-        bandwidth_remainder_ += config_.peak_bandwidth_bytes_per_second;
-        std::uint64_t byteBudget =
-            bandwidth_remainder_ / config_.lpu_clock_hz;
-        bandwidth_remainder_ %= config_.lpu_clock_hz;
-
-        std::size_t channelsUsed = 0;
-        std::array<bool,kTransportLaneCount> laneUsed{};
-        const std::size_t activeCount = active_.size();
-        const std::size_t start = activeCount == 0
-            ? 0 : round_robin_cursor_ % activeCount;
-        for (std::size_t visited = 0;
-             visited < activeCount && byteBudget != 0
-                && channelsUsed < config_.transfer_channels;
-             ++visited) {
-            auto& active = active_[(start + visited) % activeCount];
-            if (active.request.remaining_latency != 0) continue;
-            if (active.request.transport_lane && laneUsed[*active.request.transport_lane])
-                continue;
-            const auto remaining =
-                hw::kPhysicalVectorBytes - active.bytes_transferred;
-            const auto byteCount = static_cast<std::size_t>(
-                std::min<std::uint64_t>(
-                    {config_.beat_bytes, remaining, byteBudget}));
-            transfer_active_beat(active, byteCount);
-            if (active.request.transport_lane) laneUsed[*active.request.transport_lane] = true;
-            byteBudget -= byteCount;
-            ++channelsUsed;
-        }
-        if (activeCount != 0)
-            round_robin_cursor_ = (start + 1) % activeCount;
-        for (auto& active : active_) {
-            if (active.request.remaining_latency != 0)
-                --active.request.remaining_latency;
-        }
-        for (std::size_t index = active_.size(); index-- > 0;) {
-            if (active_[index].bytes_transferred
-                == hw::kPhysicalVectorBytes)
-                complete_active_request(index);
-        }
+        if(auto t=memory_->trace())last_beat_=BeatTrace{0,t->write,t->address,t->bytes};
         ++cycle_;
     }
-
 private:
-    enum class Operation { Read, Write };
-    static constexpr std::size_t kTransportLaneCount =
-        2 * hw::kHemispheres * hw::kC2cStreamsPerDirection;
-    static void validate_transport_lane(std::optional<std::size_t> lane)
-    {
-        if (lane && *lane >= kTransportLaneCount)
-            throw std::out_of_range("DDR request transport lane is outside the C2C fabric");
+    struct Owner {RequestId ticket{};std::size_t client{};std::uint64_t address{};bool write{};
+        std::array<RequestId,2> parts{};std::size_t count{};};
+    static AxiDmaConfig geometry(const Ddr4Config& c) {
+        c.validate();AxiDmaConfig a;a.beat_bytes=c.beat_bytes;a.max_burst_beats=256;
+        a.ids=8;a.per_id=(c.request_queue_depth+7)/8;a.transactions=c.request_queue_depth;
+        a.rx_beats=a.tx_beats=c.request_queue_depth*((hw::kPhysicalVectorBytes+c.beat_bytes-1)/c.beat_bytes);
+        a.clients=kLaneClients+2;a.address_limit=UINT64_MAX;return a;
     }
-
-    struct Request {
-        RequestId id{0};
-        Operation operation{Operation::Read};
-        std::uint64_t address{0};
-        C2cVector vector{};
-        std::size_t remaining_latency{0};
-        // DMA requests identify a physical direction/lane; aggregate DDR
-        // concurrency must not service that lane more than once per cycle.
-        std::optional<std::size_t> transport_lane{};
-    };
-
-    struct ActiveRequest {
-        Request request{};
-        std::size_t bytes_transferred{0};
-    };
-
-    void complete_active_request(std::size_t index)
-    {
-        auto request = std::move(active_[index].request);
-        active_.erase(active_.begin() + index);
-        if (request.operation == Operation::Read) {
-            read_completions_.push_back(ReadCompletion {
-                request.id, request.address, std::move(request.vector)});
-            return;
+    void make_memory() {
+        AxiMemory::Config c;c.capacity=config_.request_queue_depth;c.read_latency=config_.read_latency_cycles;
+        c.write_latency=config_.write_latency_cycles;c.read_jitter=config_.read_latency_jitter_cycles;
+        c.write_jitter=config_.write_latency_jitter_cycles;c.clock_hz=config_.lpu_clock_hz;
+        c.bytes_per_second=config_.peak_bandwidth_bytes_per_second;c.seed=config_.latency_random_seed;
+        memory_=std::make_unique<AxiMemory>(master_.config(),c,[this](auto a){return byte(a);},[this](auto a,auto b){put(a,b);});
+    }
+    std::size_t client_for(std::optional<std::size_t> lane) const {
+        if(lane && *lane>=kLaneClients)throw std::out_of_range("DDR lane");return lane.value_or(kDirectClient);
+    }
+    void validate(std::uint64_t address) const {
+        if(!can_accept_request(address))throw std::logic_error("DDR request table full");
+        if(address%config_.beat_bytes || address>UINT64_MAX-hw::kPhysicalVectorBytes)
+            throw std::invalid_argument("DMA vector alignment/range");
+    }
+    bool ready(RequestId id,bool write) const {
+        for(const auto& o:owners_)if(o.ticket==id && o.write==write) {
+            for(std::size_t i=0;i<o.count;++i)if(!master_.ticket_done(o.parts[i]))return false;
+            return master_.completion_ready(o.client) && master_.peek(o.client).ticket==id;
         }
-        write_completions_.push_back(
-            WriteCompletion {request.id, request.address});
+        return false;
     }
-
-    void write_payload(std::uint64_t address, const C2cVector& vector)
-    {
-        for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                const auto offset = tile * hw::kLanesPerTile + lane;
-                const std::uint64_t byte_address = address + offset;
-                pages_[byte_address / kStoragePageBytes]
-                    [static_cast<std::size_t>(
-                        byte_address % kStoragePageBytes)] =
-                    vector.payload[tile][lane];
-            }
+    AxiDmaMaster::Completion pop(RequestId id,bool write) {
+        if(!ready(id,write))throw std::logic_error("DDR owner completion not ready");
+        const auto it=std::find_if(owners_.begin(),owners_.end(),[&](const auto& o){return o.ticket==id;});
+        AxiDmaMaster::Completion c;c.ticket=id;c.address=it->address;c.write=write;
+        for(std::size_t i=0;i<it->count;++i) {
+            auto part=master_.pop(it->client);
+            if(part.ticket!=it->parts[i])throw std::logic_error("vector burst ownership");
+            c.bytes.insert(c.bytes.end(),part.bytes.begin(),part.bytes.end());
+            c.error|=part.error;c.aborted|=part.aborted;c.transferred_bytes+=part.transferred_bytes;
         }
+        owners_.erase(it);
+        return c;
     }
-
-    void require_request_credit() const
-    {
-        if (!can_accept_request()) {
-            throw std::logic_error("DDR4 request queue is full");
-        }
-    }
-
-    RequestId allocate_request_id()
-    {
-        if (next_request_id_ == 0) {
-            throw std::overflow_error("DDR4 request ID space is exhausted");
-        }
-        return next_request_id_++;
-    }
-    std::size_t latency_jitter(
-        RequestId id, std::uint64_t address, Operation operation) const
-    {
-        const std::size_t maximum = operation == Operation::Read
-            ? config_.read_latency_jitter_cycles
-            : config_.write_latency_jitter_cycles;
-        if (maximum == 0) return 0;
-        std::uint64_t value = config_.latency_random_seed
-            ^ (id * 0x9e3779b97f4a7c15ULL)
-            ^ (address + (operation == Operation::Write
-                    ? 0xd1b54a32d192ed03ULL : 0));
-        value ^= value >> 30;
-        value *= 0xbf58476d1ce4e5b9ULL;
-        value ^= value >> 27;
-        value *= 0x94d049bb133111ebULL;
-        value ^= value >> 31;
-        return static_cast<std::size_t>(
-            value % (static_cast<std::uint64_t>(maximum) + 1));
-    }
-
-    static void validate_vector_range(std::uint64_t address)
-    {
-        if (address > std::numeric_limits<std::uint64_t>::max()
-                - (hw::kPhysicalVectorBytes - 1)) {
-            throw std::out_of_range("DDR4 vector crosses the address space");
-        }
-    }
-
-    Ddr4Config config_{};
-    static constexpr std::uint64_t kStoragePageBytes = 4096;
-    using StoragePage = std::array<std::uint8_t, kStoragePageBytes>;
-    std::unordered_map<std::uint64_t, StoragePage> pages_{};
-    std::deque<Request> requests_{};
-    void transfer_active_beat(
-        ActiveRequest& active, std::size_t byte_count)
-    {
-        const auto offset = active.bytes_transferred;
-        for (std::size_t byte = 0; byte < byte_count; ++byte) {
-            const auto vector_offset = offset + byte;
-            const auto tile = vector_offset / hw::kLanesPerTile;
-            const auto lane = vector_offset % hw::kLanesPerTile;
-            const auto address = active.request.address + vector_offset;
-            if (active.request.operation == Operation::Read) {
-                const auto page = pages_.find(
-                    address / kStoragePageBytes);
-                active.request.vector.payload[tile][lane] =
-                    page == pages_.end() ? 0
-                    : page->second[static_cast<std::size_t>(
-                          address % kStoragePageBytes)];
-            } else {
-                pages_[address / kStoragePageBytes]
-                    [static_cast<std::size_t>(
-                        address % kStoragePageBytes)] =
-                    active.request.vector.payload[tile][lane];
-            }
-        }
-        active.bytes_transferred += byte_count;
-        if (active.request.operation == Operation::Read)
-            read_bytes_transferred_ += byte_count;
-        else
-            write_bytes_transferred_ += byte_count;
-        last_beat_ = BeatTrace {
-            active.request.id,
-            active.request.operation == Operation::Write,
-            active.request.address + offset,
-            byte_count,
-        };
-    }
-
-    std::vector<ActiveRequest> active_{};
-    std::deque<ReadCompletion> read_completions_{};
-    std::deque<WriteCompletion> write_completions_{};
-    std::optional<BeatTrace> last_beat_{};
-    RequestId next_request_id_{1};
-    std::size_t cycle_{0};
-    std::uint64_t bandwidth_remainder_{0};
-    std::size_t round_robin_cursor_{0};
-    std::uint64_t read_bytes_transferred_{0};
-    std::uint64_t write_bytes_transferred_{0};
+    std::uint8_t byte(std::uint64_t address) const {auto p=pages_.find(address/4096);return p==pages_.end()?0:p->second[address%4096];}
+    void put(std::uint64_t address,std::uint8_t value) {pages_[address/4096][address%4096]=value;}
+    bool clock_managed_{},low_prepared_{};
+    Ddr4Config config_;AxiDmaMaster master_;std::unique_ptr<AxiMemory> memory_;
+    std::unordered_map<std::uint64_t,std::array<std::uint8_t,4096>> pages_;
+    std::deque<Owner> owners_;std::size_t cycle_{};std::optional<BeatTrace> last_beat_;
 };
-
 } // namespace ftlpu

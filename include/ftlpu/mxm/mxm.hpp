@@ -4,6 +4,7 @@
 #include "ftlpu/core/bf16.hpp"
 #include "ftlpu/core/fp16.hpp"
 #include "ftlpu/core/stream_port.hpp"
+#include "ftlpu/core/timing.hpp"
 #include "ftlpu/mxm/accumulator.hpp"
 #include "ftlpu/mxm/array.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
@@ -13,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
@@ -21,7 +23,7 @@
 
 namespace ftlpu {
 
-class Mxm {
+class Mxm : public timing::ClockedModule {
 public:
     static constexpr std::size_t kWeightBuffers = MxmSupercell::kWeightBuffers;
     // Main's current MXM completes the local supercell dot product in one
@@ -47,10 +49,10 @@ public:
     Mxm(const Mxm&) = delete;
     Mxm& operator=(const Mxm&) = delete;
 
-    void reset()
+    void reset(std::size_t cycle = 0)
     {
         array_.reset();
-        control_.reset();
+        control_.reset(cycle);
         reset_datapath();
     }
 
@@ -81,9 +83,9 @@ public:
 
     bool idle() const noexcept
     {
-        if (!control_.idle() || !pipelines_empty() || decode_launch_) return false;
-        for (const auto& stage : decode_stages_) if (stage) return false;
-        for (const auto& stage : decode_output_pipeline_) if (stage) return false;
+        if (!control_.idle() || !pipelines_empty() || this->state().decode_launch) return false;
+        for (const auto& stage : this->state().decode_stages) if (stage) return false;
+        for (const auto& stage : this->state().decode_output_pipeline) if (stage) return false;
         return true;
     }
 
@@ -94,66 +96,29 @@ public:
 
     void reset_datapath()
     {
-        for (auto& column : east_pipeline_) {
-            for (auto& lane : column) {
-                lane.clear();
-            }
-        }
-        for (auto& buffer : accumulators_) {
-            for (auto& row : buffer) {
-                row.fill(0);
-            }
-        }
-        for (auto& buffer : contribution_counts_) {
-            for (auto& row : buffer) {
-                row.fill(0);
-            }
-        }
-        for (auto& row : last_computing_) {
-            row.fill(false);
-        }
-        for (auto& cursor : next_row_for_tile_) {
-            cursor.fill(0);
-        }
+        auto initial = DatapathState {};
+        initial.is_acc_valid.assign(hw::kMxmAccumulatorRows, {});
+        initial.is_acc_owned.assign(hw::kMxmAccumulatorRows, false);
+        datapath_state_->reset(std::move(initial));
         accumulator_.clear();
-        is_acc_valid_.assign(hw::kMxmAccumulatorRows, {});
-        is_acc_owned_.assign(hw::kMxmAccumulatorRows, false);
-        for (auto& buffer : decode_activation_buffers_) {
-            for (auto& tile : buffer) {
-                for (auto& cell : tile) {
-                    cell.fill(0.0f);
-                }
-            }
-        }
-        for (auto& buffer : decode_activation_valid_) {
-            for (auto& tile : buffer) {
-                for (auto& cell : tile) {
-                    cell.fill(false);
-                }
-            }
-        }
-        decode_launch_.reset();
-        for (auto& stage : decode_stages_) {
-            stage.reset();
-        }
-        for (auto& stage : decode_output_pipeline_) {
-            stage.reset();
-        }
-        decode_streaming_active_ = false;
-        is_mode_ = MxmIsMode::Block;
-        compute_active_by_buffer_.fill(false);
-        last_outputs_.clear();
-        active_ = false;
     }
 
-    void tick_datapath(
+    void low() override
+    {
+        throw std::logic_error(
+            "MXM LOW requires explicit stream ports from SystemPhase");
+    }
+
+    void low_datapath(
         StreamInputPort& input,
         StreamOutputPort& output,
         std::size_t mxm_id,
         std::ostream* os = nullptr,
         std::optional<std::size_t> log_tile = std::nullopt)
     {
-        last_outputs_.clear();
+        datapath_state_->prepare();
+        accumulator_.low();
+        this->state().last_outputs.clear();
 
         for (std::size_t tile = 0;
              tile < hw::kMxmSupercellsPerPlane;
@@ -173,8 +138,8 @@ public:
         }
         advance_decode_pipeline(input, output, mxm_id, os);
 
-        if (!active_ && control_.compute_active(0)) {
-            active_ = true;
+        if (!this->state().active && control_.compute_active(0)) {
+            this->state().active = true;
         }
 
         auto current_compute_active_by_buffer = std::array<bool, kWeightBuffers> {};
@@ -189,11 +154,11 @@ public:
             check_weight_buffer(weight_buffer);
             current_compute_active_by_buffer[weight_buffer] = true;
             const auto row_count = compute_row_count();
-            if (tile == 0 && !compute_active_by_buffer_[weight_buffer]) {
+            if (tile == 0 && !this->state().compute_active_by_buffer[weight_buffer]) {
                 reset_buffer_state(weight_buffer);
             }
-            const auto absolute_row = next_row_for_tile_[weight_buffer][tile];
-            next_row_for_tile_[weight_buffer][tile] += row_count;
+            const auto absolute_row = this->state().next_row_for_tile[weight_buffer][tile];
+            this->state().next_row_for_tile[weight_buffer][tile] += row_count;
             const auto row = absolute_row % hw::kMxmRows;
             if (tile == 0 && absolute_row >= hw::kMxmRows) {
                 for (std::size_t offset = 0; offset < row_count; ++offset) {
@@ -206,7 +171,7 @@ public:
                 tile,
                 stream_base,
                 compute.data_format);
-            east_pipeline_[0][tile].push_back(ActivationEvent {
+            this->state().east_pipeline[0][tile].push_back(ActivationEvent {
                 tile,
                 row,
                 weight_buffer,
@@ -241,7 +206,7 @@ public:
         std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane> computing {};
         for (std::size_t column_block = 0; column_block < hw::kMxmSupercellsPerPlane; ++column_block) {
             for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
-                for (const auto& event : east_pipeline_[column_block][tile]) {
+                for (const auto& event : this->state().east_pipeline[column_block][tile]) {
                     computing[tile][column_block] = true;
                     compute_column_block(event, column_block);
                     if (event.tile + 1 == hw::kMxmSupercellsPerPlane) {
@@ -254,16 +219,16 @@ public:
                 }
             }
         }
-        east_pipeline_ = std::move(next_pipeline);
-        last_computing_ = computing;
+        this->state().east_pipeline = std::move(next_pipeline);
+        this->state().last_computing = computing;
 
         for (std::size_t tile = 0; tile < hw::kMxmSupercellsPerPlane; ++tile) {
             const auto read = control_.accumulator_read_pulse(tile);
             if (!read.has_value()) continue;
             if (tile == 0 && read->destination == MxmAccumulatorDestination::Stream
-                && is_acc_owned_.at(read->address)
-                && !std::all_of(is_acc_valid_.at(read->address).begin(),
-                    is_acc_valid_.at(read->address).end(), [](bool valid) { return valid; }))
+                && this->state().is_acc_owned.at(read->address)
+                && !std::all_of(this->state().is_acc_valid.at(read->address).begin(),
+                    this->state().is_acc_valid.at(read->address).end(), [](bool valid) { return valid; }))
                 throw std::logic_error("ACC_READ attempted to output an incomplete IS result vector");
             const auto values = accumulator_.read(read->address, tile);
             if (read->destination == MxmAccumulatorDestination::Stream) {
@@ -280,16 +245,28 @@ public:
             }
             if (read->clear) {
                 accumulator_.clear_segment(read->address, tile);
-                is_acc_valid_.at(read->address)[tile] = false;
+                this->state().is_acc_valid.at(read->address)[tile] = false;
                 if (tile + 1 == hw::kMxmSupercellsPerPlane)
-                    is_acc_owned_.at(read->address) = false;
+                    this->state().is_acc_owned.at(read->address) = false;
             }
         }
 
-        if (active_ && pipelines_empty()) {
-            active_ = false;
+        if (this->state().active && pipelines_empty()) {
+            this->state().active = false;
         }
-        compute_active_by_buffer_ = current_compute_active_by_buffer;
+        this->state().compute_active_by_buffer = current_compute_active_by_buffer;
+    }
+
+    void validate_posedge() const override
+    {
+        datapath_state_->validate_commit();
+        accumulator_.validate_posedge();
+    }
+
+    void posedge() override
+    {
+        datapath_state_->commit();
+        accumulator_.posedge();
     }
 
     bool computing_cell(std::size_t tile, std::size_t column_block) const
@@ -298,12 +275,12 @@ public:
         if (column_block >= hw::kMxmSupercellsPerPlane) {
             throw std::out_of_range("MXM column block is outside the configured array");
         }
-        return last_computing_[tile][column_block];
+        return this->state().last_computing[tile][column_block];
     }
 
     const std::vector<ColumnOutput>& last_outputs() const
     {
-        return last_outputs_;
+        return this->state().last_outputs;
     }
 
 private:
@@ -353,6 +330,64 @@ private:
         ActivationBlock data{};
     };
 
+    struct DatapathState {
+        std::array<
+            std::array<
+                std::array<
+                    std::array<float, hw::kLanesPerTile>,
+                    hw::kMxmSupercellsPerPlane>,
+                hw::kMxmSupercellsPerPlane>,
+            kWeightBuffers>
+            decode_activation_buffers{};
+        std::array<
+            std::array<
+                std::array<
+                    std::array<bool, hw::kLanesPerTile>,
+                    hw::kMxmSupercellsPerPlane>,
+                hw::kMxmSupercellsPerPlane>,
+            kWeightBuffers>
+            decode_activation_valid{};
+        std::optional<DecodeWaveState> decode_launch{};
+        std::array<std::optional<DecodeWaveState>, kDecodePipelineStages>
+            decode_stages{};
+        std::array<std::optional<DecodeCompletedOutput>, hw::kTileRows>
+            decode_output_pipeline{};
+        bool decode_streaming_active{};
+        std::vector<std::array<bool, hw::kMxmSupercellsPerPlane>>
+            is_acc_valid{};
+        std::vector<bool> is_acc_owned{};
+        MxmIsMode is_mode{MxmIsMode::Block};
+        bool active{};
+        std::array<
+            std::array<std::deque<ActivationEvent>, hw::kMxmSupercellsPerPlane>,
+            hw::kMxmSupercellsPerPlane>
+            east_pipeline{};
+        std::array<
+            std::array<bool, hw::kMxmSupercellsPerPlane>,
+            hw::kMxmSupercellsPerPlane>
+            last_computing{};
+        std::array<
+            std::array<std::size_t, hw::kMxmSupercellsPerPlane>,
+            kWeightBuffers>
+            next_row_for_tile{};
+        std::array<bool, kWeightBuffers> compute_active_by_buffer{};
+        std::array<
+            std::array<std::array<float, hw::kMxmColumns>, hw::kMxmRows>,
+            kWeightBuffers>
+            accumulators{};
+        std::array<
+            std::array<std::array<std::size_t, hw::kMxmColumns>, hw::kMxmRows>,
+            kWeightBuffers>
+            contribution_counts{};
+        std::vector<ColumnOutput> last_outputs{};
+    };
+
+    DatapathState& state() { return datapath_state_->next_value(); }
+    const DatapathState& state() const noexcept
+    {
+        return datapath_state_->current();
+    }
+
     static void check_tile(std::size_t tile)
     {
         if (tile >= hw::kMxmSupercellsPerPlane) {
@@ -370,11 +405,11 @@ private:
     void reset_buffer_state(std::size_t weight_buffer)
     {
         check_weight_buffer(weight_buffer);
-        next_row_for_tile_[weight_buffer].fill(0);
-        for (auto& row : accumulators_[weight_buffer]) {
+        this->state().next_row_for_tile[weight_buffer].fill(0);
+        for (auto& row : this->state().accumulators[weight_buffer]) {
             row.fill(0.0f);
         }
-        for (auto& row : contribution_counts_[weight_buffer]) {
+        for (auto& row : this->state().contribution_counts[weight_buffer]) {
             row.fill(0.0f);
         }
     }
@@ -385,8 +420,8 @@ private:
         if (row >= hw::kMxmRows) {
             throw std::out_of_range("MXM accumulator row is outside the physical row set");
         }
-        accumulators_[weight_buffer][row].fill(0.0f);
-        contribution_counts_[weight_buffer][row].fill(0);
+        this->state().accumulators[weight_buffer][row].fill(0.0f);
+        this->state().contribution_counts[weight_buffer][row].fill(0);
     }
 
     static constexpr std::size_t compute_row_count()
@@ -469,10 +504,10 @@ private:
                 const auto bits = static_cast<std::uint16_t>(
                     static_cast<std::uint16_t>(low.data)
                     | (static_cast<std::uint16_t>(high.data) << 8));
-                decode_activation_buffers_[pulse.activation_buffer]
+                this->state().decode_activation_buffers[pulse.activation_buffer]
                                           [tile][column][lane] =
                     decode_mxm_16bit(bits, pulse.data_format);
-                decode_activation_valid_[pulse.activation_buffer]
+                this->state().decode_activation_valid[pulse.activation_buffer]
                                         [tile][column][lane] = true;
             }
         }
@@ -495,20 +530,20 @@ private:
         std::ostream* os)
     {
         check_weight_buffer(pulse.activation_buffer);
-        if (decode_launch_.has_value()) {
+        if (this->state().decode_launch.has_value()) {
             throw std::logic_error(
                 "MXM decode launched more than one wave in a cycle");
         }
-        if (decode_streaming_active_ && pulse.layout != is_mode_) {
+        if (this->state().decode_streaming_active && pulse.layout != this->state().is_mode) {
             throw std::logic_error(
                 "MXM decode layout cannot change while waves are in flight");
         }
         if (pulse.layout == MxmIsMode::Vector) {
             for (std::size_t stage = 0; stage + 1 < hw::kLanesPerTile; ++stage)
-                if (decode_stages_[stage].has_value())
+                if (this->state().decode_stages[stage].has_value())
                     throw std::logic_error("IS-vector waves require lane cycles between launches");
         }
-        decode_launch_ = DecodeWaveState {
+        this->state().decode_launch = DecodeWaveState {
             pulse.wave_id,
             pulse.activation_buffer,
             pulse.output_stream_base,
@@ -520,10 +555,10 @@ private:
             pulse.layout,
             {}};
         for (std::size_t column = 0; column < hw::kMxmIsColumns; ++column)
-            is_acc_owned_.at(pulse.accumulator_address
+            this->state().is_acc_owned.at(pulse.accumulator_address
                 + (pulse.accumulator_column + column) / hw::kMxmSupercellsPerPlane) = true;
-        decode_streaming_active_ = true;
-        is_mode_ = pulse.layout;
+        this->state().decode_streaming_active = true;
+        this->state().is_mode = pulse.layout;
         if (os != nullptr) {
             *os << "  MXM" << mxm_id
                 << " decode launch wave=" << pulse.wave_id
@@ -652,7 +687,7 @@ private:
             for (std::size_t lane = 0;
                  lane < hw::kLanesPerTile;
                  ++lane) {
-                if (!decode_activation_valid_[state.activation_buffer]
+                if (!this->state().decode_activation_valid[state.activation_buffer]
                                              [tile][column][lane]) {
                     throw std::logic_error(
                         "MXM decode stage used an unloaded broadcast activation vector");
@@ -666,13 +701,13 @@ private:
                      lane < hw::kLanesPerTile;
                      ++lane) {
                     partial +=
-                        decode_activation_buffers_[state.activation_buffer]
+                        this->state().decode_activation_buffers[state.activation_buffer]
                                                   [tile][column][lane]
                         * (*weights)[lane][output_lane];
                 }
                 state.partial[partial_column][output_lane] += partial;
             }
-            last_computing_[tile][column] = true;
+            this->state().last_computing[tile][column] = true;
             if (os != nullptr) {
                 *os << "  decode wave=" << state.wave_id
                     << " stage=" << stage
@@ -693,7 +728,7 @@ private:
                     if (output_lane >= hw::kLanesPerTile) continue;
                     float partial = 0.0f;
                     for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                        if (!decode_activation_valid_[state.activation_buffer][tile][column][lane])
+                        if (!this->state().decode_activation_valid[state.activation_buffer][tile][column][lane])
                             throw std::logic_error("IS-vector used an unloaded activation");
                         const auto word = input.consume_cell(tile, lane, column);
                         if (!word.valid)
@@ -701,10 +736,10 @@ private:
                         const auto weight = Bf16::from_float(
                             static_cast<float>(static_cast<std::int8_t>(word.data))
                             * state.dequant.scale()).to_float();
-                        partial += decode_activation_buffers_[state.activation_buffer][tile][column][lane] * weight;
+                        partial += this->state().decode_activation_buffers[state.activation_buffer][tile][column][lane] * weight;
                     }
                     state.partial[column][output_lane] += partial;
-                    last_computing_[tile][column] = true;
+                    this->state().last_computing[tile][column] = true;
                 }
             }
             return;
@@ -730,20 +765,20 @@ private:
             kDecodePipelineStages> {};
         auto completed = std::optional<DecodeCompletedOutput> {};
 
-        if (decode_launch_.has_value()) {
-            auto state = *decode_launch_;
+        if (this->state().decode_launch.has_value()) {
+            auto state = *this->state().decode_launch;
             execute_decode_stage(input, state, 0, os);
             next[0] = std::move(state);
         }
-        decode_launch_.reset();
+        this->state().decode_launch.reset();
 
         for (std::size_t stage = 1;
              stage < kDecodePipelineStages;
              ++stage) {
-            if (!decode_stages_[stage - 1].has_value()) {
+            if (!this->state().decode_stages[stage - 1].has_value()) {
                 continue;
             }
-            auto state = *decode_stages_[stage - 1];
+            auto state = *this->state().decode_stages[stage - 1];
             execute_decode_stage(input, state, stage, os);
             const auto stage_count = state.layout
                     == MxmIsMode::Block
@@ -766,7 +801,7 @@ private:
                         linear_segment % hw::kMxmSupercellsPerPlane;
                     accumulator_.accumulate(
                         address, segment, state.partial[column]);
-                    is_acc_valid_.at(address)[segment] = true;
+                    this->state().is_acc_valid.at(address)[segment] = true;
                 }
                 if (state.accumulator_destination
                     == MxmAccumulatorDestination::Stream) {
@@ -784,9 +819,9 @@ private:
                             accumulator_.read(address, segment);
                         if (state.accumulator_clear) {
                             accumulator_.clear_segment(address, segment);
-                            is_acc_valid_.at(address)[segment] = false;
+                            this->state().is_acc_valid.at(address)[segment] = false;
                             if (segment + 1 == hw::kMxmSupercellsPerPlane)
-                                is_acc_owned_.at(address) = false;
+                                this->state().is_acc_owned.at(address) = false;
                         }
                     }
                 } else {
@@ -803,13 +838,13 @@ private:
             }
         }
 
-        decode_stages_ = std::move(next);
-        decode_streaming_active_ = std::any_of(
-            decode_stages_.begin(),
-            decode_stages_.end(),
+        this->state().decode_stages = std::move(next);
+        this->state().decode_streaming_active = std::any_of(
+            this->state().decode_stages.begin(),
+            this->state().decode_stages.end(),
             [](const auto& stage) { return stage.has_value(); });
-        if (!decode_streaming_active_) {
-            is_mode_ = MxmIsMode::Block;
+        if (!this->state().decode_streaming_active) {
+            this->state().is_mode = MxmIsMode::Block;
         }
         advance_decode_output_pipeline(output, std::move(completed));
     }
@@ -822,16 +857,16 @@ private:
             std::optional<DecodeCompletedOutput>,
             hw::kTileRows> {};
         for (std::size_t tile = hw::kTileRows - 1; tile > 0; --tile) {
-            next[tile] = std::move(decode_output_pipeline_[tile - 1]);
+            next[tile] = std::move(this->state().decode_output_pipeline[tile - 1]);
         }
         next[0] = std::move(completed);
-        decode_output_pipeline_ = std::move(next);
+        this->state().decode_output_pipeline = std::move(next);
 
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-            if (!decode_output_pipeline_[tile].has_value()) {
+            if (!this->state().decode_output_pipeline[tile].has_value()) {
                 continue;
             }
-            const auto& output = *decode_output_pipeline_[tile];
+            const auto& output = *this->state().decode_output_pipeline[tile];
             for (std::size_t lane = 0;
                  lane < hw::kMxmSupercellColumns;
                  ++lane) {
@@ -878,19 +913,19 @@ private:
                                 lane,
                                 local_column,
                                 event.data_format));
-                    accumulators_[event.weight_buffer][row][global_column]
+                    this->state().accumulators[event.weight_buffer][row][global_column]
                         += partial;
                 }
-                ++contribution_counts_[event.weight_buffer][row][global_column];
+                ++this->state().contribution_counts[event.weight_buffer][row][global_column];
             }
         }
     }
 
-    bool column_output_ready(std::size_t weight_buffer, std::size_t row, std::size_t column_block) const
+    bool column_output_ready(std::size_t weight_buffer, std::size_t row, std::size_t column_block)
     {
         const auto global_column_base = column_block * hw::kMxmSupercellColumns;
         for (std::size_t local_column = 0; local_column < hw::kMxmSupercellColumns; ++local_column) {
-            if (contribution_counts_[weight_buffer][row][global_column_base + local_column]
+            if (this->state().contribution_counts[weight_buffer][row][global_column_base + local_column]
                 < hw::kMxmSupercellsPerPlane) {
                 return false;
             }
@@ -922,7 +957,7 @@ private:
                  lane < hw::kLanesPerTile;
                  ++lane) {
                 column_output.values[lane] =
-                    accumulators_[event.weight_buffer][row]
+                    this->state().accumulators[event.weight_buffer][row]
                                  [global_column_base + lane];
             }
             const auto address = event.accumulator_address
@@ -964,14 +999,14 @@ private:
                 accumulator_.clear_segment(address, column_block);
             }
             column_output.values = accumulated;
-            last_outputs_.push_back(column_output);
+            this->state().last_outputs.push_back(column_output);
         }
     }
 
     void check_column_output_ready(
         std::size_t weight_buffer,
         std::size_t row,
-        std::size_t column_block) const
+        std::size_t column_block)
     {
         if (column_output_ready(weight_buffer, row, column_block)) {
             return;
@@ -982,7 +1017,7 @@ private:
             + ":row=" + std::to_string(row)
             + ":count0="
             + std::to_string(
-                contribution_counts_[weight_buffer][row]
+                this->state().contribution_counts[weight_buffer][row]
                                     [global_column_base]);
         throw std::logic_error(
             "MXM automatic output reached column block "
@@ -1042,9 +1077,9 @@ private:
         }
     }
 
-    bool pipelines_empty() const
+    bool pipelines_empty()
     {
-        for (const auto& column : east_pipeline_) {
+        for (const auto& column : this->state().east_pipeline) {
             for (const auto& lane : column) {
                 if (!lane.empty()) {
                     return false;
@@ -1054,48 +1089,25 @@ private:
         return true;
     }
 
+    bool pipelines_empty() const
+    {
+        for (const auto& column : this->state().east_pipeline) {
+            for (const auto& lane : column) {
+                if (!lane.empty()) return false;
+            }
+        }
+        return true;
+    }
+
     MxmArray array_{};
     MxmAccumulator accumulator_{};
     MxmWeightDequantizer decode_dequantizer_{};
-    std::array<
-        std::array<
-            std::array<
-                std::array<float, hw::kLanesPerTile>,
-                hw::kMxmSupercellsPerPlane>,
-            hw::kMxmSupercellsPerPlane>,
-        kWeightBuffers>
-        decode_activation_buffers_{};
-    std::array<
-        std::array<
-            std::array<
-                std::array<bool, hw::kLanesPerTile>,
-                hw::kMxmSupercellsPerPlane>,
-            hw::kMxmSupercellsPerPlane>,
-        kWeightBuffers>
-        decode_activation_valid_{};
-    std::optional<DecodeWaveState> decode_launch_{};
-    std::array<std::optional<DecodeWaveState>, kDecodePipelineStages>
-        decode_stages_{};
-    std::array<
-        std::optional<DecodeCompletedOutput>,
-        hw::kTileRows>
-        decode_output_pipeline_{};
-    bool decode_streaming_active_{false};
-    // Simulation checks for partial IS rows; these are not tensor-level ops.
-    std::vector<std::array<bool, hw::kMxmSupercellsPerPlane>> is_acc_valid_;
-    std::vector<bool> is_acc_owned_;
-    MxmIsMode is_mode_{MxmIsMode::Block};
+    std::unique_ptr<timing::ClockedState<DatapathState>> datapath_state_{
+        std::make_unique<timing::ClockedState<DatapathState>>()};
     MxmControlSlice control_;
-    bool active_{false};
-    std::array<std::array<std::deque<ActivationEvent>, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane>
-        east_pipeline_{};
-    std::array<std::array<bool, hw::kMxmSupercellsPerPlane>, hw::kMxmSupercellsPerPlane> last_computing_{};
-    std::array<std::array<std::size_t, hw::kMxmSupercellsPerPlane>, kWeightBuffers> next_row_for_tile_{};
-    std::array<bool, kWeightBuffers> compute_active_by_buffer_{};
-    std::array<std::array<std::array<float, hw::kMxmColumns>, hw::kMxmRows>, kWeightBuffers> accumulators_{};
-    std::array<std::array<std::array<std::size_t, hw::kMxmColumns>, hw::kMxmRows>, kWeightBuffers>
-        contribution_counts_{};
-    std::vector<ColumnOutput> last_outputs_{};
 };
 
 } // namespace ftlpu
+
+
+

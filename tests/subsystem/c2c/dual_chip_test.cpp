@@ -8,14 +8,29 @@
 #include <cstdint>
 #include <deque>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+namespace ftlpu {
+struct C2cLinkBoundaryFixture {
+    static void seed_empty_link(C2cLink& link, std::uint64_t epoch, std::uint64_t sequence) {
+        link.epoch_ = epoch;
+        link.current_.issued = link.current_.rx_next = sequence;
+    }
+};
+}
+
 namespace {
 
 using namespace ftlpu;
+
+// Keep all eight lanes in distinct legal slices; preserve group-distance tests.
+static_assert(hw::kMemGroups >= 4);
+constexpr auto kMiddleLaneBase = hw::kMemSlicesPerGroup * (hw::kMemGroups / 2 - 1);
+constexpr auto kTxLaneBase = hw::kMemSliceColumns - 4 * hw::kMemSlicesPerGroup;
 
 void require(bool condition, const char* message)
 {
@@ -72,9 +87,12 @@ void test_rx_diagonal_pipeline_accepts_one_vector_per_cycle()
     }
 
     for (std::size_t cycle = 0; cycle < kVectorCount; ++cycle) {
-        fabric.begin_cycle();
+        fabric.low();
         rx.evaluate(fabric, transport);
-        fabric.commit_cycle();
+        rx.validate_posedge();
+        fabric.validate_posedge();
+        rx.posedge();
+        fabric.posedge();
 
         require(
             transport.received.size() == kVectorCount - cycle - 1,
@@ -139,9 +157,12 @@ void test_tx_diagonal_pipeline_emits_one_vector_per_cycle()
             }
         }
 
-        fabric.begin_cycle();
+        fabric.low();
         tx.evaluate(fabric, transport);
-        fabric.commit_cycle();
+        tx.validate_posedge();
+        fabric.validate_posedge();
+        tx.posedge();
+        fabric.posedge();
 
         const auto expected_completed = cycle + 1 < hw::kTileRows
             ? 0
@@ -177,7 +198,8 @@ void test_link_credit_and_serialization()
 
     link.send(vector);
     require(!link.can_send(), "C2C accepted a second vector without credit");
-    for (std::size_t cycle = 0; cycle < 5; ++cycle) {
+    const auto arrival_cycles = (hw::kPhysicalVectorBytes + 7) / 8 + 2;
+    for (std::size_t cycle = 1; cycle < arrival_cycles; ++cycle) {
         link.tick();
         require(!link.receive_ready(), "C2C vector arrived before serialization and flight completed");
     }
@@ -188,10 +210,10 @@ void test_link_credit_and_serialization()
     require(link.can_send(), "C2C RX pop did not return link credit");
 }
 
-void test_dual_chip_rx_notifies_mem_and_writes_sram()
+void test_dual_chip_rx_notifies_mem_and_writes_sram(bool reliable=false)
 {
     constexpr auto kStream = 5U;
-    constexpr auto kSourceSlice = 48U;
+    constexpr auto kSourceSlice = hw::kMemSliceColumns - hw::kMemSlicesPerGroup;
     constexpr auto kTargetSlice = 16U;
     constexpr auto kSourceRow = 23U;
     constexpr auto kTargetRow = 41U;
@@ -205,7 +227,11 @@ void test_dual_chip_rx_notifies_mem_and_writes_sram()
     auto system = std::make_unique<DualChipC2cSystem>(C2cLinkConfig {
         hw::kPhysicalVectorBytes,
         0,
-        2,
+        2, reliable ? 3U : 0U, 2, 1,
+    });
+    if(reliable) system->link_0_to_1().set_peer_fault_schedule([](auto,auto,auto attempt){
+        using F=C2cLink::FrameResult;
+        return attempt==0?F::Corrupt:attempt==1?F::LostAck:F::Good;
     });
     auto& source = system->chip(0);
     auto& destination = system->chip(1);
@@ -247,7 +273,8 @@ void test_dual_chip_rx_notifies_mem_and_writes_sram()
 
     bool observed_sync_wait = false;
     bool observed_sync_release = false;
-    for (std::size_t cycle = 0; cycle < 24; ++cycle) {
+    const auto transfer_cycles = 16 + 2 * hw::kTileRows + (reliable ? 24 : 0);
+    for (std::size_t cycle = 0; cycle < transfer_cycles; ++cycle) {
         system->tick();
         const auto action = destination.icu().mem_iq(target_queue).last_trace().action;
         observed_sync_wait = observed_sync_wait
@@ -256,6 +283,9 @@ void test_dual_chip_rx_notifies_mem_and_writes_sram()
             || action == IcuQueueAction::SyncRelease;
     }
 
+    if(reliable) require(system->link_0_to_1().peer_retries()==2 &&
+        system->link_0_to_1().peer_duplicates()==1 && !system->link_0_to_1().receive_ready()
+        && !system->link_0_to_1().awaiting_ack() && !system->link_0_to_1().peer_error(), "reliable peer did not retire exactly once");
     require(observed_sync_wait, "destination MEM did not wait on C2C receive");
     require(observed_sync_release, "C2C receive did not notify destination MEM ICU");
     require(source.c2c_endpoint(Hemisphere::East).tx().idle(),
@@ -286,7 +316,7 @@ void test_dual_chip_rx_notifies_mem_and_writes_sram()
 void test_dual_hemisphere_endpoints_transfer_in_parallel()
 {
     constexpr auto kStream = 7U;
-    constexpr auto kSourceSlice = 48U;
+    constexpr auto kSourceSlice = hw::kMemSliceColumns - hw::kMemSlicesPerGroup;
     constexpr auto kTargetSlice = 16U;
     constexpr auto kTargetGroup =
         kTargetSlice / hw::kMemSlicesPerGroup;
@@ -349,7 +379,8 @@ void test_dual_hemisphere_endpoints_transfer_in_parallel()
                 kTargetRows[source_index], StreamId::West(kStream)));
     }
 
-    for (std::size_t cycle = 0; cycle < 24; ++cycle) system->tick();
+    for (std::size_t cycle = 0; cycle < 16 + 2 * hw::kTileRows; ++cycle)
+        system->tick();
 
     for (std::size_t source_index = 0; source_index < hw::kHemispheres;
          ++source_index) {
@@ -373,6 +404,63 @@ void test_dual_hemisphere_endpoints_transfer_in_parallel()
     }
 }
 
+void test_reliable_window() {
+    using F=C2cLink::FrameResult;
+    C2cLink link({hw::kPhysicalVectorBytes/2,2,3,5,2,3});
+    link.set_peer_fault_schedule([](auto,auto seq,auto attempt){
+        return seq%2==0 && !attempt?F::LostAck:(!attempt?F::Lost:F::Good);
+    });
+    std::size_t sent=0,received=0;
+    for(unsigned t=0;t<512;++t) {
+        if(sent<10 && link.can_send()) {C2cVector v{}; v.vector_tag=sent++;link.send(v);}
+        if(t==80) require(sent==3 && !link.can_send() && link.receive_queue_size()==3
+            && !link.awaiting_ack(),"ACK improperly returned receive credit");
+        if(t>80 && t%4==0 && link.receive_ready())
+            require(link.pop_received().vector_tag==received++,"duplicate or out-of-order vector");
+        require(link.outstanding_vector_count()<=3,"overcommitted peer window");
+        link.tick();
+    }
+    require(sent==10 && received==10 && !link.peer_error() && !link.awaiting_ack()
+        && !link.outstanding_vector_count() && link.peer_duplicates()==5 && link.peer_retries()==10,
+        "failed peer window accounting");
+    link.set_peer_fault_schedule([](auto,auto,auto){return F::Corrupt;});
+    link.send({});
+    for(unsigned t=0;t<80;++t)link.tick();
+    require(link.peer_error() && link.awaiting_ack() && !link.receive_ready() && !link.can_send()
+        && link.peer_retries()==12,"retry limit silently retired a failed vector");
+    link.reset();link.set_peer_fault_schedule({});link.send({});
+    for(unsigned t=0;t<20;++t)link.tick();
+    require(!link.peer_error() && link.receive_ready() && !link.awaiting_ack(),"peer reset/restart");
+}
+
+void test_reliable_sequence_exhaustion() {
+    constexpr auto limit = std::numeric_limits<std::uint64_t>::max();
+    C2cLink link({hw::kPhysicalVectorBytes,1,2,5,2,2});
+    C2cLinkBoundaryFixture::seed_empty_link(link,limit-1,limit-1);
+    std::vector<std::pair<std::uint64_t,std::uint64_t>> seen;
+    link.set_peer_fault_schedule([&](auto epoch,auto seq,auto) {
+        seen.emplace_back(epoch,seq);
+        return C2cLink::FrameResult::Good;
+    });
+    auto transfer = [&](unsigned tag) {
+        link.send(make_vector(0,tag));
+        for(unsigned i=0;i<12;++i)link.tick();
+        require(link.pop_received().vector_tag==tag, "boundary payload");
+        for(unsigned i=0;i<12;++i)link.tick();
+        require(!link.awaiting_ack() && !link.outstanding_vector_count() &&
+                !link.receive_ready(), "boundary retirement");
+    };
+    transfer(7);
+    require(!link.can_send(), "sequence exhaustion wrapped in the same generation");
+    link.reset();
+    transfer(8);
+    bool refused=false;
+    try {link.reset();} catch(const std::overflow_error&) {refused=true;}
+    require(refused, "generation wrapped");
+    transfer(9);
+    require(seen==decltype(seen){{limit-1,limit-1},{limit,0},{limit,1}},
+            "generation exhaustion aliased old sequence or changed live state");
+}
 } // namespace
 
 int main()
@@ -381,6 +469,9 @@ try {
     test_tx_diagonal_pipeline_emits_one_vector_per_cycle();
     test_link_credit_and_serialization();
     test_dual_chip_rx_notifies_mem_and_writes_sram();
+    test_dual_chip_rx_notifies_mem_and_writes_sram(true);
+    test_reliable_window();
+    test_reliable_sequence_exhaustion();
     test_dual_hemisphere_endpoints_transfer_in_parallel();
     return 0;
 } catch (const std::exception& error) {

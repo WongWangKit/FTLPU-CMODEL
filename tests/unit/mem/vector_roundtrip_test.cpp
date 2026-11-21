@@ -57,7 +57,7 @@ int main()
         << " read_delay=" << kReadDelayCycles << '\n';
 
     for (std::size_t cycle = 0; cycle <= last_output_cycle; ++cycle) {
-        fabric->begin_cycle();
+        fabric->low();
         if (cycle < ftlpu::hw::kTileRows) {
             const auto bytes = tile_vector(cycle);
             input.write_payload_segment(cycle, stream, bytes);
@@ -84,7 +84,10 @@ int main()
             load_seen[transfer.tile] = true;
         }
         fabric->stage_linear_links();
-        fabric->commit_cycle();
+        mem->validate_posedge();
+        fabric->validate_posedge();
+        mem->posedge();
+        fabric->posedge();
         mem->log_cycle(log);
 
         if (cycle == store_cycle) {

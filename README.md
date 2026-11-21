@@ -91,7 +91,9 @@ decode attention resident layout intentionally remains on `Linear1x16`.
 ## Build
 
 The hardware target is defined once in
-[`config/ftlpu-lpu32.json`](config/ftlpu-lpu32.json). CMake validates this file
+[`config/ftlpu-lpu32-mixed.json`](config/ftlpu-lpu32-mixed.json) for a fresh default build.
+The native LPU32 and LPU16 decode targets remain explicit choices; select
+`config/ftlpu-lpu16-mixed.json` for the broad-workload LPU16 DMA defaults. CMake validates the selected file
 and generates the compile-time constants used by fixed-size CModel structures.
 Select another compatible target at configure time with
 `-DFTLPU_HARDWARE_CONFIG=<target.json>`. FTLPU-SOFTWARE uses the same cache

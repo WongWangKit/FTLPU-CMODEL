@@ -21,7 +21,7 @@ static std::size_t read_row(MemArrayModel& mem, StreamRegisterFabric& fabric,
     std::size_t reads=0,segments=0,issued=0;
     for(auto c=mem.cycle();c<=arrival+phases+T;++c) {
         assert(mem.cycle()==c && fabric.cycle()==c);
-        fabric.begin_cycle();
+        fabric.low();
         for(const auto& cmd:commands) if(cmd.cycle==c) {
             mem.enqueue_instruction(cmd.slice,cmd.bank,cmd.instruction); ++issued;
         }
@@ -52,7 +52,9 @@ static std::size_t read_row(MemArrayModel& mem, StreamRegisterFabric& fabric,
                     fabric.consume_segment(Layout::read_column,t,StreamId::West(stream+b),"test row sink");
             }
         }
-        fabric.stage_linear_links();fabric.commit_cycle();
+        fabric.stage_linear_links();
+        mem.validate_posedge(); fabric.validate_posedge();
+        mem.posedge(); fabric.posedge();
     }
     assert(issued==j.bytes() && reads==T*j.bytes() && segments==reads);
     assert(mem.idle() && fabric.empty());
@@ -228,16 +230,16 @@ static void negative()
     rejects([&]{SxmMatrixVxmPairAdapter wrong(j.dtype,4,2);});
     SxmMatrixVxmPairAdapter adapter(j.dtype,2,0);
     rejects([&]{adapter.streams(0,0);});
-    f->begin_cycle();rejects([&]{adapter.capture(*f,0,false,false,1);});f->commit_cycle();
+    f->low();rejects([&]{adapter.capture(*f,0,false,false,1);});f->validate_posedge(); f->posedge();
     // Low half accepted, but a high half two clocks later must be rejected.
-    f->begin_cycle();
+    f->low();
     StreamPayloadTileSegment byte{};byte.fill(0x5a);
     f->stage_payload_segment(Layout::read_column,0,StreamId::West(0),byte);
-    f->stage_payload_segment(Layout::read_column,0,StreamId::West(1),byte);f->commit_cycle();
-    f->begin_cycle();adapter.capture(*f,0,false,false,0);
-    rejects([&]{adapter.capture(*f,0,false,false,0);});f->commit_cycle();
-    f->begin_cycle();f->commit_cycle();
-    f->begin_cycle();rejects([&]{adapter.capture(*f,0,false,false,1);});f->commit_cycle();
+    f->stage_payload_segment(Layout::read_column,0,StreamId::West(1),byte);f->validate_posedge(); f->posedge();
+    f->low();adapter.capture(*f,0,false,false,0);
+    rejects([&]{adapter.capture(*f,0,false,false,0);});f->validate_posedge(); f->posedge();
+    f->low();f->validate_posedge(); f->posedge();
+    f->low();rejects([&]{adapter.capture(*f,0,false,false,1);});f->validate_posedge(); f->posedge();
     std::cout<<"PASS admission/missing_P/reset/Main_only/read_conflict/ranges/phase_order\n";
 }
 

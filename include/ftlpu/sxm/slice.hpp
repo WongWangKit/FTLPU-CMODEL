@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/stream_port.hpp"
+#include "ftlpu/core/timing.hpp"
 #include "ftlpu/sxm/distributor.hpp"
 #include "ftlpu/sxm/permute.hpp"
 #include "ftlpu/sxm/shift.hpp"
@@ -80,32 +81,77 @@ private:
 
 // SR-facing SXM functional slice.  It owns instruction issue state only; the
 // StreamRegisterFabric remains the sole owner of all live stream data.
-class SxmSlice {
+class SxmSlice : public timing::ClockedModule {
 public:
     static constexpr std::size_t kTransposeBytePlanes = 2;
     using UnitGroup = SxmUnitGroup<std::uint8_t>;
+
+private:
+    struct TransposeBank {
+        using Block = std::array<
+            std::array<StreamPayloadSliceVector, hw::kLanesPerTile>,
+            kTransposeBytePlanes>;
+
+        Block block{};
+        std::array<SxmInstruction::StreamList, hw::kTileRows> dst_streams{};
+        std::array<bool, hw::kTileRows> tile_ready{};
+        std::array<std::uint8_t, hw::kTileRows> input_row_mask{};
+        std::array<std::size_t, hw::kTileRows> ready_cycle{};
+    };
+
+    struct FanoutOutput {
+        std::size_t cycle;
+        std::size_t tile;
+        StreamPayloadTileSegment segment;
+        SxmStreamId stream;
+    };
+
+    struct State {
+        explicit State(SxmTransposeArchitecture architecture)
+        {
+            if (architecture == SxmTransposeArchitecture::WideStreaming)
+                wide.emplace();
+        }
+
+        std::optional<SxmWideTranspose> wide{};
+        UnitGroup units{};
+        std::vector<FanoutOutput> fanout_outputs{};
+        std::array<std::optional<SxmInstruction>, hw::kTileRows>
+            transpose_instruction_rows{};
+        std::optional<SxmInstruction> permute_instruction{};
+        TransposeBank transpose_bank{};
+    };
+
+public:
 
     explicit SxmSlice(SxmStreamPortMap ports,
         SxmTransposeArchitecture architecture = SxmTransposeArchitecture::LocalBlocks)
         : ports_(std::move(ports))
         , architecture_(architecture)
-        , wide_(architecture == SxmTransposeArchitecture::WideStreaming ? std::make_unique<SxmWideTranspose>() : nullptr)
+        , current_(std::make_unique<State>(architecture))
     {
     }
 
-    void reset()
+    SxmSlice(const SxmSlice&) = delete;
+    SxmSlice& operator=(const SxmSlice&) = delete;
+    SxmSlice(SxmSlice&&) = delete;
+    SxmSlice& operator=(SxmSlice&&) = delete;
+
+    void reset(std::size_t cycle = 0)
     {
-        units_.reset();
-        if(wide_)wide_->reset();
-        for (auto& instruction : transpose_instruction_rows_) instruction.reset();
-        permute_instruction_.reset();
-        transpose_bank_ = TransposeBank {};
-        fanout_outputs_.clear();
+        current_ = std::make_unique<State>(architecture_);
+        current_->units.reset(cycle);
+        next_.reset();
+        pending_issues_.clear();
+        active_fabric_ = nullptr;
+        low_started_ = false;
+        low_complete_ = false;
+        cycle_events_.clear();
     }
 
     std::size_t cycle() const noexcept
     {
-        return units_.cycle();
+        return current_->units.cycle();
     }
 
     SxmTransposeArchitecture transpose_architecture() const noexcept
@@ -115,71 +161,37 @@ public:
 
     bool idle() const noexcept
     {
-        if (wide_ && !wide_->idle()) return false;
-        if (units_.issued_count() != 0 || permute_instruction_
-            || !fanout_outputs_.empty()) return false;
-        for (const auto& row : transpose_instruction_rows_) if (row) return false;
+        if (!pending_issues_.empty()) return false;
+        const auto& state = *current_;
+        if (state.wide && !state.wide->idle()) return false;
+        if (state.units.issued_count() != 0 || state.permute_instruction
+            || !state.fanout_outputs.empty()) return false;
+        for (const auto& row : state.transpose_instruction_rows) if (row) return false;
         // A partially captured block still owns its source slot. Match the
         // VModel compat engine's occupied-row busy rule; drain must not wait
         // only for tile_ready (all eight rows).
-        for (const auto rows : transpose_bank_.input_row_mask) if (rows != 0) return false;
+        for (const auto rows : state.transpose_bank.input_row_mask) if (rows != 0) return false;
         return true;
     }
 
     bool can_issue(const SxmInstruction& instruction) const
     {
-        if (architecture_ == SxmTransposeArchitecture::WideStreaming) {
-            if (instruction.opcode == SxmOpcode::Transpose)
-                return wide_->can_issue(instruction,cycle())
-                    && units_.issued_count()==0 && !permute_instruction_;
-            if (wide_ && !wide_->idle()) return false;
-        }
-        if (instruction.opcode == SxmOpcode::Transpose) {
-            return is_streaming_transpose(instruction)
-                && !transpose_instruction_rows_[0].has_value();
-        }
-        if (instruction.opcode == SxmOpcode::Permute) {
-            return is_block_permute(instruction)
-                && !permute_instruction_.has_value();
-        }
-        return units_.can_issue(instruction);
+        if (low_started_) return false;
+        auto preview = *current_;
+        for (const auto& pending : pending_issues_)
+            issue_into(preview, pending);
+        return can_issue_from(preview, instruction);
     }
 
     void issue(SxmInstruction instruction)
     {
-        if (architecture_ == SxmTransposeArchitecture::WideStreaming) {
-            if (!can_issue(instruction)) throw std::logic_error("wide SXM instruction cannot issue");
-            if (instruction.opcode == SxmOpcode::Transpose) {
-                wide_->issue(instruction,cycle());return;
-            }
-        }
-        if (instruction.opcode == SxmOpcode::Transpose) {
-            if (!is_streaming_transpose(instruction)) {
-                throw std::invalid_argument(
-                    "SXM Transpose requires exactly 16 input and 16 output streams");
-            }
-            if (transpose_instruction_rows_[0].has_value()) {
-                throw std::logic_error("SXM transpose south row issued twice in one cycle");
-            }
-            check_uniform_direction(instruction.src_streams, "Transpose source");
-            check_uniform_direction(instruction.dst_streams, "Transpose destination");
-            transpose_instruction_rows_[0] = std::move(instruction);
-            return;
-        }
-        if (instruction.opcode == SxmOpcode::Permute) {
-            if (!is_block_permute(instruction)) {
-                throw std::invalid_argument(
-                    "SXM Permute requires exactly 16 input and 16 output streams");
-            }
-            if (permute_instruction_.has_value()) {
-                throw std::logic_error("SXM permute queue issued twice in one cycle");
-            }
-            check_uniform_direction(instruction.src_streams, "Permute source");
-            check_uniform_direction(instruction.dst_streams, "Permute destination");
-            permute_instruction_ = std::move(instruction);
-            return;
-        }
-        units_.issue(std::move(instruction));
+        if (low_started_)
+            throw std::logic_error("SXM instruction issue must precede LOW evaluation");
+        auto preview = *current_;
+        for (const auto& pending : pending_issues_)
+            issue_into(preview, pending);
+        issue_into(preview, instruction);
+        pending_issues_.push_back(std::move(instruction));
     }
 
     const SxmStreamPortMap& ports() const noexcept
@@ -192,7 +204,7 @@ public:
         if (tile >= hw::kTileRows) {
             throw std::out_of_range("SXM transpose instruction tile is outside the slice");
         }
-        return transpose_instruction_rows_[tile];
+        return current_->transpose_instruction_rows[tile];
     }
 
     void set_trace_enabled(bool enabled) noexcept
@@ -202,53 +214,90 @@ public:
 
     void evaluate(StreamRegisterFabric& fabric)
     {
+        if (active_fabric_ != nullptr || low_started_)
+            throw std::logic_error("SxmSlice LOW evaluated more than once");
+        active_fabric_ = &fabric;
+        low();
+    }
+
+    void low() override
+    {
+        if (active_fabric_ == nullptr)
+            throw std::logic_error("SxmSlice LOW requires an attached SR fabric");
+        auto& fabric = *active_fabric_;
         ports_.validate_for(fabric);
         if (!fabric.cycle_open()) {
             throw std::logic_error("SxmSlice::evaluate requires an open SR cycle");
         }
 
+        next_ = std::make_unique<State>(*current_);
+        for (auto& pending : pending_issues_)
+            issue_into(*next_, std::move(pending));
+        pending_issues_.clear();
+        low_started_ = true;
+
+        auto& state = *next_;
         cycle_events_.clear();
-        if (auto instruction=wide_ ? wide_->active_instruction() : std::nullopt) {
-            wide_->evaluate(fabric,cycle(),
+        if (auto instruction=state.wide ? state.wide->active_instruction() : std::nullopt) {
+            state.wide->evaluate(fabric,state.units.cycle(),
                 ports_.input_column(uniform_direction(instruction->src_streams,"wide source")),
                 ports_.output_column(uniform_direction(instruction->dst_streams,"wide destination")));
             if(trace_enabled_)cycle_events_.push_back("wide transpose input_fifo_bytes="
-                +std::to_string(wide_->input_buffer_bytes())+" output_fifo_bytes="
-                +std::to_string(wide_->output_buffer_bytes()));
+                +std::to_string(state.wide->input_buffer_bytes())+" output_fifo_bytes="
+                +std::to_string(state.wide->output_buffer_bytes()));
         }
 
         // Fanout traverses the same four superlane pipeline positions as a
         // MEM vector. Keep its output beat skew explicit rather than making
         // all tiles appear on the SR fabric in one cycle.
-        for (const auto& output : fanout_outputs_)
-            if (output.cycle == units_.cycle())
+        for (const auto& output : state.fanout_outputs)
+            if (output.cycle == state.units.cycle())
                 stage_block_segment(fabric, output.tile, output.segment,
                     output.stream, "SXM block fanout pipeline");
-        fanout_outputs_.erase(std::remove_if(fanout_outputs_.begin(), fanout_outputs_.end(),
-            [&](const auto& output) { return output.cycle <= units_.cycle(); }), fanout_outputs_.end());
+        state.fanout_outputs.erase(std::remove_if(state.fanout_outputs.begin(), state.fanout_outputs.end(),
+            [&](const auto& output) { return output.cycle <= state.units.cycle(); }), state.fanout_outputs.end());
 
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
             auto inputs = read_and_consume_inputs(fabric, tile);
-            const auto result = units_.evaluate(inputs);
+            const auto result = state.units.evaluate(inputs);
             write_outputs(fabric, tile, result);
         }
 
-        if (permute_instruction_.has_value()) {
+        if (state.permute_instruction.has_value()) {
             auto processed_tiles = std::array<bool, hw::kTileRows> {};
-            execute_block_permute(fabric, *permute_instruction_, processed_tiles);
+            execute_block_permute(fabric, *state.permute_instruction, processed_tiles);
             capture_transpose_inputs(fabric);
         } else {
             capture_transpose_inputs(fabric);
         }
 
-        permute_instruction_.reset();
-        units_.complete_cycle();
+        state.permute_instruction.reset();
+        state.units.complete_cycle();
         advance_transpose_instructions();
+        low_complete_ = true;
     }
+
+    void validate_posedge() const override
+    {
+        if (!low_started_ || !low_complete_ || !next_ || active_fabric_ == nullptr)
+            throw std::logic_error("SXM posedge requires one complete LOW evaluation");
+    }
+
+    void posedge() override
+    {
+        validate_posedge();
+        current_.swap(next_);
+        next_.reset();
+        active_fabric_ = nullptr;
+        low_started_ = false;
+        low_complete_ = false;
+    }
+
+    void high() override {}
 
     void log_cycle(std::ostream& os) const
     {
-        os << "sxm cycle " << (units_.cycle() == 0 ? 0 : units_.cycle() - 1) << '\n';
+        os << "sxm cycle " << (current_->units.cycle() == 0 ? 0 : current_->units.cycle() - 1) << '\n';
         if (cycle_events_.empty()) {
             os << "  idle\n";
             return;
@@ -296,17 +345,6 @@ public:
 private:
     using StreamState = UnitGroup::StreamState;
     using Evaluation = UnitGroup::Evaluation;
-    struct TransposeBank {
-        using Block = std::array<
-            std::array<StreamPayloadSliceVector, hw::kLanesPerTile>,
-            kTransposeBytePlanes>;
-
-        Block block{};
-        std::array<SxmInstruction::StreamList, hw::kTileRows> dst_streams{};
-        std::array<bool, hw::kTileRows> tile_ready{};
-        std::array<std::uint8_t, hw::kTileRows> input_row_mask{};
-        std::array<std::size_t, hw::kTileRows> ready_cycle{};
-    };
 
     static bool is_streaming_transpose(const SxmInstruction& instruction)
     {
@@ -355,10 +393,70 @@ private:
         static_cast<void>(uniform_direction(streams, role));
     }
 
+    bool can_issue_from(const State& state, const SxmInstruction& instruction) const
+    {
+        if (architecture_ == SxmTransposeArchitecture::WideStreaming) {
+            if (instruction.opcode == SxmOpcode::Transpose)
+                return state.wide->can_issue(instruction, state.units.cycle())
+                    && state.units.issued_count() == 0
+                    && !state.permute_instruction;
+            if (state.wide && !state.wide->idle()) return false;
+        }
+        if (instruction.opcode == SxmOpcode::Transpose) {
+            return is_streaming_transpose(instruction)
+                && !state.transpose_instruction_rows[0].has_value();
+        }
+        if (instruction.opcode == SxmOpcode::Permute) {
+            return is_block_permute(instruction)
+                && !state.permute_instruction.has_value();
+        }
+        return state.units.can_issue(instruction);
+    }
+
+    void issue_into(State& state, SxmInstruction instruction) const
+    {
+        if (architecture_ == SxmTransposeArchitecture::WideStreaming) {
+            if (!can_issue_from(state, instruction))
+                throw std::logic_error("wide SXM instruction cannot issue");
+            if (instruction.opcode == SxmOpcode::Transpose) {
+                state.wide->issue(instruction, state.units.cycle());
+                return;
+            }
+        }
+        if (instruction.opcode == SxmOpcode::Transpose) {
+            if (!is_streaming_transpose(instruction)) {
+                throw std::invalid_argument(
+                    "SXM Transpose requires exactly 16 input and 16 output streams");
+            }
+            if (state.transpose_instruction_rows[0].has_value()) {
+                throw std::logic_error("SXM transpose south row issued twice in one cycle");
+            }
+            check_uniform_direction(instruction.src_streams, "Transpose source");
+            check_uniform_direction(instruction.dst_streams, "Transpose destination");
+            state.transpose_instruction_rows[0] = std::move(instruction);
+            return;
+        }
+        if (instruction.opcode == SxmOpcode::Permute) {
+            if (!is_block_permute(instruction)) {
+                throw std::invalid_argument(
+                    "SXM Permute requires exactly 16 input and 16 output streams");
+            }
+            if (state.permute_instruction.has_value()) {
+                throw std::logic_error("SXM permute queue issued twice in one cycle");
+            }
+            check_uniform_direction(instruction.src_streams, "Permute source");
+            check_uniform_direction(instruction.dst_streams, "Permute destination");
+            state.permute_instruction = std::move(instruction);
+            return;
+        }
+        state.units.issue(std::move(instruction));
+    }
+
     void capture_transpose_inputs(StreamRegisterFabric& fabric)
     {
+        auto& state = next_state();
         for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-            const auto& instruction = transpose_instruction_rows_[tile];
+            const auto& instruction = state.transpose_instruction_rows[tile];
             if (instruction.has_value())
                 capture_transpose_input(fabric, tile, *instruction);
         }
@@ -397,7 +495,7 @@ private:
             return;
         }
 
-            auto& bank = transpose_bank_;
+            auto& bank = next_state().transpose_bank;
             if (bank.tile_ready[tile]) {
                 throw std::logic_error(
                     "SXM transpose buffer is full at tile "
@@ -435,7 +533,7 @@ private:
             }
         bank.tile_ready[tile] = bank.input_row_mask[tile]
             == static_cast<std::uint8_t>((1u << hw::kLanesPerTile) - 1u);
-        if (bank.tile_ready[tile]) bank.ready_cycle[tile] = units_.cycle();
+        if (bank.tile_ready[tile]) bank.ready_cycle[tile] = next_state().units.cycle();
         if (trace_enabled_) {
             std::ostringstream event;
             event << "transpose tile=" << tile
@@ -447,10 +545,11 @@ private:
 
     void advance_transpose_instructions()
     {
+        auto& rows = next_state().transpose_instruction_rows;
         for (std::size_t tile = hw::kTileRows - 1; tile > 0; --tile) {
-            transpose_instruction_rows_[tile] = std::move(transpose_instruction_rows_[tile - 1]);
+            rows[tile] = std::move(rows[tile - 1]);
         }
-        transpose_instruction_rows_[0].reset();
+        rows[0].reset();
     }
 
     void stage_block_segment(
@@ -539,11 +638,11 @@ private:
                 continue;
             const auto source_tile = block_permute_source_tile(
                 destination_tile, instruction.permute_map);
-            auto& bank = transpose_bank_;
+            auto& bank = next_state().transpose_bank;
             // A transpose result must spend one full cycle in its output
             // register before Permute may consume it.
             if (!bank.tile_ready[source_tile]
-                || bank.ready_cycle[source_tile] >= units_.cycle()) continue;
+                || bank.ready_cycle[source_tile] >= next_state().units.cycle()) continue;
             if (bank.dst_streams[source_tile] != instruction.src_streams) {
                 throw std::logic_error("SXM Permute source does not match the ready Transpose block");
             }
@@ -558,7 +657,8 @@ private:
             for (std::size_t row = first_row; row < row_end; ++row) {
                 for (std::size_t plane = 0; plane < kTransposeBytePlanes; ++plane) {
                     if (fanout && destination_tile != 0) {
-                        fanout_outputs_.push_back(FanoutOutput {units_.cycle() + destination_tile,
+                        next_state().fanout_outputs.push_back(FanoutOutput {
+                            next_state().units.cycle() + destination_tile,
                             destination_tile,
                             permute_block_segment(bank, plane, row, source_tile,
                                 destination_tile, instruction.permute_map),
@@ -595,16 +695,17 @@ private:
             || instruction.output_row + 1 == hw::kLanesPerTile) {
             if (instruction.output_tile == SxmInstruction::kAllOutputTiles) {
                 for (std::size_t tile = 0; tile < hw::kTileRows; ++tile) {
-                    if (!transpose_bank_.tile_ready[tile]
-                        || transpose_bank_.ready_cycle[tile] >= units_.cycle()
-                        || transpose_bank_.dst_streams[tile] != instruction.src_streams) continue;
-                    transpose_bank_.tile_ready[tile] = false;
-                    transpose_bank_.input_row_mask[tile] = 0;
+                    auto& bank = next_state().transpose_bank;
+                    if (!bank.tile_ready[tile]
+                        || bank.ready_cycle[tile] >= next_state().units.cycle()
+                        || bank.dst_streams[tile] != instruction.src_streams) continue;
+                    bank.tile_ready[tile] = false;
+                    bank.input_row_mask[tile] = 0;
                 }
             } else {
                 const auto source = block_permute_source_tile(instruction.output_tile, instruction.permute_map);
-                transpose_bank_.tile_ready[source] = false;
-                transpose_bank_.input_row_mask[source] = 0;
+                next_state().transpose_bank.tile_ready[source] = false;
+                next_state().transpose_bank.input_row_mask[source] = 0;
             }
         }
     }
@@ -618,7 +719,7 @@ private:
     {
         StreamState inputs{};
         std::array<bool, hw::kStreams> required{};
-        for (const auto& instruction : units_.issued_instructions()) {
+        for (const auto& instruction : next_state().units.issued_instructions()) {
             for (const auto stream : instruction.src_streams) {
                 required[stream.stream] = true;
             }
@@ -691,20 +792,26 @@ private:
 
     SxmStreamPortMap ports_;
     SxmTransposeArchitecture architecture_;
-    std::unique_ptr<SxmWideTranspose> wide_;
-    UnitGroup units_{};
-    struct FanoutOutput {
-        std::size_t cycle;
-        std::size_t tile;
-        StreamPayloadTileSegment segment;
-        SxmStreamId stream;
-    };
-    std::vector<FanoutOutput> fanout_outputs_;
-    std::array<std::optional<SxmInstruction>, hw::kTileRows> transpose_instruction_rows_{};
-    std::optional<SxmInstruction> permute_instruction_{};
-    TransposeBank transpose_bank_{};
+    std::unique_ptr<State> current_{};
+    std::unique_ptr<State> next_{};
+    std::vector<SxmInstruction> pending_issues_{};
+    StreamRegisterFabric* active_fabric_{};
+    bool low_started_{};
+    bool low_complete_{};
     std::vector<std::string> cycle_events_{};
     bool trace_enabled_{true};
+
+    State& next_state()
+    {
+        if (!next_) throw std::logic_error("SXM Next state is not prepared");
+        return *next_;
+    }
+
+    const State& next_state() const
+    {
+        if (!next_) throw std::logic_error("SXM Next state is not prepared");
+        return *next_;
+    }
 };
 
 } // namespace ftlpu
