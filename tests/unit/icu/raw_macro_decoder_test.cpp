@@ -1,7 +1,9 @@
 #include "ftlpu/icu/distributed_queue.hpp"
 #include "ftlpu/system/icu.hpp"
 
+#include "../../support/native_mem_golden.hpp"
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -28,20 +30,22 @@ std::size_t prime(Queue& queue)
     return cycles;
 }
 
-const std::vector<ftlpu::IcuRawImemWord96> kMemImage{
+using ftlpu::test::physical_mem_image;
+const std::vector<ftlpu::IcuRawImemWord96> kMemImage = physical_mem_image({
     {{{0x00000027u, 0x00000000u, 0x00000000u}}},
     {{{0x02000021u, 0x00000180u, 0x00303200u}}},
     {{{0x00000400u, 0x00000000u, 0x00000000u}}},
-};
+}, 1, 100);
 
 const std::vector<ftlpu::IcuRawImemWord128> kMxmLoadImage{
     {{{0x00000017u, 0x00000000u, 0x00000000u, 0x00000000u}}},
     {{{0x00000028u, 0x04000008u, 0x00000000u, 0x00000000u}}},
 };
 
+constexpr unsigned computeRow = ftlpu::hw::kMxmAccumulatorRows > 100 ? 100 : ftlpu::hw::kMxmAccumulatorRows / 2;
 const std::vector<ftlpu::IcuRawImemWord128> kMxmComputeImage{
     {{{0x00000017u, 0x00000000u, 0x00000000u, 0x00000000u}}},
-    {{{0x00000030u, 0x00040320u, 0x40004000u, 0x00000060u}}},
+    {{{0x00000030u, (0x00040000u | (computeRow<<3)), 0x40004000u, 0x00000060u}}},
 };
 
 const std::vector<ftlpu::IcuRawImemWord128> kMxmDequantImage{
@@ -49,24 +53,24 @@ const std::vector<ftlpu::IcuRawImemWord128> kMxmDequantImage{
     {{{0x00000010u, 0x0007f000u, 0x00000000u, 0x00000000u}}},
 };
 
-const std::vector<ftlpu::IcuRawImemWord96> kMemExtendedImage{
+const std::vector<ftlpu::IcuRawImemWord96> kMemExtendedImage = physical_mem_image({
     {{{0x00000017u, 0x00000000u, 0x00000000u}}},
-    {{{0x000000a0u, 0x00627ff8u, 0x40041ffeu}}},
+    {{{0x000000a0u, 0x00627ff8u, (0x40040000u | ((ftlpu::hw::kSramDepthRows/2-1)<<1))}}},
     {{{0x000c0000u, 0xfff80000u, 0x000bffffu}}},
     {{{0x38800000u, 0x01000001u, 0x00040000u}}},
-};
+}, 0, (ftlpu::hw::kSramDepthRows/2-1));
 
-const std::vector<ftlpu::IcuRawImemWord96> kMemCompactEscapeImage{
+const std::vector<ftlpu::IcuRawImemWord96> kMemCompactEscapeImage = physical_mem_image({
     {{{0x00000027u, 0x00000000u, 0x00000000u}}},
     {{{0x00000008u, 0x00030050u, 0x0011f020u}}},
     {{{0x00000100u, 0x00000000u, 0x00000000u}}},
-};
+}, 0, 10);
 
-const std::vector<ftlpu::IcuRawImemWord96> kMemWideEscapeImage{
+const std::vector<ftlpu::IcuRawImemWord96> kMemWideEscapeImage = physical_mem_image({
     {{{0x00000027u, 0x00000000u, 0x00000000u}}},
     {{{0x00000008u, 0x00030050u, 0x2cfff020u}}},
     {{{0x00040131u, 0x00000000u, 0x00000000u}}},
-};
+}, 0, 10);
 
 std::vector<ftlpu::DecodedIcuMacroContext<ftlpu::MemInstruction>>
 decode_mem_image(const std::vector<ftlpu::IcuRawImemWord96>& image)
@@ -150,10 +154,10 @@ try {
     require(memDdbLayout.instruction_bits == 32
             && memDdbLayout.schedule_bits == 192
             && memDdbLayout.next_start_cycle_bits == 32
-            && memDdbLayout.next_operand_bits == 13
+            && memDdbLayout.next_operand_bits == std::bit_width(hw::kSramDepthRows - 1)
             && memDdbLayout.expansion_state_bits == 6
             && memDdbLayout.delta_bits == 448
-            && memDdbLayout.entry_bits == 723,
+            && memDdbLayout.entry_bits == 710 + std::bit_width(hw::kSramDepthRows - 1),
         "MEM DDB physical layout has the wrong bit width");
     require(loadDdbLayout.entry_bits == 710
             && computeDdbLayout.entry_bits == 741
@@ -200,7 +204,7 @@ try {
     require(extended.size() == 1,
         "extended MEM image produced the wrong context count");
     require(extended[0].instruction.opcode == MemOpcode::Read
-            && extended[0].instruction.address == 4095
+            && extended[0].instruction.address == hw::kSramDepthRows / 2 - 1
             && extended[0].instruction.stream == 3,
         "extended MEM template reconstructed the wrong instruction");
     require(extended[0].schedule.start_cycle == 20
@@ -315,6 +319,19 @@ try {
             && kMemImage[0].bit(2) && !kMemImage[0].bit(3)
             && !kMemImage[0].bit(4) && kMemImage[0].bit(5),
         "raw word does not map lane-0 bit 0 to the first stream bit");
+    // Bit 1 gates execution. It is not a validity or reserved bit: the
+    // same image and nonzero command count must decode zero contexts.
+    auto disabledImage = kMemImage;
+    disabledImage[0].lanes[0] &= ~2u;
+    require(decode_mem_image(disabledImage).empty(), "disabled MEM image decoded a context");
+    for (const auto mask : {1u, 8u}) {
+        auto bad = kMemImage;
+        bad[0].lanes[0] ^= mask; // invalid or non-Macro mode
+        bool rejected = false;
+        try { (void)decode_mem_image(bad); }
+        catch (const StaticScheduleError&) { rejected = true; }
+        require(rejected, "invalid MEM control or mode accepted");
+    }
     auto invalidControlImage = kMemImage;
     invalidControlImage[0].lanes[0] |= 0x10000000u;
     bool rejectedReservedControl = false;
@@ -431,7 +448,7 @@ try {
         "raw MXM load decoder reconstructed the wrong instruction");
     require(computeIssue.has_value()
             && computeIssue->opcode == MxmControlOpcode::Compute
-            && computeIssue->accumulator_address == 100,
+            && computeIssue->accumulator_address == computeRow,
         "raw MXM compute decoder reconstructed the wrong instruction");
     require(dequantIssue.has_value()
             && dequantIssue->scale_bf16 == 0x3f80,
@@ -504,7 +521,7 @@ try {
             && memQueue->timed_issue_depth == 16
             && memQueue->timed_issue_lookahead == 2,
         "raw Macro per-queue statistics lost RTL FIFO geometry");
-    require(memQueue->ddb_entry_bits == 723
+    require(memQueue->ddb_entry_bits == memDdbLayout.entry_bits
             && loadQueue->ddb_entry_bits == 710
             && computeQueue->ddb_entry_bits == 741
             && dequantQueue->ddb_entry_bits == 630,

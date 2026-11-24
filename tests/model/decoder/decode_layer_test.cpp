@@ -24,6 +24,10 @@ constexpr std::size_t kDecodePosition = kPrefillLength;
 constexpr std::size_t kSequenceLength = kPrefillLength + 1;
 constexpr std::size_t kHidden = 32;
 constexpr std::size_t kIntermediate = 64;
+// Keep the mathematical model fixed; tile its K/N axes over a native array.
+constexpr std::size_t nativeWidth = ftlpu::hw::kMxmRows;
+static_assert(nativeWidth == ftlpu::hw::kMxmColumns);
+constexpr std::size_t panels = (kHidden+nativeWidth-1)/nativeWidth;
 constexpr float kEpsilon = 1.0e-5f;
 const float kAttentionScale =
     1.0f / std::sqrt(static_cast<float>(kHidden));
@@ -182,72 +186,78 @@ public:
         const Matrix& weights,
         const std::string& label)
     {
-        system_.reset_execution_state();
-        initialize_weight_tile(weights);
-        initialize_vector(kActivationSlices, kActivationAddress, input);
-
-        OfflineSchedule schedule(system_.icu());
-        constexpr std::size_t kLoadStart = 20;
-        for (std::size_t block = 0;
-             block < ftlpu::hw::kMxmSupercellsPerPlane;
-             ++block) {
-            const auto iw_cycle = kLoadStart + block;
-            for (std::size_t stream = 0;
-                 stream < ftlpu::hw::kMxmLoadStreamsPerCycle;
-                 ++stream) {
-                const auto slice = kWeightSlices[stream];
-                schedule.mem_at(
-                    mem_queue(slice),
-                    iw_cycle - east_read_to_mxm_latency(slice),
-                    ftlpu::MemInstruction::Read(
-                        kWeightAddressBase + block,
-                        ftlpu::StreamId::East(stream)));
-            }
-            schedule.mxm_load_at(
-                iw_cycle,
-                ftlpu::MxmControlInstruction::IWDirect16(0, block));
-        }
-
-        constexpr std::size_t kComputeCycle = kLoadStart + 10;
-        for (std::size_t byte = 0;
-             byte < kActivationSlices.size();
-             ++byte) {
-            const auto slice = kActivationSlices[byte];
-            schedule.mem_at(
-                mem_queue(slice),
-                kComputeCycle - east_read_to_mxm_latency(slice),
-                ftlpu::MemInstruction::Read(
-                    kActivationAddress,
-                    ftlpu::StreamId::East(byte)));
-        }
-        schedule.mxm_compute_at(
-            kComputeCycle,
-            ftlpu::MxmControlInstruction::Compute(
-                0,
-                0,
-                0,
-                kAccumulatorAddress,
-                1,
-                ftlpu::MxmAccumulatorDestination::Sram));
-
-        const auto phase_start = total_cycles_;
-        trace(
-            phase_start + kLoadStart,
-            phase_start + kLoadStart + ftlpu::hw::kMxmSupercellsPerPlane,
-            "MXM.E0.Load",
-            label + ": 4 x IW wide");
-        trace(
-            phase_start + kComputeCycle,
-            phase_start + kComputeCycle + 1,
-            "MXM.E0.Compute",
-            label + ": one decode activation");
-        run(schedule.end_cycle() + 16, label);
-
         Vector output{};
-        for (std::size_t column = 0; column < kHidden; ++column) {
-            output[column] =
-                system_.mxm_unit(0).accumulator().value(
-                    kAccumulatorAddress, column);
+        for(std::size_t n=0;n<panels;++n) {
+            system_.reset_execution_state();
+
+            initialize_vector(kActivationSlices, kActivationAddress, input);
+
+            OfflineSchedule schedule(system_.icu());
+            for(std::size_t k=0;k<panels;++k) {
+                const auto weightBase=kWeightAddressBase+k*ftlpu::hw::kMxmSupercellsPerPlane;
+                initialize_weight_tile(weights,k,n,weightBase);
+                const std::size_t kLoadStart = 20+k*(32+nativeWidth);
+                for (std::size_t block = 0;
+                     block < ftlpu::hw::kMxmSupercellsPerPlane;
+                     ++block) {
+                    const auto iw_cycle = kLoadStart + block;
+                    for (std::size_t stream = 0;
+                         stream < ftlpu::hw::kMxmLoadStreamsPerCycle;
+                         ++stream) {
+                        const auto slice = kWeightSlices[stream];
+                        schedule.mem_at(
+                            mem_queue(slice),
+                            iw_cycle - east_read_to_mxm_latency(slice),
+                            ftlpu::MemInstruction::Read(
+                                weightBase + block,
+                                ftlpu::StreamId::East(stream)));
+                    }
+                    schedule.mxm_load_at(
+                        iw_cycle,
+                        ftlpu::MxmControlInstruction::IWDirect16(0, block));
+                }
+
+                const std::size_t kComputeCycle = kLoadStart + 10;
+                for (std::size_t byte = 0;
+                     byte < kActivationSlices.size();
+                     ++byte) {
+                    const auto slice = kActivationSlices[byte];
+                    schedule.mem_at(
+                        mem_queue(slice),
+                        kComputeCycle - east_read_to_mxm_latency(slice),
+                        ftlpu::MemInstruction::Read(
+                            kActivationAddress+k*kSequenceLength,
+                            ftlpu::StreamId::East(byte)));
+                }
+                schedule.mxm_compute_at(
+                    kComputeCycle,
+                    ftlpu::MxmControlInstruction::Compute(
+                        0,
+                        0,
+                        0,
+                        kAccumulatorAddress,
+                        1,
+                        ftlpu::MxmAccumulatorDestination::Sram,ftlpu::MxmDataFormat::Float16,k==0));
+
+                const auto phase_start = total_cycles_;
+                trace(
+                    phase_start + kLoadStart,
+                    phase_start + kLoadStart + ftlpu::hw::kMxmSupercellsPerPlane,
+                    "MXM.E0.Load",
+                    label + ": native IW sweep");
+                trace(
+                    phase_start + kComputeCycle,
+                    phase_start + kComputeCycle + 1,
+                    "MXM.E0.Compute",
+                    label + ": one decode activation");
+            }
+            run(schedule.end_cycle() + 16, label);
+
+            for (std::size_t column = 0; column < nativeWidth && n*nativeWidth+column < kHidden; ++column) {
+                output[n*nativeWidth+column] =
+                    system_.mxm_unit(0).accumulator().value(
+                        kAccumulatorAddress, column);
+            }
         }
         require_close(output, reference_gemv(input, weights), label);
         return output;
@@ -272,95 +282,97 @@ public:
         initialize_vector(kColumnSlices, kColumnAddress, query);
 
         OfflineSchedule schedule(system_.icu());
-        constexpr std::size_t kLoadStart = 20;
-        for (std::size_t block = 0;
-             block < ftlpu::hw::kMxmSupercellsPerPlane;
-             ++block) {
-            const auto iw_cycle = kLoadStart + block;
-            for (std::size_t stream = 0;
-                 stream < ftlpu::hw::kMxmLoadStreamsPerCycle;
-                 ++stream) {
-                const auto slice = kWeightSlices[stream];
+        for(std::size_t k=0;k<panels;++k) {
+            const std::size_t kLoadStart = 20+k*(length+64);
+            for (std::size_t block = 0;
+                 block < ftlpu::hw::kMxmSupercellsPerPlane;
+                 ++block) {
+                const auto iw_cycle = kLoadStart + block;
+                for (std::size_t stream = 0;
+                     stream < ftlpu::hw::kMxmLoadStreamsPerCycle;
+                     ++stream) {
+                    const auto slice = kWeightSlices[stream];
+                    schedule.mem_at(
+                        mem_queue(slice),
+                        iw_cycle - east_read_to_mxm_latency(slice),
+                        ftlpu::MemInstruction::Read(
+                            kWeightAddressBase + block,
+                            ftlpu::StreamId::East(stream)));
+                }
+                schedule.mxm_load_at(
+                    iw_cycle,
+                    ftlpu::MxmControlInstruction::IWDirect16(0, block));
+            }
+
+            const std::size_t kColumnCycle = kLoadStart + 8;
+            for (std::size_t byte = 0; byte < kColumnSlices.size(); ++byte) {
+                const auto slice = kColumnSlices[byte];
                 schedule.mem_at(
                     mem_queue(slice),
-                    iw_cycle - east_read_to_mxm_latency(slice),
+                    kColumnCycle - east_read_to_mxm_latency(slice),
                     ftlpu::MemInstruction::Read(
-                        kWeightAddressBase + block,
-                        ftlpu::StreamId::East(stream)));
+                        kColumnAddress+k*kSequenceLength,
+                        ftlpu::StreamId::East(byte)));
             }
             schedule.mxm_load_at(
-                iw_cycle,
-                ftlpu::MxmControlInstruction::IWDirect16(0, block));
-        }
+                kColumnCycle,
+                ftlpu::MxmControlInstruction::IWColumnDirect16(0, 0, 0));
 
-        constexpr std::size_t kColumnCycle = kLoadStart + 8;
-        for (std::size_t byte = 0; byte < kColumnSlices.size(); ++byte) {
-            const auto slice = kColumnSlices[byte];
-            schedule.mem_at(
-                mem_queue(slice),
-                kColumnCycle - east_read_to_mxm_latency(slice),
-                ftlpu::MemInstruction::Read(
-                    kColumnAddress,
-                    ftlpu::StreamId::East(byte)));
-        }
-        schedule.mxm_load_at(
-            kColumnCycle,
-            ftlpu::MxmControlInstruction::IWColumnDirect16(0, 0, 0));
-
-        constexpr std::size_t kComputeStart = kColumnCycle + 8;
-        for (std::size_t block_start = 0;
-             block_start < length;
-             block_start += ftlpu::hw::kMxmRows) {
-            const auto count = std::min(
-                ftlpu::hw::kMxmRows,
-                length - block_start);
-            const auto compute_cycle = kComputeStart + block_start;
-            for (std::size_t byte = 0;
-                 byte < kKeyCacheSlices.size();
-                 ++byte) {
-                const auto slice = kKeyCacheSlices[byte];
-                schedule.mem_repeat_at(
-                    mem_queue(slice),
-                    compute_cycle - east_read_to_mxm_latency(slice),
-                    ftlpu::MemInstruction::Read(
-                        base + block_start,
-                        ftlpu::StreamId::East(byte)),
-                    count,
-                    1);
+            const std::size_t kComputeStart = kColumnCycle + 8;
+            for (std::size_t block_start = 0;
+                 block_start < length;
+                 block_start += ftlpu::hw::kMxmRows) {
+                const auto count = std::min(
+                    ftlpu::hw::kMxmRows,
+                    length - block_start);
+                const auto compute_cycle = kComputeStart + block_start;
+                for (std::size_t byte = 0;
+                     byte < kKeyCacheSlices.size();
+                     ++byte) {
+                    const auto slice = kKeyCacheSlices[byte];
+                    schedule.mem_repeat_at(
+                        mem_queue(slice),
+                        compute_cycle - east_read_to_mxm_latency(slice),
+                        ftlpu::MemInstruction::Read(
+                            k*kSequenceLength+base + block_start,
+                            ftlpu::StreamId::East(byte)),
+                        count,
+                        1);
+                }
+                schedule.mxm_compute_at(
+                    compute_cycle,
+                    ftlpu::MxmControlInstruction::Compute(
+                        0,
+                        0,
+                        0,
+                        kAccumulatorAddress + block_start,
+                        1,
+                        ftlpu::MxmAccumulatorDestination::Sram,ftlpu::MxmDataFormat::Float16,k==0),
+                    count);
             }
-            schedule.mxm_compute_at(
-                compute_cycle,
-                ftlpu::MxmControlInstruction::Compute(
-                    0,
-                    0,
-                    0,
-                    kAccumulatorAddress + block_start,
-                    1,
-                    ftlpu::MxmAccumulatorDestination::Sram),
-                count);
-        }
 
-        const auto phase_start = total_cycles_;
-        trace(
-            phase_start + kLoadStart,
-            phase_start + kLoadStart + ftlpu::hw::kMxmSupercellsPerPlane,
-            "MXM.E0.Load",
-            "QK zero template: 4 x IW wide");
-        trace(
-            phase_start + kColumnCycle,
-            phase_start + kColumnCycle + ftlpu::hw::kTileRows,
-            "MXM.E0.Load",
-            "decode Q: IWColumn inner=0 streams=2");
-        trace(
-            phase_start + kComputeStart,
-            phase_start + kComputeStart + length,
-            "MEM.E.Read",
-            "stream K cache from row " + std::to_string(base));
-        trace(
-            phase_start + kComputeStart,
-            phase_start + kComputeStart + length,
-            "MXM.E0.Compute",
-            "QK decode rows: " + std::to_string(length));
+            const auto phase_start = total_cycles_;
+            trace(
+                phase_start + kLoadStart,
+                phase_start + kLoadStart + ftlpu::hw::kMxmSupercellsPerPlane,
+                "MXM.E0.Load",
+                "QK zero template: native IW sweep");
+            trace(
+                phase_start + kColumnCycle,
+                phase_start + kColumnCycle + ftlpu::hw::kTileRows,
+                "MXM.E0.Load",
+                "decode Q: IWColumn inner=0 streams=2");
+            trace(
+                phase_start + kComputeStart,
+                phase_start + kComputeStart + length,
+                "MEM.E.Read",
+                "stream K cache from row " + std::to_string(base));
+            trace(
+                phase_start + kComputeStart,
+                phase_start + kComputeStart + length,
+                "MXM.E0.Compute",
+                "QK decode rows: " + std::to_string(length));
+        }
         run(schedule.end_cycle() + 16, "QK decode");
 
         for (std::size_t offset = 0; offset < length; ++offset) {
@@ -462,7 +474,7 @@ private:
         }
     }
 
-    void initialize_weight_tile(const Matrix& weights)
+    void initialize_weight_tile(const Matrix& weights,std::size_t k=0,std::size_t n=0,std::size_t weightBase=kWeightAddressBase)
     {
         for (std::size_t block = 0;
              block < ftlpu::hw::kMxmSupercellsPerPlane;
@@ -482,17 +494,17 @@ private:
                             block * ftlpu::hw::kMxmSupercellColumns
                             + local_column;
                         const auto bits =
-                            fp16_bits(weights[row][column]);
+                            fp16_bits((k*nativeWidth+row < kHidden && n*nativeWidth+column < kHidden) ? weights[k*nativeWidth+row][n*nativeWidth+column] : 0);
                         system_.initialize_mem_sram_lane_byte(
                             kWeightSlices[local_column * 2],
                             tile,
-                            kWeightAddressBase + block,
+                            weightBase + block,
                             lane,
                             static_cast<std::uint8_t>(bits & 0xffu));
                         system_.initialize_mem_sram_lane_byte(
                             kWeightSlices[local_column * 2 + 1],
                             tile,
-                            kWeightAddressBase + block,
+                            weightBase + block,
                             lane,
                             static_cast<std::uint8_t>(bits >> 8));
                     }
@@ -506,6 +518,7 @@ private:
         std::size_t address,
         const Vector& values)
     {
+        for (std::size_t panel=0;panel<panels;++panel)
         for (std::size_t tile = 0;
              tile < ftlpu::hw::kTileRows;
              ++tile) {
@@ -513,18 +526,18 @@ private:
                  lane < ftlpu::hw::kLanesPerTile;
                  ++lane) {
                 const auto index =
-                    tile * ftlpu::hw::kLanesPerTile + lane;
-                const auto bits = fp16_bits(values[index]);
+                    panel*nativeWidth+tile * ftlpu::hw::kLanesPerTile + lane;
+                const auto bits = fp16_bits(index<kHidden ? values[index] : 0);
                 system_.initialize_mem_sram_lane_byte(
                     slices[0],
                     tile,
-                    address,
+                    panel*kSequenceLength+address,
                     lane,
                     static_cast<std::uint8_t>(bits & 0xffu));
                 system_.initialize_mem_sram_lane_byte(
                     slices[1],
                     tile,
-                    address,
+                    panel*kSequenceLength+address,
                     lane,
                     static_cast<std::uint8_t>(bits >> 8));
             }
@@ -536,7 +549,8 @@ private:
         std::size_t token,
         std::size_t dimension) const
     {
-        const auto tile = dimension / ftlpu::hw::kLanesPerTile;
+        token += (dimension/nativeWidth)*kSequenceLength;
+        const auto tile = dimension % nativeWidth / ftlpu::hw::kLanesPerTile;
         const auto lane = dimension % ftlpu::hw::kLanesPerTile;
         const auto low = system_.read_mem_sram_lane_byte(
             slices[0], tile, token, lane);

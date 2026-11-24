@@ -109,7 +109,19 @@ void test_feedback_2_to_8()
                 value);
         }
     }
+    constexpr auto feedbackTile=VxmSlice::kTileCount > 2 ? 2u : VxmSlice::kTileCount-1;
+    const auto checkFeedback = [&] {
+        if (slice.cycle() != feedbackTile + 1) return;
+        assert(slice.instruction_at(0, feedbackTile));
+        const auto propagated_feedback =
+            VxmCompactInstructionCodec::decode(
+                0, *slice.instruction_at(0, feedbackTile));
+        assert(propagated_feedback.chain_depth == VxmChainDepth::Eight);
+        assert(propagated_feedback.instruction.lhs.kind
+               == VxmLaneOperandKind::Feedback);
+    };
     tick_with_scheduled_inputs(slice, inputs);
+    checkFeedback();
     // Old C0/C2/C4/C6 heads execute; new packets decode.
     record("input heads execute");
 
@@ -118,14 +130,7 @@ void test_feedback_2_to_8()
     tick_with_scheduled_inputs(slice, inputs);
     // Old tails retire and are captured at the same edge.
     record("depth transition");
-
-    assert(slice.instruction_at(0, 2));
-    const auto propagated_feedback =
-        VxmCompactInstructionCodec::decode(
-            0, *slice.instruction_at(0, 2));
-    assert(propagated_feedback.chain_depth == VxmChainDepth::Eight);
-    assert(propagated_feedback.instruction.lhs.kind
-           == VxmLaneOperandKind::Feedback);
+    checkFeedback();
 
     const auto& lane0 = slice.superlane(0).lane(0);
     assert(lane0.chain_depth() == VxmChainDepth::Eight);
@@ -222,18 +227,24 @@ int main()
         assert((*slice.required_streams_at(0))[stream]);
     }
 
+    const auto checkWave = [&] {
+        const auto stage=slice.cycle();
+        if (stage < VxmSlice::kTileCount) assert(slice.instruction_at(0, stage));
+    };
     slice.tick();
+    checkWave();
     // Instruction reaches tile 0 and spends one cycle decoding.
     assert(!slice.output_at(0));
     tick_with_scheduled_inputs(slice, input);
+    checkWave();
     assert(!slice.output_at(0));
     tick_with_scheduled_inputs(slice, input);
+    checkWave();
     assert(!slice.output_at(0));
 
     // The compact instruction row propagates one Superlane per cycle; each
     // destination decodes it locally. The INT8 result is still in its fixed
     // one-cycle tail quantizer here.
-    assert(slice.instruction_at(0, 3).has_value());
     assert(slice.cycle() == 3);
 
     tick_with_scheduled_inputs(slice, input);

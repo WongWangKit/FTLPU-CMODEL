@@ -1,5 +1,22 @@
 {
   "schema_version": 2,
+  "icu": {
+    "c2c_imem_depth": 4096,
+    "vxm_imem_depth": 256,
+    "sxm_imem_depth": 1024,
+    "mxm_imem_depth": 16384,
+    "mem_imem_depth": 320,
+    "queue_control_version": 1,
+    "queue_control_capacity": 16,
+    "queue_control_cache_depth": 4,
+    "queue_control_read_latency": 2,
+    "queue_control_read_ports": 1,
+    "queue_control_storage_version": 1,
+    "queue_control_pool_capacity": 512,
+    "queue_control_pool_read_ii": 1,
+    "common_barrier_encoding_version": 0,
+    "common_barrier_capacity": 0
+  },
   "target": {
     "name": "ftlpu-lpu16-mixed"
   },

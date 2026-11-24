@@ -103,7 +103,7 @@ int main()
 
     auto column_array = std::make_unique<ftlpu::MxmArray>();
     ftlpu::MxmControlSlice column_control(*column_array);
-    constexpr std::size_t kTargetSupercellColumn = 2;
+    constexpr std::size_t kTargetSupercellColumn = ftlpu::hw::kMxmSupercellsPerPlane / 2;
     for (std::size_t inner_column = 0;
          inner_column < ftlpu::hw::kMxmSupercellColumns;
          ++inner_column) {
@@ -240,13 +240,15 @@ int main()
     }
 
     const auto text = log.str();
+    const auto last = std::to_string(ftlpu::hw::kMxmSupercellsPerPlane - 1);
+    const std::string loaded(ftlpu::hw::kMxmSupercellsPerPlane, 'L');
     if (!require(text.find("mxm_control cycle 0") != std::string::npos, "missing cycle 0 log")) {
         return 1;
     }
     if (!require(text.find("tile 0 IW b1 col=") != std::string::npos, "missing tile 0 IW log")) {
         return 1;
     }
-    if (!require(text.find("tile 3 IW b1 col=") != std::string::npos, "missing last-tile IW log")) {
+    if (!require(text.find("tile " + last + " IW b1 col=") != std::string::npos, "missing last-tile IW log")) {
         return 1;
     }
     if (!require(text.find("IW buffer1=0x") != std::string::npos, "missing IW buffer log")) {
@@ -255,13 +257,13 @@ int main()
     if (!require(text.find("load_matrix:") != std::string::npos, "missing load matrix log")) {
         return 1;
     }
-    if (!require(text.find("row 0: LLLL") != std::string::npos, "missing row 0 load marker")) {
+    if (!require(text.find("row 0: " + loaded) != std::string::npos, "missing row 0 load marker")) {
         return 1;
     }
-    if (!require(text.find("row 3: LLLL") != std::string::npos, "missing last-row load marker")) {
+    if (!require(text.find("row " + last + ": " + loaded) != std::string::npos, "missing last-row load marker")) {
         return 1;
     }
-    if (!require(text.find("row 1: LLLL") != std::string::npos, "missing row 1 load marker")) {
+    if (!require(text.find("row 1: " + loaded) != std::string::npos, "missing row 1 load marker")) {
         return 1;
     }
 

@@ -153,6 +153,21 @@ public:
     using RawWord = IcuRawImemWord<WordBits>;
     using DecodedContext = DecodedIcuMacroContext<FuncInstruction>;
 
+    struct ImemReadPortSignals {
+        bool imem_read_req_valid_o{false};
+        bool imem_read_req_ready_i{false};
+        std::size_t imem_read_req_address_o{0};
+        bool imem_read_req_last_o{false};
+        bool imem_read_req_fire{false};
+        bool imem_read_rsp_valid_i{false};
+        bool imem_read_rsp_ready_o{false};
+        std::optional<RawWord> imem_read_rsp_data_i{};
+        bool imem_read_rsp_last_i{false};
+        bool imem_read_rsp_fire{false};
+    };
+
+    const ImemReadPortSignals& imem_read_port_signals() const noexcept { return imem_read_ports_; }
+
     static_assert(ImemReadLatency > 0);
     static_assert(ImemRequestInitiationInterval > 0);
     static_assert(ReservoirWords >= 2);
@@ -998,6 +1013,20 @@ private:
     void advance_fetch_frontend()
     {
         const bool consume_word=word_fifo_head_ready();
+        imem_read_ports_ = {};
+        const bool response_valid = !response_fifo_.empty();
+        const bool response_ready = word_fifo_.size() < word_fifo_depth
+            || consume_word;
+        imem_read_ports_.imem_read_rsp_valid_i = response_valid;
+        imem_read_ports_.imem_read_rsp_ready_o = response_ready;
+        imem_read_ports_.imem_read_rsp_fire =
+            response_valid && response_ready;
+        if (response_valid) {
+            const auto address = response_fifo_.front().address;
+            imem_read_ports_.imem_read_rsp_data_i = (*image_)[address];
+            imem_read_ports_.imem_read_rsp_last_i =
+                address + 1 == image_->size();
+        }
         if (consume_word) {
             const auto address=word_fifo_.front().address;
             word_fifo_.pop_front();
@@ -1005,8 +1034,7 @@ private:
             ++statistics_.word_fifo_reads;
         }
 
-        const bool move_response=!response_fifo_.empty()
-            && word_fifo_.size() < word_fifo_depth;
+        const bool move_response=imem_read_ports_.imem_read_rsp_fire;
         if (move_response) {
             word_fifo_.push_back(response_fifo_.front());
             response_fifo_.pop_front();
@@ -1042,17 +1070,15 @@ private:
 
     void begin_fetch_if_possible()
     {
-        if (fetch_issue_cooldown_ != 0 || disabled_
-            || state_ == State::Done
-            || next_fetch_address_ == image_->size())
-            return;
-        if (pending_fetches_.size()+response_fifo_.size()
-            >= response_fifo_depth)
-            return;
-        // The control word is deliberately non-speculative. Payload fetches
-        // may then fill the bounded response/word FIFOs independently of the
-        // parser reservoir, matching the RTL local-iMEM credit boundary.
-        if (next_fetch_address_ != 0 && !control_latched_) return;
+        auto& p=imem_read_ports_;
+        p.imem_read_req_valid_o = !fetch_issue_cooldown_ && !disabled_
+            && state_ != State::Done && next_fetch_address_ < image_->size()
+            && (!next_fetch_address_ || control_latched_);
+        p.imem_read_req_ready_i = pending_fetches_.size()+response_fifo_.size() < response_fifo_depth;
+        p.imem_read_req_address_o = next_fetch_address_;
+        p.imem_read_req_last_o = p.imem_read_req_valid_o && next_fetch_address_+1 == image_->size();
+        p.imem_read_req_fire = p.imem_read_req_valid_o && p.imem_read_req_ready_i;
+        if (!p.imem_read_req_fire) return;
         pending_fetches_.push_back(PendingFetch{
             next_fetch_address_, ImemReadLatency});
         if (next_fetch_address_ != 0)
@@ -1911,6 +1937,7 @@ private:
     std::deque<FetchedWord> word_fifo_{};
     std::size_t outstanding_payload_fetches_{0};
     std::size_t fetch_issue_cooldown_{0};
+    ImemReadPortSignals imem_read_ports_{};
     std::size_t next_fetch_address_{0};
     Reservoir reservoir_{};
     State state_{State::WaitingForControl};

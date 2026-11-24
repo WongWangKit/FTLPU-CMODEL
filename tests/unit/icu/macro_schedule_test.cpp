@@ -117,7 +117,7 @@ try {
     const auto mxmPacked = MxmContextCodec::pack_initial(
         IcuMacroSchedule {5, 3, 2, 1, 2, 10, -2,
             IcuInductionTarget::MxmAccumulatorAddress},
-        MxmControlInstruction::Compute(0, 0, 0, 100));
+        MxmControlInstruction::Compute(0, 0, 0, hw::kMxmAccumulatorRows / 2));
     const auto mxmState = MxmContextCodec::unpack(mxmPacked);
     require(mxmState.induction_target
                 == IcuInductionTarget::MxmAccumulatorAddress
@@ -180,4 +180,3 @@ try {
     std::cerr << "icu_macro_schedule_test failed: " << error.what() << '\n';
     return 1;
 }
-

@@ -607,7 +607,7 @@ public:
         for(auto& q:c2c_dma_queues_)fn(q);for(auto& q:c2c_tx_queues_)fn(q);for(auto& q:c2c_rx_queues_)fn(q);
     }
     bool program_queues_done() const {
-        bool done=common_barriers_.done();
+        bool done=common_barriers_.done() && qctl_events_.empty();
         const_cast<InstructionControlUnit*>(this)->for_each_program_queue([&](const auto& q){done &= q.done();});
         for(const auto& packet:pending_c2c_dma_raw_words_) done &= !packet.has_value();
         return done;
@@ -649,6 +649,7 @@ public:
         queue_control_transport_ticked_.fill(false);
         mem_native_owners_.clear();
         queue_completion_events_ = {};
+        qctl_events_.clear();
         queue_control_pool_.reset();
         transport_overlap_enabled_ = false;
         compute_enabled_ = false;
@@ -689,6 +690,7 @@ public:
         mem_transport_owners_.clear();
         mem_native_owners_.clear();
         queue_completion_events_ = {};
+        qctl_events_.clear();
         queue_control_pool_.reset();
         mem_transport_owner_count_ = 0;
         transport_overlap_enabled_ = false;
@@ -1403,13 +1405,124 @@ public:
         throw std::logic_error("unknown ICU location kind");
     }
 
-    void notify_tagged(IcuLocation location, std::size_t event_tag)
+    // One input event may have several consumers. Generation belongs to its
+    // producer (never infer it from the tag when replaying a clocked event).
+    bool event_in_ready(const std::vector<IcuLocation>& consumers)
     {
+        if (clock_managed_ && next_) return next_->event_in_ready(consumers);
+        if (!has_qctl_consumer(consumers)) return true;
+        std::size_t reserved=qctl_events_.size();
+        if (clock_managed_) for (const auto& e:pending_runtime_events_)
+            if (e.kind==PendingRuntimeEvent::Kind::QctlEvent && e.generation==program_generation_
+                && has_qctl_consumer(e.consumers)) ++reserved;
+        return reserved<kQctlEventDepth;
+    }
+    // A phase receipt lives in the bounded event slot until the producer
+    // retires it. Enqueue is not the release edge when arbitration is busy.
+    std::optional<std::size_t> take_phase_fire(std::uint64_t generation,std::size_t event_tag)
+    {
+        const auto& events = clock_managed_ && next_ ? next_->qctl_events_ : qctl_events_;
+        auto found=std::ranges::find_if(events,[&](const auto& e){
+            return e.generation==generation && e.event_tag==event_tag && e.phase_fire_cycle.has_value();
+        });
+        if (found==events.end()) return {};
+        const auto edge=found->phase_fire_cycle;
         if (clock_managed_) {
-            buffer_runtime_event(
-                PendingRuntimeEvent::tagged(location, event_tag));
+            PendingRuntimeEvent e{};e.kind=PendingRuntimeEvent::Kind::PhaseAck;
+            e.tag=event_tag;e.generation=generation;buffer_runtime_event(std::move(e));
+        } else qctl_events_.erase(found);
+        return edge;
+    }
+    bool uses_qctl_event(const std::vector<IcuLocation>& targets)
+    { return has_qctl_consumer(targets); }
+
+    void push_event(std::uint64_t generation, std::size_t event_tag,
+        const std::vector<IcuLocation>& consumers, bool same_phase=false)
+    {
+        if (consumers.empty()) throw StaticScheduleError("empty event consumer mask");
+        if (generation < program_generation_) return;
+        if (generation == program_generation_ && !event_in_ready(consumers))
+            throw StaticScheduleError("QCTL event buffer full");
+        if (clock_managed_) {
+            PendingRuntimeEvent e{};
+            e.kind = PendingRuntimeEvent::Kind::QctlEvent;
+            e.tag = event_tag; e.generation = generation; e.consumers = consumers; e.same_phase = same_phase;
+            buffer_runtime_event(std::move(e));
             return;
         }
+        if (generation < program_generation_) return;
+        if (generation != program_generation_) throw StaticScheduleError("future QCTL event generation");
+        std::vector<IcuLocation> pending, native;
+        for (auto target : consumers) {
+            auto& dst = qctl_target(target, [](const auto& q){return q.qctl_configured();})
+                ? pending : native;
+            if (std::find(dst.begin(), dst.end(), target) != dst.end())
+                throw StaticScheduleError("duplicate event consumer");
+            dst.push_back(target);
+        }
+        if (!pending.empty()) {
+            if (qctl_events_.size() >= kQctlEventDepth)
+                throw StaticScheduleError("QCTL event buffer full");
+            if (same_phase) {
+                // A mixed Native/QCTL phase has one release edge. Never
+                // deliver the Native subset ahead of the selected record.
+                pending.insert(pending.end(),native.begin(),native.end()); native.clear();
+            }
+            qctl_events_.push_back({generation, event_tag, std::move(pending), same_phase});
+        }
+        for (auto target : native) deliver_tagged(target, event_tag);
+    }
+    void notify_tagged(IcuLocation location, std::size_t event_tag)
+    { push_event(program_generation_, event_tag, {location}); }
+
+private:
+    static constexpr std::size_t kQctlEventDepth = 8; // DEV EVENT_DEPTH
+    struct QctlEvent { std::uint64_t generation; std::size_t event_tag; std::vector<IcuLocation> consumers; bool same_phase; std::optional<std::size_t> phase_fire_cycle{}; };
+    std::deque<QctlEvent> qctl_events_{};
+    template<class Fn> bool qctl_target(IcuLocation target, Fn fn)
+    {
+        switch(target.kind) {
+        case IcuLocationKind::Mem:
+            check_mem_location(target);
+            return fn(mem_iq(mem_queue(static_cast<Hemisphere>(target.unit),target.index,target.bank)));
+        case IcuLocationKind::MxmLoad: return fn(mxm_load_iq(target.unit));
+        case IcuLocationKind::MxmCompute: return fn(mxm_compute_iq(target.unit));
+        case IcuLocationKind::MxmDequant: return fn(mxm_dequant_iq(target.unit));
+        default: return false;
+        }
+    }
+    bool has_qctl_consumer(const std::vector<IcuLocation>& targets) {
+        return std::ranges::any_of(targets,[&](auto t){
+            return qctl_target(t,[](const auto& q){return q.qctl_configured();});
+        });
+    }
+    void dispatch_qctl_event()
+    {
+        // Eligibility uses WAIT only. A tag mismatch blocks this selected
+        // record; it does not permit a younger record to jump it.
+        std::erase_if(qctl_events_,[&](const auto& e){return e.generation != program_generation_;});
+        for (auto it=qctl_events_.begin(); it!=qctl_events_.end(); ++it) {
+            auto& pending=it->consumers;
+            const auto waiting=[&](auto target){
+                return qctl_target(target,[](const auto& q){return q.wait_event_tag().has_value();});
+            };
+            if (!std::ranges::any_of(pending, waiting)) continue;
+            if (it->same_phase && !std::ranges::all_of(pending,[&](auto t){
+                return blocked_on_tagged_event(t,it->event_tag);
+            })) return;
+            std::erase_if(pending,[&](auto target) {
+                if (!blocked_on_tagged_event(target,it->event_tag)) return false;
+                deliver_tagged(target,it->event_tag); return true;
+            });
+            if (pending.empty()) {
+                if (it->same_phase) it->phase_fire_cycle=cycle_;
+                else qctl_events_.erase(it);
+            }
+            return;
+        }
+    }
+    void deliver_tagged(IcuLocation location, std::size_t event_tag)
+    {
         switch (location.kind) {
         case IcuLocationKind::Mem:
             check_mem_location(location);
@@ -1450,6 +1563,7 @@ public:
         throw std::logic_error("unknown tagged ICU location kind");
     }
 
+public:
     bool blocked_on_tagged_event(
         IcuLocation location, std::size_t event_tag)
     {
@@ -1697,6 +1811,11 @@ public:
     // consumer boundary, while C2C transport queues may keep running.
     void broadcast_tagged_notification(std::size_t event_tag)
     {
+        // Native legacy release has no destination mask. A QCTL image must
+        // name its participants; a blind token broadcast evades arbitration.
+        bool targeted=false;
+        for_each_program_queue([&](const auto& q){targeted |= q.qctl_configured();});
+        if (targeted) throw StaticScheduleError("QCTL event requires an explicit consumer mask");
         for (auto& queue : vxm_queues_) queue.notify(event_tag);
         for (auto& queue : mem_queues_) queue.notify(event_tag);
         for (auto& queue : mxm_load_queues_) queue.notify(event_tag);
@@ -1765,6 +1884,7 @@ public:
         if(!program_loading_) queue_control_pool_.begin_cycle();
 
         compute_enabled_ = (!program_loading_ && common_barriers_.begin_cycle(program_issue_enabled_));
+        if (compute_enabled_) dispatch_qctl_event();
         if (!compute_enabled_ && !program_loading_) {
             for (auto& queue : vxm_queues_) queue.hold_compute_cycle();
             for (auto& queue : mxm_load_queues_) queue.hold_compute_cycle();
@@ -2322,7 +2442,8 @@ private:
     struct PendingRuntimeEvent {
         enum class Kind : std::uint8_t {
             Basic,
-            Tagged,
+            QctlEvent,
+            PhaseAck,
             MemSynchronized,
             CommonCommit,
             QueueCommit,
@@ -2334,11 +2455,11 @@ private:
         std::uint64_t generation{0};
         std::uint32_t instance{0};
 
+        std::vector<IcuLocation> consumers{};
+        bool same_phase{};
+
         static PendingRuntimeEvent basic(IcuLocation location)
         { return {Kind::Basic, location}; }
-        static PendingRuntimeEvent tagged(
-            IcuLocation location, std::size_t tag)
-        { return {Kind::Tagged, location, tag}; }
         static PendingRuntimeEvent mem_synchronized(
             IcuLocation location, std::size_t tag)
         { return {Kind::MemSynchronized, location, tag}; }
@@ -2450,8 +2571,10 @@ private:
         case PendingRuntimeEvent::Kind::Basic:
             notify(event.location);
             return;
-        case PendingRuntimeEvent::Kind::Tagged:
-            notify_tagged(event.location, event.tag);
+        case PendingRuntimeEvent::Kind::PhaseAck:
+            (void)take_phase_fire(event.generation,event.tag); return;
+        case PendingRuntimeEvent::Kind::QctlEvent:
+            push_event(event.generation, event.tag, event.consumers, event.same_phase);
             return;
         case PendingRuntimeEvent::Kind::MemSynchronized:
             notify_mem_synchronized(event.location, event.tag);

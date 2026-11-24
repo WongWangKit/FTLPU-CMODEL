@@ -78,7 +78,8 @@ int main()
 
     const auto text = log.str();
     assert(text.find("mxm_array cell(0,0) mxm_supercell: IW buffer0=0x") != std::string::npos);
-    assert(text.find("mxm_array cell(3,3) mxm_supercell: IW buffer0=0x") != std::string::npos);
+    const auto last=std::to_string(ftlpu::hw::kMxmSupercellsPerPlane-1);
+    assert(text.find("mxm_array cell("+last+","+last+") mxm_supercell: IW buffer0=0x") != std::string::npos);
 
     return 0;
 }

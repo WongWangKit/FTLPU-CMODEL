@@ -37,29 +37,29 @@ public:
 void generic_fifo_contract()
 {
     RtlSynchronousFifo<int> fifo(2);
-    require(fifo.empty() && !fifo.dequeue_valid(), "reset FIFO not empty");
+    require(fifo.empty() && !fifo.dequeue_valid_o(), "reset FIFO not empty");
 
     fifo.drive(true, 10, false);
-    require(fifo.enqueue_fire() && !fifo.dequeue_valid(),
+    require(fifo.enqueue_fire() && !fifo.dequeue_valid_o(),
         "empty FIFO unexpectedly bypassed enqueue data");
     fifo.low();
     require(fifo.empty(), "LOW exposed Next occupancy");
     fifo.posedge();
-    require(fifo.occupancy() == 1 && fifo.front() == 10,
+    require(fifo.level_o() == 1 && fifo.dequeue_data_o() == 10,
         "first enqueue did not commit at POSEDGE");
 
     cycle<int>(fifo, true, 20, false);
-    require(fifo.full() && fifo.front() == 10, "FIFO did not fill in order");
+    require(fifo.full() && fifo.dequeue_data_o() == 10, "FIFO did not fill in order");
 
     fifo.drive(true, 30, true);
-    require(fifo.enqueue_ready() && fifo.enqueue_fire() && fifo.dequeue_fire(),
+    require(fifo.enqueue_ready_o() && fifo.enqueue_fire() && fifo.dequeue_fire(),
         "full replacement was not accepted");
     fifo.low(); fifo.posedge();
-    require(fifo.full() && fifo.front() == 20,
+    require(fifo.full() && fifo.dequeue_data_o() == 20,
         "simultaneous full read/write corrupted order or level");
 
     cycle<int>(fifo, false, std::nullopt, true);
-    require(fifo.occupancy() == 1 && fifo.front() == 30,
+    require(fifo.level_o() == 1 && fifo.dequeue_data_o() == 30,
         "replacement payload or pointer wrap was lost");
     cycle<int>(fifo, false, std::nullopt, true);
     require(fifo.empty(), "FIFO did not drain");
@@ -77,11 +77,11 @@ void relay_registered_ready_contract()
     cycle<int>(relay, true, 1, false);
     cycle<int>(relay, true, 2, false);
     relay.drive(true, 3, true);
-    require(!relay.enqueue_ready() && !relay.enqueue_fire()
+    require(!relay.enqueue_ready_o() && !relay.enqueue_fire()
             && relay.dequeue_fire(),
         "relay full ready depended on same-cycle dequeue");
     relay.low(); relay.posedge();
-    require(relay.occupancy() == 1 && relay.front() == 2,
+    require(relay.level_o() == 1 && relay.dequeue_data_o() == 2,
         "relay full-cycle dequeue behavior is incorrect");
     require(relay.statistics().rejected_writes == 1,
         "relay backpressure was not recorded");

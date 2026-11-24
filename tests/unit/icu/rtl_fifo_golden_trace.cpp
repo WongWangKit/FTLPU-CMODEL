@@ -35,7 +35,7 @@ constexpr std::array<Stimulus, 12> kStimuli{{
 
 std::uint32_t visible_data(const RtlSynchronousFifo<std::uint8_t>& fifo)
 {
-    return fifo.dequeue_valid() ? fifo.front() : 0;
+    return fifo.dequeue_valid_o() ? fifo.dequeue_data_o() : 0;
 }
 
 } // namespace
@@ -68,12 +68,12 @@ int main(int argc, char** argv)
                 : std::nullopt,
             stimulus.dequeue_ready);
 
-        const auto enqueue_ready_pre = fifo.enqueue_ready();
-        const auto dequeue_valid_pre = fifo.dequeue_valid();
+        const auto enqueue_ready_pre = fifo.enqueue_ready_o();
+        const auto dequeue_valid_pre = fifo.dequeue_valid_o();
         const auto enqueue_fire = fifo.enqueue_fire();
         const auto dequeue_fire = fifo.dequeue_fire();
         const auto dequeue_data_pre = visible_data(fifo);
-        const auto level_pre = fifo.occupancy();
+        const auto level_pre = fifo.level_o();
         const auto write_ptr_pre = fifo.write_pointer();
         const auto read_ptr_pre = fifo.read_pointer();
 
@@ -88,8 +88,8 @@ int main(int argc, char** argv)
                << dequeue_valid_pre << ',' << enqueue_fire << ','
                << dequeue_fire << ',' << dequeue_data_pre << ',' << level_pre
                << ',' << write_ptr_pre << ',' << read_ptr_pre << ','
-               << fifo.occupancy() << ',' << fifo.write_pointer() << ','
-               << fifo.read_pointer() << ',' << fifo.dequeue_valid() << ','
+               << fifo.level_o() << ',' << fifo.write_pointer() << ','
+               << fifo.read_pointer() << ',' << fifo.dequeue_valid_o() << ','
                << visible_data(fifo) << '\n';
     }
 

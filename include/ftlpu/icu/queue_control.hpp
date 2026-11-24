@@ -38,7 +38,9 @@ public:
     void configure_shared(IcuQueueControlPool& pool, std::vector<IcuQueueControl> entries, std::size_t limit)
     {
         *this=IcuQueueControlFrontend{};
-        handle_=pool.add_partition(entries,limit);pool_=&pool;
+        // An extent-only partition has no backing records, requests or credits.
+        // Its end_cycle lives on the queue, including after a segment reload.
+        if (!entries.empty()) {handle_=pool.add_partition(entries,limit);pool_=&pool;}
     }
     void rebind_shared_pool(IcuQueueControlPool& pool) noexcept
     {

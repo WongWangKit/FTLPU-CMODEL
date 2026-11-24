@@ -117,13 +117,14 @@ bool verify_mem_codec()
 
 bool verify_mxm_codec()
 {
+    constexpr auto last = ftlpu::hw::kMxmSupercellsPerPlane - 1;
     const ftlpu::MxmControlInstruction instructions[] {
-        ftlpu::MxmControlInstruction::IW(1, 3,
+        ftlpu::MxmControlInstruction::IW(1, last,
             ftlpu::MxmWeightInputMode::Int8DequantBf16, 8),
-        ftlpu::MxmControlInstruction::IWColumn(1, 2, 7,
+        ftlpu::MxmControlInstruction::IWColumn(1, last - 1, 7,
             ftlpu::MxmWeightInputMode::Int8DequantBf16, 15),
         ftlpu::MxmControlInstruction::IWDirect16(0, 1, 16),
-        ftlpu::MxmControlInstruction::IWColumnDirect16(0, 3, 4, 30),
+        ftlpu::MxmControlInstruction::IWColumnDirect16(0, last, 4, 30),
         ftlpu::MxmControlInstruction::Compute(
             1,
             30,
@@ -157,7 +158,7 @@ bool verify_mxm_codec()
             8,
             ftlpu::MxmDataFormat::BFloat16,
             ftlpu::hw::kMxmAccumulatorRows / 3,
-            2,
+            last - 1,
             ftlpu::MxmAccumulatorDestination::Sram,
             false,
             ftlpu::MxmIsMode::Vector),
@@ -187,14 +188,14 @@ bool verify_mxm_codec()
 
     if (!require(
             ftlpu::isa::encode_mxm_instruction(
-                ftlpu::MxmControlInstruction::IW(1, 3))
-                == 0x1cu,
+                ftlpu::MxmControlInstruction::IW(1, last))
+                == (4u | (last << 3)),
             "MXM base-zero IW encoding changed")) {
         return false;
     }
     if (!require(
             (ftlpu::isa::encode_mxm_instruction(
-                 ftlpu::MxmControlInstruction::IW(1, 3,
+                 ftlpu::MxmControlInstruction::IW(1, last,
                      ftlpu::MxmWeightInputMode::Int8DequantBf16, 8))
                 >> 10)
                     == 8,
@@ -202,7 +203,7 @@ bool verify_mxm_codec()
         return false;
     }
     const auto direct_iw = ftlpu::isa::encode_mxm_instruction(
-        ftlpu::MxmControlInstruction::IWDirect16(1, 3));
+        ftlpu::MxmControlInstruction::IWDirect16(1, last));
     if (!require(
             (direct_iw & (std::uint64_t {1} << 9)) != 0,
             "MXM Direct16 IW input-mode bit was not encoded")) {
@@ -391,7 +392,7 @@ bool verify_sxm_codec()
         ftlpu::SxmInstruction::Permute(std::move(src), std::move(dst), map);
     instruction.output_row = 5;
     instruction.input_row = 3;
-    instruction.output_tile = 2;
+    instruction.output_tile = ftlpu::hw::kTileRows / 2;
     const auto decoded =
         ftlpu::isa::decode_sxm_instruction(ftlpu::isa::encode_sxm_instruction(instruction));
     return require(

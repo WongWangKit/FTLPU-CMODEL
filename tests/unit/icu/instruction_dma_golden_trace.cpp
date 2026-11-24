@@ -72,16 +72,22 @@ Stimulus parse_stimulus(const std::string& line)
     stimulus.cycle = std::stoull(f[0]);
     stimulus.scenario = static_cast<unsigned>(std::stoul(f[1]));
     auto& input = stimulus.inputs;
-    input.reset_n = std::stoul(f[2]) != 0;
-    input.command_valid = std::stoul(f[3]) != 0;
-    input.command_address = std::stoull(f[4]);
-    input.command_length = static_cast<std::uint32_t>(std::stoul(f[5]));
-    input.command_id = static_cast<std::uint8_t>(std::stoul(f[6]));
-    input.request_ready = std::stoul(f[7]) != 0;
-    input.response_valid = std::stoul(f[8]) != 0;
+    input.rst_ni = std::stoul(f[2]) != 0;
+    input.ctrl_dma_cmd_valid_i = std::stoul(f[3]) != 0;
+    input.ctrl_dma_cmd_address_i = std::stoull(f[4]);
+    input.ctrl_dma_cmd_length_i =
+        static_cast<std::uint32_t>(std::stoul(f[5]));
+    input.ctrl_dma_cmd_id_i = static_cast<std::uint8_t>(std::stoul(f[6]));
+    input.ddr_read_req_ready_i = std::stoul(f[7]) != 0;
+    input.ddr_read_rsp_valid_i = std::stoul(f[8]) != 0;
     stimulus.response_hex = f[9];
-    input.response = parse_response(f);
-    input.reassembler_ready = std::stoul(f[14]) != 0;
+    const auto response = parse_response(f);
+    input.ddr_read_rsp_data_i = response.data;
+    input.ddr_read_rsp_keep_i = response.keep;
+    input.ddr_read_rsp_last_i = response.last;
+    input.ddr_read_rsp_id_i = response.id;
+    input.ddr_read_rsp_error_i = response.error;
+    input.reasm_rsp_ready_i = std::stoul(f[14]) != 0;
     return stimulus;
 }
 
@@ -118,13 +124,17 @@ int main(int argc, char** argv) try
 
     std::string line;
     std::getline(stimulusFile, line); // Header.
+    // Preserve the established cross-model CSV schema while sampling the
+    // canonical RTL-named C++ interface below.  This keeps the existing
+    // 108-cycle RTL trace directly comparable without reintroducing legacy
+    // member names into InstructionDmaProtocolCore.
     output << "cycle,scenario,reset_n,cmd_valid,cmd_address,cmd_length,cmd_id,"
               "req_ready,rsp_valid,rsp_data,rsp_keep,rsp_last,rsp_id,rsp_error,"
               "reasm_ready,cmd_ready_pre,req_valid_pre,req_address_pre,"
               "req_length_pre,req_id_pre,cmd_fire,outstanding_enq_fire,"
-              "outstanding_deq_fire,rsp_ready_pre,rsp_input_fire,"
-              "resp_valid_pre,resp_data_pre,resp_keep_pre,resp_last_pre,"
-              "resp_id_pre,resp_error_pre,reasm_fire,outstanding_pre,rx_pre,"
+              "outstanding_deq_fire,rsp_ready_pre,rsp_input_fire,resp_valid_pre,"
+              "resp_data_pre,resp_keep_pre,resp_last_pre,resp_id_pre,"
+              "resp_error_pre,reasm_fire,outstanding_pre,rx_pre,"
               "fault_comb_pre,fault_code_comb_pre,outstanding_post,rx_post,"
               "fault_state_post,fault_code_post,idle_post,fault_wire_post_nba\n";
 
@@ -138,36 +148,41 @@ int main(int argc, char** argv) try
 
         const auto outstandingPre = core.outstanding();
         const auto rxPre = core.response_fifo_occupancy();
-        const auto commandFire = core.command_fire();
-        const auto responseInputFire = core.response_input_fire();
+        const auto commandFire = core.ctrl_dma_cmd_fire();
+        const auto responseInputFire = core.ddr_read_rsp_fire();
         const auto outstandingDequeue = responseInputFire
-            && input.response.last && outstandingPre != 0;
-        const auto responseValid = core.response_valid();
+            && input.ddr_read_rsp_last_i && outstandingPre != 0;
+        const auto responseValid = core.reasm_rsp_valid_o();
         InstructionDmaResponseBeat response{};
-        if (responseValid) response = core.response_front();
+        if (responseValid) response = core.reasm_rsp_o();
 
         output << stimulus.cycle << ',' << stimulus.scenario << ','
-               << input.reset_n << ',' << input.command_valid << ','
-               << input.command_address << ',' << input.command_length << ','
-               << static_cast<unsigned>(input.command_id) << ','
-               << input.request_ready << ',' << input.response_valid << ','
+               << input.rst_ni << ',' << input.ctrl_dma_cmd_valid_i << ','
+               << input.ctrl_dma_cmd_address_i << ','
+               << input.ctrl_dma_cmd_length_i << ','
+               << static_cast<unsigned>(input.ctrl_dma_cmd_id_i) << ','
+               << input.ddr_read_req_ready_i << ','
+               << input.ddr_read_rsp_valid_i << ','
                << normalized_hex(stimulus.response_hex, 64) << ','
                << normalized_hex(line.empty() ? "0" : split(line)[10], 8) << ','
-               << input.response.last << ','
-               << static_cast<unsigned>(input.response.id) << ','
-               << input.response.error << ',' << input.reassembler_ready << ','
-               << core.command_ready() << ',' << core.request_valid() << ','
-               << core.request_address() << ',' << core.request_length() << ','
-               << static_cast<unsigned>(core.request_id()) << ','
+               << input.ddr_read_rsp_last_i << ','
+               << static_cast<unsigned>(input.ddr_read_rsp_id_i) << ','
+               << input.ddr_read_rsp_error_i << ','
+               << input.reasm_rsp_ready_i << ','
+               << core.ctrl_dma_cmd_ready_o() << ','
+               << core.ddr_read_req_valid_o() << ','
+               << core.ddr_read_req_address_o() << ','
+               << core.ddr_read_req_length_o() << ','
+               << static_cast<unsigned>(core.ddr_read_req_id_o()) << ','
                << commandFire << ',' << commandFire << ','
-               << outstandingDequeue << ',' << core.response_ready() << ','
+               << outstandingDequeue << ',' << core.ddr_read_rsp_ready_o() << ','
                << responseInputFire << ',' << responseValid << ','
                << (responseValid ? response_hex(response) : std::string(64, '0'))
                << ',' << std::hex << std::setw(8) << std::setfill('0')
                << (responseValid ? response.keep : 0U) << std::dec << ','
                << (responseValid && response.last) << ','
                << (responseValid ? static_cast<unsigned>(response.id) : 0U) << ','
-               << (responseValid && response.error) << ',' << core.response_fire()
+               << (responseValid && response.error) << ',' << core.reasm_rsp_fire()
                << ',' << outstandingPre << ',' << rxPre << ',' << core.fault()
                << ',' << static_cast<unsigned>(core.fault_code());
 

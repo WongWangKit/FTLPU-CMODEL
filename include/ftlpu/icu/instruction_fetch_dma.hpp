@@ -591,8 +591,8 @@ private:
 
     [[nodiscard]] bool reassembler_ready(const State& state) const
     {
-        if (!protocol_.response_valid()) return false;
-        const auto& response = protocol_.response_front();
+        if (!protocol_.reasm_rsp_valid_o()) return false;
+        const auto& response = protocol_.reasm_rsp_o();
         const auto found = std::find_if(state.commands.begin(),
             state.commands.end(), [&](const auto& command) {
                 return command.id == response.id;
@@ -604,8 +604,8 @@ private:
 
     void consume_protocol_response(State& state)
     {
-        if (!protocol_.response_fire()) return;
-        const auto& response = protocol_.response_front();
+        if (!protocol_.reasm_rsp_fire()) return;
+        const auto& response = protocol_.reasm_rsp_o();
         auto found = find_command(state, response.id);
         if (response.error || found == state.commands.end())
             return;
@@ -637,7 +637,7 @@ private:
 
     void accept_ddr_response(State& state)
     {
-        if (!protocol_.response_input_fire()) return;
+        if (!protocol_.ddr_read_rsp_fire()) return;
         if (state.transport.empty())
             throw std::logic_error("instruction DMA accepted a response without a DDR request");
         const auto request = state.transport.front();
@@ -662,13 +662,13 @@ private:
 
     void accept_protocol_command(State& state)
     {
-        if (!protocol_.request_fire()) return;
-        auto found = find_command(state, protocol_.request_id());
+        if (!protocol_.ddr_read_req_fire()) return;
+        auto found = find_command(state, protocol_.ddr_read_req_id_o());
         if (found == state.commands.end() || found->protocol_issued)
             throw std::logic_error("instruction DMA protocol command has no program owner");
         found->protocol_issued = true;
-        state.ddr_commands.push_back({protocol_.request_id(),
-            protocol_.request_address(), protocol_.request_length(), 0, 0,found->program.generation});
+        state.ddr_commands.push_back({protocol_.ddr_read_req_id_o(),
+            protocol_.ddr_read_req_address_o(), protocol_.ddr_read_req_length_o(), 0, 0,found->program.generation});
         ++statistics_.command_handshakes;
     }
 
@@ -678,7 +678,7 @@ private:
         // Reserve each protocol response slot before submitting a physical
         // read. Account for the input just removed from transport this LOW.
         if(state.transport.size()+protocol_.response_fifo_occupancy()
-            +(protocol_.response_input_fire()?1:0)>=config_.response_fifo_depth) {
+            +(protocol_.ddr_read_rsp_fire()?1:0)>=config_.response_fifo_depth) {
             low_observation_.credit_wait=true;++statistics_.ddr_credit_wait_cycles;return;
         }
         auto found = std::find_if(state.ddr_commands.begin(),
@@ -724,17 +724,21 @@ private:
                 return !item.protocol_issued && item.total_bytes != 0;
             });
         if (command != next_->commands.end()) {
-            inputs.command_valid = true;
-            inputs.command_address = command->program.base_address;
-            inputs.command_length = static_cast<std::uint32_t>(command->total_bytes);
-            inputs.command_id = command->id;
+            inputs.ctrl_dma_cmd_valid_i = true;
+            inputs.ctrl_dma_cmd_address_i = command->program.base_address;
+            inputs.ctrl_dma_cmd_length_i = static_cast<std::uint32_t>(command->total_bytes);
+            inputs.ctrl_dma_cmd_id_i = command->id;
         }
-        inputs.request_ready = true;
+        inputs.ddr_read_req_ready_i = true;
         if (const auto response = pending_ddr_response(*next_)) {
-            inputs.response_valid = true;
-            inputs.response = *response;
+            inputs.ddr_read_rsp_valid_i = true;
+            inputs.ddr_read_rsp_data_i = response->data;
+            inputs.ddr_read_rsp_keep_i = response->keep;
+            inputs.ddr_read_rsp_last_i = response->last;
+            inputs.ddr_read_rsp_id_i = response->id;
+            inputs.ddr_read_rsp_error_i = response->error;
         }
-        inputs.reassembler_ready = reassembler_ready(*next_);
+        inputs.reasm_rsp_ready_i = reassembler_ready(*next_);
 
         const bool fullAtCycleStart = protocol_.response_fifo_occupancy()
             == config_.response_fifo_depth;
@@ -749,7 +753,7 @@ private:
         retire_commands(*next_);
         protocol_.low();
 
-        if (inputs.response_valid && !protocol_.response_input_fire())
+        if (inputs.ddr_read_rsp_valid_i && !protocol_.ddr_read_rsp_fire())
             low_observation_.credit_wait = true;
         statistics_.outstanding_peak = std::max(statistics_.outstanding_peak,
             protocol_.next_outstanding());

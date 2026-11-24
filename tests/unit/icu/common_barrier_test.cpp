@@ -1,6 +1,7 @@
 #include "ftlpu/icu/common_barrier.hpp"
 #include "ftlpu/system/icu.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
+#include "../../support/native_mem_golden.hpp"
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -19,11 +20,11 @@ template <typename Function> void rejects(Function function)
     require(rejected, "invalid common barrier program was accepted");
 }
 
-const std::vector<IcuRawImemWord96> image{
+const auto image=test::physical_mem_image({
     {{{0x00000027u, 0x00000000u, 0x00000000u}}},
     {{{0x02000021u, 0x00000180u, 0x00303200u}}},
     {{{0x00000400u, 0x00000000u, 0x00000000u}}},
-};
+},1,100);
 std::vector<IcuRawImemWord96> make_long_image()
 {
     std::vector<IcuRawImemWord96> result(2);
@@ -35,7 +36,7 @@ std::vector<IcuRawImemWord96> make_long_image()
                 result[1].lanes[offset / 32] |= 1u << (offset % 32);
     };
     put(0, 3); // no delta dictionary
-    put(20, 32); put(100, 13); // first absolute cycle / SRAM row
+    put(20, 32); put(100, std::bit_width(hw::kSramDepthRows-1)); // first absolute cycle / SRAM row
     put(0, 1); // one-record run
     put(0, 1); put(1, 2); put(0, 1); put(2, 6); put(0, 1);
     put(6, 11); put(2, 8); put(1, 10); // seven reads, interval=3, row stride=1
@@ -360,6 +361,24 @@ void commits_are_independent_of_compute_and_trace()
 
 int main()
 try {
+    if constexpr (hw::kCommonBarrierCapacity == 0) {
+        rejects([] { IcuCommonBarrierController c; c.configure(1,{{0,7}},{{7,{41,42}}}); });
+        auto sys=std::make_unique<TspSliceSystem>();
+        auto& icu=sys->icu();
+        for (unsigned gen=1;gen<=1000;++gen) {
+            icu.configure_queue_completion_events(gen,{{7,{41,42}}});
+            if(gen>1)icu.notify_queue_mem_commit(gen-1,42);
+            icu.notify_queue_mem_commit(gen,41);
+            icu.notify_queue_mem_commit(gen,41);
+            require(!icu.queue_completion_ready(7),"partial/old aggregate released a native queue");
+            icu.notify_queue_mem_commit(gen,42);
+            require(icu.queue_completion_ready(7),"complete native aggregate did not become ready");
+        }
+        physical_response_and_context_hold();
+        commits_are_independent_of_compute_and_trace();
+        std::cout<<"native QCTL completion generations, finite frontend hold, tile commits and unsupported BARR rejection passed\n";
+        return 0;
+    }
     for(std::uint64_t generation=1;generation<=1000;++generation) {
         IcuCommonBarrierController c;c.configure(generation,{{0,1}},{{1,{9}}});
         c.notify_mem_commit(generation,9);require(c.live_completion_instances()==1,"missing live event token");

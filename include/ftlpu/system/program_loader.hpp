@@ -157,7 +157,7 @@ public:
     const ProgramLoadConfig& config() const noexcept { return config_; }
     void set_program_reset(std::function<void()> reset) {program_reset_=std::move(reset);}
     State state() const noexcept { return state_; }
-    const MemProgramEdge& mem_program_edge() const noexcept { return mem_edge_; }
+    const MemProgramPortSignals& mem_program_port_signals() const noexcept { return mem_program_ports_; }
     bool failed() const noexcept {return state_==State::Failed;}
     void recover_failed_program() {
         if(!failed() || !dma_.drained())throw std::logic_error("program error not drained");
@@ -166,7 +166,7 @@ public:
         if(program_reset_)program_reset_();
         // Keep the generation watermark and physical clocks; retry is a new
         // task. Never resume a partially overwritten private instruction slot.
-        mem_endpoint_={}; mem_edge_={};
+        mem_endpoint_={}; mem_program_ports_={};
         stats_={};images_.clear();state_=State::Idle;segment_loading_=false;
         start_requested_=dependencies_ready_=false;
     }
@@ -214,7 +214,7 @@ public:
 
     void reset()
     {
-        mem_endpoint_={}; mem_edge_={};
+        mem_endpoint_={}; mem_program_ports_={};
         dma_.reset();
         state_ = State::Idle;
         stats_ = {};
@@ -239,7 +239,10 @@ public:
             if(busy() || !dma_.drained() || !commits_.empty() || !reassembly_.empty())
                 throw std::logic_error("previous segment source not retired");
             for(const auto& im:images) {
-                if(im.storage!=ProgramStorage::Imem || im.generation!=last_generation_
+                // Continuations may rebind an empty QCTL partition's local end, never
+                // replace event records or an active queue in this generation.
+                const bool extent = im.storage==ProgramStorage::Qctl && !im.byte_count;
+                if((im.storage!=ProgramStorage::Imem && !extent) || im.generation!=last_generation_
                     || im.kind==IcuMacroQueueKind::C2cDma || im.kind==IcuMacroQueueKind::C2cTx
                     || im.kind==IcuMacroQueueKind::C2cRx)
                     throw std::invalid_argument("compute segment target/generation");
@@ -283,7 +286,7 @@ public:
         }
         if(generation && (compute_segment?*generation!=last_generation():*generation<=last_generation()))
             throw std::invalid_argument("program generation must increase across task switches");
-        if((qctl && !queueEvents) || (barr && (!barrierEvents || !barrierRam)))
+        if((qctl && !queueEvents && !compute_segment) || (barr && (!barrierEvents || !barrierRam)))
             throw std::invalid_argument("missing committed event or barrier configuration");
         if (!dma_.drained())
             throw std::logic_error("program DMA still has unconsumed traffic");
@@ -296,7 +299,7 @@ public:
         segment_loading_=compute_segment;
         // A quiescent non-final segment is a safe reload point, not KERNEL_DONE.
         more_segments_pending_=more_segments;
-        if(compute_segment)for(const auto& im:images)icu_.stage_segment_begin(im);
+        if(compute_segment) {for(const auto& im:images) if(im.storage==ProgramStorage::Imem) icu_.stage_segment_begin(im);}
         else if(program_reset_) program_reset_(); else icu_.stage_program_reset();
         if(generation) {last_generation_=*generation;icu_.stage_program_generation(*generation);}
         images_ = std::move(images);
@@ -332,7 +335,7 @@ public:
 private:
     void tick_before_dma(std::size_t cycle)
     {
-        mem_edge_={};
+        mem_program_ports_={};
         observe_completion(cycle+1);
         if(failed()) {return;}
         if (!busy()) return;
@@ -355,7 +358,7 @@ private:
         if (state_ == State::Prime) {
             bool primed=true;
             if(segment_loading_) {
-                for(const auto& im:images_) {icu_.stage_segment_prime(im);each_segment_target(im,[&](auto& q){primed &= q.imem_occupancy()==0 || q.frontend_ready();});}
+                for(const auto& im:images_) {if(im.storage!=ProgramStorage::Imem)continue;icu_.stage_segment_prime(im);each_segment_target(im,[&](auto& q){primed &= q.imem_occupancy()==0 || q.frontend_ready();});}
             } else {icu_.stage_program_frontend_tick();primed=icu_.program_frontends_ready();}
             if (primed) {
                 stats_.frontend_ready = cycle;
@@ -378,12 +381,12 @@ private:
             if(w.prime) {
                 if(record.written_words!=image.word_count())throw std::logic_error("PRIME overtook WRITE commits");
                 configure_target(image);record.image_committed=cycle;
-                if(segment_loading_)icu_.stage_segment_end(image);
+                if(segment_loading_ && image.storage==ProgramStorage::Imem)icu_.stage_segment_end(image);
             } else {
                 if(is_mem_macro(image)) {
-                    mem_edge_.queue=image.queue_index;mem_edge_.generation=last_generation_;
+                    mem_program_ports_.mem_program_queue_o=image.queue_index;mem_program_ports_.mem_program_generation_o=last_generation_;
                     if(!mem_endpoint_.commit(w.address)){fail_mem_endpoint();return;}
-                    mem_edge_.commit=true;mem_edge_.commit_address=w.address;
+                    mem_program_ports_.mem_program_commit_i=true;mem_program_ports_.mem_program_commit_address_i=w.address;
                 }
                 if(!record.first_write_committed)record.first_write_committed=cycle;
                 commit_word(image,w);total_committed_bytes_+=image.word_bytes();++record.written_words;++stats_.written_words;
@@ -539,7 +542,7 @@ private:
         bool dependencies_ready{false};
         bool segment_loading{},prime_sent{};
         std::size_t total_committed_bytes{};
-        MemProgramEndpoint endpoint{}; MemProgramEdge edge{};
+        MemProgramEndpoint endpoint{}; MemProgramPortSignals edge{};
     };
 
     Snapshot capture_snapshot() const
@@ -548,11 +551,11 @@ private:
             word_fifo_,ingress_fifo_,relay_fifos_,
             current_,routed_bytes_,vector_offset_,accepted_words_,
             next_write_cycle_,last_generation_,start_requested_,
-            dependencies_ready_,segment_loading_,prime_sent_,total_committed_bytes_,mem_endpoint_,mem_edge_};
+            dependencies_ready_,segment_loading_,prime_sent_,total_committed_bytes_,mem_endpoint_,mem_program_ports_};
     }
     void restore_snapshot(Snapshot snapshot)
     {
-        mem_endpoint_=snapshot.endpoint; mem_edge_=snapshot.edge;
+        mem_endpoint_=snapshot.endpoint; mem_program_ports_=snapshot.edge;
         state_=snapshot.state;
         stats_=std::move(snapshot.stats);
         images_=std::move(snapshot.images);
@@ -641,22 +644,27 @@ private:
         auto& endpoint=relays[target_relay];
         bool ready=cycle>=next_write_cycle_ &&
             commits_.size()<=config_.imem_write_commit_latency_cycles;
+        if (is_mem_macro(image)) {
+            mem_program_ports_.mem_program_ready_i=ready && !mem_endpoint_.last_seen;
+            mem_program_ports_.mem_prime_ready_i=ready && mem_endpoint_.last_seen && !mem_endpoint_.primed
+                && mem_endpoint_.accepted==mem_endpoint_.committed;
+        }
         if (!endpoint.empty() && is_mem_macro(image)) {
-            const auto& w=endpoint.front();auto& edge=mem_edge_;
-            edge.queue=image.queue_index;edge.generation=last_generation_;
+            const auto& w=endpoint.front();auto& edge=mem_program_ports_;
+            edge.mem_program_queue_o=image.queue_index;edge.mem_program_generation_o=last_generation_;
             // A delayed ACK retains ownership; PRIME can wait on the relay.
             ready &= !w.prime || mem_endpoint_.accepted==mem_endpoint_.committed;
-            edge.ready=ready;edge.prime_valid=w.prime;edge.write_valid=!w.prime;
+            edge.mem_prime_valid_o=w.prime;edge.mem_program_valid_o=!w.prime;
             if(!w.prime) {
-                edge.address=w.address;edge.strb=w.strb;edge.last=w.last;
-                std::copy_n(w.bytes.begin(),edge.data.size(),edge.data.begin());
+                edge.mem_program_imem_address_o=w.address;edge.mem_program_strb_o=w.strb;edge.mem_program_last_o=w.last;
+                std::copy_n(w.bytes.begin(),image.word_bytes(),edge.mem_program_data_o.begin());
             }
             if(ready) {
                 if(!(w.prime ? mem_endpoint_.prime(image.word_count())
                              : mem_endpoint_.write(w.address,w.strb,w.last,image.word_count()))) {
                     fail_mem_endpoint();return;
                 }
-                edge.prime_fire=w.prime;edge.write_fire=!w.prime;
+                edge.mem_prime_fire=w.prime;edge.mem_program_fire=!w.prime;
             }
         }
         if (!endpoint.empty() && ready) {
@@ -667,7 +675,7 @@ private:
             if(write.prime && is_mem_macro(image)) {
                 record.prime_accepted=cycle;
                 configure_target(image);record.image_committed=cycle;
-                if(segment_loading_)icu_.stage_segment_end(image);
+                if(segment_loading_ && image.storage==ProgramStorage::Imem)icu_.stage_segment_end(image);
             } else {
                 commits_.push_back(std::move(write));
                 if(commits_.back().prime)record.prime_accepted=cycle;
@@ -729,11 +737,12 @@ private:
         return im.storage==ProgramStorage::Imem && im.kind==IcuMacroQueueKind::Mem && im.mode==IcuQueueMode::Macro;
     }
     void fail_mem_endpoint() {
-        mem_edge_.error=mem_endpoint_.error;
+        mem_program_ports_.mem_program_error_i=true;
+        mem_program_ports_.mem_program_fault_code_i=mem_endpoint_.error;
         begin_task_abort(); // no new admission or PRIME, retain published AXI obligations
     }
     MemProgramEndpoint mem_endpoint_{};
-    MemProgramEdge mem_edge_{};
+    MemProgramPortSignals mem_program_ports_{};
     void clear_distribution() {
         word_fifo_.clear();ingress_fifo_.clear();
         for(auto& h:relay_fifos_)for(auto& r:h)r.clear();

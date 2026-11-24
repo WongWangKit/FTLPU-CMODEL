@@ -41,14 +41,14 @@ int main() try {
     loader.submit({im},0);unsigned w=0,c=0,p=0;bool held=false;std::size_t issued[3]{};
     for(unsigned t=0;!loader.ready_to_start();++t){
         check(t<2048&&!loader.failed(),"ready timeout");sys->tick();
-        const auto& x=loader.mem_program_edge();
-        if(x.write_fire){check(w<3&&x.queue==0&&x.generation==42&&x.address==w&&x.strb==7&&x.last==(w==2),"WRITE pins");
-            for(int k=0;k<12;k++)check(x.data[k]==byte(w*12+k),"accepted bytes");issued[w++]=t;}
-        if(x.commit){check(c<w&&x.commit_address==c&&t-issued[c]==5,"commit latency/order");
+        const auto& x=loader.mem_program_port_signals();
+        if(x.mem_program_fire){check(w<3&&x.mem_program_queue_o==0&&x.mem_program_generation_o==42&&x.mem_program_imem_address_o==w&&x.mem_program_strb_o==7&&x.mem_program_last_o==(w==2),"WRITE pins");
+            for(int k=0;k<12;k++)check(x.mem_program_data_o[k]==byte(w*12+k),"accepted bytes");issued[w++]=t;}
+        if(x.mem_program_commit_i){check(c<w&&x.mem_program_commit_address_i==c&&t-issued[c]==5,"commit latency/order");
             const auto z=sys->chip().icu().mem_iq(0).read_raw_imem(c);
             for(int k=0;k<3;k++)check(z.lanes[k]==lanes[c*3+k],"actual SRAM at commit");++c;}
-        held|=x.prime_valid&&!x.ready;
-        if(x.prime_fire){
+        held|=x.mem_prime_valid_o&&!x.mem_prime_ready_i;
+        if(x.mem_prime_fire){
             check(c==3&&!p,"premature PRIME");
             check(sys->chip().icu().mem_iq(0).mem_local_imem_load_port_signals().prime_fire
                 && loader.statistics().images[0].image_committed==loader.statistics().images[0].prime_accepted,

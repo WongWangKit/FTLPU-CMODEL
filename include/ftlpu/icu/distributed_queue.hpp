@@ -829,6 +829,14 @@ public:
     { queue_transport_executor_ = std::move(executor); }
     void rebind_shared_queue_control_pool(IcuQueueControlPool& pool) noexcept
     { queue_controls_.rebind_shared_pool(pool); }
+    bool qctl_configured() const noexcept { return raw_macro_mode_ && queue_controls_.size(); }
+    std::optional<std::size_t> wait_event_tag() const noexcept
+    {
+        const auto* control = queue_controls_.cached_due(cycle_);
+        if (control && control->opcode == IcuControlOpcode::WaitEvent
+            && !has_tagged_notification(control->operand)) return control->operand;
+        return std::nullopt;
+    }
     bool queue_transport_due() const noexcept
     {
         const auto* entry=queue_controls_.cached_due(cycle_);
@@ -910,6 +918,13 @@ public:
                 earliest_active_macro_release_cycle()), false);
         }
         queue_controls_.prime_cycle();
+    }
+
+    using ImemReadPortSignals = typename MacroDecoder::ImemReadPortSignals;
+    const ImemReadPortSignals& imem_read_port_signals() const noexcept
+    {
+        static const ImemReadPortSignals idle{};
+        return macro_decoder_ ? macro_decoder_->imem_read_port_signals() : idle;
     }
 
     const IcuMacroDecoderStatistics& macro_decoder_statistics() const noexcept
@@ -1281,6 +1296,8 @@ public:
             throw std::logic_error(
                 "transport-only ticking is defined only for MEM ICU queues");
         } else {
+            // A retired compute slot being refilled has no transport instruction to issue.
+            if (instruction_update_) return std::nullopt;
             ensure_configured();
             if (raw_macro_mode_) {
                 hold_compute_cycle();

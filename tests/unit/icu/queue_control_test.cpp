@@ -18,7 +18,7 @@ std::vector<IcuRawImemWord96> image()
         for(unsigned b=0;b<width;++b,++offset)
             if ((value>>b)&1u) words[1].lanes[offset/32]|=1u<<(offset%32);
     };
-    put(0,3);put(20,32);put(100,13);put(0,1);
+    put(0,3);put(20,32);put(100,std::bit_width(hw::kSramDepthRows-1));put(0,1);
     put(0,1);put(1,2);put(0,1);put(2,6);put(0,1);
     put(6,11);put(2,8);put(1,10); // 7 reads at local 20,23,...38
     return words;
@@ -154,7 +154,7 @@ void overlapping_contexts()
             if((value>>b)&1u) words[offset/96].lanes[(offset%96)/32]|=1u<<(offset%32);
     };
     put(1,3);put(3,22);put(100,14); // dictionary: next Macro starts +3, address +100
-    put(20,32);put(100,13);
+    put(20,32);put(100,std::bit_width(hw::kSramDepthRows-1));
     for(unsigned m=0;m<2;++m) {
         put(0,1);put(0,1);put(1,2);put(0,1);put(2,6);put(0,1);
         put(6,11);put(5,8);put(1,10);
@@ -257,6 +257,46 @@ void issued_data_keeps_flowing(bool transport)
         require(!icu.queue_completion_ready(7),"kernel switch reused old page completion");
     }
 }
+// Two real MEM_PACKET writers, distinct banks' queues and independently late waves.
+void two_page_last_tile(bool reverse)
+{
+    auto sys=std::make_unique<TspSliceSystem>();auto& icu=sys->icu();
+    auto& mem=sys->mem_array(Hemisphere::East);
+    icu.configure_queue_completion_events(77,{{17,{400,401}}});
+    const auto queue=[](unsigned p){return InstructionControlUnit::mem_queue(Hemisphere::East,p,0);};
+    for(unsigned p=0;p<2;p++){
+        auto q=queue(p);auto& raw=icu.mem_iq(q);raw.load_raw_macro(IcuMacroQueueKind::Mem,image());
+        raw.configure_queue_controls({{0,kQueueControlMemPacket,1},{0,IcuControlOpcode::WaitEvent,17}},16,8,2);
+        icu.push_mem_transport_synchronized_raw(q,InstructionControlUnit::encode_mem_synchronized_packet(
+            1,90+p,0,1,MemInstruction::Write(30+p,StreamId::East(p)),1));
+        icu.configure_mem_transport_owner(q,0,77,90+p,true);mem.configure_transport_commit(77,90+p,p,0,1);
+        icu.enable_queue_control_transport(q);icu.mem_transport_iq(q).launch();
+    }
+    icu.prime_raw_macro_frontends();auto tick=[&]{sys->tick(TspSliceSystem::LogSinks{});};
+    tick();
+    for(unsigned visit=0;visit<2;visit++){
+        auto p=visit^unsigned(reverse);auto q=queue(p);icu.notify_mem_synchronized(IcuLocation::Mem(Hemisphere::East,p,0),90+p);tick();
+        for(unsigned tile=0;tile<hw::kTileRows;tile++){
+            for(unsigned b=0;b<hw::kLanesPerTile;b++){
+                auto cell=StreamCell::Valid(31+64*p+tile*8+b);cell.transport=true;
+                sys->stream_fabric(Hemisphere::East).initialize_cell(mem.ports().input_column(p,StreamDirection::East),tile,b,StreamId::East(p),cell);
+            }
+            tick();require(mem.transport_committed_segments(77,90+p,p,0)==tile+1,"tile retirement mismatch");
+            require(!icu.queue_completion_ready(17),"all-of accepted an uncommitted page");
+            for(unsigned b=0;b<hw::kLanesPerTile;b++)
+                require(mem.sram_lane_byte(p,0,tile,30+p,b)==31+64*p+tile*8+b,"physical page contents");
+        }
+        icu.notify_queue_mem_commit(77,400+p);icu.notify_queue_mem_commit(77,400+p);
+        require(icu.queue_completion_ready(17)==bool(visit),"duplicate completed the other page");
+        if(!visit){for(unsigned t=0;t<7;t++){tick();require(icu.mem_iq(q).blocked_on_event(17),"early first-bank release");}}
+    }
+    auto a=IcuLocation::Mem(Hemisphere::East,0,0),b=IcuLocation::Mem(Hemisphere::East,1,0);
+    icu.push_event(76,17,{a,b},true);tick();
+    require(icu.blocked_on_tagged_event(a,17)&&icu.blocked_on_tagged_event(b,17),"old generation released new pages");
+    icu.push_event(77,17,{a,b},true);tick();
+    require(icu.take_phase_fire(77,17).has_value() && !icu.blocked_on_tagged_event(a,17) &&
+        !icu.blocked_on_tagged_event(b,17),"all-of did not release both destinations together");
+}
 void staged_reset_preserves_transport_owner()
 {
     auto system=std::make_unique<TspSliceSystem>();
@@ -334,9 +374,67 @@ void shared_pool_refill() {
     std::vector<IcuQueueControl> overflow(17);
     pool.configure(512,1,4,2);rejects([&]{pool.add_partition(overflow,16);});
 }
+// Product dispatch/clock path; use two physical banks, not a standalone arbiter.
+void qctl_event_edges()
+{
+    auto system=std::make_unique<TspSliceSystem>();
+    auto& icu=system->icu();
+    const auto a=IcuLocation::Mem(Hemisphere::East,0,0), b=IcuLocation::Mem(Hemisphere::East,0,1);
+    auto setup=[&](unsigned bank,std::vector<IcuQueueControl> controls){
+        auto& q=icu.mem_iq(bank); q.load_raw_macro(IcuMacroQueueKind::Mem,image());
+        q.configure_queue_controls(std::move(controls),16,8,2);
+    };
+    setup(0,{{0,IcuControlOpcode::WaitEvent,53},{1,IcuControlOpcode::WaitEvent,55},
+             {2,IcuControlOpcode::WaitEvent,55}});
+    setup(1,{{3,IcuControlOpcode::WaitEvent,54},{5,IcuControlOpcode::WaitEvent,55}});
+    icu.set_program_generation(41);icu.prime_raw_macro_frontends();
+    auto tick=[&]{system->tick(TspSliceSystem::LogSinks{});};
+    auto retired=[&](unsigned i){return icu.mem_iq(i).queue_controls_retired();};
+    rejects([&]{icu.broadcast_tagged_notification(53);});
+    icu.push_event(40,53,{a}); tick();
+    require(!retired(0),"stale generation released same tag");
+    icu.push_event(41,54,{b}); icu.push_event(41,53,{a}); tick();
+    require(retired(0)==1 && !retired(1),"disjoint wait did not bypass oldest unready target");
+    icu.push_event(41,55,{a,b}); icu.push_event(41,55,{a});
+    for(unsigned i=0;i<9;++i) tick();
+    require(retired(0)==3 && retired(1)==2,"repeated tag or staggered multicast lost a target");
+    std::cout<<"QCTL: stale=0; tag53 before 54; multicast + repeated 55: retired=3/2\n";
+}
+void qctl_wrong_tag_and_phase()
+{
+    auto system=std::make_unique<TspSliceSystem>();auto& icu=system->icu();
+    const auto a=IcuLocation::Mem(Hemisphere::East,0,0),b=IcuLocation::Mem(Hemisphere::East,0,1);
+    auto& qa=icu.mem_iq(0);qa.load_raw_macro(IcuMacroQueueKind::Mem,image());
+    qa.configure_queue_controls({{0,IcuControlOpcode::WaitEvent,61},{1,IcuControlOpcode::WaitEvent,62}},16,8,2);
+    auto& qb=icu.mem_iq(1);qb.push_nop(3);qb.append_control(IcuControlInstruction::WaitEvent(61));qb.launch();
+    icu.set_program_generation(5);icu.prime_raw_macro_frontends();
+    auto tick=[&]{system->tick(TspSliceSystem::LogSinks{});};
+    icu.push_event(5,61,{a,b},true);
+    unsigned held=0;
+    while(qa.queue_controls_retired()==0) {
+        require(held++<12,"mixed phase stalled");tick();
+        if (!qa.queue_controls_retired()) require(qa.blocked_on_event(61),"partial phase release");
+    }
+    require(icu.take_phase_fire(5,61).has_value(),"missing phase release receipt");
+    require(held>=3 && !qb.blocked_on_event(61),"Native and QCTL did not clear phase together");
+    // Both records name the same waiting target. The oldest is selected
+    // even with a mismatched tag (no tag search or arbitrary reordering).
+    icu.push_event(5,60,{a});icu.push_event(5,62,{a});tick();tick();
+    require(qa.blocked_on_event(62) && qa.queue_controls_retired()==1,"tag match skipped selected record");
+    for (unsigned n=0;n<6;++n) {
+        require(icu.event_in_ready({a}),"lost event credit");icu.push_event(5,60,{a});
+    }
+    require(!icu.event_in_ready({a}),"uncommitted events overbooked full buffer");
+    rejects([&]{icu.push_event(5,60,{a});});
+    tick();require(!icu.event_in_ready({a}),"full buffer lost an unconsumed record");
+    icu.set_program_generation(6);tick();
+    require(icu.event_in_ready({a}) && qa.blocked_on_event(62),"old buffered records advanced new generation");
+    icu.push_event(6,62,{a});tick();require(qa.queue_controls_retired()==2,"same-tag reload failed");
+}
 int main() try {
-    shared_pool_refill();compare(false,true);compare(true,true);
-    staged_reset_preserves_transport_owner();
+    if constexpr (!hw::kCommonBarrierCapacity) rejects([] { IcuCommonBarrierController c; c.configure(1,{{0,1}},{{1,{9}}}); });
+    qctl_wrong_tag_and_phase();qctl_event_edges();shared_pool_refill();compare(false,true);compare(true,true);
+    two_page_last_tile(false);two_page_last_tile(true);staged_reset_preserves_transport_owner();
     finite_frontend();compare(false);compare(true);transport_order();completion_generation();trailing_nops();
     overlapping_contexts();response_during_wait();
     issued_data_keeps_flowing(false);issued_data_keeps_flowing(true);

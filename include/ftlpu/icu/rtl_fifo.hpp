@@ -57,25 +57,25 @@ public:
     RtlSynchronousFifo& operator=(const RtlSynchronousFifo&) = delete;
 
     std::size_t depth() const noexcept { return depth_; }
-    std::size_t occupancy() const noexcept { return current_.level; }
+    std::size_t level_o() const noexcept { return current_.level; }
     bool empty() const noexcept { return current_.level == 0; }
     bool full() const noexcept { return current_.level == depth_; }
-    bool dequeue_valid() const noexcept { return !empty(); }
+    bool dequeue_valid_o() const noexcept { return !empty(); }
     bool dequeue_fire() const noexcept
     {
-        return dequeue_valid() && dequeue_ready_i_;
+        return dequeue_valid_o() && dequeue_ready_i_;
     }
-    bool enqueue_ready() const noexcept
+    bool enqueue_ready_o() const noexcept
     {
         return current_.level < depth_
             || (full_replacement_ && dequeue_fire());
     }
     bool enqueue_fire() const noexcept
     {
-        return enqueue_valid_i_ && enqueue_ready();
+        return enqueue_valid_i_ && enqueue_ready_o();
     }
 
-    const T& front() const
+    const T& dequeue_data_o() const
     {
         if (empty()) throw std::logic_error("RTL FIFO front on empty FIFO");
         const auto& entry = current_.storage[current_.read_pointer];
@@ -86,16 +86,16 @@ public:
 
     // Drive one cycle of combinational inputs. A valid enqueue owns its data
     // until LOW samples it. Calling drive twice before POSEDGE is an error.
-    void drive(bool enqueue_valid, std::optional<T> enqueue_data,
-        bool dequeue_ready)
+    void drive(bool enqueue_valid_i, std::optional<T> enqueue_data_i,
+        bool dequeue_ready_i)
     {
         if (inputs_driven_ || next_.has_value())
             throw std::logic_error("RTL FIFO inputs driven outside input window");
-        if (enqueue_valid != enqueue_data.has_value())
+        if (enqueue_valid_i != enqueue_data_i.has_value())
             throw std::invalid_argument("RTL FIFO valid/data mismatch");
-        enqueue_valid_i_ = enqueue_valid;
-        enqueue_data_i_ = std::move(enqueue_data);
-        dequeue_ready_i_ = dequeue_ready;
+        enqueue_valid_i_ = enqueue_valid_i;
+        enqueue_data_i_ = std::move(enqueue_data_i);
+        dequeue_ready_i_ = dequeue_ready_i;
         inputs_driven_ = true;
     }
 
@@ -118,7 +118,7 @@ public:
             next.statistics.maximum_occupancy, current_.level);
         if (empty()) ++next.statistics.empty_cycles;
         if (full()) ++next.statistics.full_cycles;
-        if (enqueue_valid_i_ && !enqueue_ready()) {
+        if (enqueue_valid_i_ && !enqueue_ready_o()) {
             ++next.statistics.rejected_writes;
             ++next.statistics.current_backpressure_duration;
             next.statistics.maximum_backpressure_duration = std::max(
@@ -127,7 +127,7 @@ public:
         } else {
             next.statistics.current_backpressure_duration = 0;
         }
-        if (dequeue_valid() && !dequeue_ready_i_)
+        if (dequeue_valid_o() && !dequeue_ready_i_)
             ++next.statistics.stall_cycles;
 
         if (write_fire) {

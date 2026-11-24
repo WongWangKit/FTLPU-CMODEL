@@ -63,13 +63,14 @@ int main()
     assert(transposed[7][3] == 307);
     assert(transposed[7][6] == 607);
 
+    constexpr int lanes=ftlpu::hw::kTileRows*ftlpu::hw::kLanesPerTile;
     const auto input_stream = stream_vector();
     const auto north = ftlpu::SxmSlice::shift_select(input_stream, ftlpu::SxmShiftSource::NorthShifted, 1, -1);
     assert(north[0][0] == 1);
     assert(north[0][6] == 7);
     assert(north[0][7] == 8);
-    assert(north[ftlpu::hw::kTileRows - 2][7] == 24);
-    assert(north[ftlpu::hw::kTileRows - 1][0] == 25);
+    assert(north[ftlpu::hw::kTileRows - 2][7] == lanes-8);
+    assert(north[ftlpu::hw::kTileRows - 1][0] == lanes-7);
     assert(north[ftlpu::hw::kTileRows - 1][7] == -1);
 
     const auto south = ftlpu::SxmSlice::shift_select(input_stream, ftlpu::SxmShiftSource::SouthShifted, 2, -1);
@@ -77,15 +78,15 @@ int main()
     assert(south[0][1] == -1);
     assert(south[0][2] == 0);
     assert(south[1][0] == 6);
-    assert(south[ftlpu::hw::kTileRows - 1][7] == 29);
+    assert(south[ftlpu::hw::kTileRows - 1][7] == lanes-3);
 
     auto permutation = ftlpu::Permute320::identity_map();
     for (std::size_t index = 0; index < ftlpu::Permute320::kTotalLanes; ++index) {
         permutation[index] = ftlpu::Permute320::kTotalLanes - 1 - index;
     }
     const auto permuted = ftlpu::SxmSlice::permute(input_stream, permutation);
-    assert(permuted[0][0] == 31);
-    assert(permuted[0][7] == 24);
+    assert(permuted[0][0] == lanes-1);
+    assert(permuted[0][7] == lanes-8);
     assert(permuted[ftlpu::hw::kTileRows - 1][7] == 0);
 
     bool caught = false;
@@ -220,7 +221,7 @@ int main()
     assert(!fabric.cell(0, 0, 0, east0).valid);
     assert(fabric.cell(1, 0, 0, east1).valid);
     assert(fabric.cell(1, 0, 0, east1).data == 7);
-    assert(fabric.cell(1, ftlpu::hw::kTileRows - 1, 0, east1).data == 31);
+    assert(fabric.cell(1, ftlpu::hw::kTileRows - 1, 0, east1).data == lanes-1);
 
     // The physical SXM path has one width: eight FP16 values represented by
     // sixteen byte streams. The former two-stream serial mode is rejected.
@@ -350,7 +351,8 @@ int main()
         stream_range(16, 2 * ftlpu::hw::kLanesPerTile),
         stream_range(0, 2 * ftlpu::hw::kLanesPerTile),
         ftlpu::Permute320::identity_map());
-    selected_tile.output_tile = 2;
+    const auto selected_index=ftlpu::hw::kTileRows/2;
+    selected_tile.output_tile = selected_index;
     selected_sxm.issue(selected_tile);
     selected_fabric.low();
     selected_sxm.evaluate(selected_fabric);
@@ -364,7 +366,7 @@ int main()
             for (std::size_t lane = 0;
                  lane < ftlpu::hw::kLanesPerTile; ++lane) {
                 assert(selected_fabric.cell(
-                    1, tile, lane, output_stream).valid == (tile == 2));
+                    1, tile, lane, output_stream).valid == (tile == selected_index));
             }
         }
     }
@@ -561,9 +563,12 @@ int main()
     // released for a subsequent transpose.
     ftlpu::StreamRegisterFabric fanout_fabric(2);
     ftlpu::SxmSlice fanout_sxm(ftlpu::SxmStreamPortMap::SameDirection(0, 1));
+    constexpr auto tiles=ftlpu::hw::kTileRows;
+    constexpr auto release=tiles+1;
+    constexpr auto source_lane=(tiles/2)*ftlpu::hw::kLanesPerTile;
     for (std::size_t iteration = 0; iteration < 3; ++iteration) {
-        for (std::size_t cycle = 0; cycle < 10; ++cycle) {
-            if (cycle < 4) {
+        for (std::size_t cycle = 0; cycle < release+tiles+1; ++cycle) {
+            if (cycle < tiles) {
                 for (std::size_t plane = 0; plane < 2; ++plane)
                     for (std::size_t lane = 0; lane < 8; ++lane)
                         fanout_fabric.initialize_cell(0, cycle, lane,
@@ -576,9 +581,9 @@ int main()
                 instruction.input_row = ftlpu::SxmInstruction::kBroadcastInputRows;
                 fanout_sxm.issue(instruction);
             }
-            if (cycle == 5) {
+            if (cycle == release) {
                 auto map = ftlpu::Permute320::identity_map();
-                for (std::size_t i=0;i<32;++i) map[i]=16+i%8;
+                for (std::size_t i=0;i<map.size();++i) map[i]=source_lane+i%8;
                 auto instruction = ftlpu::SxmInstruction::Permute(stream_range(16,16),stream_range(0,16),map);
                 if (iteration == 1) instruction.output_row = ftlpu::SxmInstruction::kConsumeOutputRowBase + 2;
                 fanout_sxm.issue(instruction);
@@ -586,14 +591,14 @@ int main()
             fanout_fabric.low();fanout_sxm.evaluate(fanout_fabric);
             fanout_sxm.validate_posedge();fanout_fabric.validate_posedge();
             fanout_sxm.posedge();fanout_fabric.posedge();
-            if (cycle>=5 && cycle<9) {
-                const auto tile=cycle-5;
+            if (cycle>=release && cycle<release+tiles) {
+                const auto tile=cycle-release;
                 for (std::size_t row=0;row<8;++row)
                     if (iteration != 1 || row == 2)
                     for (std::size_t plane=0;plane<2;++plane)
                         for (std::size_t lane=0;lane<8;++lane) {
                             const auto cell=fanout_fabric.cell(1,tile,lane,ftlpu::StreamId::East(row*2+plane));
-                            assert(cell.valid && cell.data==iteration*32+plane*64+16+row);
+                            assert(cell.valid && cell.data==iteration*32+plane*64+source_lane+row);
                         }
             }
         }

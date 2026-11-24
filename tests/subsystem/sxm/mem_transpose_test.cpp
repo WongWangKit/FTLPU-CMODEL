@@ -12,12 +12,30 @@ void run(Hemisphere side,std::size_t matrices){
     auto system=std::make_unique<TspSliceSystem>(SystemHardwareConfiguration{},SxmTransposeArchitecture::WideStreaming);
     for(std::size_t m=0;m<matrices;++m)for(std::size_t r=0;r<N;++r)for(std::size_t c=0;c<N;++c)
         for(std::size_t b=0;b<2;++b)
-            system->initialize_mem_sram_lane_byte(side,inputSlice+b,c/hw::kLanesPerTile,m*N+r,c%hw::kLanesPerTile,
+            system->initialize_mem_sram_lane_byte(side,inputSlice+b,(m*N+r)/hw::kSramDepthRows,c/hw::kLanesPerTile,(m*N+r)%hw::kSramDepthRows,c%hw::kLanesPerTile,
                 static_cast<std::uint8_t>(value(m,r,c)>>(8*b)));
     const auto readCycle=first-(hw::kMemGroups+hw::kC2cToSxmStreamRegisterColumns-inputSlice/hw::kMemSlicesPerGroup);
     const auto writeCycle=first+N+SxmWideTranspose::skew
         +hw::kMemGroups+hw::kC2cToSxmStreamRegisterColumns-outputSlice/hw::kMemSlicesPerGroup;
     for(std::size_t b=0;b<2;++b){
+        if (matrices*N+32 > hw::kSramDepthRows || matrices*N+1 > hw::kIcuMemImemDepth) {
+            // Map the same linear stream across banks. A repeat emits one
+            // physical row per cycle; switching banks must not insert a bubble.
+            for (bool write : {false,true}) {
+                const std::size_t base=write?32:0;
+                for (std::size_t i=0;i<matrices*N;) {
+                    const auto bank=(base+i)/hw::kSramDepthRows, row=(base+i)%hw::kSramDepthRows;
+                    const auto n=std::min(matrices*N-i,hw::kSramDepthRows-row);
+                    auto q=InstructionControlUnit::mem_queue(side,(write?outputSlice:inputSlice)+b,bank);
+                    system->icu().enqueue_mem_nop(q,(write?writeCycle:readCycle)+i);
+                    system->icu().enqueue_mem(q, write?MemInstruction::Write(row,StreamId::West(b)):
+                                                      MemInstruction::Read(row,StreamId::East(16+b)));
+                    if(n>1)system->icu().enqueue_mem_repeat(q,n-1,1,1);
+                    i+=n;
+                }
+            }
+            continue;
+        }
         auto reader=InstructionControlUnit::mem_queue(side,inputSlice+b,0);
         auto writer=InstructionControlUnit::mem_queue(side,outputSlice+b,0);
         system->icu().enqueue_mem_nop(reader,readCycle);
@@ -37,7 +55,7 @@ void run(Hemisphere side,std::size_t matrices){
     for(std::size_t m=0;m<matrices;++m)for(std::size_t r=0;r<N;++r)for(std::size_t c=0;c<N;++c){
         std::uint16_t actual=0;
         for(std::size_t b=0;b<2;++b)actual|=std::uint16_t(system->read_mem_sram_lane_byte(side,outputSlice+b,
-            c/hw::kLanesPerTile,32+m*N+r,c%hw::kLanesPerTile))<<(8*b);
+            (32+m*N+r)/hw::kSramDepthRows,c/hw::kLanesPerTile,(32+m*N+r)%hw::kSramDepthRows,c%hw::kLanesPerTile))<<(8*b);
         if(actual!=value(m,c,r))throw std::runtime_error("MEM/SXM transpose value mismatch");
     }
     if(!system->icu().program_queues_done() || !system->program_resources_drained())

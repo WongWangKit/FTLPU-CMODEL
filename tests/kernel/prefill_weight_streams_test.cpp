@@ -14,7 +14,7 @@
 
 namespace {
 using namespace ftlpu;
-constexpr std::size_t T = 32, K = 128, N = 64;
+constexpr std::size_t T = hw::kMxmRows, K = 4*T, N = 2*T;
 constexpr std::size_t weightStream = 8, activationStream = 0;
 constexpr std::size_t firstLoad = 20;
 constexpr std::array<std::size_t, 2> activationSlices{40, 41};
@@ -104,7 +104,7 @@ Result run(std::size_t tokens, std::size_t streams, const std::filesystem::path&
         const auto nb = block / (K / T), kb = block % (K / T);
         for (std::size_t column = 0; column < T; ++column) {
             const auto slice = column % 8;
-            const auto address = block * 4 + (streams == 1 ? 3 - column / 8 : column / 8);
+            const auto address = block * hw::kTileRows + (streams == 1 ? hw::kTileRows - 1 - column / 8 : column / 8);
             for (std::size_t tile = 0; tile < hw::kTileRows; ++tile)
                 for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane)
                     system->initialize_mem_sram_lane_byte(slice, tile, address, lane,
@@ -132,7 +132,7 @@ Result run(std::size_t tokens, std::size_t streams, const std::filesystem::path&
         for (std::size_t i = 0; i < loadLength; ++i) {
             for (std::size_t stream = 0; stream < streams; ++stream) {
                 const auto slice = streams == 1 ? i % 8 : stream;
-                const auto address = block * 4 + (streams == 1 ? 3 - i / 8 : i);
+                const auto address = block * hw::kTileRows + (streams == 1 ? hw::kTileRows - 1 - i / 8 : i);
                 schedule.mem(slice, load + i - inputLatency(slice),
                     MemInstruction::Read(address, StreamId::East(weightStream + stream)));
             }
@@ -261,7 +261,7 @@ int main(int argc, char** argv) try {
             << "\"k\":" << K << ",\"n\":" << N << ",\"cases\":[\n";
     }
     bool first = true;
-    for (const auto tokens : {16u, 32u, 64u}) {
+    for (const auto tokens : {T/2, T, 2*T}) {
         std::vector<float> baseline;
         for (const auto streams : {8u, 1u}) {
             auto r = run(tokens, streams, directory);

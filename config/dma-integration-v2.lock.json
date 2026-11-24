@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "scope": "LPU16/32 mixed, functional integration only",
+  "profiles": {
+    "ftlpu-lpu16-mixed": {
+      "P": 112,
+      "RT": 128,
+      "Q": 832,
+      "imem": {
+        "Mem": 320,
+        "Mxm": 16384,
+        "Sxm": 1024,
+        "Vxm": 256,
+        "C2c": 4096
+      }
+    },
+    "ftlpu-lpu32-mixed": {
+      "P": 192,
+      "RT": 128,
+      "Q": 384,
+      "imem": {
+        "Mem": 3136,
+        "Mxm": 8192,
+        "Sxm": 1024,
+        "Vxm": 1536,
+        "C2c": 4096
+      }
+    }
+  },
+  "units": {
+    "P": "32-byte program response packets",
+    "RT": "vectors per data lane per direction",
+    "Q": "shared admission transactions",
+    "imem": "physical instruction words per queue"
+  },
+  "program_fifo": {
+    "Config": 16,
+    "Word": 8,
+    "Prime": 32
+  },
+  "not_signed": [
+    "area, Fmax, FPGA BRAM mapping",
+    "LPU64, Peer RTL, SXM/VXM execution integration"
+  ]
+}
