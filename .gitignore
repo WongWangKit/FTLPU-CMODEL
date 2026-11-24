@@ -44,3 +44,7 @@ docs/*_schedule_detail.png
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Clock experiments and timing archives belong on dma_hz and dma_wzq only.
+/clock_experiment/
+/timing_refactor/
