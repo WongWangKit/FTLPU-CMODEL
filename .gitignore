@@ -61,3 +61,8 @@ id_rsa
 id_ed25519
 credentials.local.json
 secrets.local.json
+
+# This DMA branch versions clock experiments and timing migration sources.
+# Re-include the directories themselves; generated output/secret rules still apply.
+!/clock_experiment/
+!/timing_refactor/
