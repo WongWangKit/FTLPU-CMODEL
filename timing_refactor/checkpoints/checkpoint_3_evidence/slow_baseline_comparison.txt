@@ -1,0 +1,27 @@
+Checkpoint 3 MXM - slow baseline comparison
+Date: 2026-11-14
+
+Checkpoint 2 independent baseline:
+- kernel.projection.w8a16: ACC address 1536 outside configured 128 rows
+- kernel.swiglu.w8a16: ACC address 1536 outside configured 128 rows
+- model.smollm2.prefill_attention: ACC address 512 outside configured 128 rows
+- model.decoder.decode_layer: MXM INT8 weight streams had not all arrived
+- model.smollm2.decode_ffn: SRAM row outside configured slice SRAM
+- model.smollm2.decode_attention: VXM active-bundle reconfiguration error
+
+Checkpoint 3 command:
+ctest --test-dir D:\LPU\FTLPU-CMODEL-clock\out\checkpoint_3_mxm -C Release -L slow --output-on-failure
+
+Checkpoint 3 result:
+- kernel.projection.w8a16: ACC address 1536 outside configured 128 rows
+- kernel.swiglu.w8a16: ACC address 1536 outside configured 128 rows
+- model.smollm2.prefill_attention: ACC address 512 outside configured 128 rows
+- model.decoder.decode_layer: ACC address 128 outside configured 128 rows
+- model.smollm2.decode_ffn: SRAM row outside configured slice SRAM
+- model.smollm2.decode_attention: VXM active-bundle reconfiguration error
+
+Interpretation:
+Five tests retain the same target-configuration or VXM baseline class. The
+Decoder Layer now passes the old MXM weight-arrival timing blocker and proceeds
+to the existing 128-row accumulator capacity boundary. No capacity or VXM
+configuration was changed to make the slow suite appear to pass.

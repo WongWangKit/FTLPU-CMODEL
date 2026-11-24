@@ -1,0 +1,10 @@
+Checkpoint 3 MXM - original source integrity evidence
+Date: 2026-11-14
+
+Original source: D:\LPU\FTLPU-CMODEL-main
+Frozen manifest: timing_refactor\manifests\source_manifest_pre_copy.csv
+Manifest rows checked: 861
+Missing files: 0
+Changed SHA-256 values: 0
+
+Result: PASS. The original CModel reference directory was not modified.

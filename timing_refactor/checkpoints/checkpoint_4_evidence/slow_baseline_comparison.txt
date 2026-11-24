@@ -1,0 +1,16 @@
+Checkpoint 4 VXM - slow baseline comparison
+Date: 2026-11-14
+
+Command:
+ctest --test-dir D:\LPU\FTLPU-CMODEL-clock\out\checkpoint_4_vxm -C Release -L slow --output-on-failure
+
+Result: six expected baseline failures, no new failure category.
+
+- kernel.projection.w8a16: MXM accumulator address 1536 / 128 rows
+- kernel.swiglu.w8a16: MXM accumulator address 1536 / 128 rows
+- model.smollm2.prefill_attention: MXM accumulator address 512 / 128 rows
+- model.decoder.decode_layer: MXM accumulator address 128 / 128 rows
+- model.smollm2.decode_ffn: MEM slice SRAM row capacity
+- model.smollm2.decode_attention: cycle 31 VXM active-bundle reconfiguration
+
+These categories and messages match Checkpoint 3 evidence.

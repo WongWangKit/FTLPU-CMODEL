@@ -1,0 +1,20 @@
+Checkpoint 3 MXM - focused test evidence
+Date: 2026-11-14
+
+Command:
+ctest --test-dir D:\LPU\FTLPU-CMODEL-clock\out\checkpoint_3_mxm -C Release -L mxm --output-on-failure
+
+Result: PASS
+Passed: 9
+Failed: 0
+
+Passed tests:
+- unit.core.wide_transport_codec
+- unit.mxm.supercell
+- unit.mxm.array
+- unit.mxm.control_slice
+- unit.mxm.accumulator
+- unit.mxm.clocked
+- unit.mxm.weight_dequantizer
+- subsystem.mxm.bf16
+- subsystem.mxm.decode_streamed_weight

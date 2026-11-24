@@ -1,0 +1,12 @@
+Checkpoint 4 VXM - fast regression
+Date: 2026-11-14
+
+Command:
+ctest --test-dir D:\LPU\FTLPU-CMODEL-clock\out\checkpoint_4_vxm -C Release -L fast -E ^kernel\.rmsnorm$ --output-on-failure
+
+Result: PASS
+Passed: 62
+Failed: 0
+CTest real time: 16.81 seconds
+
+The count is one greater than Checkpoint 3 because unit.vxm.clocked is new.

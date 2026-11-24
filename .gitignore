@@ -62,7 +62,7 @@ id_ed25519
 credentials.local.json
 secrets.local.json
 
-# Standalone clock experiments and migration archives (DMA product branch).
-/clock_experiment/
-/timing_refactor/*
-!/timing_refactor/rtl_golden/
+# This DMA branch versions clock experiments and timing migration sources.
+# Re-include the directories themselves; generated output/secret rules still apply.
+!/clock_experiment/
+!/timing_refactor/

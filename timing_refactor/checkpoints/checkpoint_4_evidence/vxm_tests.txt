@@ -1,0 +1,12 @@
+Checkpoint 4 VXM - focused tests
+Date: 2026-11-14
+
+Command:
+ctest --test-dir D:\LPU\FTLPU-CMODEL-clock\out\checkpoint_4_vxm -C Release -L vxm --output-on-failure
+
+Result: PASS
+Passed: 14
+Failed: 0
+
+Includes unit.vxm.clocked plus 10 other VXM unit tests and 3 VXM-labelled
+system topology tests.

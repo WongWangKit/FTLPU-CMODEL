@@ -1,0 +1,12 @@
+Checkpoint 3 MXM - frozen RMSNorm baseline
+Date: 2026-11-14
+
+Command:
+ctest --test-dir D:\LPU\FTLPU-CMODEL-clock\out\checkpoint_3_mxm -C Release -R rmsnorm --output-on-failure
+
+Result: expected historical failure, unchanged in form
+Test: kernel.rmsnorm
+Error: VXM input Buffer cannot be reconfigured while a Bundle is active
+
+This is the pre-existing VXM active-bundle baseline. It is not counted as a
+Checkpoint 3 MXM regression and was not modified in this checkpoint.

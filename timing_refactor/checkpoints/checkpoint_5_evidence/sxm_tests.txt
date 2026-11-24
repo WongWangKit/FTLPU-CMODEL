@@ -1,0 +1,8 @@
+command=ctest -C Release -L sxm --output-on-failure
+tests=10
+passed=10
+failed=0
+elapsed_seconds=1.72
+new_test=unit.sxm.clocked
+result=PASS
+

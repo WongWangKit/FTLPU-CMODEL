@@ -1,0 +1,18 @@
+Checkpoint 3 MXM - Release build evidence
+Date: 2026-11-14
+
+Source: D:\LPU\FTLPU-CMODEL-clock
+Build: D:\LPU\FTLPU-CMODEL-clock\out\checkpoint_3_mxm
+Configuration: Release
+Hardware configuration: config\ftlpu-lpu32.json
+
+CMake configure: PASS
+Build method: enumerate generated .vcxproj targets, exclude only ALL_BUILD,
+ZERO_CHECK, RUN_TESTS, CompilerIdCXX and VCTargetsPath, then build in groups.
+Actual compiled targets: 72
+Result: BUILD_ALL_TARGETS_PASS count=72
+Exit code: 0
+
+The MSVC /DNDEBUG overridden by /UNDEBUG messages are expected warnings for
+tests whose assertions remain enabled in Release. No compilation or link error
+was reported.

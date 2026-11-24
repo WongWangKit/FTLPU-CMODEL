@@ -1,0 +1,5 @@
+test=kernel.rmsnorm
+result=EXPECTED_FROZEN_FAILURE
+message=VXM input Buffer cannot be reconfigured while a Bundle is active
+comparison=identical to Checkpoint 4
+

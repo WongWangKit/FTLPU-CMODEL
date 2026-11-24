@@ -1,0 +1,16 @@
+path,kind
+CMakeLists.txt,build
+include/ftlpu/vxm/lane.hpp,source
+include/ftlpu/vxm/superlane.hpp,source
+include/ftlpu/vxm/slice.hpp,source
+include/ftlpu/system/tsp_slice_system.hpp,source
+tests/unit/vxm/vxm_clocked_test.cpp,test
+timing_refactor/TIMING_ARCHITECTURE.md,document
+timing_refactor/MODULE_STATE_INVENTORY.md,document
+timing_refactor/MIGRATION_CHECKLIST.md,document
+timing_refactor/TIMING_REFACTOR_CHANGELOG.md,document
+clock_experiment/CPP_TIMING_MODELING.md,document
+timing_refactor/checkpoints/checkpoint_4_vxm.md,document
+timing_refactor/checkpoints/checkpoint_4_evidence/,evidence
+timing_refactor/manifests/checkpoint_4_changed_files.csv,manifest
+timing_refactor/manifests/checkpoint_4_key_hashes.csv,manifest
