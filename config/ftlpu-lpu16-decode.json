@@ -1,5 +1,48 @@
 {
   "schema_version": 2,
+  "icu": {
+    "mem_instruction_bits": 96,
+    "mem_imem_depth": 131072,
+    "mem_iq_depth": 16,
+    "mem_macro_contexts": 32,
+    "mxm_instruction_bits": 128,
+    "mxm_imem_depth": 65536,
+    "mxm_iq_depth": 16,
+    "mxm_macro_contexts": 40,
+    "vxm_instruction_bits": 96,
+    "vxm_imem_depth": 2048,
+    "vxm_iq_depth": 16,
+    "vxm_macro_contexts": 4,
+    "sxm_instruction_bits": 96,
+    "sxm_imem_depth": 2048,
+    "sxm_iq_depth": 16,
+    "sxm_macro_contexts": 4,
+    "c2c_instruction_bits": 96,
+    "c2c_imem_depth": 32768,
+    "c2c_iq_depth": 16,
+    "c2c_macro_contexts": 4,
+    "mem_macro_context_bits": 256,
+    "mxm_macro_context_bits": 256,
+    "fetch_latency_cycles": 1,
+    "macro_imem_request_ii_cycles": 1,
+    "barrier_latency_cycles": 35,
+    "macro_reservoir_words": 3,
+    "macro_decode_window_bits": 64,
+    "macro_ddb_depth": 8,
+    "macro_admission_lookahead": 8,
+    "macro_ddb_run_capacity": 8,
+    "common_barrier_encoding_version": 1,
+    "common_barrier_capacity": 1024,
+    "common_transport_overlap_version": 1,
+    "queue_control_version": 1,
+    "queue_control_capacity": 16,
+    "queue_control_cache_depth": 4,
+    "queue_control_read_latency": 2,
+    "queue_control_read_ports": 1,
+    "queue_control_storage_version": 1,
+    "queue_control_pool_capacity": 512,
+    "queue_control_pool_read_ii": 1
+  },
   "target": {
     "name": "ftlpu-lpu16-decode"
   },
@@ -9,7 +52,7 @@
     "lanes_per_tile": 8
   },
   "mem": {
-    "slices_per_hemisphere": 52,
+    "slices_per_hemisphere": 20,
     "banks_per_slice": 2,
     "rows_per_bank": 1024,
     "bytes_per_lane": 1
@@ -31,14 +74,6 @@
         "mem.b3",
         "mem.b4",
         "mem.b5",
-        "mem.b6",
-        "mem.b7",
-        "mem.b8",
-        "mem.b9",
-        "mem.b10",
-        "mem.b11",
-        "mem.b12",
-        "mem.b13",
         "c2c_sxm",
         "sxm_mxm"
       ],
@@ -52,14 +87,6 @@
             "mem.b3",
             "mem.b4",
             "mem.b5",
-            "mem.b6",
-            "mem.b7",
-            "mem.b8",
-            "mem.b9",
-            "mem.b10",
-            "mem.b11",
-            "mem.b12",
-            "mem.b13",
             "c2c_sxm",
             "sxm_mxm"
           ],
@@ -81,15 +108,7 @@
           "mem.b2",
           "mem.b3",
           "mem.b4",
-          "mem.b5",
-          "mem.b6",
-          "mem.b7",
-          "mem.b8",
-          "mem.b9",
-          "mem.b10",
-          "mem.b11",
-          "mem.b12",
-          "mem.b13"
+          "mem.b5"
         ]
       },
       "sxm": {
@@ -136,11 +155,11 @@
       },
       "c2c": {
         "tx_input": {
-          "column": "mem.b13",
+          "column": "mem.b5",
           "flow": "forward"
         },
         "rx_output": {
-          "column": "mem.b13",
+          "column": "mem.b5",
           "flow": "reverse"
         }
       }
@@ -179,7 +198,8 @@
     ]
   },
   "c2c": {
-    "beat_bytes": 16
+    "beat_bytes": 16,
+    "streams_per_direction": 8
   },
   "mxm": {
     "accum_contexts": 4,
@@ -220,9 +240,11 @@
     ],
     "attention_mask_base_row": 768,
     "matmul_result_base_row": 512,
-    "w8a16_result_slice_base": 16
+    "w8a16_result_slice_base": 16,
+    "automatic_layout": true
   },
   "throughput": {
+    "mxm_prefill_weight_streams": 8,
     "mxms_per_hemisphere": 1,
     "mxm_weight_buffers": 2,
     "mxm_local_dequant_enabled": 1,
@@ -232,19 +254,29 @@
     "vxm_fma_enabled": 1
   },
   "external_memory": {
+    "dma_fifo_depth_vectors": 16,
     "lpu_clock_mhz": 200,
-    "ddr_peak_bandwidth_mbytes_per_second": 25600,
     "ddr_scheduling_efficiency_percent": 80,
     "ddr_read_latency_cycles": 30,
     "ddr_write_latency_cycles": 30,
     "ddr_read_latency_jitter_cycles": 0,
     "ddr_write_latency_jitter_cycles": 0,
     "ddr_request_queue_depth": 64,
-    "ddr_latency_random_seed": 1179929680
+    "ddr_latency_random_seed": 1179929680,
+    "ddr_interface_peak_bytes_per_second": 460000000000,
+    "ddr_budget_bytes_per_second": 25600000000,
+    "ddr_rx_entrance_bytes_per_second": 51200000000,
+    "ddr_effective_peak_bytes_per_second": 20480000000
+  },
+  "program_load": {
+    "bus_bytes_per_cycle": 32,
+    "route_latency_cycles": 1,
+    "imem_write_ii_cycles": 1,
+    "imem_write_commit_latency_cycles": 1
   },
   "planning": {
     "source_workbook": "LPU参数配置.xlsx",
-    "source_sha256": "0ccabacbada7c82fb75624b9dc13ed1f5a904c2efdecc8197eec4c9514fa3379",
+    "source_sha256": "7f8a5f4fd00387af484e8fa523705a194da273ba574b893a0cdb137a8585b6e3",
     "source_sheet": "三档参数对照",
     "source_column": "E",
     "status": "experimental target; model-level validation required",
@@ -331,7 +363,7 @@
       },
       "29": {
         "parameter": "MEM slices",
-        "value": 52
+        "value": 20
       },
       "30": {
         "parameter": "每组 MEM slices",
@@ -355,11 +387,11 @@
       },
       "35": {
         "parameter": "每 LPU MEM 容量",
-        "value": 3.25
+        "value": 1.25
       },
       "36": {
         "parameter": "MEM 总容量",
-        "value": 3.25
+        "value": 1.25
       },
       "37": {
         "parameter": "MEM bank 端口约束",
@@ -367,7 +399,7 @@
       },
       "39": {
         "parameter": "MEM ICU 总数",
-        "value": 208
+        "value": 80
       },
       "40": {
         "parameter": "每 ICU 活动指令数",
@@ -453,9 +485,9 @@
     "unimplemented_requirements": [
       "RTL/PPA/FPGA acceptance and timing closure",
       "iMEM capacity from program peak and FPGA segmented loading",
-      "external-memory capacity/type enforcement (budget, efficiency and latency are modeled)"
+      "external-memory capacity and device-type enforcement (capacity and type stay documentation only)"
     ],
     "layout_note": "Mask starts at depth-256; result seed=min(1600,depth/2). These seeds do not prove tensor lifetime fit.",
-    "timing_note": "No jitter specified in workbook; jitter=0. Effective peak=min(per-LPU budget,RX entrance); then apply efficiency, matching workbook row 56. Raw interface peak and budget remain in workbook_rows."
+    "timing_note": "No jitter specified in workbook; jitter=0. ddr_effective_peak_bytes_per_second is workbook row 56 (min of per-LPU budget and RX entrance, times efficiency) and is consumed directly as the model's sustained byte ceiling. ddr_read/write_latency_cycles and ddr_request_queue_depth are enforced by the DDR model, so the achievable rate also falls out of Little's law instead of being assumed."
   }
 }

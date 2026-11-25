@@ -112,6 +112,11 @@ ftlpu_add_test(mem_sync_read_test tests/unit/mem/mem_sync_read_test.cpp
 ftlpu_add_test(mem_array_r1_test tests/unit/mem/mem_array_test.cpp
     unit.mem.array_r1 unit mem fast)
 target_compile_definitions(mem_array_r1_test PRIVATE FTLPU_TEST_MEM_R1=1)
+ftlpu_add_test(mem_gather_test tests/unit/mem/mem_gather_test.cpp
+    unit.mem.gather unit mem fast)
+ftlpu_add_test(mem_gather_r1_test tests/unit/mem/mem_gather_test.cpp
+    unit.mem.gather_r1 unit mem fast)
+target_compile_definitions(mem_gather_r1_test PRIVATE FTLPU_TEST_MEM_R1=1)
 ftlpu_add_test(mem_read_mode_test tests/unit/mem/mem_read_mode_test.cpp
     unit.mem.read_mode unit mem fast)
 ftlpu_add_test(vector_roundtrip_test tests/unit/mem/vector_roundtrip_test.cpp
@@ -150,14 +155,11 @@ ftlpu_add_test(vxm_static_quantizer_test tests/unit/vxm/static_quantizer_test.cp
 ftlpu_add_test(vxm_log_test tests/unit/vxm/log_test.cpp
     unit.vxm.log unit vxm fast)
 
-ftlpu_add_test(sxm_test tests/unit/sxm/slice_test.cpp
-    unit.sxm.slice unit sxm fast)
-ftlpu_add_test(sxm_wide_transpose_test tests/unit/sxm/wide_transpose_test.cpp
-    unit.sxm.wide_transpose unit sxm fast)
-ftlpu_add_test(sxm_attention_transpose_test tests/unit/sxm/attention_transpose_test.cpp
-    unit.sxm.attention_transpose unit sxm fast)
-ftlpu_add_test(sxm_local_blocks_timing_test tests/unit/sxm/local_blocks_timing_test.cpp
-    unit.sxm.local_blocks_timing unit sxm fast)
+ftlpu_add_test(sxm_fifo_transpose_test tests/unit/sxm/fifo_transpose_test.cpp
+    unit.sxm.fifo_transpose unit sxm fast)
+if(MSVC)
+    target_link_options(sxm_fifo_transpose_test PRIVATE /STACK:67108864)
+endif()
 ftlpu_add_test(icu_barrier_test tests/unit/icu/barrier_test.cpp
     unit.icu.barrier unit icu fast)
 ftlpu_add_test(icu_common_barrier_test tests/unit/icu/common_barrier_test.cpp
@@ -224,9 +226,8 @@ ftlpu_add_test(rmsnorm_test tests/kernel/rmsnorm_test.cpp
     kernel.rmsnorm kernel rmsnorm fast)
 
 # Model tests: model-shaped phases and complete layer schedules.
-ftlpu_add_test(smollm2_attention_test
-    tests/model/smollm2/prefill_attention_test.cpp
-    model.smollm2.prefill_attention model smollm2 slow serial)
+# The archived SmolLM2 prefill fixture hand-issues the retired local transpose
+# and standalone Permute. It has no FIFO program to run on this hardware.
 ftlpu_add_test(decoder_layer_decode_test
     tests/model/decoder/decode_layer_test.cpp
     model.decoder.decode_layer model decoder slow serial)
@@ -241,7 +242,6 @@ ftlpu_add_test(smollm2_decode_attention_test
 set_tests_properties(
     kernel.projection.w8a16
     kernel.swiglu.w8a16
-    model.smollm2.prefill_attention
     model.decoder.decode_layer
     model.smollm2.decode_ffn
     model.smollm2.decode_attention
@@ -249,28 +249,10 @@ set_tests_properties(
 )
 
 ftlpu_add_demo(mxm_control_trace_demo examples/mxm/control_trace_demo.cpp)
-ftlpu_add_demo(sxm_chain_demo examples/sxm/chain_demo.cpp)
 ftlpu_add_demo(stream_topology_api_demo examples/system/stream_topology_api_demo.cpp)
 
 ftlpu_add_test(vxm_fp32_input_test tests/unit/vxm/fp32_input_test.cpp vxm_fp32_input)
 
-# Opt-in SXM typed matrix reference. Avoid linking unrelated MXM/System ISA
-# objects so the bounded T=2/4/8 MEM/SXM reference can be tested independently.
-foreach(pair IN ITEMS "sxm_matrix_test|tests/unit/sxm/matrix_test.cpp|unit.sxm.matrix"
-                      "sxm_matrix_mem_vxm_test|tests/subsystem/sxm/matrix_mem_vxm_test.cpp|subsystem.sxm.matrix_mem_vxm")
-    string(REPLACE "|" ";" fields "${pair}")
-    list(GET fields 0 target)
-    list(GET fields 1 source)
-    list(GET fields 2 test_name)
-    add_executable(${target} ${source} src/mem/sram.cpp)
-    target_include_directories(${target} PRIVATE "${FTLPU_GENERATED_INCLUDE_DIR}" include tests/support)
-    if(MSVC)
-        target_compile_options(${target} PRIVATE /UNDEBUG)
-    else()
-        target_compile_options(${target} PRIVATE -UNDEBUG)
-    endif()
-    add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${target}>)
-    set_tests_properties(${test_name} PROPERTIES LABELS "sxm;matrix;fast")
-endforeach()
+
 
 endif()

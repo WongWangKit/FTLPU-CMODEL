@@ -1015,8 +1015,8 @@ public:
 
     void enqueue_sxm_transpose(Hemisphere hemisphere, SxmInstruction instruction)
     {
-        if (instruction.opcode != SxmOpcode::Transpose) {
-            throw std::invalid_argument("ICU SXM transpose queue requires a Transpose instruction");
+        if (!SxmFifoTranspose::accepts(instruction)) {
+            throw std::invalid_argument("ICU SXM requires a full FIFO transpose with two contiguous byte streams");
         }
         const auto side = hemisphere_index(hemisphere);
         sxm_transpose_queues_[side].push_instruction(std::move(instruction));
@@ -1029,13 +1029,9 @@ public:
         enqueue_sxm_permute(Hemisphere::East, std::move(instruction));
     }
 
-    void enqueue_sxm_permute(Hemisphere hemisphere, SxmInstruction instruction)
+    void enqueue_sxm_permute(Hemisphere, SxmInstruction)
     {
-        if (instruction.opcode != SxmOpcode::Permute) {
-            throw std::invalid_argument("ICU SXM permute queue requires a Permute instruction");
-        }
-        const auto side = hemisphere_index(hemisphere);
-        sxm_permute_queues_[side].push_instruction(std::move(instruction));
+        throw std::invalid_argument("standalone SXM Permute is retired; recompile for FIFO transpose");
     }
 
 

@@ -51,10 +51,33 @@ Ddr4Config ideal_ddr4(std::size_t beat_bytes,
     return config;
 }
 
+void test_back_to_back_store_descriptors_share_tx_fifo()
+{
+    Ddr4Model ddr(ideal_ddr4(hw::kPhysicalVectorBytes, 2, 17, 8));
+    C2cDmaEngine dma(ddr, 4);
+    dma.issue(C2cDmaInstruction::Store(0x1000, 1));
+    dma.issue(C2cDmaInstruction::Store(0x2000, 1));
+    dma.send(make_vector(11));
+    dma.send(make_vector(73));
+    for (unsigned i = 0; i < 128 && dma.completions().size() != 2; ++i) {
+        dma.tick();
+        ddr.tick();
+    }
+    require(dma.completions().size() == 2, "back-to-back stores did not complete");
+    require(ddr.read_vector(0x1000).payload == make_vector(11).payload &&
+            ddr.read_vector(0x2000).payload == make_vector(73).payload,
+            "TX consumed the next descriptor's vector at the wrong address");
+}
+
 void test_ddr4_transfers_one_beat_per_cycle()
 {
     constexpr auto kAddress = std::uint64_t {0x800};
-    auto ddr4 = Ddr4Model(ideal_ddr4(8, 2, 2, 2));
+    constexpr auto kBeatBytes = std::size_t {8};
+    // One write is split into a beat per kBeatBytes, so the number of beats
+    // follows the target's physical vector width instead of assuming the
+    // 32-byte profile.
+    constexpr auto kBeats = hw::kPhysicalVectorBytes / kBeatBytes;
+    auto ddr4 = Ddr4Model(ideal_ddr4(kBeatBytes, 2, 2, 2));
     const auto expected = make_vector(0x20);
     const auto request = ddr4.request_write(kAddress, expected);
 
@@ -67,20 +90,19 @@ void test_ddr4_transfers_one_beat_per_cycle()
     require(ddr4.last_beat().has_value(),
         "DDR4 did not expose its first write beat");
     require(ddr4.last_beat()->address == kAddress
-            && ddr4.last_beat()->byte_count == 8,
+            && ddr4.last_beat()->byte_count == kBeatBytes,
         "DDR4 first beat trace has an incorrect address or size");
     const auto partial = ddr4.read_vector(kAddress);
     for (std::size_t byte = 0; byte < hw::kPhysicalVectorBytes; ++byte) {
         const auto tile = byte / hw::kLanesPerTile;
         const auto lane = byte % hw::kLanesPerTile;
         const auto expected_byte =
-            byte < 8 ? expected.payload[tile][lane] : 0;
+            byte < kBeatBytes ? expected.payload[tile][lane] : 0;
         require(partial.payload[tile][lane] == expected_byte,
             "DDR4 write did not commit exactly one beat");
     }
-    ddr4.tick();
-    ddr4.tick();
-    ddr4.tick();
+    for (std::size_t beat = 1; beat < kBeats; ++beat)
+        ddr4.tick();
     require(ddr4.write_completion_ready(request),
         "DDR4 write completion did not follow the final beat");
     require(ddr4.read_vector(kAddress).payload == expected.payload,
@@ -841,6 +863,7 @@ void test_sixteen_lane_shared_ingress_sustains_qwen_page()
 
 int main()
 try {
+    test_back_to_back_store_descriptors_share_tx_fifo();
     test_ddr4_transfers_one_beat_per_cycle();
     test_ddr4_exposes_eight_vector_channels();
     test_default_ddr4_bandwidth_and_latency_jitter();

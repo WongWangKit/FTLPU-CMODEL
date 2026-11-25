@@ -56,7 +56,7 @@ public:
 
     explicit TspSliceSystem(
         SystemHardwareConfiguration hardware = {},
-        SxmTransposeArchitecture sxm_architecture = SxmTransposeArchitecture::LocalBlocks)
+        SxmTransposeArchitecture sxm_architecture = SxmTransposeArchitecture::Fifo)
         : hardware_configuration_(hardware)
         , stream_layout_(make_configured_stream_layout())
         , active_stream_routes_ {

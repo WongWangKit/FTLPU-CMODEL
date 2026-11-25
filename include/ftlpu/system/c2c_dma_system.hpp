@@ -14,11 +14,11 @@ namespace ftlpu {
 class C2cDmaSystem {
 public:
     explicit C2cDmaSystem(
-        Ddr4Config ddr4_config = {},
+        Ddr4Config ddr4_config = target_ddr4_config(),
         std::size_t dma_fifo_depth_vectors = hw::config::kDmaFifoDepthVectors,
         SystemHardwareConfiguration hardware = {},
         ProgramLoadConfig program_load = {},
-        SxmTransposeArchitecture sxm_architecture = SxmTransposeArchitecture::LocalBlocks)
+        SxmTransposeArchitecture sxm_architecture = SxmTransposeArchitecture::Fifo)
         : ddr4_(ddr4_config)
         , dmas_ {
             C2cDmaEngine(ddr4_, dma_fifo_depth_vectors,

@@ -103,7 +103,14 @@ slice 组成一个 group，位于两个 stream-register boundary 之间。全部
 
 - `Read(address, stream)` 读取 tile-local 8-byte SRAM segment，写入一条 stream；
 - `Write(address, stream)` 消费一条 8-byte stream segment 并写入 SRAM；
-- `Gather`/`Scatter` 已编码，但因为尚未实现 address-stream datapath，执行时会拒绝。
+- `Gather(stream, map)` 消费 map segment，读取它指定的行；
+- `Scatter(stream, map)` 消费 map segment，写入它指定的行。
+
+Gather/Scatter 是行间接寻址：控制波经过的每个 tile 各自解析本 leaf 的 bank-local
+行号，所以一条指令仍然每 tile 搬运一个 8-byte segment。map segment 的 byte 0..1
+是小端 16-bit 行号，byte 2..7 必须为 0。map segment 缺失、高位字节非零、行号越过
+配置的 SRAM 深度、或直接 `address` 字段非零，都按 fault 处理而不是静默截断。
+只有 `MissingStreamPolicy::ZeroFill` 会把缺失的 map 变成该 tile 的空操作。
 
 一条指令波最终经过四个 tile，因此完整指令波以四个错拍的 8-byte segment 搬运
 一个 32-byte 物理向量 row。
@@ -385,7 +392,8 @@ cycle-0 边界。它会 reset ICU queue、MEM 指令与 stream 状态、MXM data
 ## 12. 已知限制
 
 - 模型不与私有 Groq 硬件或 ISA bit-accurate；
-- Gather/Scatter 尚无 address-stream 执行 datapath；
+- Gather/Scatter 每个 tile 解析一个行号，没有多索引突发、冲突合并或 lane-wise
+  索引模式；
 - 离线 schedule 仍在 integration test 内构造，没有独立编译器或可复用 program
   文件格式；
 - 资源分配仍使用 workload-specific SRAM slice 和 stream ID，没有通用 allocator；

@@ -629,7 +629,7 @@ private:
                         // A missing address stalls this indirect command only.
                         instruction_queues_[mem_slice][bank][port].front();
                     auto& slot=instruction_rows_[mem_slice][bank][port][0];
-                    if(slot->opcode==MemOpcode::Gather) {
+                    if (slot->opcode == MemOpcode::Gather && slot->routing_owner) {
                         auto& fifo=gather_addresses_[mem_slice][bank];
                         if(fifo.empty()){slot.reset();continue;}
                         if(slot->routing_owner!=fifo.front().owner)throw std::logic_error("Gather address/instruction owner mismatch");
@@ -669,10 +669,14 @@ private:
                                 *instruction);
                             break;
                         case MemOpcode::Gather:
-                            execute_read(fabric,mem_slice,bank,tile,*instruction);
+                            if (instruction->routing_owner)
+                                execute_read(fabric, mem_slice, bank, tile, *instruction);
+                            else
+                                execute_gather(fabric, mem_slice, bank, tile, *instruction);
                             break;
                         case MemOpcode::Scatter:
-                            throw std::logic_error("lane-wise Scatter is not implemented");
+                            execute_scatter(fabric, mem_slice, bank, tile, *instruction);
+                            break;
                         }
                     }
             }
@@ -892,6 +896,189 @@ private:
                 instruction.address,
                 vector_tag,
                 bytes,
+            });
+        }
+    }
+
+    // Gather/Scatter map-stream contract: every tile of the control wave
+    // supplies one bank-local row index for its own leaf. The index occupies
+    // bytes 0..1 of the tile segment (little endian, 16 bit) and bytes 2..7
+    // must be zero, so a full-width payload write is accepted while a
+    // malformed or wider-than-16-bit index faults instead of being silently
+    // truncated. The direct row_address field is unused by indirect opcodes.
+    static constexpr std::size_t kMapIndexBytes = 2;
+
+    static void check_indirect_instruction(const MemInstruction& instruction)
+    {
+        if (instruction.address != 0) {
+            throw std::logic_error(
+                "MEM Gather/Scatter do not use the direct row address field");
+        }
+        if (instruction.preserve_stream) {
+            throw std::logic_error(
+                "MEM Gather/Scatter cannot preserve an input stream");
+        }
+        if (instruction.transport_generation) {
+            throw std::logic_error(
+                "MEM Gather/Scatter cannot commit transport data");
+        }
+    }
+
+    static std::size_t map_row_index(
+        const StreamTileSegment& segment,
+        std::size_t mem_slice,
+        std::size_t bank,
+        std::size_t tile,
+        const MemInstruction& instruction)
+    {
+        for (std::size_t lane = kMapIndexBytes; lane < hw::kLanesPerTile; ++lane) {
+            if (segment[lane].data == 0) continue;
+            throw std::logic_error(
+                "MEM Gather/Scatter map segment carries non-zero data above "
+                "the 16-bit row index: slice=" + std::to_string(mem_slice)
+                + " bank=" + std::to_string(bank)
+                + " tile=" + std::to_string(tile)
+                + " map_stream=" + std::to_string(instruction.map_stream)
+                + " lane=" + std::to_string(lane)
+                + " byte=" + std::to_string(
+                    static_cast<unsigned>(segment[lane].data)));
+        }
+        return static_cast<std::size_t>(segment[0].data)
+            | (static_cast<std::size_t>(segment[1].data) << 8);
+    }
+
+    // Resolves the indirect row for one tile and consumes its map segment.
+    // Only ZeroFill turns a missing map into a no-op; Error faults, because a
+    // gather without an index has no defensible data to return.
+    std::optional<std::size_t> resolve_map_row(
+        StreamRegisterFabric& fabric,
+        std::size_t mem_slice,
+        std::size_t bank,
+        std::size_t tile,
+        const MemInstruction& instruction)
+    {
+        const auto map = instruction.map_stream_id();
+        const auto column = ports_.input_column(mem_slice, map.direction());
+        StreamInputPort input(fabric, column, map.direction(), "MEM Map");
+        if (!input.segment_valid(tile, map.index())) {
+            if (missing_stream_policy_ == MissingStreamPolicy::ZeroFill) {
+                return std::nullopt;
+            }
+            std::string valid_streams;
+            for (std::size_t candidate = 0;
+                 candidate < hw::kStreamsPerDirection; ++candidate) {
+                if (!input.segment_valid(tile, candidate)) continue;
+                if (!valid_streams.empty()) valid_streams += ",";
+                valid_streams += std::to_string(candidate);
+            }
+            throw std::logic_error(
+                "MEM Gather/Scatter reached an invalid map segment: slice="
+                + std::to_string(mem_slice)
+                + " bank=" + std::to_string(bank)
+                + " tile=" + std::to_string(tile)
+                + " sr_column=" + std::to_string(column)
+                + " map_stream=" + std::to_string(instruction.map_stream)
+                + " valid_stream_indices_at_tile="
+                + (valid_streams.empty() ? "none" : valid_streams));
+        }
+        const auto row = map_row_index(
+            input.consume_segment(tile, map.index()),
+            mem_slice, bank, tile, instruction);
+        const auto active_rows = sram_.bank(mem_slice, bank).active_rows();
+        if (row >= active_rows) {
+            throw std::logic_error(
+                "MEM Gather/Scatter row index is outside the configured SRAM: "
+                "slice=" + std::to_string(mem_slice)
+                + " bank=" + std::to_string(bank)
+                + " tile=" + std::to_string(tile)
+                + " row=" + std::to_string(row)
+                + " active_rows=" + std::to_string(active_rows));
+        }
+        return row;
+    }
+
+    void execute_gather(
+        StreamRegisterFabric& fabric,
+        std::size_t mem_slice,
+        std::size_t bank,
+        std::size_t tile,
+        const MemInstruction& instruction)
+    {
+        check_indirect_instruction(instruction);
+        const auto row = resolve_map_row(fabric, mem_slice, bank, tile, instruction);
+        if (!row.has_value()) return;
+
+        const auto stream = instruction.stream_id();
+        const auto sr_column = ports_.output_column(mem_slice, stream.direction());
+        const auto bytes = sram_.bank(mem_slice, bank).read_segment(tile, *row);
+        const auto vector_tag =
+            static_cast<std::uint64_t>(cycle_) * hw::kTileRows + tile;
+
+        if (read_timing_ == ReadTiming::RegisteredR1) {
+            read_responses_.push_back(MemTransfer {
+                MemTransfer::Kind::LoadSramToStream,
+                mem_slice, bank, tile, sr_column, stream,
+                *row, vector_tag, bytes,
+            });
+            pending_compute_read_ = true;
+        } else {
+            StreamOutputPort output(
+                fabric, sr_column, stream.direction(), "MEM Gather");
+            output.write_payload_segment(tile, stream.index(), bytes, vector_tag);
+        }
+
+        if (capture_trace_) {
+            executed_mem_.push_back(MemTransfer {
+                MemTransfer::Kind::LoadSramToStream,
+                mem_slice, bank, tile, sr_column, stream,
+                *row, vector_tag, bytes,
+            });
+        }
+    }
+
+    void execute_scatter(
+        StreamRegisterFabric& fabric,
+        std::size_t mem_slice,
+        std::size_t bank,
+        std::size_t tile,
+        const MemInstruction& instruction)
+    {
+        check_indirect_instruction(instruction);
+        const auto row = resolve_map_row(fabric, mem_slice, bank, tile, instruction);
+        if (!row.has_value()) return;
+
+        const auto stream = instruction.stream_id();
+        const auto sr_column = ports_.input_column(mem_slice, stream.direction());
+        StreamInputPort input(
+            fabric, sr_column, stream.direction(), "MEM Scatter");
+        if (!input.segment_valid(tile, stream.index())) {
+            throw std::logic_error(
+                "MEM Scatter reached an invalid data stream segment: slice="
+                + std::to_string(mem_slice)
+                + " bank=" + std::to_string(bank)
+                + " tile=" + std::to_string(tile)
+                + " sr_column=" + std::to_string(sr_column)
+                + " stream=" + std::to_string(stream.packed())
+                + " row=" + std::to_string(*row));
+        }
+        const auto segment = input.consume_segment(tile, stream.index());
+        StreamPayloadTileSegment bytes{};
+        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+            bytes[lane] = segment[lane].data;
+        }
+        sram_.bank(mem_slice, bank).write_segment(tile, *row, bytes);
+
+        const auto vector_tag = segment.front().vector_tag;
+        consumed_mem_.push_back(MemTransfer {
+            MemTransfer::Kind::StoreStreamToSram,
+            mem_slice, bank, tile, sr_column, stream,
+            *row, vector_tag, bytes,
+        });
+        if (capture_trace_) {
+            executed_mem_.push_back(MemTransfer {
+                MemTransfer::Kind::StoreStreamToSram,
+                mem_slice, bank, tile, sr_column, stream,
+                *row, vector_tag, bytes,
             });
         }
     }

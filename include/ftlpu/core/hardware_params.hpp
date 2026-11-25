@@ -3,6 +3,7 @@
 #include "ftlpu/core/hardware_config.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <bit>
 #include <string_view>
 
@@ -44,10 +45,29 @@ constexpr std::size_t kStreamRegisterBytes =
 
 // C2C transport beats do not grow when the on-chip vector grows. A complete
 // vector is injected into ordinary SR only after all its beats have arrived.
-constexpr std::size_t kC2cStreamsPerDirection = kLanesPerTile;
+constexpr std::size_t kC2cStreamsPerDirection = config::kC2cStreamsPerDirection;
 constexpr std::size_t kC2cBytesPerStreamPerCycle = config::kC2cBeatBytes;
 constexpr std::size_t kC2cBytesPerDirectionPerCycle =
     kC2cStreamsPerDirection * kC2cBytesPerStreamPerCycle;
+
+// External-memory timing of the target profile. kDdrPeakBytesPerSecond is the
+// sustained ceiling after the per-LPU budget/entrance reduction and efficiency
+// factor, so the DDR model never assumes the raw device pin rate. Latency and
+// outstanding depth are enforced separately by Ddr4Model, which is why the
+// achievable rate also obeys Little's law instead of being assumed.
+constexpr std::uint64_t kDdrClockHz = config::kDdrClockHz;
+constexpr std::uint64_t kDdrPeakBytesPerSecond = config::kDdrPeakBytesPerSecond;
+constexpr std::size_t kDdrReadLatencyCycles = config::kDdrReadLatencyCycles;
+constexpr std::size_t kDdrWriteLatencyCycles = config::kDdrWriteLatencyCycles;
+constexpr std::size_t kDdrRequestQueueDepth = config::kDdrRequestQueueDepth;
+constexpr std::size_t kDdrReadLatencyJitterCycles =
+    config::kDdrReadLatencyJitterCycles;
+constexpr std::size_t kDdrWriteLatencyJitterCycles =
+    config::kDdrWriteLatencyJitterCycles;
+static_assert(kDdrClockHz > 0);
+static_assert(kDdrPeakBytesPerSecond > 0);
+static_assert(kDdrRequestQueueDepth > 0);
+static_assert(kDdrReadLatencyCycles > 0 && kDdrWriteLatencyCycles > 0);
 
 // MEM/SRAM geometry for one modeled hemisphere.
 constexpr std::size_t kMemSliceColumns = config::kMemSlicesPerHemisphere;
@@ -220,6 +240,7 @@ constexpr std::size_t kIcuMxmMacroContextBits = config::kIcuMxmMacroContextBits;
 // Retained in the existing ABI encoding-version field. The 32-lane ISA keeps
 // version 1; wide packets/FU fields require version 2 on both sides.
 constexpr std::size_t kIcuIsaLayoutVersion =
+    kLanesPerTile > 8 ? 3 :
     kPhysicalVectorBytes > 32 || kMxmAccumulatorAddressBits > 13 || kMxmColumnBits > 2 ? 2 : 1;
 // VXM uses sequential 96-bit configurations and has no FU-loop context.
 // Queue-local compact SXM fields, two-counter launch state, and PC. Transpose
@@ -297,7 +318,6 @@ static_assert(kMxmAccumulatorBlockCount <= 256,
     "the current MXM supports at most 256 accumulator blocks");
 static_assert(kMxmAccumulatorRows
     == kMxmAccumulatorBlockCount * kMxmRows);
-static_assert(kSxmConcurrentStreamOps == 16);
 static_assert(kIcuVxmImemDepth >= kIcuVxmIqDepth);
 static_assert(kIcuMemImemDepth >= kIcuMemIqDepth);
 static_assert(kIcuMxmImemDepth >= kIcuMxmIqDepth);

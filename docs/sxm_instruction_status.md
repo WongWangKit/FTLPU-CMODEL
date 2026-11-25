@@ -1,4 +1,12 @@
-# SXM 指令现状与矩阵参考路径改造
+# SXM 指令与历史矩阵实验
+
+2026-11-20 起，CModel 每侧的 SXM 只执行整块流式转置。LPU32 按行接收 32×32 个双字节元素，各 SL 错开一拍。SL 内两个 8×8 bank 交替采集和转置读出，输入 FIFO、三级相邻 SL 固定交换、输出 FIFO 依次工作。首个输出在启动后第 38 拍，下块可在第 32 拍启动。旧时序的 raw-macro 需重编。实现见 include/ftlpu/sxm/fifo_transpose.hpp，周期常量见 include/ftlpu/sxm/fifo_timing.hpp。
+
+旧 SmolLM2 prefill 手排用例直接向两条队列发送 local transpose 和独立 Permute，已退出当前 CModel 测试集，尚待新排程。旧 Permute 队列编号保留给二进制接口，不能执行数据交换。
+
+## 历史记录（2026-11-10）
+
+以下是当时的独立参考实验，其头文件现位于 tests/reference/ftlpu/sxm/。
 
 更新：2026-11-10。范围：**一个矩阵功能＋一个启动命令＋MEM 正常行读出适配**。
 本文件说明本轮实际实现，不替换旧 ISA 说明，也不宣称全芯片已经切换到新路径。

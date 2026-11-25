@@ -2,94 +2,39 @@
 
 #include "ftlpu/core/instruction_codec.hpp"
 #include "ftlpu/icu/active_macro_context.hpp"
+#include "ftlpu/sxm/fifo_transpose.hpp"
 
 namespace ftlpu::isa {
 
-// Queue identity supplies the opcode. Only the actual SXM FU fields are
-// carried by the packed Macro template, with no launch-domain packet header.
-inline constexpr std::size_t sxm_macro_native_bits(bool transpose)
-{
-    return transpose ? 16 : 16 + hw::kSxmTileSelectorBits
-        + SxmInstruction::kTotalLanes * hw::kSxmLaneIndexBits;
+// Reserve the old full-tile selector (15 on LPU32) so previously timed
+// binaries fail explicitly instead of consuming a different output wave.
+inline constexpr unsigned kSxmFifoTransposeRow = SxmEncodingLayout::kExtended
+    ? 3 * SxmEncodingLayout::kRowModeUnit - 1 : 14;
+inline constexpr std::size_t sxm_macro_native_bits(bool transpose) {
+    // The old queue geometry remains readable in binary headers.
+    return 12 + SxmEncodingLayout::kRowBits + (transpose ? 0 : hw::kSxmTileSelectorBits
+        + SxmInstruction::kTotalLanes * hw::kSxmLaneIndexBits);
 }
-
-inline void validate_sxm_macro_streams(const SxmInstruction::StreamList& streams,
-    std::size_t count)
-{
-    if (streams.size() != count || streams.empty()
-        || streams.front().stream + count > hw::kStreams)
-        throw std::invalid_argument("SXM Macro has an invalid stream range");
-    for (std::size_t i = 0; i < count; ++i)
-        if (streams[i].stream != streams.front().stream + i)
-            throw std::invalid_argument("SXM Macro streams must be consecutive");
-}
-
 template <typename Write>
-void write_sxm_macro_native(const SxmInstruction& ins, bool transpose, Write write)
-{
-    if (ins.opcode != (transpose ? SxmOpcode::Transpose : SxmOpcode::Permute))
-        throw std::invalid_argument("SXM Macro opcode does not match its queue");
-    const bool all = ins.input_row == SxmInstruction::kAllInputRows;
-    const bool wide = transpose && all && ins.dst_streams.size() == 2;
-    validate_sxm_macro_streams(ins.src_streams,
-        transpose && (!all || wide) ? 2 : 2 * hw::kLanesPerTile);
-    validate_sxm_macro_streams(ins.dst_streams, wide ? 2 : 2 * hw::kLanesPerTile);
-    write(ins.src_streams.front().stream, 6);
-    write(ins.dst_streams.front().stream, 6);
-    if (transpose) {
-        if ((!all && ins.input_row != SxmInstruction::kBroadcastInputRows
-                && ins.input_row >= hw::kLanesPerTile)
-            || ins.output_row != SxmInstruction::kAllOutputRows
-            || ins.output_tile != SxmInstruction::kAllOutputTiles)
-            throw std::invalid_argument("invalid SXM transpose selectors");
-        write(all ? (wide ? 15 : hw::kLanesPerTile) : ins.input_row, 4);
-    } else {
-        if (!all || (ins.output_row != SxmInstruction::kAllOutputRows && ins.output_row > 15)
-            || (ins.output_tile != SxmInstruction::kAllOutputTiles && ins.output_tile >= hw::kTileRows))
-            throw std::invalid_argument("invalid SXM permute selectors");
-        write(ins.output_row == SxmInstruction::kAllOutputRows ? hw::kLanesPerTile : ins.output_row, 4);
-        write(ins.output_tile == SxmInstruction::kAllOutputTiles ? hw::kTileRows : ins.output_tile,
-            hw::kSxmTileSelectorBits);
-        for (auto lane : ins.permute_map) {
-            if (lane >= SxmInstruction::kTotalLanes)
-                throw std::invalid_argument("SXM Macro permutation is outside the vector");
-            write(lane, hw::kSxmLaneIndexBits);
-        }
-    }
+void write_sxm_macro_native(const SxmInstruction& ins, bool transpose, Write write) {
+    if (!transpose || !SxmFifoTranspose::accepts(ins))
+        throw std::invalid_argument("only the FIFO full-tile SXM transpose can execute; recompile the program");
+    write(ins.src_streams[0].stream,6);
+    write(ins.dst_streams[0].stream,6);
+    write(kSxmFifoTransposeRow,SxmEncodingLayout::kRowBits);
 }
-
 template <typename Read>
-SxmInstruction read_sxm_macro_native(bool transpose, Read read)
-{
-    const auto source = read(6), destination = read(6), row = read(4);
-    const auto streams = [](std::size_t first, std::size_t count) {
-        SxmInstruction::StreamList result;
-        for (std::size_t i = 0; i < count; ++i) result.push_back(SxmStreamId{first + i});
-        return result;
-    };
-    SxmInstruction result;
-    if (transpose) {
-        const bool wide = row == 15;
-        result = SxmInstruction::Transpose(
-            streams(source, row == hw::kLanesPerTile ? 2 * hw::kLanesPerTile : 2),
-            streams(destination, wide ? 2 : 2 * hw::kLanesPerTile));
-        result.input_row = wide || row == hw::kLanesPerTile ? SxmInstruction::kAllInputRows : row;
-    } else {
-        const auto tile = read(hw::kSxmTileSelectorBits);
-        SxmInstruction::PermuteMap map{};
-        for (auto& lane : map) lane = read(hw::kSxmLaneIndexBits);
-        result = SxmInstruction::Permute(streams(source, 2 * hw::kLanesPerTile),
-            streams(destination, 2 * hw::kLanesPerTile), map);
-        result.output_row = row == hw::kLanesPerTile ? SxmInstruction::kAllOutputRows : row;
-        result.output_tile = tile == hw::kTileRows ? SxmInstruction::kAllOutputTiles : tile;
-    }
-    write_sxm_macro_native(result, transpose, [](auto, auto) {});
+SxmInstruction read_sxm_macro_native(bool transpose, Read read) {
+    if (!transpose) throw std::invalid_argument("standalone SXM Permute is retired");
+    const auto src=read(6), dst=read(6);
+    if (read(SxmEncodingLayout::kRowBits)!=kSxmFifoTransposeRow)
+        throw std::invalid_argument("retired SXM transpose encoding; recompile for FIFO timing");
+    auto result=SxmInstruction::Transpose({{src},{src+1}},{{dst},{dst+1}});
+    if (!SxmFifoTranspose::accepts(result)) throw std::invalid_argument("invalid FIFO stream pair");
     return result;
 }
 } // namespace ftlpu::isa
-
 namespace ftlpu {
-
 template <std::size_t Bits>
 struct IcuPackedSxmMacroContext {
     static constexpr std::size_t bit_count = Bits, word_count = Bits / 32;

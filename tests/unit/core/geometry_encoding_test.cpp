@@ -10,13 +10,7 @@ void require(bool condition, const char* message)
 {
     if (!condition) throw std::runtime_error(message);
 }
-ftlpu::SxmInstruction::StreamList streams(std::size_t base)
-{
-    ftlpu::SxmInstruction::StreamList result;
-    for (std::size_t i = 0; i < 2 * ftlpu::hw::kLanesPerTile; ++i)
-        result.push_back({base + i});
-    return result;
-}
+
 }
 
 int main() try
@@ -30,46 +24,29 @@ int main() try
         require(ports.output_column(slice, StreamDirection::West) == group,
             "reverse MEM grouping changed with physical tile count");
     }
-    SxmInstruction::PermuteMap map{};
-    SxmSlice::StreamVector<int> input{};
-    for (std::size_t i = 0; i < map.size(); ++i) {
-        map[i] = map.size() - 1 - i;
-        input[i / hw::kLanesPerTile][i % hw::kLanesPerTile] = static_cast<int>(i);
+    using Codec=IcuSxmActiveMacroContextCodec<true>;
+    const auto transpose=SxmInstruction::Transpose({{0},{1}},{{32},{33}});
+    const IcuMacroSchedule schedule{0,3,hw::kPhysicalVectorBytes,0,1,1,0,IcuInductionTarget::None};
+    require(Codec::unpack(Codec::pack_initial(schedule,transpose)).instruction.dst_streams==transpose.dst_streams,
+        "FIFO transpose stream lost");
+    for (std::size_t row=0; row<hw::kLanesPerTile; ++row) {
+        const auto iw = MxmControlInstruction::IWColumnDirect16(1, hw::kTileRows-1, row, 16);
+        const auto native = isa::encode_mxm_instruction(iw);
+        const auto packed = isa::pack_mxm_load_template(native);
+        if constexpr (isa::MxmEncodingLayout::kExtendedTemplates)
+            require((packed >> isa::MxmEncodingLayout::kWsTemplateBits) == 0, "WS template truncated");
+        const auto load = isa::decode_mxm_instruction(isa::unpack_mxm_load_template(packed));
+        require(load.weight_inner_column == row && load.weight_column == iw.weight_column
+            && load.weight_stream_base == 16 && load.weight_input_mode == iw.weight_input_mode,
+            "MXM IW high selector or stream lost");
     }
-    auto instruction = SxmInstruction::Permute(streams(0), streams(16), map);
-    instruction.output_tile = hw::kTileRows - 1;
-    using Codec = IcuSxmActiveMacroContextCodec<false>;
-    IcuMacroSchedule schedule{0,3,2,0,2,13,0,IcuInductionTarget::None};
-    const auto packet = Codec::pack_initial(schedule,instruction);
-    auto decoded = Codec::unpack(packet);
-    require(decoded.instruction.permute_map == map
-            && decoded.instruction.output_tile == hw::kTileRows - 1,
-        "SXM Macro lost high lane indices or last tile");
-    const auto permuted = SxmSlice::permute(input, decoded.instruction.permute_map);
-    for (std::size_t i = 0; i < map.size(); ++i)
-        require(permuted[i / hw::kLanesPerTile][i % hw::kLanesPerTile]
-                    == static_cast<int>(map[i]), "SXM physical permutation mismatch");
-    instruction.output_tile = SxmInstruction::kAllOutputTiles;
-    decoded = Codec::unpack(Codec::pack_initial(schedule,instruction));
-    require(decoded.instruction.output_tile == SxmInstruction::kAllOutputTiles,
-        "SXM all-tiles sentinel did not round trip");
-    const auto raw = isa::decode_sxm_instruction(isa::encode_sxm_instruction(instruction));
-    require(raw.permute_map == map && raw.output_tile == instruction.output_tile,
-        "legacy SXM codec lost widened permutation or sentinel");
-    instruction.permute_map.back() = SxmInstruction::kTotalLanes;
-    bool rejected = false;
-    try { (void)Codec::pack_initial(schedule,instruction); }
-    catch (const std::invalid_argument&) { rejected = true; }
-    require(rejected, "SXM accepted an out-of-range source lane");
-    if constexpr (hw::kPhysicalVectorBytes == 32)
-        require(Codec::bit_count==384,"LPU32 permute context exceeds 384 bits");
     if constexpr (hw::kPhysicalVectorBytes == 64) {
         require(hw::kMemSliceColumns == 52 && hw::kMemSlicesPerGroup == 4
             && hw::kMemGroups == 13 && hw::kSystemStreamRegisterColumns == 16,
             "8-tile target changed the MEM/SR topology");
     }
     std::cout << "geometry_encoding_test passed: tiles=" << hw::kTileRows
-        << " mem_group=" << hw::kMemSlicesPerGroup << " lanes=" << map.size()
+        << " mem_group=" << hw::kMemSlicesPerGroup << " lanes=" << hw::kPhysicalVectorBytes
         << " sxm_words=" << Codec::word_count << '\n';
     return 0;
 } catch (const std::exception& error) {

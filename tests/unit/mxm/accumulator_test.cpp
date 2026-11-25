@@ -25,7 +25,8 @@ int main()
     static_assert(ftlpu::hw::kMxmAccumulatorRows
         == ftlpu::hw::kMxmAccumulatorBlockCount * ftlpu::hw::kMxmRows);
     static_assert(ftlpu::hw::kMxmAccumulatorBytes
-        == ftlpu::hw::kMxmAccumulatorBlockCount * 32 * 32 * sizeof(float));
+        == ftlpu::hw::kMxmAccumulatorBlockCount * ftlpu::hw::kMxmRows
+            * ftlpu::hw::kMxmColumns * sizeof(float));
 
     ftlpu::MxmAccumulator accumulator;
     ftlpu::MxmAccumulator::Segment first{};
@@ -34,16 +35,18 @@ int main()
         first[lane] = static_cast<float>(lane + 1);
         second[lane] = static_cast<float>(2 * lane);
     }
-    accumulator.accumulate(17, 2, first);
-    accumulator.accumulate(17, 2, second);
-    const auto result = accumulator.read(17, 2);
+    constexpr auto row = ftlpu::hw::kMxmAccumulatorRows - 1;
+    constexpr auto column = ftlpu::hw::kMxmSupercellsPerPlane - 1;
+    accumulator.accumulate(row, column, first);
+    accumulator.accumulate(row, column, second);
+    const auto result = accumulator.read(row, column);
     for (std::size_t lane = 0; lane < result.size(); ++lane) {
         assert(result[lane] == first[lane] + second[lane]);
-        assert(accumulator.value(17, 16 + lane) == result[lane]);
+        assert(accumulator.value(row, column * first.size() + lane) == result[lane]);
     }
 
-    accumulator.clear_segment(17, 2);
-    for (const auto value : accumulator.read(17, 2)) {
+    accumulator.clear_segment(row, column);
+    for (const auto value : accumulator.read(row, column)) {
         assert(value == 0.0f);
     }
     assert(throws([&] {

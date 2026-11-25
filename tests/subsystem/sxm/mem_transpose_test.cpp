@@ -9,13 +9,13 @@ std::uint16_t value(std::size_t matrix,std::size_t row,std::size_t col){
     return static_cast<std::uint16_t>(0x1000+matrix*139+row*43+col*7);
 }
 void run(Hemisphere side,std::size_t matrices){
-    auto system=std::make_unique<TspSliceSystem>(SystemHardwareConfiguration{},SxmTransposeArchitecture::WideStreaming);
+    auto system=std::make_unique<TspSliceSystem>(SystemHardwareConfiguration{},SxmTransposeArchitecture::Fifo);
     for(std::size_t m=0;m<matrices;++m)for(std::size_t r=0;r<N;++r)for(std::size_t c=0;c<N;++c)
         for(std::size_t b=0;b<2;++b)
             system->initialize_mem_sram_lane_byte(side,inputSlice+b,c/hw::kLanesPerTile,m*N+r,c%hw::kLanesPerTile,
                 static_cast<std::uint8_t>(value(m,r,c)>>(8*b)));
     const auto readCycle=first-(hw::kMemGroups+hw::kC2cToSxmStreamRegisterColumns-inputSlice/hw::kMemSlicesPerGroup);
-    const auto writeCycle=first+N+SxmWideTranspose::skew
+    const auto writeCycle=first+sxm_fifo::output_offset
         +hw::kMemGroups+hw::kC2cToSxmStreamRegisterColumns-outputSlice/hw::kMemSlicesPerGroup;
     for(std::size_t b=0;b<2;++b){
         auto reader=InstructionControlUnit::mem_queue(side,inputSlice+b,0);
@@ -44,8 +44,10 @@ void run(Hemisphere side,std::size_t matrices){
         throw std::runtime_error("MEM/SXM did not drain");
 }
 int main(int argc,char** argv)try{
-    auto matrices=argc==2?std::stoul(argv[1]):96u;
-    if(!matrices || matrices>96)throw std::invalid_argument("matrix-count must be 1..96");
+    constexpr auto capacity=(hw::kSramDepthRows-32)/N;
+    const auto matrices=argc==2?std::stoul(argv[1]):std::min<std::size_t>(96,capacity);
+    if(!matrices || matrices>capacity)
+        throw std::invalid_argument("matrix count exceeds the output MEM bank");
     run(Hemisphere::East,matrices);run(Hemisphere::West,matrices);
-    std::cout<<"MEM -> packed Macro wide SXM -> MEM passed: matrices="<<matrices<<" both hemispheres\n";return 0;
+    std::cout<<"MEM -> packed Macro FIFO SXM -> MEM passed: matrices="<<matrices<<" both hemispheres\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

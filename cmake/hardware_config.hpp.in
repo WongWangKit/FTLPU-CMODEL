@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string_view>
 
 namespace ftlpu::hw::config {
@@ -36,6 +37,19 @@ inline constexpr std::size_t kProgramLoadRouteLatencyCycles = @FTLPU_PROGRAM_ROU
 inline constexpr std::size_t kProgramLoadImemWriteIiCycles = @FTLPU_PROGRAM_WRITE_II@;
 inline constexpr std::size_t kProgramLoadImemWriteCommitLatencyCycles = @FTLPU_PROGRAM_COMMIT_LATENCY@;
 
+// External-memory timing of this target. kDdrPeakBytesPerSecond is the
+// sustained ceiling, not the raw device pin rate: profiles generated from the
+// LPU parameter workbook already apply the budget/entrance reduction and the
+// efficiency factor. Latency and outstanding depth let the DDR model derive
+// its own achievable rate on top of that ceiling.
+inline constexpr std::uint64_t kDdrClockHz = @FTLPU_DDR_CLOCK_HZ@;
+inline constexpr std::uint64_t kDdrPeakBytesPerSecond = @FTLPU_DDR_PEAK_BYTES_PER_SECOND@;
+inline constexpr std::size_t kDdrReadLatencyCycles = @FTLPU_DDR_READ_LATENCY@;
+inline constexpr std::size_t kDdrWriteLatencyCycles = @FTLPU_DDR_WRITE_LATENCY@;
+inline constexpr std::size_t kDdrRequestQueueDepth = @FTLPU_DDR_QUEUE_DEPTH@;
+inline constexpr std::size_t kDdrReadLatencyJitterCycles = @FTLPU_DDR_READ_JITTER@;
+inline constexpr std::size_t kDdrWriteLatencyJitterCycles = @FTLPU_DDR_WRITE_JITTER@;
+
 inline constexpr std::size_t kHemispheres = @FTLPU_HW_HEMISPHERES@;
 inline constexpr std::size_t kTilesPerSlice = @FTLPU_HW_TILES_PER_SLICE@;
 inline constexpr std::size_t kLanesPerTile = @FTLPU_HW_LANES_PER_TILE@;
@@ -48,6 +62,7 @@ inline constexpr std::size_t kMemBytesPerLane = @FTLPU_HW_MEM_BYTES_PER_LANE@;
 inline constexpr std::size_t kStreamRegistersPerLane = @FTLPU_HW_SR_REGISTERS@;
 inline constexpr std::size_t kBytesPerStreamPerLane = @FTLPU_HW_SR_BYTES_PER_STREAM@;
 inline constexpr std::size_t kC2cBeatBytes = @FTLPU_HW_C2C_BEAT_BYTES@;
+inline constexpr std::size_t kC2cStreamsPerDirection = @FTLPU_C2C_CHANNELS@;
 
 inline constexpr std::size_t kMxmAccumulatorContexts = @FTLPU_HW_MXM_ACCUM_CONTEXTS@;
 inline constexpr std::size_t kMxmsPerHemisphere = @FTLPU_HW_PHYSICAL_MXMS@;

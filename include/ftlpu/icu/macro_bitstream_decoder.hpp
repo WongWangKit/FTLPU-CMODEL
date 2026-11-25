@@ -628,8 +628,8 @@ private:
     {
         switch (kind_) {
         case IcuMacroQueueKind::Mem: return kMemAddressBits;
-        case IcuMacroQueueKind::MxmLoad: return 2;
-        case IcuMacroQueueKind::MxmCompute: return 13;
+        case IcuMacroQueueKind::MxmLoad: return isa::MxmEncodingLayout::kLoadOperandBits;
+        case IcuMacroQueueKind::MxmCompute: return isa::MxmEncodingLayout::kComputeOperandBits;
         case IcuMacroQueueKind::MxmDequant:
         case IcuMacroQueueKind::SxmTranspose:
         case IcuMacroQueueKind::SxmPermute: return 0;
@@ -641,9 +641,9 @@ private:
     {
         switch (kind_) {
         case IcuMacroQueueKind::Mem: return 32;
-        case IcuMacroQueueKind::MxmLoad: return 29;
+        case IcuMacroQueueKind::MxmLoad: return std::max(isa::MxmEncodingLayout::kIsTemplateBits, isa::MxmEncodingLayout::kWsTemplateBits);
         case IcuMacroQueueKind::MxmDequant: return 16;
-        case IcuMacroQueueKind::MxmCompute: return 49;
+        case IcuMacroQueueKind::MxmCompute: return isa::MxmEncodingLayout::kComputeTemplateBits;
         case IcuMacroQueueKind::SxmTranspose: return isa::sxm_macro_native_bits(true);
         case IcuMacroQueueKind::SxmPermute: return isa::sxm_macro_native_bits(false);
         }
@@ -655,7 +655,7 @@ private:
         if (kind_ == IcuMacroQueueKind::MxmLoad)
             return static_cast<MxmControlOpcode>(opcode & 0x3u)
                     == MxmControlOpcode::IS
-                ? 29 : 16;
+                ? isa::MxmEncodingLayout::kIsTemplateBits : isa::MxmEncodingLayout::kWsTemplateBits;
         return native_instruction_bits();
     }
 

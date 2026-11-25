@@ -57,6 +57,24 @@ struct Ddr4Config {
     }
 };
 
+// DDR timing of the build target. Profiles generated from the LPU parameter
+// workbook carry the sustained budget, the access latency and the outstanding
+// request depth, so changing the profile moves the simulated storage system
+// with the MEM geometry. Targets that omit external_memory reproduce the
+// 500 MHz dual-channel DDR4-3200 platform baked into Ddr4Config's defaults.
+inline Ddr4Config target_ddr4_config()
+{
+    Ddr4Config config;
+    config.lpu_clock_hz = hw::kDdrClockHz;
+    config.peak_bandwidth_bytes_per_second = hw::kDdrPeakBytesPerSecond;
+    config.read_latency_cycles = hw::kDdrReadLatencyCycles;
+    config.write_latency_cycles = hw::kDdrWriteLatencyCycles;
+    config.request_queue_depth = hw::kDdrRequestQueueDepth;
+    config.read_latency_jitter_cycles = hw::kDdrReadLatencyJitterCycles;
+    config.write_latency_jitter_cycles = hw::kDdrWriteLatencyJitterCycles;
+    return config;
+}
+
 class Ddr4Model {
 public:
     using RequestId = std::uint64_t;

@@ -4,29 +4,29 @@
 这些是实验配置，不代表 RTL、FPGA 或整层模型已经验收。原来的
 `config/ftlpu-lpu32.json` 保持原样，历史测试仍可使用它。
 
-| 参数 | LPU64 cloud | LPU32 edge | LPU16 decode |
+| 参数 | LPU-MAX | LPU32 edge | LPU16 FPGA |
 |---|---:|---:|---:|
-| tiles / lanes | 8 / 64 | 4 / 32 | 2 / 16 |
+| tiles × lanes/tile | 20 × 16 | 4 × 8 | 2 × 8 |
 | 每侧物理 MXM | 2 | 1 | 1 |
-| MXM 阵列 | 64×64 | 32×32 | 16×16 |
-| 每 MXM ACC contexts / KiB | 4 / 64 | 4 / 16 | 4 / 4 |
-| VXM ALUs | 32 | 16 | 16 |
-| 每侧 slices / 每组 slices | 52 / 4 | 52 / 4 | 52 / 4 |
+| MXM 阵列 | 320×320 | 32×32 | 16×16 |
+| 每 MXM ACC contexts / KiB | 4 / 1600 | 4 / 16 | 4 / 4 |
+| VXM ALUs | 16 | 16 | 16 |
+| 每侧 slices / 每组 slices | 44 / 4 | 24 / 4 | 20 / 4 |
 | banks / rows | 2 / 2048 | 2 / 2048 | 2 / 1024 |
-| 总 MEM MiB | 26 | 13 | 3.25 |
+| 总 MEM MiB | 110 | 6 | 1.25 |
 | 时钟 MHz | 1000 | 500 | 200 |
 | SR 编码 stream 数 | 64 | 64 | 64 |
-| 每侧 RX 通道 / beat bytes | 8 / 32 | 8 / 32 | 8 / 16 |
+| 每侧 RX 通道 / beat bytes | 8 / 320 | 8 / 32 | 8 / 16 |
 | 单 LPU 外存预算 GB/s | 1200 | 68.264 | 25.6 |
-| RX 上限 GB/s | 512 | 256 | 51.2 |
-| 效率 | 80% | 80% | 80% |
-| 估算有效上限 GB/s | 409.6 | 54.6112 | 20.48 |
+| RX 上限 GB/s | 5120 | 256 | 51.2 |
+| 效率 | 100% | 80% | 80% |
+| 估算有效上限 GB/s | 1200 | 54.6112 | 20.48 |
 | 读 / 写基础延时 cycles | 100 / 100 | 50 / 50 | 30 / 30 |
 | outstanding 上限 | 512 | 128 | 64 |
 
 ## 文件与字段语义
 
-- `config/ftlpu-lpu64-cloud.json`
+- `config/ftlpu-max.json`
 - `config/ftlpu-lpu32-edge.json`
 - `config/ftlpu-lpu16-decode.json`：使用表中 FPGA 档参数试验 decode，未另行提高频率或放大 SRAM。
 
@@ -34,10 +34,28 @@
 省略时保留原来的每侧两个物理实例。`throughput.mxms_per_hemisphere`
 仍表示本程序启用数量，不得超过物理实例数。
 
-外存 `ddr_peak_bandwidth_mbytes_per_second` 使用
-`min(单 LPU 带宽预算, RX 入口)`，再通过效率字段施加表中的 80%，
-从而与表中第 56 行一致。存储器原始峰值、容量、类型均保留在 `planning.workbook_rows`。
-这些规划字段不自动实现内存容量限制或控制器协议。
+三档由同一份工作簿生成。MEM slice 的产品设计上限为每侧 44，历史基线仍可使用 52。
+每侧传输通道由 `c2c.streams_per_direction` 指定，与 tile 宽度独立；省略该字段的旧目标沿用原先的 lane 数。
+MAX 的四个 MXM 合计使用 6.25 MiB ACC。320 B 向量 MEM 回读和最后一个 ACC 分段的累加均有独立回归。
+集成 SXM 的旧 FU 包最多携带 16 个 stream 选择，部分行选择使用 4 位并保留广播和释放编码。
+16 lanes/tile 的整机运行需要另行确定 SXM 指令格式和 matrix adapter。
+
+外存 `external_memory` 分三层记录带宽，避免把器件峰值当成可用带宽：
+
+| 字段 | 含义 | 来源 |
+|---|---|---|
+| `ddr_interface_peak_bytes_per_second` | 器件接口峰值 | 表中第 53 行 |
+| `ddr_budget_bytes_per_second` | 分配给单 LPU 的预算 | 表中第 54 行 |
+| `ddr_rx_entrance_bytes_per_second` | 片上 RX 理论入口 | 表中第 47 行 |
+| `ddr_effective_peak_bytes_per_second` | `min(预算, RX 入口) × 效率` | 表中第 56 行 |
+
+CMake 生成 `hw::kDdrPeakBytesPerSecond` 时直接取 `ddr_effective_peak_bytes_per_second`，
+即模型按"可持续上限"限流，而不是按器件引脚峰值。`ddr_read/write_latency_cycles`
+与 `ddr_request_queue_depth` 一并进入 `Ddr4Config`，所以实际可达带宽还受 outstanding
+和延时约束，不再由效率系数单独决定。省略 `external_memory` 的旧 target 回落到
+500 MHz 双通道 DDR4-3200 平台（51.2 GB/s、35/25 cycles、队列 256、抖动 15/10）。
+
+存储器容量与类型仍只保留在 `planning.workbook_rows`，不参与容量校验或控制器协议。
 表中没有给延时抖动，三档设为零；基础延时保留 ns 到周期的换算。
 
 布局种子使用 `attention_mask_base_row = rows_per_bank - 256`、
@@ -53,6 +71,9 @@ ICU 仍为每个 slice bank 一个队列、每队列一个活动指令、IQ 深�
 
 ```powershell
 python tools/generate_workbook_profiles.py ../LPU参数配置.xlsx
+cmake -S . -B build-max -DFTLPU_HARDWARE_CONFIG="$PWD/config/ftlpu-max.json"
+cmake --build build-max --config Release --target vector_roundtrip_test mxm_accumulator_test
+ctest --test-dir build-max -C Release -R '^(unit.mem.vector_roundtrip|unit.mxm.accumulator)$' --output-on-failure
 cmake -S . -B build-lpu16-decode -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TRY_COMPILE_CONFIGURATION=Release -DFTLPU_HARDWARE_CONFIG="$PWD/config/ftlpu-lpu16-decode.json"
 cmake --build build-lpu16-decode --target hardware_profile_test geometry_encoding_test wide_transport_codec_test vector_roundtrip_test mxm_decode_streamed_weight_test --parallel 2
 ctest --test-dir build-lpu16-decode -R '^(integration.hardware_profile|unit.core.geometry_encoding|unit.core.wide_transport_codec|unit.mem.vector_roundtrip|subsystem.mxm.decode_streamed_weight)$' --output-on-failure

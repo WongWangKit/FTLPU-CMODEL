@@ -72,7 +72,8 @@ struct MxmEncodingLayout {
     static constexpr std::uint64_t mask(unsigned width) { return (std::uint64_t{1} << width) - 1; }
     static constexpr unsigned kIwMode = 3 + kColumnBits;
     static constexpr unsigned kIwInner = kIwMode + 1;
-    static constexpr unsigned kIwInput = kIwInner + 3;
+    static constexpr unsigned kInnerBits = std::max<unsigned>(3, std::bit_width(hw::kLanesPerTile - 1));
+    static constexpr unsigned kIwInput = kIwInner + kInnerBits;
     static constexpr unsigned kIwStream = kIwInput + 1;
     static constexpr unsigned kIwEnd = kIwStream + 6;
     static constexpr unsigned kComputeStride = 15 + kAddressBits;
@@ -88,6 +89,14 @@ struct MxmEncodingLayout {
     static constexpr unsigned kDecodeRetain = kDecodeFormat + 2;
     static constexpr unsigned kIsMode = kDecodeFormat + 3;
     static constexpr unsigned kDecodeEnd = kIsMode + 1;
+    // Layout v3 derives the packed queue widths from the same fields as the FU.
+    static constexpr bool kExtendedTemplates = hw::kIcuIsaLayoutVersion >= 3;
+    static constexpr unsigned kWsTemplateBits = kExtendedTemplates ? kIwEnd : 16;
+    static constexpr unsigned kIsTemplateBits = kExtendedTemplates ? kDecodeEnd : 29;
+    static constexpr unsigned kComputeTemplateBits =
+        kExtendedTemplates ? std::max(kComputeEnd, kDecodeEnd) : 49;
+    static constexpr unsigned kLoadOperandBits = kExtendedTemplates ? kColumnBits : 2;
+    static constexpr unsigned kComputeOperandBits = kExtendedTemplates ? kAddressBits : 13;
     static_assert(kComputeEnd <= 64 && kDecodeEnd <= 64 && kIwEnd <= 64);
 };
 
@@ -107,20 +116,59 @@ inline std::uint64_t unpack_mxm_load_template(std::uint64_t packed)
 }
 
 struct SxmEncodingLayout {
+    static constexpr bool kExtended = hw::kLanesPerTile > 8;
+    static constexpr unsigned kCountBits = std::bit_width(hw::kSxmConcurrentStreamOps);
+    static constexpr unsigned kLocalBits = std::bit_width(hw::kLanesPerTile);
+    // Extended selectors have a lane index plus two mode bits. Indices
+    // 0..L-1 address individual rows, including the old control values.
+    static constexpr unsigned kRowBits = kExtended ? std::bit_width(hw::kLanesPerTile - 1) + 2 : 4;
+    static constexpr unsigned kRowModeUnit = 1u << (kRowBits - 2);
+    static constexpr unsigned kRawHeaderBits = 6 + 2 * kCountBits;
+    static_assert(hw::kSxmConcurrentStreamOps <= hw::kStreams);
     static constexpr std::size_t kLaneBits = hw::kSxmLaneIndexBits;
     static constexpr std::size_t kTileBits = hw::kSxmTileSelectorBits;
     static constexpr std::size_t kStrideBits = hw::kSxmGroupStrideBits;
     static constexpr std::size_t kMapOffset = 116;
     static constexpr std::size_t kOutputRowOffset =
         kMapOffset + SxmInstruction::kTotalLanes * kLaneBits;
-    static constexpr std::size_t kOutputTileOffset = kOutputRowOffset + 4;
+    static constexpr std::size_t kOutputTileOffset = kOutputRowOffset + SxmEncodingLayout::kRowBits;
     static constexpr std::size_t kStrideOffset = kOutputTileOffset + kTileBits;
     static constexpr std::size_t kUsedBits = kStrideOffset + kStrideBits;
-    static constexpr std::size_t kRawMapOffset = 208 + hw::kLanesPerTile * 4;
+    static constexpr std::size_t kRawMapOffset = kRawHeaderBits + 2 * hw::kSxmConcurrentStreamOps * 6 + hw::kLanesPerTile * kLocalBits;
     static constexpr std::size_t kRawUsedBits =
-        kRawMapOffset + SxmInstruction::kTotalLanes * kLaneBits + 8 + kTileBits;
+        kRawMapOffset + SxmInstruction::kTotalLanes * kLaneBits + 2 * kRowBits + kTileBits;
     static constexpr std::size_t kRawWords = (kRawUsedBits + 31) / 32;
 };
+
+// Internal selectors remain convenient for scheduling. On extended targets
+// the high two wire bits select indexed, all, broadcast/consume, or wide.
+inline std::size_t sxm_row_field(std::size_t row, bool input)
+{
+    using I = SxmInstruction;
+    const auto L = hw::kLanesPerTile;
+    const auto unit = SxmEncodingLayout::kRowModeUnit;
+    if (row < L) return row;
+    if (row == I::kAllInputRows) return SxmEncodingLayout::kExtended ? unit : L;
+    if (input && row == I::kBroadcastInputRows)
+        return SxmEncodingLayout::kExtended ? 2 * unit : row;
+    if (!input && row >= I::kConsumeOutputRowBase && row <= I::kLastConsumeRow)
+        return SxmEncodingLayout::kExtended ? 2 * unit + row - I::kConsumeOutputRowBase : row;
+    throw std::out_of_range("invalid SXM row selector");
+}
+
+inline std::size_t sxm_row_from_field(std::size_t field, bool input)
+{
+    using I = SxmInstruction;
+    const auto L = hw::kLanesPerTile;
+    const auto unit = SxmEncodingLayout::kRowModeUnit;
+    if (field < L) return field;
+    if (field == (SxmEncodingLayout::kExtended ? unit : L)) return I::kAllInputRows;
+    const auto special = SxmEncodingLayout::kExtended ? 2 * unit : L + 1;
+    if (input && field == special) return I::kBroadcastInputRows;
+    if (!input && field >= special && field - special < L - 1)
+        return I::kConsumeOutputRowBase + field - special;
+    throw std::invalid_argument("reserved SXM row selector");
+}
 
 struct EncodedSxmInstruction {
     std::array<std::uint32_t, SxmEncodingLayout::kRawWords> words{};
@@ -274,7 +322,7 @@ inline EncodedMxmInstruction encode_mxm_instruction(const MxmControlInstruction&
     constexpr std::uint64_t kOpcodeMask = 0x3;
     constexpr std::uint64_t kWeightBufferMask = 0x1;
     constexpr std::uint64_t kWeightColumnMask = MxmEncodingLayout::mask(MxmEncodingLayout::kColumnBits);
-    constexpr std::uint64_t kWeightInnerColumnMask = 0x7;
+    constexpr std::uint64_t kWeightInnerColumnMask = MxmEncodingLayout::mask(MxmEncodingLayout::kInnerBits);
     constexpr std::uint64_t kWeightStreamBaseMask = 0x3f;
     constexpr std::uint64_t kStreamBaseMask = 0x3f;
     constexpr std::uint64_t kActivationStreamMask = 0x3f;
@@ -455,7 +503,7 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
     const auto iw_weight_buffer = static_cast<std::size_t>((word >> 2) & 0x1u);
     const auto iw_weight_column = static_cast<std::size_t>((word >> 3) & MxmEncodingLayout::mask(MxmEncodingLayout::kColumnBits));
     const auto iw_column_mode = ((word >> MxmEncodingLayout::kIwMode) & 0x1u) != 0;
-    const auto iw_inner_column = static_cast<std::size_t>((word >> MxmEncodingLayout::kIwInner) & 0x7u);
+    const auto iw_inner_column = static_cast<std::size_t>((word >> MxmEncodingLayout::kIwInner) & MxmEncodingLayout::mask(MxmEncodingLayout::kInnerBits));
     const auto iw_input_mode =
         static_cast<MxmWeightInputMode>(((word >> MxmEncodingLayout::kIwInput) & 1u)
             | (((word >> MxmEncodingLayout::kIwEnd) & 1u) << 1));
@@ -598,16 +646,16 @@ inline VxmDecodedInstruction decode_vxm_instruction(
 
 inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instruction)
 {
-    constexpr std::size_t kMaxStreams = 16;
-    constexpr std::size_t kSrcOffset = 16;
+    constexpr std::size_t kMaxStreams = hw::kSxmConcurrentStreamOps;
+    constexpr std::size_t kSrcOffset = SxmEncodingLayout::kRawHeaderBits;
     constexpr std::size_t kDstOffset = kSrcOffset + kMaxStreams * 6;
     constexpr std::size_t kLaneMapOffset = kDstOffset + kMaxStreams * 6;
     constexpr std::size_t kPermuteMapOffset =
-        kLaneMapOffset + hw::kLanesPerTile * 4;
+        SxmEncodingLayout::kRawMapOffset;
     constexpr std::size_t kOutputRowOffset =
         kPermuteMapOffset + SxmInstruction::kTotalLanes * SxmEncodingLayout::kLaneBits;
-    constexpr std::size_t kInputRowOffset = kOutputRowOffset + 4;
-    constexpr std::size_t kOutputTileOffset = kInputRowOffset + 4;
+    constexpr std::size_t kInputRowOffset = kOutputRowOffset + SxmEncodingLayout::kRowBits;
+    constexpr std::size_t kOutputTileOffset = kInputRowOffset + SxmEncodingLayout::kRowBits;
 
     detail::require_unsigned_fit(
         static_cast<std::size_t>(instruction.opcode), 0x3, "SXM opcode does not fit");
@@ -624,12 +672,17 @@ inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instru
     detail::write_bits(encoded.words, 0, 2, static_cast<std::uint32_t>(instruction.opcode));
     detail::write_bits(encoded.words, 2, 2, static_cast<std::uint32_t>(instruction.shift_source));
     detail::write_bits(encoded.words, 4, 2, static_cast<std::uint32_t>(instruction.shift_distance));
-    detail::write_bits(encoded.words, 6, 5, static_cast<std::uint32_t>(instruction.src_streams.size()));
-    detail::write_bits(encoded.words, 11, 5, static_cast<std::uint32_t>(instruction.dst_streams.size()));
+    detail::write_bits(encoded.words, 6, SxmEncodingLayout::kCountBits, static_cast<std::uint32_t>(instruction.src_streams.size()));
+    detail::write_bits(encoded.words, 6 + SxmEncodingLayout::kCountBits, SxmEncodingLayout::kCountBits, static_cast<std::uint32_t>(instruction.dst_streams.size()));
 
     for (std::size_t index = 0; index < instruction.src_streams.size(); ++index) {
         detail::require_unsigned_fit(
             instruction.src_streams[index].stream, 0x3f, "SXM source stream does not fit");
+        if (SxmEncodingLayout::kExtended && index && (instruction.opcode == SxmOpcode::Transpose || instruction.opcode == SxmOpcode::Permute)) {
+            if (instruction.src_streams[index].stream != instruction.src_streams.front().stream + index)
+                throw std::invalid_argument("wide SXM requires a consecutive stream range");
+            continue;
+        }
         detail::write_bits(
             encoded.words, kSrcOffset + index * 6, 6,
             static_cast<std::uint32_t>(instruction.src_streams[index].stream));
@@ -637,6 +690,11 @@ inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instru
     for (std::size_t index = 0; index < instruction.dst_streams.size(); ++index) {
         detail::require_unsigned_fit(
             instruction.dst_streams[index].stream, 0x3f, "SXM destination stream does not fit");
+        if (SxmEncodingLayout::kExtended && index && (instruction.opcode == SxmOpcode::Transpose || instruction.opcode == SxmOpcode::Permute)) {
+            if (instruction.dst_streams[index].stream != instruction.dst_streams.front().stream + index)
+                throw std::invalid_argument("wide SXM requires a consecutive stream range");
+            continue;
+        }
         detail::write_bits(
             encoded.words, kDstOffset + index * 6, 6,
             static_cast<std::uint32_t>(instruction.dst_streams[index].stream));
@@ -647,7 +705,7 @@ inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instru
             : instruction.lane_map[lane];
         detail::require_unsigned_fit(source, hw::kLanesPerTile, "SXM lane map does not fit");
         detail::write_bits(
-            encoded.words, kLaneMapOffset + lane * 4, 4,
+            encoded.words, kLaneMapOffset + lane * SxmEncodingLayout::kLocalBits, SxmEncodingLayout::kLocalBits,
             static_cast<std::uint32_t>(source));
     }
     for (std::size_t lane = 0; lane < SxmInstruction::kTotalLanes; ++lane) {
@@ -659,18 +717,13 @@ inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instru
             encoded.words, kPermuteMapOffset + lane * SxmEncodingLayout::kLaneBits, SxmEncodingLayout::kLaneBits,
             static_cast<std::uint32_t>(instruction.permute_map[lane]));
     }
-    const auto output_row = instruction.output_row == SxmInstruction::kAllOutputRows
-        ? hw::kLanesPerTile : instruction.output_row;
-    detail::require_unsigned_fit(
-        output_row, hw::kLanesPerTile, "SXM output row does not fit");
-    detail::write_bits(encoded.words, kOutputRowOffset, 4,
-        static_cast<std::uint32_t>(output_row));
-    const auto input_row = instruction.input_row == SxmInstruction::kAllInputRows
-        ? hw::kLanesPerTile : instruction.input_row;
-    detail::require_unsigned_fit(
-        input_row, hw::kLanesPerTile, "SXM input row does not fit");
-    detail::write_bits(encoded.words, kInputRowOffset, 4,
-        static_cast<std::uint32_t>(input_row));
+    detail::write_bits(encoded.words, kOutputRowOffset, SxmEncodingLayout::kRowBits,
+        static_cast<std::uint32_t>(sxm_row_field(instruction.output_row, false)));
+    if (instruction.reads_transpose_bank() && instruction.input_row >= 2 * hw::kLanesPerTile)
+        throw std::invalid_argument("invalid vector Permute bank slot");
+    detail::write_bits(encoded.words, kInputRowOffset, SxmEncodingLayout::kRowBits,
+        static_cast<std::uint32_t>(instruction.reads_transpose_bank() ? instruction.input_row
+            : sxm_row_field(instruction.input_row, true)));
     const auto output_tile = instruction.output_tile == SxmInstruction::kAllOutputTiles
         ? hw::kTileRows : instruction.output_tile;
     detail::require_unsigned_fit(
@@ -682,16 +735,16 @@ inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instru
 
 inline SxmInstruction decode_sxm_instruction(const EncodedSxmInstruction& encoded)
 {
-    constexpr std::size_t kMaxStreams = 16;
-    constexpr std::size_t kSrcOffset = 16;
+    constexpr std::size_t kMaxStreams = hw::kSxmConcurrentStreamOps;
+    constexpr std::size_t kSrcOffset = SxmEncodingLayout::kRawHeaderBits;
     constexpr std::size_t kDstOffset = kSrcOffset + kMaxStreams * 6;
     constexpr std::size_t kLaneMapOffset = kDstOffset + kMaxStreams * 6;
     constexpr std::size_t kPermuteMapOffset =
-        kLaneMapOffset + hw::kLanesPerTile * 4;
+        SxmEncodingLayout::kRawMapOffset;
     constexpr std::size_t kOutputRowOffset =
         kPermuteMapOffset + SxmInstruction::kTotalLanes * SxmEncodingLayout::kLaneBits;
-    constexpr std::size_t kInputRowOffset = kOutputRowOffset + 4;
-    constexpr std::size_t kOutputTileOffset = kInputRowOffset + 4;
+    constexpr std::size_t kInputRowOffset = kOutputRowOffset + SxmEncodingLayout::kRowBits;
+    constexpr std::size_t kOutputTileOffset = kInputRowOffset + SxmEncodingLayout::kRowBits;
     constexpr std::size_t kUsedBits =
         kOutputTileOffset + SxmEncodingLayout::kTileBits;
 
@@ -706,21 +759,25 @@ inline SxmInstruction decode_sxm_instruction(const EncodedSxmInstruction& encode
     instruction.shift_source =
         static_cast<SxmShiftSource>(detail::read_bits(encoded.words, 2, 2));
     instruction.shift_distance = detail::read_bits(encoded.words, 4, 2);
-    const auto src_count = detail::read_bits(encoded.words, 6, 5);
-    const auto dst_count = detail::read_bits(encoded.words, 11, 5);
+    const auto src_count = detail::read_bits(encoded.words, 6, SxmEncodingLayout::kCountBits);
+    const auto dst_count = detail::read_bits(encoded.words, 6 + SxmEncodingLayout::kCountBits, SxmEncodingLayout::kCountBits);
     if (src_count > kMaxStreams || dst_count > kMaxStreams) {
         throw std::logic_error("encoded SXM stream count is invalid");
     }
     for (std::size_t index = 0; index < src_count; ++index) {
         instruction.src_streams.push_back(
-            SxmStreamId {detail::read_bits(encoded.words, kSrcOffset + index * 6, 6)});
+            SxmStreamId {SxmEncodingLayout::kExtended && (instruction.opcode == SxmOpcode::Transpose || instruction.opcode == SxmOpcode::Permute)
+                ? detail::read_bits(encoded.words, kSrcOffset, 6) + index
+                : detail::read_bits(encoded.words, kSrcOffset + index * 6, 6)});
     }
     for (std::size_t index = 0; index < dst_count; ++index) {
         instruction.dst_streams.push_back(
-            SxmStreamId {detail::read_bits(encoded.words, kDstOffset + index * 6, 6)});
+            SxmStreamId {SxmEncodingLayout::kExtended && (instruction.opcode == SxmOpcode::Transpose || instruction.opcode == SxmOpcode::Permute)
+                ? detail::read_bits(encoded.words, kDstOffset, 6) + index
+                : detail::read_bits(encoded.words, kDstOffset + index * 6, 6)});
     }
     for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-        const auto source = detail::read_bits(encoded.words, kLaneMapOffset + lane * 4, 4);
+        const auto source = detail::read_bits(encoded.words, kLaneMapOffset + lane * SxmEncodingLayout::kLocalBits, SxmEncodingLayout::kLocalBits);
         if (source > hw::kLanesPerTile) {
             throw std::logic_error("encoded SXM lane map is invalid");
         }
@@ -736,16 +793,12 @@ inline SxmInstruction decode_sxm_instruction(const EncodedSxmInstruction& encode
         instruction.permute_map[lane] = source;
     }
     const auto output_row =
-        detail::read_bits(encoded.words, kOutputRowOffset, 4);
-    if (output_row > hw::kLanesPerTile)
-        throw std::logic_error("encoded SXM output row is invalid");
-    instruction.output_row = output_row == hw::kLanesPerTile
-        ? SxmInstruction::kAllOutputRows : output_row;
-    const auto input_row = detail::read_bits(encoded.words, kInputRowOffset, 4);
-    if (input_row > hw::kLanesPerTile)
-        throw std::logic_error("encoded SXM input row is invalid");
-    instruction.input_row = input_row == hw::kLanesPerTile
-        ? SxmInstruction::kAllInputRows : input_row;
+        detail::read_bits(encoded.words, kOutputRowOffset, SxmEncodingLayout::kRowBits);
+    instruction.output_row = sxm_row_from_field(output_row, false);
+    const auto input_row = detail::read_bits(encoded.words, kInputRowOffset, SxmEncodingLayout::kRowBits);
+    instruction.input_row = instruction.reads_transpose_bank() ? input_row : sxm_row_from_field(input_row, true);
+    if (instruction.reads_transpose_bank() && input_row >= 2 * hw::kLanesPerTile)
+        throw std::invalid_argument("invalid encoded vector Permute bank slot");
     const auto output_tile = detail::read_bits(encoded.words, kOutputTileOffset, SxmEncodingLayout::kTileBits);
     if (output_tile > hw::kTileRows)
         throw std::logic_error("encoded SXM output tile is invalid");

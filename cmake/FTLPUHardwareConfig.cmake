@@ -147,8 +147,16 @@ function(ftlpu_generate_hardware_config input_json output_header)
         message(FATAL_ERROR "c2c.beat_bytes must be positive and fit within one physical vector")
     endif()
 
-    # Simulation timing knobs are optional for older target files. They are
-    # independent of the executable ISA/ABI.
+    # Older targets coupled transport channel count to tile width.
+    string(JSON FTLPU_C2C_CHANNELS ERROR_VARIABLE channel_error GET "${FTLPU_HW_JSON}" c2c streams_per_direction)
+    if(channel_error)
+        set(FTLPU_C2C_CHANNELS ${FTLPU_HW_LANES_PER_TILE})
+    endif()
+    math(EXPR stream_limit "${FTLPU_HW_SR_REGISTERS} / 2")
+    if(NOT FTLPU_C2C_CHANNELS MATCHES "^[1-9][0-9]*$" OR FTLPU_C2C_CHANNELS GREATER stream_limit)
+        message(FATAL_ERROR "c2c.streams_per_direction exceeds the physical stream range")
+    endif()
+    # Simulation timing knobs are optional and independent of the ISA/ABI.
     macro(ftlpu_timing_parameter output default_value section field)
         string(JSON FTLPU_TIMING_TYPE ERROR_VARIABLE FTLPU_SECTION_ERROR
             TYPE "${FTLPU_HW_JSON}" ${section})
@@ -177,6 +185,69 @@ function(ftlpu_generate_hardware_config input_json output_header)
     ftlpu_timing_parameter(FTLPU_PROGRAM_ROUTE_LATENCY 1 program_load route_latency_cycles)
     ftlpu_timing_parameter(FTLPU_PROGRAM_WRITE_II 1 program_load imem_write_ii_cycles)
     ftlpu_timing_parameter(FTLPU_PROGRAM_COMMIT_LATENCY 1 program_load imem_write_commit_latency_cycles)
+
+    # External-memory timing belongs to the target, not to the model: the DDR
+    # budget, latency and outstanding-request depth come from the same workbook
+    # that fixes the MEM geometry. Targets that omit the object keep the legacy
+    # 500 MHz dual-channel DDR4-3200 platform.
+    macro(ftlpu_external_memory_value output default_value allow_zero field)
+        string(JSON FTLPU_EXTERNAL_TYPE ERROR_VARIABLE FTLPU_EXTERNAL_SECTION_ERROR
+            TYPE "${FTLPU_HW_JSON}" external_memory)
+        if(FTLPU_EXTERNAL_SECTION_ERROR)
+            set(${output} ${default_value})
+        elseif(NOT FTLPU_EXTERNAL_TYPE STREQUAL "OBJECT")
+            message(FATAL_ERROR "external_memory must be an object")
+        else()
+            string(JSON FTLPU_EXTERNAL_VALUE ERROR_VARIABLE FTLPU_EXTERNAL_FIELD_ERROR
+                GET "${FTLPU_HW_JSON}" external_memory ${field})
+            if(FTLPU_EXTERNAL_FIELD_ERROR)
+                set(${output} ${default_value})
+            else()
+                set(${output} ${FTLPU_EXTERNAL_VALUE})
+            endif()
+        endif()
+        if(${allow_zero})
+            set(FTLPU_EXTERNAL_PATTERN "^[0-9]+$")
+            set(FTLPU_EXTERNAL_RULE "a non-negative integer")
+        else()
+            set(FTLPU_EXTERNAL_PATTERN "^[1-9][0-9]*$")
+            set(FTLPU_EXTERNAL_RULE "a positive integer")
+        endif()
+        if(NOT "${${output}}" MATCHES "${FTLPU_EXTERNAL_PATTERN}"
+           OR "${${output}}" GREATER 9223372036854775807)
+            message(FATAL_ERROR
+                "external_memory.${field} must be ${FTLPU_EXTERNAL_RULE} <= 2^63-1")
+        endif()
+    endmacro()
+
+    # Prefer the explicit effective peak. Older profiles only stored the
+    # already-reduced figure under a name that read like a device peak.
+    string(JSON FTLPU_DDR_EFFECTIVE_PEAK ERROR_VARIABLE FTLPU_DDR_EFFECTIVE_ERROR
+        GET "${FTLPU_HW_JSON}" external_memory ddr_effective_peak_bytes_per_second)
+    if(FTLPU_DDR_EFFECTIVE_ERROR)
+        string(JSON FTLPU_DDR_LEGACY_PEAK ERROR_VARIABLE FTLPU_DDR_LEGACY_ERROR
+            GET "${FTLPU_HW_JSON}" external_memory ddr_peak_bandwidth_mbytes_per_second)
+        if(FTLPU_DDR_LEGACY_ERROR)
+            set(FTLPU_DDR_PEAK_BYTES_PER_SECOND 51200000000)
+        else()
+            math(EXPR FTLPU_DDR_PEAK_BYTES_PER_SECOND
+                "${FTLPU_DDR_LEGACY_PEAK} * 1000000")
+        endif()
+    else()
+        set(FTLPU_DDR_PEAK_BYTES_PER_SECOND ${FTLPU_DDR_EFFECTIVE_PEAK})
+    endif()
+    if(NOT FTLPU_DDR_PEAK_BYTES_PER_SECOND MATCHES "^[1-9][0-9]*$")
+        message(FATAL_ERROR
+            "external memory peak bandwidth must be a positive integer")
+    endif()
+
+    ftlpu_external_memory_value(FTLPU_DDR_CLOCK_MHZ 500 OFF lpu_clock_mhz)
+    math(EXPR FTLPU_DDR_CLOCK_HZ "${FTLPU_DDR_CLOCK_MHZ} * 1000000")
+    ftlpu_external_memory_value(FTLPU_DDR_READ_LATENCY 35 OFF ddr_read_latency_cycles)
+    ftlpu_external_memory_value(FTLPU_DDR_WRITE_LATENCY 25 OFF ddr_write_latency_cycles)
+    ftlpu_external_memory_value(FTLPU_DDR_QUEUE_DEPTH 256 OFF ddr_request_queue_depth)
+    ftlpu_external_memory_value(FTLPU_DDR_READ_JITTER 15 ON ddr_read_latency_jitter_cycles)
+    ftlpu_external_memory_value(FTLPU_DDR_WRITE_JITTER 10 ON ddr_write_latency_jitter_cycles)
 
     include("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/FTLPUIcuGeometry.cmake")
 

@@ -1,15 +1,58 @@
 {
   "schema_version": 2,
+  "icu": {
+    "mem_instruction_bits": 96,
+    "mem_imem_depth": 131072,
+    "mem_iq_depth": 16,
+    "mem_macro_contexts": 32,
+    "mxm_instruction_bits": 128,
+    "mxm_imem_depth": 65536,
+    "mxm_iq_depth": 16,
+    "mxm_macro_contexts": 40,
+    "vxm_instruction_bits": 96,
+    "vxm_imem_depth": 2048,
+    "vxm_iq_depth": 16,
+    "vxm_macro_contexts": 4,
+    "sxm_instruction_bits": 96,
+    "sxm_imem_depth": 2048,
+    "sxm_iq_depth": 16,
+    "sxm_macro_contexts": 4,
+    "c2c_instruction_bits": 96,
+    "c2c_imem_depth": 32768,
+    "c2c_iq_depth": 16,
+    "c2c_macro_contexts": 4,
+    "mem_macro_context_bits": 256,
+    "mxm_macro_context_bits": 256,
+    "fetch_latency_cycles": 1,
+    "macro_imem_request_ii_cycles": 1,
+    "barrier_latency_cycles": 35,
+    "macro_reservoir_words": 3,
+    "macro_decode_window_bits": 64,
+    "macro_ddb_depth": 8,
+    "macro_admission_lookahead": 8,
+    "macro_ddb_run_capacity": 8,
+    "common_barrier_encoding_version": 1,
+    "common_barrier_capacity": 1024,
+    "common_transport_overlap_version": 1,
+    "queue_control_version": 1,
+    "queue_control_capacity": 16,
+    "queue_control_cache_depth": 4,
+    "queue_control_read_latency": 2,
+    "queue_control_read_ports": 1,
+    "queue_control_storage_version": 1,
+    "queue_control_pool_capacity": 512,
+    "queue_control_pool_read_ii": 1
+  },
   "target": {
-    "name": "ftlpu-lpu64-cloud"
+    "name": "ftlpu-max"
   },
   "topology": {
     "hemispheres": 2,
-    "tiles_per_slice": 8,
-    "lanes_per_tile": 8
+    "tiles_per_slice": 20,
+    "lanes_per_tile": 16
   },
   "mem": {
-    "slices_per_hemisphere": 52,
+    "slices_per_hemisphere": 44,
     "banks_per_slice": 2,
     "rows_per_bank": 2048,
     "bytes_per_lane": 1
@@ -37,8 +80,6 @@
         "mem.b9",
         "mem.b10",
         "mem.b11",
-        "mem.b12",
-        "mem.b13",
         "c2c_sxm",
         "sxm_mxm"
       ],
@@ -58,8 +99,6 @@
             "mem.b9",
             "mem.b10",
             "mem.b11",
-            "mem.b12",
-            "mem.b13",
             "c2c_sxm",
             "sxm_mxm"
           ],
@@ -87,9 +126,7 @@
           "mem.b8",
           "mem.b9",
           "mem.b10",
-          "mem.b11",
-          "mem.b12",
-          "mem.b13"
+          "mem.b11"
         ]
       },
       "sxm": {
@@ -136,11 +173,11 @@
       },
       "c2c": {
         "tx_input": {
-          "column": "mem.b13",
+          "column": "mem.b11",
           "flow": "forward"
         },
         "rx_output": {
-          "column": "mem.b13",
+          "column": "mem.b11",
           "flow": "reverse"
         }
       }
@@ -179,11 +216,12 @@
     ]
   },
   "c2c": {
-    "beat_bytes": 32
+    "beat_bytes": 320,
+    "streams_per_direction": 8
   },
   "mxm": {
     "accum_contexts": 4,
-    "is_columns": 4,
+    "is_columns": 2,
     "supported_modes": [
       "ws-vector",
       "ws-block",
@@ -193,7 +231,7 @@
     "instances_per_hemisphere": 2
   },
   "vxm": {
-    "alus": 32
+    "alus": 16
   },
   "memory": {
     "dedicated_slice_roles": 1,
@@ -220,9 +258,11 @@
     ],
     "attention_mask_base_row": 1792,
     "matmul_result_base_row": 1024,
-    "w8a16_result_slice_base": 16
+    "w8a16_result_slice_base": 16,
+    "automatic_layout": true
   },
   "throughput": {
+    "mxm_prefill_weight_streams": 8,
     "mxms_per_hemisphere": 2,
     "mxm_weight_buffers": 2,
     "mxm_local_dequant_enabled": 1,
@@ -232,26 +272,36 @@
     "vxm_fma_enabled": 1
   },
   "external_memory": {
+    "dma_fifo_depth_vectors": 16,
     "lpu_clock_mhz": 1000,
-    "ddr_peak_bandwidth_mbytes_per_second": 512000,
-    "ddr_scheduling_efficiency_percent": 80,
+    "ddr_scheduling_efficiency_percent": 100,
     "ddr_read_latency_cycles": 100,
     "ddr_write_latency_cycles": 100,
     "ddr_read_latency_jitter_cycles": 0,
     "ddr_write_latency_jitter_cycles": 0,
     "ddr_request_queue_depth": 512,
-    "ddr_latency_random_seed": 1179929680
+    "ddr_latency_random_seed": 1179929680,
+    "ddr_interface_peak_bytes_per_second": 1200000000000,
+    "ddr_budget_bytes_per_second": 1200000000000,
+    "ddr_rx_entrance_bytes_per_second": 5120000000000,
+    "ddr_effective_peak_bytes_per_second": 1200000000000
+  },
+  "program_load": {
+    "bus_bytes_per_cycle": 32,
+    "route_latency_cycles": 1,
+    "imem_write_ii_cycles": 1,
+    "imem_write_commit_latency_cycles": 1
   },
   "planning": {
     "source_workbook": "LPU参数配置.xlsx",
-    "source_sha256": "0ccabacbada7c82fb75624b9dc13ed1f5a904c2efdecc8197eec4c9514fa3379",
+    "source_sha256": "7f8a5f4fd00387af484e8fa523705a194da273ba574b893a0cdb137a8585b6e3",
     "source_sheet": "三档参数对照",
     "source_column": "C",
     "status": "experimental target; model-level validation required",
     "workbook_rows": {
       "7": {
         "parameter": "主要用途",
-        "value": "云端单 LPU 高吞吐推理"
+        "value": "对标 GroqChip 的单芯片高吞吐推理"
       },
       "8": {
         "parameter": "实现形态",
@@ -271,15 +321,15 @@
       },
       "13": {
         "parameter": "tile / superlane 数",
-        "value": 8
+        "value": 20
       },
       "14": {
         "parameter": "每 tile 的 lane 数",
-        "value": 8
+        "value": 16
       },
       "15": {
         "parameter": "内部向量 lane 数",
-        "value": 64
+        "value": 320
       },
       "16": {
         "parameter": "物理 MXM 数",
@@ -291,11 +341,11 @@
       },
       "18": {
         "parameter": "MXM 阵列行数",
-        "value": 64
+        "value": 320
       },
       "19": {
         "parameter": "MXM 阵列列数",
-        "value": 64
+        "value": 320
       },
       "20": {
         "parameter": "每 MXM weight buffers",
@@ -311,15 +361,15 @@
       },
       "23": {
         "parameter": "每 MXM ACC 容量",
-        "value": 64
+        "value": 1600
       },
       "24": {
         "parameter": "ACC 总容量",
-        "value": 256
+        "value": 6400
       },
       "25": {
         "parameter": "VXM ALU 列数",
-        "value": 32
+        "value": 16
       },
       "26": {
         "parameter": "计算时钟目标",
@@ -331,7 +381,7 @@
       },
       "29": {
         "parameter": "MEM slices",
-        "value": 52
+        "value": 44
       },
       "30": {
         "parameter": "每组 MEM slices",
@@ -351,15 +401,15 @@
       },
       "34": {
         "parameter": "MEM 每行宽度",
-        "value": 64
+        "value": 320
       },
       "35": {
         "parameter": "每 LPU MEM 容量",
-        "value": 26
+        "value": 110
       },
       "36": {
         "parameter": "MEM 总容量",
-        "value": 26
+        "value": 110
       },
       "37": {
         "parameter": "MEM bank 端口约束",
@@ -367,7 +417,7 @@
       },
       "39": {
         "parameter": "MEM ICU 总数",
-        "value": 208
+        "value": 176
       },
       "40": {
         "parameter": "每 ICU 活动指令数",
@@ -387,11 +437,11 @@
       },
       "44": {
         "parameter": "C2C/DMA 每通道 beat",
-        "value": 32
+        "value": 320
       },
       "45": {
         "parameter": "每内部向量传输拍数",
-        "value": 2
+        "value": 1
       },
       "46": {
         "parameter": "每侧 RX 逻辑通道数",
@@ -399,7 +449,7 @@
       },
       "47": {
         "parameter": "芯片/板级 RX 理论入口",
-        "value": 512
+        "value": 5120
       },
       "48": {
         "parameter": "连接方式",
@@ -427,11 +477,11 @@
       },
       "55": {
         "parameter": "外部存储效率假设",
-        "value": 0.8
+        "value": 1
       },
       "56": {
         "parameter": "估算可持续带宽上界",
-        "value": 409.6
+        "value": 1200
       },
       "57": {
         "parameter": "基础读延时假设",
@@ -453,9 +503,10 @@
     "unimplemented_requirements": [
       "RTL/PPA/FPGA acceptance and timing closure",
       "iMEM capacity from program peak and FPGA segmented loading",
-      "external-memory capacity/type enforcement (budget, efficiency and latency are modeled)"
+      "external-memory capacity and device-type enforcement (capacity and type stay documentation only)",
+      "16-lane SXM row/stream encoding and matrix adapter before integrated ICU execution"
     ],
     "layout_note": "Mask starts at depth-256; result seed=min(1600,depth/2). These seeds do not prove tensor lifetime fit.",
-    "timing_note": "No jitter specified in workbook; jitter=0. Effective peak=min(per-LPU budget,RX entrance); then apply efficiency, matching workbook row 56. Raw interface peak and budget remain in workbook_rows."
+    "timing_note": "No jitter specified in workbook; jitter=0. ddr_effective_peak_bytes_per_second is workbook row 56 (min of per-LPU budget and RX entrance, times efficiency) and is consumed directly as the model's sustained byte ceiling. ddr_read/write_latency_cycles and ddr_request_queue_depth are enforced by the DDR model, so the achievable rate also falls out of Little's law instead of being assumed."
   }
 }

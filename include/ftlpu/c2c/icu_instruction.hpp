@@ -236,6 +236,8 @@ struct C2cDmaIcuInstruction {
     std::size_t address_stride_bytes{hw::kPhysicalVectorBytes};
     std::uint32_t sync_tag{0};
 
+    C2cRowIndex row_index{};
+
     static C2cDmaIcuInstruction Load(Hemisphere endpoint_hemisphere,
         std::size_t lane, std::uint64_t ddr4_address,
         std::size_t vector_count = 1,
@@ -272,6 +274,7 @@ struct C2cDmaIcuInstruction {
             instruction.address_stride_bytes,
             sync_tag == std::numeric_limits<std::uint32_t>::max()
                 ? instruction.sync_tag : sync_tag};
+        result.row_index = instruction.row_index;
         result.validate();
         return result;
     }
@@ -287,6 +290,7 @@ struct C2cDmaIcuInstruction {
             : C2cDmaInstruction::Store(ddr4_address, vector_count,
                   address_stride_bytes, lane);
         instruction.sync_tag = sync_tag;
+        instruction.row_index = row_index;
         return instruction;
     }
 
@@ -305,6 +309,7 @@ struct C2cDmaIcuInstruction {
 
     void validate() const
     {
+        row_index.validate(direction, ddr4_address, vector_count, address_stride_bytes);
         C2cTxIcuInstruction::validate_endpoint(
             endpoint_hemisphere, lane, 0, false);
         if (vector_count == 0)
@@ -408,6 +413,11 @@ public:
         write(packet.words[0], 23, 16, value.address_stride_bytes);
         write(packet.words[0], 39, 16, value.sync_tag);
         write(packet.words[1], 0, 64, value.ddr4_address);
+        if (value.row_index.row_limit) {
+            write(packet.words[0], 55, 1, 1);
+            write(packet.words[0], 56, 40, value.row_index.address / 4);
+            write(packet.words[1], 64, 31, value.row_index.row_limit);
+        }
         write(packet.words[1], 95, 1, 1);
         return packet;
     }
@@ -415,8 +425,7 @@ public:
     static C2cDmaIcuInstruction decode_dma(const C2cDmaIcuPacket& packet)
     {
         if (read(packet.words[0], 0, 2) != 0
-            || !zero(packet.words[0], 55, 96)
-            || !zero(packet.words[1], 64, 95)
+            || (!read(packet.words[0],55,1) && (!zero(packet.words[0],56,96) || !zero(packet.words[1],64,95)))
             || read(packet.words[1], 95, 1) != 1)
             throw std::invalid_argument("C2C DMA packet has non-zero reserved bits");
         const auto direction = read(packet.words[0], 2, 1) == 0
@@ -427,9 +436,16 @@ public:
         const auto count = read(packet.words[0], 7, 16) + 1;
         const auto stride = read(packet.words[0], 23, 16);
         const auto tag = static_cast<std::uint32_t>(read(packet.words[0], 39, 16));
-        return direction == C2cDmaDirection::Ddr4ToC2c
+        auto instruction = direction == C2cDmaDirection::Ddr4ToC2c
             ? C2cDmaIcuInstruction::Load(hemisphere, lane, address, count, stride, tag)
             : C2cDmaIcuInstruction::Store(hemisphere, lane, address, count, stride, tag);
+        if (read(packet.words[0],55,1)) {
+            instruction.row_index = {read(packet.words[0],56,40)*4,
+                static_cast<std::uint32_t>(read(packet.words[1],64,31))};
+            if (!instruction.row_index.row_limit) throw std::invalid_argument("empty indexed DMA table");
+            instruction.validate();
+        }
+        return instruction;
     }
 
 private:

@@ -14,6 +14,22 @@ enum class C2cDmaDirection : std::uint8_t {
     C2cToDdr4,
 };
 
+// Indirect read of a fixed 512-byte table row. The index is a little-endian
+// u32 in DDR. A zero row limit selects ordinary absolute-address DMA.
+struct C2cRowIndex {
+    std::uint64_t address{};
+    std::uint32_t row_limit{};
+    void validate(C2cDmaDirection direction, std::uint64_t base,
+                  std::size_t count, std::size_t stride) const {
+        if (!row_limit && !address) return;
+        if (!row_limit || direction != C2cDmaDirection::Ddr4ToC2c ||
+            address % 4 || address / 4 >= (1ULL << 40) || row_limit >= (1ULL << 31) ||
+            stride != hw::kPhysicalVectorBytes || count == 0 || count > 512 / stride ||
+            base % stride || base > UINT64_MAX - (std::uint64_t(row_limit - 1) * 512 + count * stride - 1))
+            throw std::invalid_argument("invalid indexed DMA row descriptor");
+    }
+};
+
 struct C2cDmaInstruction {
     C2cDmaDirection direction{C2cDmaDirection::Ddr4ToC2c};
     std::uint64_t ddr4_address{0};
@@ -24,6 +40,7 @@ struct C2cDmaInstruction {
     // CModel diagnostic vector tags are deliberately distinct from the
     // hardware synchronization tag carried by the fixed DMA ICU packet.
     std::uint32_t sync_tag{0};
+    C2cRowIndex row_index{};
 
     static C2cDmaInstruction Load(
         std::uint64_t ddr4_address,
@@ -79,6 +96,7 @@ struct C2cDmaInstruction {
 
     void validate() const
     {
+        row_index.validate(direction, ddr4_address, vector_count, address_stride_bytes);
         if (vector_count == 0) {
             throw std::invalid_argument(
                 "C2C DMA vector_count must be non-zero");

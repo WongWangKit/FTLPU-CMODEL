@@ -31,8 +31,8 @@ provide a concrete target for dataflow scheduling and future compiler work.
 | MXM weights | Two peer buffers per supercell, selected by `IW`/`Compute` |
 | MXM decode | Selectable `Linear1x16` or activation-stationary `Native4x4` |
 | VXM | One central slice; 16 physical ALUs per lane, two mirrored eight-stage chains sharing 8 ICU queues |
-| SXM | One four-tile slice per hemisphere for Transpose/Permute |
-| ICU | 208 MEM, 12 MXM, 8 VXM compact-control, 4 SXM, and 6 C2C/DMA queues |
+| SXM | One streaming FIFO transpose per hemisphere, with a fixed inter-superlane exchange |
+| ICU | 208 MEM, 12 MXM, 8 VXM compact-control, 2 active SXM transpose queues (2 legacy Permute IDs reserved), and 6 C2C/DMA queues |
 
 The fixed full-chip topology is:
 
@@ -74,10 +74,10 @@ signed address stride.
 | `w8a16_swiglu_test` | gate/up projection plus SwiGLU | 196,608 FP16 outputs |
 | `dual_hemisphere_w8a16_swiglu_test` | full gate/up, SwiGLU, and down FFN | `[128,576]` final FP16 output |
 | `rmsnorm_test` | `[32,32]` FP16 RMSNorm | all stored FP16 outputs |
-| `smollm2_attention_test` | ICU-driven Q/K RoPE, QK, softmax, and P x V hardware tile | bit-checked RoPE plus `8 x 32` attention output |
+| `sxm_fifo_transpose_test` | Cycle-accurate FIFO transpose and retired-mode rejection | data, valid bits, tags, superlane skew and consecutive tiles |
 | `mxm_decode_layout_comparison_test` | Same `K=128, N=32` GEMV in both decode layouts | bit-identical BF16 outputs and cycle comparison |
 | `smollm2_decode_ffn_test` | Native 4 x 4 weight-streaming decode FFN | `[1,576]` final BF16 output |
-| `sxm_mem_transpose_test` | continuous MEM -> SXM -> MEM FP16 transpose | four 32 x 32 matrices |
+| `sxm_mem_transpose_test` | continuous MEM -> SXM -> MEM FP16 transpose | up to 96 consecutive 32 x 32 matrices |
 
 The full FFN uses all four MXMs and currently schedules 90,817 cycles. Its final
 gate/up reduction streams accumulator results directly into the shared VXM
@@ -128,7 +128,7 @@ Run the two largest regressions directly:
 
 ```powershell
 build-vs2026\Release\dual_hemisphere_w8a16_swiglu_test.exe
-build-vs2026\Release\smollm2_attention_test.exe
+build-vs2026\Release\sxm_mem_transpose_test.exe 96
 ```
 
 Whole-system logging is disabled by default because per-cycle traces are
@@ -159,7 +159,7 @@ python scripts\render_swiglu_schedule_trace.py `
   docs\figures\w8a16_swiglu_schedule_detail.svg
 ```
 
-Regenerate the attention schedule:
+Historical schedule reproduction using the retired SmolLM2 fixture (requires the old CModel)
 
 ```powershell
 $env:FTLPU_SCHEDULE_TRACE = "$PWD\logs\smollm2_attention\schedule.csv"
@@ -180,7 +180,7 @@ an MXM-local accumulator and red for final `stream+clear` operations.
 - `include/ftlpu/mxm/`: supercells, arrays, control slices, GEMM datapath, and
   MXM-local accumulators.
 - `include/ftlpu/vxm/`: ALU, lane, superlane, and central VXM slice.
-- `include/ftlpu/sxm/`: Shift/Distribute/Transpose/Permute models.
+- `include/ftlpu/sxm/`: Local ping-pong transpose banks, skew FIFOs and the registered neighbor exchange.
 - `include/ftlpu/system/`: ICU, stream topology, and full-chip integration.
 - `tests/`: unit and offline whole-system numerical regressions.
 - `examples/`: small trace-oriented demos.

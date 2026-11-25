@@ -229,6 +229,8 @@ private:
         C2cDmaInstruction instruction{};
         std::size_t next_vector_index{0};
         std::size_t completed_vectors{0};
+        std::optional<Ddr4Model::RequestId> index_request{};
+        bool index_resolved{};
     };
 
     struct PendingRequest {
@@ -241,6 +243,30 @@ private:
     {
         auto& active = *active_[stream];
         auto& pending = pending_requests_[stream];
+        const auto index = active.instruction.row_index;
+        if (index.row_limit && !active.index_resolved) {
+            if (!active.index_request) {
+                if (ddr4_.can_accept_request()) {
+                    const auto aligned = index.address & ~std::uint64_t(hw::kPhysicalVectorBytes-1);
+                    active.index_request = ddr4_.request_read(aligned, 2*(transport_lane_base_+stream));
+                    last_read_request_ = aligned;
+                    trace("row_index_request",stream,aligned,0,0);
+                }
+            } else if (ddr4_.read_completion_ready(*active.index_request)) {
+                const auto data = ddr4_.pop_read_completion(*active.index_request);
+                const auto offset = index.address % hw::kPhysicalVectorBytes;
+                std::uint32_t id = 0;
+                for (unsigned b=0;b<4;++b) {
+                    const auto i=offset+b;
+                    id |= std::uint32_t(data.vector.payload[i/hw::kLanesPerTile][i%hw::kLanesPerTile]) << (8*b);
+                }
+                if (id>=index.row_limit) throw std::out_of_range("indexed DMA row exceeds table");
+                active.instruction.ddr4_address += std::uint64_t(id)*512;
+                active.index_resolved = true;
+                trace("row_index_resolved",stream,active.instruction.ddr4_address,0,id);
+            }
+            return;
+        }
         while (!pending.empty()
             && ddr4_.read_completion_ready(pending.front().id)
             && inbound_[stream].size() < fifo_depth_vectors_) {
@@ -299,7 +325,10 @@ private:
         }
         finish_transfer_if_complete(stream);
         if (!active_[stream].has_value()) return;
-        while (!outbound_[stream].empty()
+        // TX may already have queued a vector for the following store while
+        // the last write of this descriptor is awaiting DDR completion.
+        while (active.next_vector_index < active.instruction.vector_count
+            && !outbound_[stream].empty()
             && pending.size() < fifo_depth_vectors_
             && ddr4_.can_accept_request()) {
             auto vector = std::move(outbound_[stream].front());

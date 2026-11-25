@@ -29,8 +29,8 @@ bit-accurate。当前目标是提供一个可验证的数据流调度目标，�
 | MXM 权重 | 每个 supercell 两个对等 buffer，由 `IW`/`Compute` 选择 |
 | MXM decode | 可选择 `Linear1x16` 或 activation-stationary `Native4x4` |
 | VXM | 中心一个 slice；每 lane 16 个物理 ALU，两条八级链镜像执行、共享 8 条 ICU queue |
-| SXM | 每个 hemisphere 一个四-tile Transpose/Permute slice |
-| ICU | 208 MEM、12 MXM、8 条 VXM 紧凑控制、4 SXM、6 C2C/DMA queue |
+| SXM | 每侧一个流式 FIFO 转置单元，SL 间执行固定交换 |
+| ICU | 208 MEM、12 MXM、8 条 VXM 紧凑控制、2 个 SXM 转置队列（另保留 2 个旧 Permute 编号）、6 C2C/DMA queue |
 
 固定的完整芯片拓扑为：
 
@@ -67,10 +67,10 @@ MEM、MXM、VXM 和 SXM 指令必须在正确周期与 stream operand 相遇。�
 | `w8a16_swiglu_test` | gate/up projection + SwiGLU | 196,608 个 FP16 输出 |
 | `dual_hemisphere_w8a16_swiglu_test` | 完整 gate/up、SwiGLU、down FFN | `[128,576]` 最终 FP16 输出 |
 | `rmsnorm_test` | `[32,32]` FP16 RMSNorm | 全部存回的 FP16 输出 |
-| `smollm2_attention_test` | ICU 驱动的 Q/K RoPE、QK、softmax 和 P x V hardware tile | RoPE 逐 bit 检查及 `8 x 32` attention 输出 |
+| `sxm_fifo_transpose_test` | 逐拍验证 FIFO 转置与非法指令拒绝 | 数据、有效位、标签、错拍和连续矩阵 |
 | `mxm_decode_layout_comparison_test` | 用两种 decode layout 执行相同 `K=128, N=32` GEMV | BF16 逐 bit 一致并比较周期数 |
 | `smollm2_decode_ffn_test` | 原生 4 x 4 weight-streaming decode FFN | `[1,576]` 最终 BF16 输出 |
-| `sxm_mem_transpose_test` | 连续 MEM -> SXM -> MEM FP16 transpose | 四个 32 x 32 矩阵 |
+| `sxm_mem_transpose_test` | 连续 MEM -> SXM -> MEM FP16 transpose | 最多 96 个连续的 32 x 32 矩阵 |
 
 完整 FFN 使用四个 MXM，当前调度为 90,817 拍。gate/up 的最终 reduction 会把
 accumulator 结果直接送入共享 VXM SwiGLU 流水线。standalone attention 可执行文件
@@ -116,7 +116,7 @@ ctest --test-dir build --output-on-failure
 
 ```powershell
 build-vs2026\Release\dual_hemisphere_w8a16_swiglu_test.exe
-build-vs2026\Release\smollm2_attention_test.exe
+build-vs2026\Release\sxm_mem_transpose_test.exe 96
 ```
 
 整系统日志默认关闭，因为逐拍 trace 会显著拖慢模拟。小型测试和 demo 可以通过
@@ -145,7 +145,7 @@ python scripts\render_swiglu_schedule_trace.py `
   docs\figures\w8a16_swiglu_schedule_detail.svg
 ```
 
-重新生成 attention 调度图：
+历史版本生成旧 SmolLM2 手排流水图的命令（需使用旧 CModel）
 
 ```powershell
 $env:FTLPU_SCHEDULE_TRACE = "$PWD\logs\smollm2_attention\schedule.csv"
@@ -166,7 +166,7 @@ python scripts\render_schedule_trace.py `
 - `include/ftlpu/mxm/`：supercell、阵列、控制 slice、GEMM datapath 和 MXM 本地
   accumulator。
 - `include/ftlpu/vxm/`：ALU、lane、superlane 和中心 VXM slice。
-- `include/ftlpu/sxm/`：Shift/Distribute/Transpose/Permute 模型。
+- `include/ftlpu/sxm/`：局部双 bank 转置、错拍 FIFO 和相邻 SL 固定交换 模型。
 - `include/ftlpu/system/`：ICU、stream topology 和完整芯片集成。
 - `tests/`：单元测试和离线整系统数值回归。
 - `examples/`：用于观察 trace 的小型 demo。
