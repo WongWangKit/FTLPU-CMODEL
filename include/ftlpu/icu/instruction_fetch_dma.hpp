@@ -181,6 +181,28 @@ struct InstructionFetchDmaStatistics {
     }
 };
 
+// PRE_POSEDGE pin-level observation of the two sides of the registered DMA
+// response FIFO in lpu_instruction_dma.sv.  The DDR input and Reassembler
+// output are intentionally separate: an accepted DDR beat is not visible to
+// the Reassembler until the response FIFO has committed it.
+struct InstructionFetchDmaBeatInterfaceView {
+    bool valid{false};
+    bool ready{false};
+    bool fire{false};
+    std::array<std::uint8_t, InstructionDmaResponseBeat::kDataBytes> data{};
+    std::uint32_t keep{0};
+    bool last{false};
+    std::uint8_t id{0};
+    bool error{false};
+    std::size_t beat_index{0};
+};
+
+struct InstructionFetchDmaHardwareInterfaceView {
+    InstructionFetchDmaBeatInterfaceView ddr_response_input{};
+    InstructionFetchDmaBeatInterfaceView reassembler_response_output{};
+    std::size_t response_fifo_level{0};
+};
+
 // Ddr4Model remains the single memory/bandwidth authority. ProtocolCore is the
 // single outstanding-ID, response-FIFO and fault authority; this wrapper only
 // adapts accepted commands to DDR reads and reassembles instruction records.
@@ -217,6 +239,28 @@ public:
         const auto id = allocate_dma_id();
         pending_command_ = make_command(id, program);
         return id;
+    }
+
+    // The canonical Program Load controller owns the transaction ID on its
+    // LOAD output. Consume that interface value instead of allocating a
+    // second, shadow ID inside the DMA model.
+    void start_with_id(InstructionFetchProgram program, std::uint8_t id)
+    {
+        require_input_window("command");
+        validate_program(program);
+        if (!can_accept_program())
+            throw std::logic_error("instruction DMA command window is full");
+        const auto id_count = std::size_t{1} << config_.id_width_bits;
+        if (static_cast<std::size_t>(id) >= id_count)
+            throw std::invalid_argument(
+                "instruction DMA command ID exceeds configured width");
+        const auto used = std::any_of(state_.commands.begin(),
+            state_.commands.end(), [id](const auto& command) {
+                return command.id == id;
+            });
+        if (used || (pending_command_ && pending_command_->id == id))
+            throw std::logic_error("instruction DMA command ID is already live");
+        pending_command_ = make_command(id, program);
     }
 
     [[nodiscard]] bool word_ready() const noexcept
@@ -295,6 +339,7 @@ public:
         pending_command_.reset();
         pending_word_pop_ = false;
         low_observation_ = {};
+        hardware_interface_view_ = {};
     }
 
     [[nodiscard]] bool idle() const noexcept
@@ -342,6 +387,11 @@ public:
     {
         return statistics_;
     }
+    [[nodiscard]] const InstructionFetchDmaHardwareInterfaceView&
+    hardware_interface_view() const noexcept
+    {
+        return hardware_interface_view_;
+    }
     [[nodiscard]] bool low_last_read_request() const noexcept
     {
         return low_observation_.read_request;
@@ -349,6 +399,27 @@ public:
     [[nodiscard]] bool low_last_beat() const noexcept
     {
         return low_observation_.response_input;
+    }
+    [[nodiscard]] bool low_final_response_beat() const noexcept
+    {
+        return low_observation_.response_input
+            && low_observation_.response_last;
+    }
+    [[nodiscard]] std::uint8_t low_response_dma_id() const noexcept
+    {
+        return low_observation_.response_dma_id;
+    }
+    [[nodiscard]] bool low_reassembler_response_fire() const noexcept
+    {
+        return low_observation_.reassembler_response;
+    }
+    [[nodiscard]] bool low_reassembler_response_last() const noexcept
+    {
+        return low_observation_.reassembler_response_last;
+    }
+    [[nodiscard]] std::uint8_t low_reassembler_response_id() const noexcept
+    {
+        return low_observation_.reassembler_response_dma_id;
     }
     [[nodiscard]] bool low_load_credit_wait() const noexcept
     {
@@ -418,8 +489,69 @@ private:
     struct LowObservation {
         bool read_request{false};
         bool response_input{false};
+        bool response_last{false};
+        std::uint8_t response_dma_id{0};
+        bool reassembler_response{false};
+        bool reassembler_response_last{false};
+        std::uint8_t reassembler_response_dma_id{0};
         bool credit_wait{false};
     };
+
+    static std::size_t ddr_beat_index(const State& state,
+        std::uint8_t id, std::size_t responseBytes) noexcept
+    {
+        const auto command=std::find_if(state.ddr_commands.begin(),
+            state.ddr_commands.end(),[id](const auto& item) {
+                return item.dma_id==id;
+            });
+        return command==state.ddr_commands.end()?0:
+            command->bytes_completed/responseBytes;
+    }
+
+    static std::size_t reassembler_beat_index(const State& state,
+        std::uint8_t id, std::size_t responseBytes) noexcept
+    {
+        const auto command=std::find_if(state.commands.begin(),
+            state.commands.end(),[id](const auto& item) {
+                return item.id==id;
+            });
+        return command==state.commands.end()?0:
+            command->bytes_assembled/responseBytes;
+    }
+
+    void capture_hardware_interface_view(
+        const InstructionDmaProtocolInputs& inputs,const State& state)
+    {
+        hardware_interface_view_={};
+        auto& ddr=hardware_interface_view_.ddr_response_input;
+        ddr.valid=inputs.ddr_read_rsp_valid_i;
+        ddr.ready=protocol_.ddr_read_rsp_ready_o();
+        ddr.fire=protocol_.ddr_read_rsp_fire();
+        ddr.data=inputs.ddr_read_rsp_data_i;
+        ddr.keep=inputs.ddr_read_rsp_keep_i;
+        ddr.last=inputs.ddr_read_rsp_last_i;
+        ddr.id=inputs.ddr_read_rsp_id_i;
+        ddr.error=inputs.ddr_read_rsp_error_i;
+        if(ddr.valid)
+            ddr.beat_index=ddr_beat_index(state,ddr.id,config_.data_bytes());
+
+        auto& reasm=hardware_interface_view_.reassembler_response_output;
+        reasm.valid=protocol_.reasm_rsp_valid_o();
+        reasm.ready=inputs.reasm_rsp_ready_i;
+        reasm.fire=protocol_.reasm_rsp_fire();
+        if(reasm.valid) {
+            const auto& beat=protocol_.reasm_rsp_o();
+            reasm.data=beat.data;
+            reasm.keep=beat.keep;
+            reasm.last=beat.last;
+            reasm.id=beat.id;
+            reasm.error=beat.error;
+            reasm.beat_index=reassembler_beat_index(
+                state,reasm.id,config_.data_bytes());
+        }
+        hardware_interface_view_.response_fifo_level=
+            protocol_.response_fifo_occupancy();
+    }
 
     static void validate_program(const InstructionFetchProgram& program)
     {
@@ -633,6 +765,8 @@ private:
         ++statistics_.r_handshakes;
         statistics_.bytes_received += request.valid_bytes;
         low_observation_.response_input = true;
+        low_observation_.response_last = request.last;
+        low_observation_.response_dma_id = request.dma_id;
     }
 
     void accept_protocol_command(State& state)
@@ -711,6 +845,14 @@ private:
             ++statistics_.response_fifo_full_cycles;
 
         protocol_.drive(inputs);
+        capture_hardware_interface_view(inputs,*next_);
+        if(protocol_.reasm_rsp_fire()) {
+            low_observation_.reassembler_response=true;
+            low_observation_.reassembler_response_last=
+                protocol_.reasm_rsp_last_o();
+            low_observation_.reassembler_response_dma_id=
+                protocol_.reasm_rsp_id_o();
+        }
         consume_protocol_response(*next_);
         accept_ddr_response(*next_);
         accept_protocol_command(*next_);
@@ -752,6 +894,7 @@ private:
     bool pending_word_pop_{false};
     bool clock_managed_{false};
     LowObservation low_observation_{};
+    InstructionFetchDmaHardwareInterfaceView hardware_interface_view_{};
     InstructionFetchDmaTrace trace_{};
     InstructionFetchDmaStatistics statistics_{};
 };

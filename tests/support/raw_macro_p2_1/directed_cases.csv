@@ -1,0 +1,15 @@
+case_id,base,word_count,profile,scope
+P2.1-F01,0,1,always_ready,fetch
+P2.1-F02,0,4,always_ready,fetch
+P2.1-F03,5,3,always_ready,fetch
+P2.1-F04,0,4,request_stall,fetch
+P2.1-F05,0,3,response_gap,fetch
+P2.1-F06,0,4,word_backpressure,fetch
+P2.1-F07,0,9,credit_boundary,fetch
+P2.1-F08,0,5,full_replacement,fetch
+P2.1-F09-zero,0,0,descriptor_fault,fetch
+P2.1-F09-range,14,3,descriptor_fault,fetch
+P2.1-F10,0,2,response_protocol_fault,fetch
+P2.1-F11-clear,0,4,clear_during_fetch,fetch
+P2.1-F11-reset,0,4,reset_during_fetch,fetch
+P2.1-F12,0,0,existing_raw_macro_level1,full_path_retained

@@ -8,7 +8,7 @@
 #include "ftlpu/core/stream_port.hpp"
 #include "ftlpu/core/timing.hpp"
 #include "ftlpu/mem/mem_array.hpp"
-#include "ftlpu/mxm/mxm.hpp"
+#include "ftlpu/mxm/core.hpp"
 #include "ftlpu/sxm/slice.hpp"
 #include "ftlpu/system/hardware_configuration.hpp"
 #include "ftlpu/system/icu.hpp"
@@ -165,12 +165,11 @@ public:
         clock_.register_module(icu_);
         clock_.register_module(program_loader_clock_slot_);
         clock_.register_module(program_loader_dma_clock_slot_);
+        clock_.register_module(program_load_command_clock_slot_);
+        clock_.register_module(program_load_config_fifo_clock_slot_);
         for (auto& stream : streams_) clock_.register_module(stream);
         for (auto& mem : mems_) clock_.register_module(mem);
-        for (auto& mxm : mxms_) {
-            clock_.register_module(mxm.control());
-            clock_.register_module(mxm);
-        }
+        for (auto& mxm : mxms_) clock_.register_module(mxm);
         clock_.register_module(vxm_);
         for (auto& sxm : sxms_) clock_.register_module(sxm);
         for (std::size_t index = 0; index < hw::kHemispheres; ++index) {
@@ -189,14 +188,22 @@ public:
         system_phase_.add_node("ICU dispatch", [this] {
             dispatch_phase(active_sinks_);
         });
-        system_phase_.add_node("MXM control then datapath", [this] {
+        system_phase_.add_node("MXM standalone core LOW", [this] {
             mxm_phase(active_sinks_);
+        }, [this] {
+            for (auto& mxm : mxms_) mxm.high();
         });
         system_phase_.add_node("VXM capture then execute then route", [this] {
             vxm_phase(active_sinks_);
         });
-        system_phase_.add_node("MEM SXM C2C and passive-route staging", [this] {
-            mem_sxm_stage_phase(active_sinks_);
+        system_phase_.add_node("MEM reads Current and stages SR Next", [this] {
+            mem_stage_phase(active_sinks_);
+        });
+        system_phase_.add_node("SXM reads Current and stages SR Next", [this] {
+            sxm_stage_phase(active_sinks_);
+        });
+        system_phase_.add_node("C2C and passive SR route staging", [this] {
+            c2c_and_route_stage_phase();
         });
         system_phase_.add_node("C2C DMA DDR and barrier progression", [this] {
             advance_dma_ddr_and_barrier_phase();
@@ -293,6 +300,8 @@ public:
         if (!loader.clocked_mode()) loader.enable_clocked_mode();
         program_loader_clock_slot_.bind(&loader);
         program_loader_dma_clock_slot_.bind(&loader.dma());
+        program_load_command_clock_slot_.bind(&loader.command_controller());
+        program_load_config_fifo_clock_slot_.bind(&loader.config_fifo());
         program_loader_begin_low_=[&loader](std::size_t cycle) {
             loader.begin_clocked_low(cycle);
         };
@@ -302,6 +311,8 @@ public:
         program_loader_high_=[&loader] {
             loader.high();
             loader.dma().high();
+            loader.command_controller().high();
+            loader.config_fifo().high();
         };
     }
 
@@ -517,13 +528,13 @@ public:
         return mems_[hemisphere_index(hemisphere)];
     }
 
-    Mxm& mxm_unit(std::size_t mxm)
+    MxmCore& mxm_unit(std::size_t mxm)
     {
         require_active_mxm(mxm);
         return mxms_.at(mxm);
     }
 
-    const Mxm& mxm_unit(std::size_t mxm) const
+    const MxmCore& mxm_unit(std::size_t mxm) const
     {
         require_active_mxm(mxm);
         return mxms_.at(mxm);
@@ -731,8 +742,11 @@ private:
 
     void mxm_phase(LogSinks sinks)
     {
-        tick_mxm_controls(sinks);
-        tick_mxm_datapaths(sinks);
+        for (std::size_t mxm = 0; mxm < kMxmCount; ++mxm) {
+            if (sinks.mxm != nullptr)
+                *sinks.mxm << "mxm" << mxm << " cycle " << cycle() << '\n';
+            mxms_[mxm].low();
+        }
     }
 
     void vxm_phase(LogSinks sinks)
@@ -744,12 +758,11 @@ private:
         transfer_unconsumed_streams_across_vxm(sinks);
     }
 
-    void mem_sxm_stage_phase(LogSinks sinks)
+    void mem_stage_phase(LogSinks sinks)
     {
         for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
             try {
                 auto& fabric = streams_[hemisphere];
-                sxms_[hemisphere].set_trace_enabled(sinks.sxm != nullptr);
                 if (sinks.mem != nullptr) {
                     *sinks.mem << "mem." << hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
                                << " cycle " << cycle() << '\n';
@@ -758,7 +771,38 @@ private:
                 mems_[hemisphere].evaluate(
                     fabric,
                     sinks.mem != nullptr || sinks.capture_mem_trace);
+            } catch (const std::exception& error) {
+                throw std::logic_error(
+                    "MEM staging failed at system cycle "
+                    + std::to_string(cycle()) + " in hemisphere "
+                    + hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
+                    + ": " + error.what());
+            }
+        }
+    }
+
+    void sxm_stage_phase(LogSinks sinks)
+    {
+        for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
+            try {
+                auto& fabric = streams_[hemisphere];
+                sxms_[hemisphere].set_trace_enabled(sinks.sxm != nullptr);
                 sxms_[hemisphere].evaluate(fabric);
+            } catch (const std::exception& error) {
+                throw std::logic_error(
+                    "SXM staging failed at system cycle "
+                    + std::to_string(cycle()) + " in hemisphere "
+                    + hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
+                    + ": " + error.what());
+            }
+        }
+    }
+
+    void c2c_and_route_stage_phase()
+    {
+        for (std::size_t hemisphere = 0; hemisphere < hw::kHemispheres; ++hemisphere) {
+            try {
+                auto& fabric = streams_[hemisphere];
                 if (c2cs_[hemisphere].has_value()) {
                     evaluate_c2c(hemisphere, fabric);
                 }
@@ -766,7 +810,7 @@ private:
                     fabric, active_stream_routes_[hemisphere]);
             } catch (const std::exception& error) {
                 throw std::logic_error(
-                    "MEM/SXM staging failed at system cycle "
+                    "C2C/passive SR route staging failed at system cycle "
                     + std::to_string(cycle()) + " in hemisphere "
                     + hemisphere_short_name(static_cast<Hemisphere>(hemisphere))
                     + ": " + error.what());
@@ -906,206 +950,6 @@ private:
                     location, notification->sync_tag);
         }
     }
-
-    static Hemisphere mxm_hemisphere(std::size_t mxm)
-    {
-        return static_cast<Hemisphere>(mxm / kMxmCountPerHemisphere);
-    }
-
-    static std::size_t local_mxm_index(std::size_t mxm)
-    {
-        return mxm % kMxmCountPerHemisphere;
-    }
-
-    void tick_mxm_controls(LogSinks sinks)
-    {
-        for (std::size_t mxm = 0; mxm < kMxmCount; ++mxm) {
-            if (sinks.mxm != nullptr) {
-                *sinks.mxm << "mxm" << mxm << " cycle " << cycle() << '\n';
-            }
-            auto provider = [this, mxm, sinks](std::size_t tile) {
-                if (sinks.mxm != nullptr && (!sinks.mxm_log_tile.has_value() || tile == *sinks.mxm_log_tile)) {
-                    *sinks.mxm << "  SXM.sreg"
-                               << stream_layout_.mxm_weight_input.column
-                               << " -> MXM" << mxm << " tile " << tile << '\n';
-                }
-                try {
-                    return collect_mxm_weight_input_from_streams(mxm, tile);
-                } catch (const std::exception& ex) {
-                    throw std::logic_error(
-                        "MXM" + std::to_string(mxm)
-                        + " IW tile " + std::to_string(tile) + ": " + ex.what());
-                }
-            };
-            try {
-                if (sinks.mxm != nullptr) {
-                    mxms_[mxm].control().low(*sinks.mxm, provider, false, sinks.mxm_log_tile);
-                } else {
-                    static NullStream null_stream;
-                    mxms_[mxm].control().low(null_stream.stream(), provider, false);
-                }
-            } catch (const std::exception& error) {
-                throw std::logic_error(
-                    "MXM" + std::to_string(mxm)
-                    + " control at system cycle " + std::to_string(cycle())
-                    + ": " + error.what());
-            }
-        }
-    }
-
-    void tick_mxm_datapaths(LogSinks sinks)
-    {
-        for (std::size_t mxm = 0; mxm < kMxmCount; ++mxm) {
-            const auto hemisphere = hemisphere_index(mxm_hemisphere(mxm));
-            auto input = StreamInputPort(
-                streams_[hemisphere],
-                stream_layout_.mxm_activation_input.column,
-                stream_layout_.mxm_activation_input.direction,
-                "MXM" + std::to_string(mxm) + " datapath");
-            auto output = StreamOutputPort(
-                streams_[hemisphere],
-                stream_layout_.mxm_result_output.column,
-                stream_layout_.mxm_result_output.direction,
-                "MXM" + std::to_string(mxm) + " datapath");
-            try {
-                mxms_[mxm].low_datapath(
-                    input, output, local_mxm_index(mxm), sinks.mxm,
-                    sinks.mxm_log_tile);
-            } catch (const std::exception& error) {
-                throw std::logic_error(
-                    "MXM" + std::to_string(mxm)
-                    + " datapath at system cycle " + std::to_string(cycle())
-                    + ": " + error.what());
-            }
-        }
-    }
-
-    MxmControlSlice::WeightInput collect_mxm_weight_input_from_streams(std::size_t mxm, std::size_t tile)
-    {
-        auto input = MxmControlSlice::WeightInput {};
-        const auto hemisphere = hemisphere_index(mxm_hemisphere(mxm));
-        auto streams = StreamInputPort(
-            streams_[hemisphere],
-            stream_layout_.mxm_weight_input.column,
-            stream_layout_.mxm_weight_input.direction,
-            "MXM" + std::to_string(mxm) + " weight input");
-        const auto& instruction = mxms_[mxm].control().instruction_at(tile);
-        if (!instruction.has_value()
-            || instruction->opcode != MxmControlOpcode::IW) {
-            throw std::logic_error(
-                "MXM weight input requested without an active IW instruction");
-        }
-        if (instruction->weight_input_mode
-            != MxmWeightInputMode::Direct16) {
-            const auto stream_base = instruction->weight_stream_base;
-            if (instruction->weight_load_mode
-                == MxmWeightLoadMode::Vector) {
-                const auto column = instruction->weight_inner_column;
-                for (std::size_t lane = 0;
-                     lane < hw::kLanesPerTile;
-                     ++lane) {
-                    const auto word = streams.consume_cell(
-                        tile, lane, stream_base);
-                    if (!word.valid) {
-                        throw std::logic_error(
-                            "MXM INT8 column IW reached tile before its weight stream arrived at the MXM boundary register"
-                            " buffer=" + std::to_string(instruction->weight_buffer)
-                            + " column=" + std::to_string(instruction->weight_column)
-                            + " inner=" + std::to_string(column)
-                            + " stream=" + std::to_string(stream_base));
-                    }
-                    input[lane][column] =
-                        MxmArray::Supercell::InputWord {
-                            word.data,
-                            lane + 1 == hw::kLanesPerTile,
-                        };
-                }
-                return input;
-            }
-
-            for (std::size_t lane = 0;
-                 lane < hw::kLanesPerTile;
-                 ++lane) {
-                for (std::size_t column = 0;
-                     column < hw::kMxmSupercellColumns;
-                     ++column) {
-                    const auto word = streams.consume_cell(
-                        tile, lane, stream_base + column);
-                    if (!word.valid) {
-                        throw std::logic_error(
-                            "MXM INT8 IW reached tile before all eight weight streams arrived at the MXM boundary register"
-                            " (tile=" + std::to_string(tile)
-                            + ", lane=" + std::to_string(lane)
-                            + ", stream="
-                            + std::to_string(stream_base + column) + ")");
-                    }
-                    input[lane][column] =
-                        MxmArray::Supercell::InputWord {
-                            word.data,
-                            column + 1
-                                == hw::kMxmSupercellColumns,
-                        };
-                }
-            }
-            return input;
-        }
-
-        const auto stream_base = instruction->weight_stream_base;
-        if (instruction->weight_input_mode
-            != MxmWeightInputMode::Direct16) {
-            throw std::invalid_argument("MXM weight input mode is invalid");
-        }
-        if (instruction->weight_load_mode == MxmWeightLoadMode::Vector) {
-            const auto low = stream_base;
-            const auto high =
-                stream_base + hw::kMxmColumnLoadStreamsPerCycle - 1;
-            const auto column = instruction->weight_inner_column;
-            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-                const auto low_word = streams.consume_cell(tile, lane, low);
-                const auto high_word = streams.consume_cell(tile, lane, high);
-                if (!low_word.valid || !high_word.valid) {
-                    throw std::logic_error(
-                        "MXM column IW reached tile before both 16-bit weight streams arrived at the MXM boundary register");
-                }
-                const auto bits = static_cast<std::uint16_t>(
-                    static_cast<std::uint16_t>(low_word.data)
-                    | (static_cast<std::uint16_t>(high_word.data) << 8));
-                input[lane][column] = MxmArray::Supercell::InputWord {
-                    bits,
-                    lane + 1 == hw::kLanesPerTile,
-                };
-            }
-            return input;
-        }
-
-        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            for (std::size_t column = 0; column < hw::kMxmSupercellColumns; ++column) {
-                const auto low_stream = stream_base + column * hw::kMxmWeightBytesPerValue;
-                const auto low = streams.consume_cell(
-                    tile, lane, low_stream);
-                const auto high = streams.consume_cell(
-                    tile, lane, low_stream + 1);
-                if (!low.valid || !high.valid) {
-                    throw std::logic_error(
-                        "MXM IW reached tile before both 16-bit weight streams arrived at the MXM boundary register"
-                        " lane=" + std::to_string(lane)
-                        + " column=" + std::to_string(column)
-                        + " low_stream=" + std::to_string(low_stream)
-                        + " low_valid=" + std::to_string(low.valid)
-                        + " high_valid=" + std::to_string(high.valid));
-                }
-                const auto bits = static_cast<std::uint16_t>(
-                    static_cast<std::uint16_t>(low.data)
-                    | (static_cast<std::uint16_t>(high.data) << 8));
-                input[lane][column] = MxmArray::Supercell::InputWord {
-                    bits,
-                    column + 1 == hw::kMxmSupercellColumns,
-                };
-            }
-        }
-        return input;
-    }
-
 
     bool has_complete_vxm_input(std::size_t tile) const
     {
@@ -1487,10 +1331,12 @@ private:
     std::array<StreamRegisterFabric, hw::kHemispheres> streams_;
     VxmSlice vxm_{};
     std::array<SxmSlice, hw::kHemispheres> sxms_;
-    std::array<Mxm, kMxmCount> mxms_{};
+    std::array<MxmCore, kMxmCount> mxms_{};
     InstructionControlUnit icu_{};
     OptionalClockedModuleSlot program_loader_clock_slot_{};
     OptionalClockedModuleSlot program_loader_dma_clock_slot_{};
+    OptionalClockedModuleSlot program_load_command_clock_slot_{};
+    OptionalClockedModuleSlot program_load_config_fifo_clock_slot_{};
     std::function<void(std::size_t)> program_loader_begin_low_{};
     std::function<void(std::size_t)> program_loader_advance_low_{};
     std::function<void()> program_loader_high_{};

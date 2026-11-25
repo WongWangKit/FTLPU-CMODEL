@@ -28,6 +28,27 @@ struct StreamRegisterColumn {
 
 class StreamRegisterFabric final : public timing::ClockedModule {
 public:
+    struct InterfaceCell {
+        std::size_t column{0};
+        std::size_t tile{0};
+        std::size_t lane{0};
+        StreamId stream{StreamId::East(0)};
+    };
+
+    // Sparse PRE_POSEDGE hardware-interface sample. The vector indices of
+    // each valid/data pair are aligned. Status vectors use the RTL flattening
+    // order {direction,column,superlane}; a set bit means at least one lane or
+    // stream in that physical SR leaf asserted the status signal.
+    struct HardwareInterfaceView {
+        std::vector<InterfaceCell> inject_valid_i{};
+        std::vector<std::uint8_t> inject_data_i{};
+        std::vector<InterfaceCell> consume_i{};
+        std::vector<bool> collision_o{};
+        std::vector<bool> invalid_consume_o{};
+        std::vector<InterfaceCell> state_valid_o{};
+        std::vector<std::uint8_t> state_data_o{};
+    };
+
     struct CycleActivity {
         std::size_t staged_writes{0};
         std::size_t east_staged_writes{0};
@@ -47,6 +68,8 @@ public:
         , next_(column_count)
         , next_producers_(column_count)
         , consumed_(column_count)
+        , next_candidate_count_(column_count * hw::kTileRows
+              * hw::kLanesPerTile * hw::kStreams, 0)
         , last_staged_cycle_(column_count * hw::kTileRows
               * hw::kLanesPerTile * hw::kStreams,
               std::numeric_limits<std::size_t>::max())
@@ -71,6 +94,11 @@ public:
         cycle_open_ = false;
         current_activity_ = {};
         last_activity_ = {};
+        candidate_cells_.clear();
+        std::fill(next_candidate_count_.begin(), next_candidate_count_.end(), 0);
+        hardware_interface_view_ = {};
+        hardware_interface_view_.collision_o.assign(status_count(), false);
+        hardware_interface_view_.invalid_consume_o.assign(status_count(), false);
     }
 
     std::size_t column_count() const noexcept
@@ -128,6 +156,11 @@ public:
         return last_activity_;
     }
 
+    const HardwareInterfaceView& hardware_interface_view() const noexcept
+    {
+        return hardware_interface_view_;
+    }
+
     void low() override
     {
         if (cycle_open_) {
@@ -136,6 +169,19 @@ public:
         // posedge() leaves the staging state clean. Do not rescan the
         // complete fabric a second time at the start of every cycle.
         current_activity_ = {};
+        hardware_interface_view_ = {};
+        hardware_interface_view_.collision_o.assign(status_count(), false);
+        hardware_interface_view_.invalid_consume_o.assign(status_count(), false);
+        hardware_interface_view_.state_valid_o.reserve(current_cells_.size());
+        hardware_interface_view_.state_data_o.reserve(current_cells_.size());
+        for (const auto encoded : current_cells_) {
+            const auto location = decode_cell(encoded);
+            const auto& value = cell(location.column, location.tile,
+                location.lane, location.stream);
+            hardware_interface_view_.state_valid_o.push_back(InterfaceCell {
+                location.column, location.tile, location.lane, location.stream});
+            hardware_interface_view_.state_data_o.push_back(value.data);
+        }
         cycle_open_ = true;
     }
 
@@ -223,28 +269,37 @@ public:
             return;
         }
 
-        auto& destination = select(next_[column].lanes[tile][lane], stream);
-        if (destination.valid) {
-            const auto existing = select(
-                next_producers_[column].lanes[tile][lane], stream);
-            throw std::logic_error(
-                std::string("stream-register write collision at column ")
-                + std::to_string(column) + ", tile " + std::to_string(tile)
-                + ", lane " + std::to_string(lane) + ", stream "
-                + direction_name(stream.direction()) + std::to_string(stream.index())
-                + " while staging " + producer + "; existing producer="
-                + producer_name(existing));
-        }
         if (transport_ingress) {
             value.transport = true;
             ++current_activity_.c2c_staged_writes;
         }
-        destination = value;
-        select(next_producers_[column].lanes[tile][lane], stream) =
-            classify_producer(producer);
-        next_cells_.push_back(encode_cell(column, tile, lane, stream));
-        last_staged_cycle_[encode_cell(column, tile, lane, stream)] =
-            committed_cycles_ + 1;
+
+        const auto encoded = encode_cell(column, tile, lane, stream);
+        hardware_interface_view_.inject_valid_i.push_back(
+            InterfaceCell {column, tile, lane, stream});
+        hardware_interface_view_.inject_data_i.push_back(value.data);
+        auto& candidate_count = next_candidate_count_[encoded];
+        if (candidate_count == 0) candidate_cells_.push_back(encoded);
+        ++candidate_count;
+
+        auto& destination = select(next_[column].lanes[tile][lane], stream);
+        if (candidate_count == 1) {
+            destination = value;
+            select(next_producers_[column].lanes[tile][lane], stream) =
+                classify_producer(producer);
+            next_cells_.push_back(encoded);
+            last_staged_cycle_[encoded] = committed_cycles_ + 1;
+        } else {
+            // RTL has no priority winner. Two or more candidates invalidate
+            // only this cell's Next value and assert the leaf collision flag;
+            // all unrelated cells still commit normally.
+            destination = StreamCell::Invalid();
+            select(next_producers_[column].lanes[tile][lane], stream) =
+                ProducerKind::None;
+            std::erase(next_cells_, encoded);
+            hardware_interface_view_.collision_o[
+                status_index(stream.direction(), column, tile)] = true;
+        }
         ++current_activity_.staged_writes;
         if (stream.direction() == StreamDirection::East)
             ++current_activity_.east_staged_writes;
@@ -294,12 +349,15 @@ public:
     {
         require_open_cycle();
         check_location(column, tile, lane, stream);
+        hardware_interface_view_.consume_i.push_back(
+            InterfaceCell {column, tile, lane, stream});
         const auto& source = cell(column, tile, lane, stream);
         if (!source.valid) {
-            throw std::logic_error(
-                std::string("read of invalid stream cell by ") + consumer
-                + " at column " + std::to_string(column) + ", tile "
-                + std::to_string(tile) + ", lane " + std::to_string(lane));
+            // Match the RTL observation contract: invalid consume is reported
+            // on the physical leaf but does not abort other cells' updates.
+            hardware_interface_view_.invalid_consume_o[
+                status_index(stream.direction(), column, tile)] = true;
+            return;
         }
 
         // Consumption is a broadcast read. Multiple functional units may
@@ -415,6 +473,9 @@ public:
                 location.stream) = false;
         }
         consumed_cells_.clear();
+        for (const auto encoded : candidate_cells_)
+            next_candidate_count_[encoded] = 0;
+        candidate_cells_.clear();
         cycle_open_ = false;
         ++committed_cycles_;
     }
@@ -568,6 +629,20 @@ private:
             encoded / hw::kTileRows, tile, lane, stream};
     }
 
+    std::size_t status_count() const noexcept
+    {
+        return 2 * column_count() * hw::kTileRows;
+    }
+
+    std::size_t status_index(
+        StreamDirection direction,
+        std::size_t column,
+        std::size_t tile) const noexcept
+    {
+        const auto direction_index = direction == StreamDirection::East ? 0u : 1u;
+        return (direction_index * column_count() + column) * hw::kTileRows + tile;
+    }
+
     static void clear_columns(std::vector<StreamRegisterColumn>& columns)
     {
         std::fill(columns.begin(), columns.end(), StreamRegisterColumn {});
@@ -647,6 +722,8 @@ private:
     std::vector<std::size_t> current_cells_{};
     std::vector<std::size_t> next_cells_{};
     std::vector<std::size_t> consumed_cells_{};
+    std::vector<std::size_t> candidate_cells_{};
+    std::vector<std::uint8_t> next_candidate_count_{};
     std::vector<std::size_t> last_staged_cycle_{};
     // Diagnostic commit count. In TspSliceSystem every commit is issued only
     // by the global Clock, so it remains lockstep with the physical cycle.
@@ -654,6 +731,7 @@ private:
     bool cycle_open_{false};
     CycleActivity current_activity_{};
     CycleActivity last_activity_{};
+    HardwareInterfaceView hardware_interface_view_{};
 };
 
 } // namespace ftlpu

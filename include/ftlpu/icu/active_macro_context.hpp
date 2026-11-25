@@ -69,6 +69,12 @@ class IcuActiveMacroContextCodec256 {
 public:
     using Packed = IcuPackedActiveMacroContext256;
     using State = IcuActiveMacroContextState<FuncInstruction>;
+    static constexpr bool canonical_mxm_command =
+        std::is_same_v<FuncInstruction, MxmLoadCommand>
+        || std::is_same_v<FuncInstruction, MxmComputeCommand>
+        || std::is_same_v<FuncInstruction, MxmDequantCommand>
+        || std::is_same_v<FuncInstruction, MxmParamLoadCommand>
+        || std::is_same_v<FuncInstruction, MxmBackendCommand>;
 
     static constexpr std::size_t bit_count = Packed::bit_count;
     static constexpr std::size_t word_count = Packed::word_count;
@@ -440,6 +446,33 @@ private:
             }
             throw StaticScheduleError(
                 "MXM Active Context has an invalid induction target");
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmLoadCommand>) {
+            if (target != IcuInductionTarget::MxmOperand0)
+                throw StaticScheduleError(
+                    "MXM Load Active Context has an invalid induction target");
+            return static_cast<std::int64_t>(instruction.weight_buffer);
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmComputeCommand>) {
+            if (target == IcuInductionTarget::MxmOperand0)
+                return instruction.activation_stream;
+            if (target == IcuInductionTarget::MxmOperand1)
+                return static_cast<std::int64_t>(instruction.weight_buffer);
+            throw StaticScheduleError(
+                "MXM Compute Active Context has an invalid induction target");
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmDequantCommand>
+            || std::is_same_v<FuncInstruction, MxmParamLoadCommand>) {
+            if (target != IcuInductionTarget::MxmOperand0)
+                throw StaticScheduleError(
+                    "MXM parameter Active Context has an invalid induction target");
+            return static_cast<std::int64_t>(instruction.param_buffer);
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmBackendCommand>) {
+            if (target != IcuInductionTarget::MxmOperand0)
+                throw StaticScheduleError(
+                    "MXM Backend Active Context has an invalid induction target");
+            return instruction.address;
         } else {
             throw StaticScheduleError(
                 "this queue type does not support Macro induction");
@@ -449,6 +482,30 @@ private:
     static void validate_operand(
         std::int64_t operand, IcuInductionTarget target, const FuncInstruction& instruction)
     {
+        if constexpr (canonical_mxm_command) {
+            std::int64_t limit = 2;
+            if constexpr (std::is_same_v<FuncInstruction,
+                              MxmComputeCommand>) {
+                if (target == IcuInductionTarget::MxmOperand0) limit = 31;
+                else if (target != IcuInductionTarget::MxmOperand1)
+                    throw StaticScheduleError(
+                        "MXM Compute Active Context target is invalid");
+            } else if constexpr (std::is_same_v<FuncInstruction,
+                                     MxmBackendCommand>) {
+                if (target != IcuInductionTarget::MxmOperand0)
+                    throw StaticScheduleError(
+                        "MXM Backend Active Context target is invalid");
+                limit = 1024;
+            } else if (target != IcuInductionTarget::MxmOperand0) {
+                throw StaticScheduleError(
+                    "MXM Active Context target is invalid");
+            }
+            if (operand < 0 || operand >= limit)
+                throw StaticScheduleError(
+                    "Macro induction leaves the MXM operand domain");
+            static_cast<void>(instruction);
+            return;
+        }
         std::int64_t limit = 0;
         switch (target) {
         case IcuInductionTarget::MemAddress:
@@ -491,6 +548,23 @@ private:
             } else
                 state.instruction.accumulator_address =
                     static_cast<std::size_t>(next);
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmLoadCommand>) {
+            state.instruction.weight_buffer = next != 0;
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmComputeCommand>) {
+            if (state.induction_target == IcuInductionTarget::MxmOperand0)
+                state.instruction.activation_stream =
+                    static_cast<std::uint8_t>(next);
+            else
+                state.instruction.weight_buffer = next != 0;
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmDequantCommand>
+            || std::is_same_v<FuncInstruction, MxmParamLoadCommand>) {
+            state.instruction.param_buffer = next != 0;
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmBackendCommand>) {
+            state.instruction.address = static_cast<std::uint16_t>(next);
         }
     }
 
@@ -514,6 +588,8 @@ private:
         } else if constexpr (std::is_same_v<FuncInstruction,
                                  MxmDequantInstruction>) {
             return isa::encode_mxm_dequant_instruction(instruction);
+        } else if constexpr (canonical_mxm_command) {
+            return isa::encode_mxm_command(instruction);
         } else {
             throw StaticScheduleError(
                 "this queue instruction has no 256-bit Active Context codec");
@@ -531,6 +607,21 @@ private:
                                  MxmDequantInstruction>) {
             return isa::decode_mxm_dequant_instruction(
                 static_cast<std::uint16_t>(native));
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmLoadCommand>) {
+            return isa::decode_mxm_load_command(native);
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmComputeCommand>) {
+            return isa::decode_mxm_compute_command(native);
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmDequantCommand>) {
+            return isa::decode_mxm_dequant_command(native);
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmParamLoadCommand>) {
+            return isa::decode_mxm_param_load_command(native);
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmBackendCommand>) {
+            return isa::decode_mxm_backend_command(native);
         } else {
             throw StaticScheduleError(
                 "this queue instruction has no 256-bit Active Context codec");

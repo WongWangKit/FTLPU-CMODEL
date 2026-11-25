@@ -1,4 +1,5 @@
 #include "ftlpu/mxm/accumulator.hpp"
+#include "ftlpu/mxm/bf16_arithmetic.hpp"
 
 #include <algorithm>
 #include <type_traits>
@@ -108,7 +109,8 @@ MxmAccumulator::Segment MxmAccumulator::projected_segment(
             using Operation = std::decay_t<decltype(operation)>;
             if constexpr (std::is_same_v<Operation, Accumulate>) {
                 for (std::size_t lane = 0; lane < result.size(); ++lane)
-                    result[lane] += operation.values[lane];
+                    result[lane] = mxm_numeric::fp32_add(
+                        result[lane], operation.values[lane]);
             } else {
                 result.fill(0.0f);
             }
@@ -122,7 +124,8 @@ void MxmAccumulator::apply(const Accumulate& operation)
     auto& row = checked_row(operation.address);
     const auto base = checked_column_base(operation.column_block);
     for (std::size_t lane = 0; lane < operation.values.size(); ++lane)
-        row[base + lane] += operation.values[lane];
+        row[base + lane] = mxm_numeric::fp32_add(
+            row[base + lane], operation.values[lane]);
 }
 
 void MxmAccumulator::apply(const ClearSegment& operation)

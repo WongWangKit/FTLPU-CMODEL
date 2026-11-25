@@ -1,0 +1,32 @@
+{
+  "schema": "ftlpu.mxm.datapath.c6.trace.v1",
+  "test_name": "mxm_datapath_c6_cycle_scoreboard",
+  "title": "MXM Datapath C6 Cycle Scoreboard",
+  "required_fields": ["schema","run_id","case_id","source","global_cycle","logical_cycle","transport_tick","phase","sample_point","event_sequence","module","instance","signal","width","value","event_type","mapping_status","source_ref"],
+  "allowed_event_types": ["SIGNAL_SAMPLE","STATE_SAMPLE","ARCH_EVENT"],
+  "allowed_mapping_statuses": ["DIRECT","DERIVED","SEMANTIC","PARTIAL","UNMAPPED","NA","CONFLICT"],
+  "comparable_mapping_statuses": ["DIRECT","DERIVED","SEMANTIC","PARTIAL"],
+  "excluded_mapping_statuses": ["UNMAPPED","NA"],
+  "architecture": {"events":[],"phase":"LOW","sample_point":"PRE_POSEDGE","canonical_module":"architecture","canonical_instance":"architecture"},
+  "signal_rules": [
+    {
+      "name":"backend_pre_posedge",
+      "signals":["rst_ni","run_i","slot_valid_i","operation_i","output_bf16_i","address_i","partial_valid_i","partial_i","partial_tag_i","slot_valid_o","slot_bf16_o","slot_operation_o","slot_address_o","bank_request_valid_o","bank_write_o","bank_address_o","invalid_read_o","accepted_read","alu_valid_o","operand_a_o","alu_address_o","alu_tag_o"],
+      "event_types":["SIGNAL_SAMPLE","STATE_SAMPLE"],"mapping_statuses":["DIRECT"],
+      "canonical_module":"lpu_mxm_backend_column","canonical_instance":"backend_column0",
+      "source_views":{"CMODEL":{"phase":"LOW","sample_point":"PRE_POSEDGE"},"RTL":{"phase":"LOW","sample_point":"PRE_POSEDGE"}}
+    },
+    {
+      "name":"backend_post_posedge",
+      "signals":["result_valid_o","result_bf16_o","result_o","result_address_o","result_tag_o","fault_o","context_valid_q","context_ok_q","bypass_valid_q","sum_valid","pending_valid_q","bank_capture_valid_q","bank_read_valid","bank_read_address"],
+      "event_types":["SIGNAL_SAMPLE","STATE_SAMPLE"],"mapping_statuses":["DIRECT"],
+      "canonical_module":"lpu_mxm_backend_column","canonical_instance":"backend_column0",
+      "source_views":{"CMODEL":{"phase":"HIGH","sample_point":"POST_POSEDGE"},"RTL":{"phase":"HIGH","sample_point":"POST_POSEDGE"}}
+    },
+    {"name":"bank0_write_data","signals":["bank_write_data_o[0]"],"event_types":["SIGNAL_SAMPLE"],"mapping_statuses":["DIRECT"],"canonical_module":"lpu_mxm_backend_column","canonical_instance":"backend_column0","source_views":{"CMODEL":{"phase":"LOW","sample_point":"PRE_POSEDGE"},"RTL":{"phase":"LOW","sample_point":"PRE_POSEDGE"}},"gate":{"signal":"bank_write_o[0]","equals":"1","count_xz_exclusions":true}},
+    {"name":"bank1_write_data","signals":["bank_write_data_o[1]"],"event_types":["SIGNAL_SAMPLE"],"mapping_statuses":["DIRECT"],"canonical_module":"lpu_mxm_backend_column","canonical_instance":"backend_column0","source_views":{"CMODEL":{"phase":"LOW","sample_point":"PRE_POSEDGE"},"RTL":{"phase":"LOW","sample_point":"PRE_POSEDGE"}},"gate":{"signal":"bank_write_o[1]","equals":"1","count_xz_exclusions":true}},
+    {"name":"alu_operand_b","signals":["operand_b_o"],"event_types":["SIGNAL_SAMPLE"],"mapping_statuses":["DIRECT"],"canonical_module":"lpu_mxm_backend_column","canonical_instance":"backend_column0","source_views":{"CMODEL":{"phase":"LOW","sample_point":"PRE_POSEDGE"},"RTL":{"phase":"LOW","sample_point":"PRE_POSEDGE"}},"gate":{"signal":"alu_valid_o","equals":"1","count_xz_exclusions":true}},
+    {"name":"bank0_read_data","signals":["bank_read_data[0]"],"event_types":["STATE_SAMPLE"],"mapping_statuses":["DIRECT"],"canonical_module":"lpu_mxm_backend_column","canonical_instance":"backend_column0","source_views":{"CMODEL":{"phase":"HIGH","sample_point":"POST_POSEDGE"},"RTL":{"phase":"HIGH","sample_point":"POST_POSEDGE"}},"gate":{"signal":"bank_read_valid[0]","equals":"1","count_xz_exclusions":true}},
+    {"name":"bank1_read_data","signals":["bank_read_data[1]"],"event_types":["STATE_SAMPLE"],"mapping_statuses":["DIRECT"],"canonical_module":"lpu_mxm_backend_column","canonical_instance":"backend_column0","source_views":{"CMODEL":{"phase":"HIGH","sample_point":"POST_POSEDGE"},"RTL":{"phase":"HIGH","sample_point":"POST_POSEDGE"}},"gate":{"signal":"bank_read_valid[1]","equals":"1","count_xz_exclusions":true}}
+  ]
+}

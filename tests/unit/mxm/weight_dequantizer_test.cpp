@@ -4,6 +4,7 @@
 #include "ftlpu/mxm/weight_dequantizer.hpp"
 
 #include <cassert>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <sstream>
@@ -67,7 +68,18 @@ int main()
         if (result[0][0]->data != expected)
             throw std::runtime_error("E4M3FN weight decode failed");
     }
-    const auto dequant = ftlpu::MxmDequantInstruction::Scale(0.125f);
+    const auto dequant = ftlpu::MxmDequantInstruction::ScaleZeroPoint(
+        0.125f, -2);
+    bool nonzero_zero_point_encoded = false;
+    try {
+        (void)ftlpu::isa::encode_mxm_dequant_instruction(dequant);
+        nonzero_zero_point_encoded = true;
+    } catch (const std::logic_error&) {
+    }
+    if (nonzero_zero_point_encoded) {
+        throw std::runtime_error(
+            "nonzero Zero Point was silently dropped by the 16-bit Dequant ISA");
+    }
     const auto input = quantized_input();
     const auto converted = ftlpu::MxmWeightDequantizer {}.convert(
         input,
@@ -83,8 +95,46 @@ int main()
             const auto quantized = static_cast<std::int8_t>(
                 static_cast<std::uint8_t>(input[lane][column]->data));
             const auto expected = ftlpu::Bf16::from_float(
-                static_cast<float>(quantized) * dequant.scale()).bits();
-            assert(converted[lane][column]->data == expected);
+                static_cast<float>(
+                    static_cast<int>(quantized)
+                    - static_cast<int>(dequant.zero_point))
+                    * dequant.scale()).bits();
+            if (converted[lane][column]->data != expected) {
+                throw std::runtime_error("INT8 zero-point-zero dequant mismatch");
+            }
+        }
+    }
+
+    struct ZeroPointCase {
+        std::int8_t q;
+        std::int8_t zero_point;
+        std::uint16_t scale;
+        std::uint16_t expected;
+    };
+    constexpr auto zero_point_cases = std::array {
+        ZeroPointCase {5, 0, 0x3f80, 0x40a0},
+        ZeroPointCase {5, 2, 0x3f80, 0x4040},
+        ZeroPointCase {-5, 2, 0x3f80, 0xc0e0},
+        ZeroPointCase {-2, -2, 0x3f80, 0x0000},
+        ZeroPointCase {-3, -5, 0x3f00, 0x3f80},
+        ZeroPointCase {3, 7, 0xbe80, 0x3f80},
+        ZeroPointCase {127, -128, 0x3f80, 0x437f},
+        ZeroPointCase {-128, 127, 0x3f80, 0xc37f},
+        ZeroPointCase {1, 0, 0x0001, 0x0001},
+        ZeroPointCase {0, 0, 0x7f80, 0x7fc0},
+    };
+    for (const auto& test : zero_point_cases) {
+        auto data = quantized_input();
+        data[0][0]->data = static_cast<std::uint8_t>(test.q);
+        const auto result = ftlpu::MxmWeightDequantizer {}.convert(
+            data,
+            ftlpu::MxmWeightLoadMode::Block,
+            0,
+            Mode::Int8DequantBf16,
+            ftlpu::MxmDequantInstruction::ScaleBits(
+                test.scale, test.zero_point));
+        if (result[0][0]->data != test.expected) {
+            throw std::runtime_error("INT8 affine dequant Zero Point mismatch");
         }
     }
 
@@ -94,14 +144,19 @@ int main()
     control.issue_south(ftlpu::MxmControlInstruction::IW(0, 0));
     control.set_weight_input(0, input);
     std::ostringstream log;
+    // First cycle dispatches the queued commands into row 0. The second cycle
+    // executes them and commits the Supercell weight register.
+    control.tick(log);
     control.tick(log);
     for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
         for (std::size_t column = 0;
              column < ftlpu::hw::kMxmSupercellColumns;
              ++column) {
-            assert(
-                array->cell(0, 0).weight_bits(0, lane, column)
-                == converted[lane][column]->data);
+            if (array->cell(0, 0).weight_bits(0, lane, column)
+                != converted[lane][column]->data) {
+                throw std::runtime_error(
+                    "dequantized weight did not commit to Supercell");
+            }
         }
     }
 
@@ -111,11 +166,15 @@ int main()
     missing.set_weight_input(0, input);
     bool rejected = false;
     try {
+        // Dispatch, then execute the invalid pairing at row 0.
+        missing.tick(log);
         missing.tick(log);
     } catch (const std::logic_error&) {
         rejected = true;
     }
-    assert(rejected);
+    if (!rejected) {
+        throw std::runtime_error("missing Dequant instruction was accepted");
+    }
 
     return 0;
 }

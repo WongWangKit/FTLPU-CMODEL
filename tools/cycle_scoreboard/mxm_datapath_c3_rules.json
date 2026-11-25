@@ -1,0 +1,27 @@
+{
+  "schema": "ftlpu.mxm.datapath.c3.trace.v1",
+  "test_name": "mxm_datapath_c3_cycle_scoreboard",
+  "title": "MXM Datapath C3 Cycle Scoreboard",
+  "required_fields": ["schema","run_id","case_id","source","global_cycle","logical_cycle","transport_tick","phase","sample_point","event_sequence","module","instance","signal","width","value","event_type","mapping_status","source_ref"],
+  "allowed_event_types": ["SIGNAL_SAMPLE","STATE_SAMPLE","ARCH_EVENT"],
+  "allowed_mapping_statuses": ["DIRECT","DERIVED","SEMANTIC","PARTIAL","UNMAPPED","NA","CONFLICT"],
+  "comparable_mapping_statuses": ["DIRECT","DERIVED","SEMANTIC","PARTIAL"],
+  "excluded_mapping_statuses": ["UNMAPPED","NA"],
+  "architecture": {"events":[],"phase":"LOW","sample_point":"PRE_POSEDGE","canonical_module":"architecture","canonical_instance":"architecture"},
+  "signal_rules": [
+    {
+      "name":"supercell_pre_posedge",
+      "signals":["rst_ni","activation_valid_i","activation_i","weight_buffer_i","tag_i","weight_write_valid_i","weight_write_buffer_i","weight_write_data_i","below_valid_i","below_partial_i","below_tag_i","weight_write_accepted_o","weight_buffer_ready_o","weight_buffer_busy_o","input_weight_fault","partial_protocol_fault"],
+      "event_types":["SIGNAL_SAMPLE","STATE_SAMPLE"],"mapping_statuses":["DIRECT"],
+      "canonical_module":"lpu_mxm_supercell","canonical_instance":"supercell0",
+      "source_views":{"CMODEL":{"phase":"LOW","sample_point":"PRE_POSEDGE"},"RTL":{"phase":"LOW","sample_point":"PRE_POSEDGE"}}
+    },
+    {
+      "name":"supercell_post_posedge",
+      "signals":["weight_forward_valid_o","weight_forward_buffer_o","weight_forward_data_o","weight_buffer_ready_o","activation_valid_o","activation_o","weight_buffer_o","activation_tag_o","dot_valid_o","dot_result_o","dot_tag_o","alignment_lost_o","partial_valid_o","partial_o","partial_tag_o","fault_o","weight_valid_q_0","weight_valid_q_1"],
+      "event_types":["SIGNAL_SAMPLE","STATE_SAMPLE"],"mapping_statuses":["DIRECT"],
+      "canonical_module":"lpu_mxm_supercell","canonical_instance":"supercell0",
+      "source_views":{"CMODEL":{"phase":"HIGH","sample_point":"POST_POSEDGE"},"RTL":{"phase":"HIGH","sample_point":"POST_POSEDGE"}}
+    }
+  ]
+}

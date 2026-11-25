@@ -14,7 +14,13 @@ void run(Hemisphere side,std::size_t matrices){
         for(std::size_t b=0;b<2;++b)
             system->initialize_mem_sram_lane_byte(side,inputSlice+b,c/hw::kLanesPerTile,m*N+r,c%hw::kLanesPerTile,
                 static_cast<std::uint8_t>(value(m,r,c)>>(8*b)));
-    const auto readCycle=first-(hw::kMemGroups+hw::kC2cToSxmStreamRegisterColumns-inputSlice/hw::kMemSlicesPerGroup);
+    const auto readToSxmLatency=
+        system->mem_array(side).read_response_latency_cycles()
+        + hw::kMemGroups+hw::kC2cToSxmStreamRegisterColumns
+        - inputSlice/hw::kMemSlicesPerGroup;
+    if (first < readToSxmLatency)
+        throw std::logic_error("MEM/SXM schedule starts before the modeled read path can deliver data");
+    const auto readCycle=first-readToSxmLatency;
     const auto writeCycle=first+N+SxmWideTranspose::skew
         +hw::kMemGroups+hw::kC2cToSxmStreamRegisterColumns-outputSlice/hw::kMemSlicesPerGroup;
     for(std::size_t b=0;b<2;++b){

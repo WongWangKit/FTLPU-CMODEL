@@ -108,6 +108,8 @@ bool verify_outputs(const ftlpu::TspSliceSystem& system)
 
 } // namespace
 
+// This stack-resident system is also a footprint regression for heap-backed
+// MXM Core state.
 int main()
 try {
     auto system = ftlpu::TspSliceSystem {};

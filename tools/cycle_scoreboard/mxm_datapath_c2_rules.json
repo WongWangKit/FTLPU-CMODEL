@@ -1,0 +1,47 @@
+{
+  "schema": "ftlpu.mxm.datapath.c2.trace.v1",
+  "test_name": "mxm_datapath_c2_cycle_scoreboard",
+  "title": "MXM Datapath C2 Cycle Scoreboard",
+  "required_fields": ["schema","run_id","case_id","source","global_cycle","logical_cycle","transport_tick","phase","sample_point","event_sequence","module","instance","signal","width","value","event_type","mapping_status","source_ref"],
+  "allowed_event_types": ["SIGNAL_SAMPLE","STATE_SAMPLE","ARCH_EVENT"],
+  "allowed_mapping_statuses": ["DIRECT","DERIVED","SEMANTIC","PARTIAL","UNMAPPED","NA","CONFLICT"],
+  "comparable_mapping_statuses": ["DIRECT","DERIVED","SEMANTIC","PARTIAL"],
+  "excluded_mapping_statuses": ["UNMAPPED","NA"],
+  "architecture": {"events":[],"phase":"LOW","sample_point":"PRE_POSEDGE","canonical_module":"architecture","canonical_instance":"architecture"},
+  "signal_rules": [
+    {
+      "name":"dequant_pre_posedge",
+      "signals":["rst_ni","run_i","request_i","buffer_i","param_write_i","param_write_buffer_i","param_buffer_i","stream_valid_i","stream_i","consume_o","accepted_o","param_accepted_o","param_ready_o","fault_o"],
+      "event_types":["SIGNAL_SAMPLE"],"mapping_statuses":["DIRECT"],
+      "canonical_module":"lpu_mxm_weight_dequant_pipe","canonical_instance":"dequant0",
+      "source_views":{"CMODEL":{"phase":"LOW","sample_point":"PRE_POSEDGE"},"RTL":{"phase":"LOW","sample_point":"PRE_POSEDGE"}}
+    },
+    {
+      "name":"dequant_post_posedge",
+      "signals":["valid_q","buffer_q","valid_o","buffer_o","weight_bf16_o","param_ready_o","fault_o"],
+      "event_types":["SIGNAL_SAMPLE","STATE_SAMPLE"],"mapping_statuses":["DIRECT"],
+      "canonical_module":"lpu_mxm_weight_dequant_pipe","canonical_instance":"dequant0",
+      "source_views":{"CMODEL":{"phase":"HIGH","sample_point":"POST_POSEDGE"},"RTL":{"phase":"HIGH","sample_point":"POST_POSEDGE"}}
+    },
+    {
+      "name":"weight_buffer_pre_posedge",
+      "signals":["rst_ni","activation_valid_i","activation_i","weight_buffer_i","tag_i","weight_write_valid_i","weight_write_buffer_i","weight_write_data_i","weight_write_accepted_o","weight_buffer_ready_o","weight_buffer_busy_o"],
+      "event_types":["SIGNAL_SAMPLE"],"mapping_statuses":["DIRECT"],
+      "canonical_module":"lpu_mxm_supercell","canonical_instance":"weight_buffer0",
+      "source_views":{"CMODEL":{"phase":"LOW","sample_point":"PRE_POSEDGE"},"RTL":{"phase":"LOW","sample_point":"PRE_POSEDGE"}}
+    },
+    {
+      "name":"weight_buffer_post_posedge",
+      "signals":["weight_forward_valid_o","weight_forward_buffer_o","weight_forward_data_o","weight_buffer_ready_o","activation_valid_o","activation_o","weight_buffer_o","activation_tag_o","fault_o","weight_valid_q_0_0","weight_valid_q_0_1","weight_valid_q_0_2","weight_valid_q_1_0","weight_valid_q_1_1","weight_valid_q_1_2"],
+      "event_types":["SIGNAL_SAMPLE","STATE_SAMPLE"],"mapping_statuses":["DIRECT"],
+      "canonical_module":"lpu_mxm_supercell","canonical_instance":"weight_buffer0",
+      "source_views":{"CMODEL":{"phase":"HIGH","sample_point":"POST_POSEDGE"},"RTL":{"phase":"HIGH","sample_point":"POST_POSEDGE"}}
+    },
+    {"name":"weight_data_0_0","signals":["weights_q_0_0"],"event_types":["STATE_SAMPLE"],"mapping_statuses":["DIRECT"],"canonical_module":"lpu_mxm_supercell","canonical_instance":"weight_buffer0","source_views":{"CMODEL":{"phase":"HIGH","sample_point":"POST_POSEDGE"},"RTL":{"phase":"HIGH","sample_point":"POST_POSEDGE"}},"gate":{"signal":"weight_valid_q_0_0","equals":"1","count_xz_exclusions":true}},
+    {"name":"weight_data_0_1","signals":["weights_q_0_1"],"event_types":["STATE_SAMPLE"],"mapping_statuses":["DIRECT"],"canonical_module":"lpu_mxm_supercell","canonical_instance":"weight_buffer0","source_views":{"CMODEL":{"phase":"HIGH","sample_point":"POST_POSEDGE"},"RTL":{"phase":"HIGH","sample_point":"POST_POSEDGE"}},"gate":{"signal":"weight_valid_q_0_1","equals":"1","count_xz_exclusions":true}},
+    {"name":"weight_data_0_2","signals":["weights_q_0_2"],"event_types":["STATE_SAMPLE"],"mapping_statuses":["DIRECT"],"canonical_module":"lpu_mxm_supercell","canonical_instance":"weight_buffer0","source_views":{"CMODEL":{"phase":"HIGH","sample_point":"POST_POSEDGE"},"RTL":{"phase":"HIGH","sample_point":"POST_POSEDGE"}},"gate":{"signal":"weight_valid_q_0_2","equals":"1","count_xz_exclusions":true}},
+    {"name":"weight_data_1_0","signals":["weights_q_1_0"],"event_types":["STATE_SAMPLE"],"mapping_statuses":["DIRECT"],"canonical_module":"lpu_mxm_supercell","canonical_instance":"weight_buffer0","source_views":{"CMODEL":{"phase":"HIGH","sample_point":"POST_POSEDGE"},"RTL":{"phase":"HIGH","sample_point":"POST_POSEDGE"}},"gate":{"signal":"weight_valid_q_1_0","equals":"1","count_xz_exclusions":true}},
+    {"name":"weight_data_1_1","signals":["weights_q_1_1"],"event_types":["STATE_SAMPLE"],"mapping_statuses":["DIRECT"],"canonical_module":"lpu_mxm_supercell","canonical_instance":"weight_buffer0","source_views":{"CMODEL":{"phase":"HIGH","sample_point":"POST_POSEDGE"},"RTL":{"phase":"HIGH","sample_point":"POST_POSEDGE"}},"gate":{"signal":"weight_valid_q_1_1","equals":"1","count_xz_exclusions":true}},
+    {"name":"weight_data_1_2","signals":["weights_q_1_2"],"event_types":["STATE_SAMPLE"],"mapping_statuses":["DIRECT"],"canonical_module":"lpu_mxm_supercell","canonical_instance":"weight_buffer0","source_views":{"CMODEL":{"phase":"HIGH","sample_point":"POST_POSEDGE"},"RTL":{"phase":"HIGH","sample_point":"POST_POSEDGE"}},"gate":{"signal":"weight_valid_q_1_2","equals":"1","count_xz_exclusions":true}}
+  ]
+}

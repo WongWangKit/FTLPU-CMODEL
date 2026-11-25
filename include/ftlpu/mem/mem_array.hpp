@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ftlpu/core/hardware_params.hpp"
+#include "ftlpu/core/instruction_codec.hpp"
 #include "ftlpu/core/stream_fabric.hpp"
 #include "ftlpu/core/stream_port.hpp"
 #include "ftlpu/core/timing.hpp"
@@ -104,6 +105,12 @@ public:
     // that immutable response at the next evaluate(), for fabric commit B.
     enum class ReadTiming { Main, RegisteredR1 };
 
+    static constexpr std::size_t read_response_latency_cycles(
+        ReadTiming timing) noexcept
+    {
+        return timing == ReadTiming::RegisteredR1 ? 1 : 0;
+    }
+
     struct MemTransfer {
         enum class Kind {
             StoreStreamToSram,
@@ -127,6 +134,22 @@ public:
         std::size_t bank{0};
         std::size_t tile{0};
         MemInstruction instruction{};
+    };
+
+    struct HardwareInterfaceView {
+        // Sparse equivalents of the RTL packed ports. Entries at the same
+        // index in bank_issue_valid_i/bank_issue_i describe one asserted
+        // {slice,bank,tile} command during this LOW sample.
+        std::vector<InstructionTrace> bank_issue_valid_i{};
+        std::vector<std::uint32_t> bank_issue_i{};
+        std::vector<MemTransfer> mem_boundary_consume_o{};
+        std::vector<MemTransfer> mem_producer_valid_o{};
+        std::vector<StreamPayloadTileSegment> mem_producer_data_o{};
+        std::vector<StreamDirection> mem_producer_direction_o{};
+        std::vector<StreamId> mem_producer_stream_o{};
+        std::vector<std::size_t> mem_producer_boundary_o{};
+        bool mem_fault_valid_o{false};
+        bool mem_busy_o{false};
     };
 
     explicit MemArrayModel(
@@ -164,6 +187,7 @@ public:
         active_fabric_ = nullptr;
         cycle_prepared_ = false;
         last_transport_commit_segments_ = 0;
+        hardware_interface_view_ = {};
     }
 
     void set_sram_depth_rows(std::size_t rows)
@@ -406,6 +430,11 @@ public:
 
     ReadTiming read_timing() const noexcept { return read_timing_; }
 
+    constexpr std::size_t read_response_latency_cycles() const noexcept
+    {
+        return read_response_latency_cycles(read_timing_);
+    }
+
     // RegisteredR1 outputs after the most recent sampling edge A. These
     // snapshots are independent of trace capture and are staged at the next
     // evaluate(), for the owning fabric's edge B commit. No SRAM re-read.
@@ -432,6 +461,11 @@ public:
     const std::vector<MemTransfer>& consumed_transfers() const noexcept
     {
         return consumed_mem_;
+    }
+
+    const HardwareInterfaceView& hardware_interface_view() const noexcept
+    {
+        return hardware_interface_view_;
     }
 
     bool has_pending_read_responses() const noexcept
@@ -476,16 +510,43 @@ public:
         pending_sram_writes_.clear();
         dispatched_queue_slots_ = {};
         staged_read_responses_ = read_response_state_.current();
+        hardware_interface_view_ = {};
         for (const auto& response : staged_read_responses_) {
             StreamOutputPort output(fabric, response.sr_column,
                 response.stream.direction(), "MEM Read");
             output.write_payload_segment(response.tile, response.stream.index(),
                 response.bytes, response.vector_tag);
+            record_mem_producer(response);
         }
         auto& cycle_rows = instruction_rows_state_.next_value();
         dispatch_from_queues(cycle_rows);
         execute_current_instructions(fabric, cycle_rows);
         advance_instructions(cycle_rows);
+
+        hardware_interface_view_.mem_boundary_consume_o = consumed_mem_;
+        // RTL hemisphere_busy_o is the OR of command-pipeline busy only.
+        // A registered SRAM response may still drive producer_valid_o after
+        // the final command has left the control column; that response must
+        // not extend the canonical MEM Busy signal by an extra cycle.
+        bool command_pipeline_busy =
+            !hardware_interface_view_.bank_issue_valid_i.empty();
+        for (const auto& slice : instruction_queues_)
+            for (const auto& bank : slice)
+                for (const auto& queue : bank)
+                    command_pipeline_busy =
+                        command_pipeline_busy || !queue.empty();
+        const auto scan_rows = [&](const InstructionRows& rows) {
+            for (const auto& slice : rows)
+                for (const auto& bank : slice)
+                    for (const auto& port : bank)
+                        for (const auto& slot : port)
+                            if (slot) return true;
+            return false;
+        };
+        command_pipeline_busy = command_pipeline_busy
+            || scan_rows(instruction_rows_state_.current())
+            || scan_rows(instruction_rows_state_.next_value());
+        hardware_interface_view_.mem_busy_o = command_pipeline_busy;
     }
 
     void validate_posedge() const override
@@ -634,10 +695,16 @@ private:
                             rows[mem_slice][bank][port][tile];
                         if (!instruction.has_value()) continue;
 
+                        const InstructionTrace issue {
+                            mem_slice, bank, tile, *instruction};
+                        hardware_interface_view_.bank_issue_valid_i.push_back(
+                            issue);
+                        hardware_interface_view_.bank_issue_i.push_back(
+                            static_cast<std::uint32_t>(
+                                isa::encode_mem_instruction(*instruction)));
+
                         if (capture_trace_) {
-                            executed_instructions_.push_back(
-                                InstructionTrace {
-                                    mem_slice, bank, tile, *instruction});
+                            executed_instructions_.push_back(issue);
                         }
                         switch (instruction->opcode) {
                         case MemOpcode::Read:
@@ -670,35 +737,38 @@ private:
         const auto bytes =
             sram_.bank(mem_slice, bank).read_segment(tile, physical_address);
         const auto vector_tag = static_cast<std::uint64_t>(cycle()) * hw::kTileRows + tile;
+        const MemTransfer transfer {
+            MemTransfer::Kind::LoadSramToStream,
+            mem_slice, bank, tile, sr_column, stream,
+            physical_address, vector_tag, bytes,
+            instruction.transport_generation,
+        };
 
         if (read_timing_ == ReadTiming::RegisteredR1) {
-            read_response_state_.next_value().push_back(MemTransfer {
-                MemTransfer::Kind::LoadSramToStream,
-                mem_slice, bank, tile, sr_column, stream,
-                physical_address, vector_tag, bytes,
-                instruction.transport_generation,
-            });
+            read_response_state_.next_value().push_back(transfer);
         } else {
             StreamOutputPort output(fabric, sr_column, stream.direction(), "MEM Read");
             output.write_payload_segment(tile, stream.index(), bytes, vector_tag);
+            record_mem_producer(transfer);
         }
 
         // Keep execution trace at the SRAM sampling edge. The response and
         // staged-response accessors distinguish output and fabric phases.
         if (capture_trace_) {
-            executed_mem_.push_back(MemTransfer {
-                MemTransfer::Kind::LoadSramToStream,
-                mem_slice,
-                bank,
-                tile,
-                sr_column,
-                stream,
-                physical_address,
-                vector_tag,
-                bytes,
-                instruction.transport_generation,
-            });
+            executed_mem_.push_back(transfer);
         }
+    }
+
+    void record_mem_producer(const MemTransfer& producer)
+    {
+        hardware_interface_view_.mem_producer_valid_o.push_back(producer);
+        hardware_interface_view_.mem_producer_data_o.push_back(producer.bytes);
+        hardware_interface_view_.mem_producer_direction_o.push_back(
+            producer.stream.direction());
+        hardware_interface_view_.mem_producer_stream_o.push_back(
+            producer.stream);
+        hardware_interface_view_.mem_producer_boundary_o.push_back(
+            producer.sr_column);
     }
 
     void execute_write(
@@ -1016,6 +1086,7 @@ private:
     StreamRegisterFabric* active_fabric_{nullptr};
     bool cycle_prepared_{false};
     std::size_t last_transport_commit_segments_{0};
+    HardwareInterfaceView hardware_interface_view_{};
 };
 
 } // namespace ftlpu

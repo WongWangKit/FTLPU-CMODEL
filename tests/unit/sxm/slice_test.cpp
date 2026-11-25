@@ -2,9 +2,21 @@
 
 #include <cassert>
 #include <cstdint>
+#include <iostream>
 #include <stdexcept>
+#include <string>
 
 namespace {
+
+[[noreturn]] void fail_check(const char* expression, int line)
+{
+    throw std::runtime_error(
+        "check failed at line " + std::to_string(line) + ": " + expression);
+}
+
+#undef assert
+#define assert(expression) \
+    ((expression) ? static_cast<void>(0) : fail_check(#expression, __LINE__))
 
 using TileVector = ftlpu::SxmSlice::TileVector<std::int32_t>;
 using StreamVector = ftlpu::SxmSlice::StreamVector<std::int32_t>;
@@ -40,7 +52,7 @@ ftlpu::SxmInstruction::StreamList stream_range(std::size_t first, std::size_t co
 
 } // namespace
 
-int main()
+int run_test()
 {
     auto map = ftlpu::Distribute16::identity_map();
     map[0] = ftlpu::hw::kLanesPerTile - 1;
@@ -599,4 +611,14 @@ int main()
         }
     }
     return 0;
+}
+
+int main()
+{
+    try {
+        return run_test();
+    } catch (const std::exception& error) {
+        std::cerr << "sxm slice test: " << error.what() << '\n';
+        return 1;
+    }
 }

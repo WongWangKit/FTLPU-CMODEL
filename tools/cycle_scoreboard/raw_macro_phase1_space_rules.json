@@ -1,0 +1,78 @@
+{
+  "schema": "ftlpu.raw_macro.level2.trace.v1",
+  "test_name": "raw_macro_phase1_space_cycle_scoreboard",
+  "title": "RAW Macro Phase1 MEM Space Cycle Scoreboard",
+  "default_scopes": ["ICU", "MEM", "SRAM", "STREAM"],
+  "required_fields": [
+    "schema", "run_id", "case_id", "source", "global_cycle",
+    "logical_cycle", "transport_tick", "phase", "sample_point",
+    "event_sequence", "module", "instance", "signal", "width", "value",
+    "event_type", "mapping_status", "source_ref", "hemisphere",
+    "mem_slice", "bank", "tile", "opcode", "address", "stream",
+    "direction", "preserve", "data", "category", "scope"
+  ],
+  "string_fields": [
+    "schema", "run_id", "case_id", "source", "phase", "sample_point",
+    "module", "instance", "signal", "value", "event_type",
+    "mapping_status", "source_ref", "hemisphere", "opcode", "direction",
+    "data", "category", "scope"
+  ],
+  "integer_fields": [
+    "global_cycle", "logical_cycle", "transport_tick", "event_sequence",
+    "width", "mem_slice", "bank", "tile", "address", "stream", "preserve"
+  ],
+  "allowed_sources": ["CMODEL", "RTL"],
+  "allowed_phases": ["LOW", "POSEDGE", "HIGH", "NEGEDGE"],
+  "allowed_sample_points": ["PRE_POSEDGE", "POST_POSEDGE", "POST_NBA", "POST_COMB"],
+  "allowed_event_types": ["SIGNAL_SAMPLE", "STATE_SAMPLE", "ARCH_EVENT"],
+  "allowed_mapping_statuses": ["DIRECT", "DERIVED", "SEMANTIC", "PARTIAL", "UNMAPPED", "NA"],
+  "comparable_mapping_statuses": ["DIRECT", "DERIVED", "SEMANTIC", "PARTIAL"],
+  "excluded_mapping_statuses": ["UNMAPPED", "NA"],
+  "architecture": {
+    "comparison_mode": "KEYED_IDENTITY",
+    "identity_fields": [
+      "case_id", "global_cycle", "logical_cycle", "transport_tick",
+      "phase", "sample_point", "signal", "category", "scope",
+      "hemisphere", "mem_slice", "bank", "tile", "opcode", "address",
+      "stream", "direction", "preserve"
+    ],
+    "sample_point_aliases": {"POST_POSEDGE": "POST_NBA"},
+    "events": [
+      "MEM_ISSUE_ACCEPT", "MEM_TILE_COMMAND", "MEM_SRAM_READ_SAMPLE",
+      "MEM_SRAM_WRITE_COMMIT", "MEM_STREAM_CONSUME", "MEM_READ_RESPONSE",
+      "MEM_SRF_INJECT_COMMIT", "MEM_DRAINED"
+    ],
+    "phase": "LOW",
+    "sample_point": "PRE_POSEDGE",
+    "canonical_module": "architecture",
+    "canonical_instance": "architecture"
+  },
+  "signal_rules": [
+    {
+      "name": "execution_issue_ready_per_bank",
+      "scope": "ICU",
+      "category": "CANONICAL",
+      "signals": ["execution_issue_ready"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "canonical_module": "lpu_mem_execution_frontend",
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "mem_busy_derived_per_hemisphere",
+      "scope": "MEM",
+      "category": "DIAGNOSTIC",
+      "signals": ["mem_busy_derived"],
+      "event_types": ["STATE_SAMPLE"],
+      "mapping_statuses": ["DERIVED"],
+      "canonical_module": "cmodel_mem_diagnostic",
+      "source_views": {
+        "CMODEL": {"phase": "POSEDGE", "sample_point": "POST_COMB"},
+        "RTL": {"phase": "POSEDGE", "sample_point": "POST_COMB"}
+      }
+    }
+  ]
+}

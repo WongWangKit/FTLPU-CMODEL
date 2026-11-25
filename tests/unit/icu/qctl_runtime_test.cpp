@@ -117,6 +117,7 @@ void scheduler_counter_enable_and_wait_states()
         "SYNC release did not return Controller to IDLE");
 
     IcuQctlControllerInputs resumed{scheduler_cycle, nullptr};
+    resumed.done = true;
     outputs = controller.evaluate(resumed);
     require(outputs.scheduler_counter_ce,
         "released QCTL boundary inserted an extra Scheduler offset");
@@ -131,7 +132,8 @@ BarrierCycleResult run_barrier_cycle(
     std::array<IcuQctlController, 3>& controllers,
     IcuQctlArrivalReleaseBarrier& barrier,
     const std::array<IcuQueueControl, 3>& records,
-    const std::array<std::uint32_t, 3>& cycles)
+    const std::array<std::uint32_t, 3>& cycles,
+    const std::array<bool, 3>& head_valid = {true, true, true})
 {
     std::array<IcuQctlControllerInputs, 3> inputs{};
     std::vector<bool> arrivals(3, false);
@@ -139,7 +141,7 @@ BarrierCycleResult run_barrier_cycle(
     BarrierCycleResult result;
     for (std::size_t queue = 0; queue < controllers.size(); ++queue) {
         inputs[queue].scheduler_cycle = cycles[queue];
-        inputs[queue].head = &records[queue];
+        inputs[queue].head = head_valid[queue] ? &records[queue] : nullptr;
         result.controllers[queue] = controllers[queue].evaluate(inputs[queue]);
         arrivals[queue] = result.controllers[queue].sync_arrival_valid;
         notifies[queue] = result.controllers[queue].notify_valid;
@@ -176,10 +178,15 @@ void arrival_release_barrier_rounds_and_reset()
     result = run_barrier_cycle(controllers, barrier, records, {0, 1, 0});
     require(result.barrier.completed && result.barrier.notifier == 2,
         "all participants did not accept the held NOTIFY request");
-    require(result.controllers[0].retire_head
-        && result.controllers[1].retire_head
+    require(!result.controllers[0].retire_head
+        && !result.controllers[1].retire_head
         && result.controllers[2].retire_head,
-        "barrier completion did not release every participant and notifier");
+        "NOTIFY handshake incorrectly bypassed registered Release");
+    result = run_barrier_cycle(controllers, barrier, records, {0, 1, 0},
+        {true, true, false});
+    require(result.controllers[0].retire_head
+        && result.controllers[1].retire_head,
+        "registered Release did not retire every SYNC participant");
     require(!barrier.arrived(0) && !barrier.arrived(1),
         "barrier completion retained arrival history");
 
@@ -189,10 +196,13 @@ void arrival_release_barrier_rounds_and_reset()
         && !barrier.arrived(1),
         "second barrier round reused first-round arrival state");
     result = run_barrier_cycle(controllers, barrier, records, {0, 1, 0});
-    require(result.barrier.completed && result.controllers[0].retire_head
-        && result.controllers[1].retire_head
-        && result.controllers[2].retire_head,
-        "second barrier round did not independently complete");
+    require(result.barrier.completed && result.controllers[2].retire_head,
+        "second barrier round did not accept its independent NOTIFY");
+    result = run_barrier_cycle(controllers, barrier, records, {0, 1, 0},
+        {true, true, false});
+    require(result.controllers[0].retire_head
+        && result.controllers[1].retire_head,
+        "second barrier round did not independently release participants");
     barrier.reset();
     for (auto& controller : controllers) controller.reset();
     require(!barrier.arrived(0) && !barrier.arrived(1)
@@ -220,6 +230,11 @@ void sync_first_notify_later()
     result = run_barrier_cycle(controllers, barrier, records, {0, 0, 2});
     require(result.barrier.completed && result.barrier.notifier == 2,
         "late NOTIFY did not release already-arrived participants");
+    result = run_barrier_cycle(controllers, barrier, records, {0, 0, 2},
+        {true, true, false});
+    require(result.controllers[0].retire_head
+        && result.controllers[1].retire_head,
+        "late NOTIFY did not produce the registered Release pulse");
 }
 
 void event_broadcast_contract()
@@ -364,6 +379,161 @@ void complete_runtime_path()
         "complete QCTL Runtime reset retained an Event-side buffer");
 }
 
+void fabric_fault_and_event_selection_contract()
+{
+    IcuQctlArrivalReleaseBarrier barrier;
+    barrier.configure({true});
+    auto outputs = barrier.evaluate({true}, {true});
+    require(!outputs.completed && !outputs.notify_ready[0],
+        "participant NOTIFY was incorrectly accepted");
+    barrier.commit({true}, outputs);
+    require(barrier.fault() && barrier.fault_code() == 1,
+        "participant NOTIFY did not set the sticky Fabric fault");
+    barrier.reset();
+    require(!barrier.fault(), "Fabric reset did not clear sticky fault");
+
+    IcuQctlEventManager events;
+    events.configure(2, 4);
+    events.push(7, {true, false});
+    events.push(7, {false, true});
+    auto selected = events.select({false, true});
+    require(selected.found && selected.index == 1 && selected.tag == 7
+        && selected.visible[1],
+        "Event Buffer did not choose the oldest currently serviceable event");
+    events.commit(selected, {false, true});
+    require(events.level() == 1,
+        "repeated Event TAG entries were merged or retired out of order");
+    selected = events.select({true, false});
+    require(selected.found && selected.index == 0 && selected.visible[0],
+        "older temporarily-unserviceable event was lost");
+}
+
+void sticky_fault_reset_and_global_encoding()
+{
+    // Pool faults retain the first code and deassert load ready until Clear.
+    IcuQctlRuntime pool_fault;
+    pool_fault.configure(16, 2, 2, 2, 1, 2);
+    IcuQctlRuntime::LoadInputs bad_partition{};
+    bad_partition.partition_valid = true;
+    bad_partition.partition_queue = 0;
+    bad_partition.partition_count = 1;
+    bad_partition.partition_generation = 0;
+    pool_fault.load_cycle(bad_partition);
+    pool_fault.begin_load_cycle({});
+    require(pool_fault.hardware_interface_view().fault_o
+            && pool_fault.hardware_interface_view().fault_code_o == 0x01
+            && !pool_fault.hardware_interface_view().partition_ready_o,
+        "Pool fault did not retain global class/code or stop load handshakes");
+    pool_fault.complete_load_cycle();
+    IcuQctlRuntime::LoadInputs second_fault{};
+    second_fault.load_valid = true;
+    second_fault.load_address = 99;
+    pool_fault.load_cycle(second_fault);
+    pool_fault.begin_load_cycle({});
+    require(pool_fault.hardware_interface_view().fault_code_o == 0x01,
+        "later Pool violation replaced the first sticky fault");
+    pool_fault.complete_load_cycle();
+    IcuQctlRuntime::LoadInputs clear{};
+    clear.clear = true;
+    pool_fault.load_cycle(clear);
+    pool_fault.begin_load_cycle({});
+    require(!pool_fault.hardware_interface_view().fault_o
+            && pool_fault.hardware_interface_view().partition_ready_o,
+        "Clear did not remove sticky Pool fault");
+    pool_fault.complete_load_cycle();
+
+    // Empty event target is Event fault 1 and therefore global code 0x21.
+    IcuQctlRuntime event_fault;
+    event_fault.configure(16, 1, 2, 2, 1, 2);
+    event_fault.configure_partition(0, 0, {}, 1);
+    event_fault.configure_barrier({false});
+    std::vector<std::uint32_t> cycles(1, 0);
+    std::vector<bool> run(1, true);
+    event_fault.drive_event_input(true, 7, {false});
+    event_fault.begin_cycle(cycles, run);
+    event_fault.complete_cycle({false});
+    event_fault.begin_cycle(cycles, run);
+    require(event_fault.hardware_interface_view().fault_o
+            && event_fault.hardware_interface_view().fault_code_o == 0x21,
+        "Event fault did not use global 0x2 class encoding");
+    event_fault.complete_cycle({false});
+    event_fault.reset();
+    require(!event_fault.hardware_interface_view().fault_o,
+        "Runtime reset did not clear Event fault");
+
+    // Fabric invalid-notifier reachability is exercised at the Fabric object
+    // above; the global encoder must preserve its 0x3 class.
+    require(IcuQctlRuntime::encode_global_fault_code(false, 0, false, 0,
+            true, 1, {false}, {0}) == 0x31,
+        "Fabric fault did not use global 0x3 class encoding");
+
+    // A missed local boundary is Controller fault 2 and global code 0x12.
+    IcuQctlRuntime local_fault;
+    local_fault.configure(16, 1, 2, 2, 1, 2);
+    local_fault.configure_partition(0, 0,
+        {{0, IcuControlOpcode::WaitEvent, 9}}, 3);
+    local_fault.configure_barrier({false});
+    for (unsigned step = 0; !local_fault.all_primed() && step < 8; ++step)
+        local_fault.prime_cycle();
+    cycles[0] = 1;
+    local_fault.begin_cycle(cycles, run);
+    local_fault.complete_cycle({false});
+    local_fault.begin_cycle(cycles, run);
+    require(local_fault.hardware_interface_view().fault_o
+            && local_fault.hardware_interface_view().fault_code_o == 0x12,
+        "local Controller fault did not use global 0x1 class encoding");
+    local_fault.complete_cycle({false});
+
+    // Configure is the local fault-clear boundary for Cache/Controller state.
+    IcuQctlPool pool;
+    pool.configure(4, 1, 1);
+    pool.configure_partition(0, 0, 0, 1);
+    IcuQctlCache cache;
+    cache.configure(pool, 0, 1);
+    cache.retire();
+    require(cache.fault() && cache.fault_code() == 4,
+        "empty Cache retirement did not set sticky fault 4");
+    cache.configure(pool, 0, 1);
+    require(!cache.fault(), "Cache Configure did not clear local fault");
+}
+
+void runtime_copy_rebinds_cache_and_preserves_current()
+{
+    IcuQctlRuntime current;
+    current.configure(16, 1, 1, 2, 1, 2);
+    current.configure_partition(0, 0, {
+        {0, IcuControlOpcode::WaitEvent, 0x44},
+        {1, kQueueControlMemPacket, 1}}, 7);
+    current.configure_barrier({false});
+    for (unsigned step = 0; !current.all_primed() && step < 8; ++step)
+        current.prime_cycle();
+    require(current.queue_status(0).fetch_offset == 1
+            && current.queue_status(0).retire_offset == 0,
+        "copy test did not establish one-record Current Cache state");
+
+    IcuQctlRuntime next = current;
+    next.push_event(0x44, {true});
+    std::vector<std::uint32_t> cycle(1, 0);
+    std::vector<bool> run(1, true);
+    auto outputs = next.tick(cycle, {false});
+    require(outputs[0].event_fire,
+        "copied Runtime did not use its rebound Event/Cache state");
+    require(current.queue_status(0).retire_offset == 0
+            && next.queue_status(0).retire_offset == 1,
+        "Next progression mutated Current or failed to retire independently");
+    for (unsigned step = 0; next.queue_status(0).fetch_offset < 2
+         && step < 8; ++step)
+        next.prime_cycle();
+    require(next.queue_status(0).fetch_offset == 2
+            && current.queue_status(0).fetch_offset == 1,
+        "copied Cache retained a Pool pointer into Current");
+
+    IcuQctlRuntime assigned;
+    assigned = next;
+    require(assigned.queue_status(0).fetch_offset == 2,
+        "Runtime assignment lost copied QCTL state");
+}
+
 } // namespace
 
 int main()
@@ -375,6 +545,9 @@ try {
     event_broadcast_contract();
     mem_packet_retirement_is_not_sram_commit();
     complete_runtime_path();
+    fabric_fault_and_event_selection_contract();
+    sticky_fault_reset_and_global_encoding();
+    runtime_copy_rebinds_cache_and_preserves_current();
     std::cout << "QCTL runtime passed: Pool/Cache/Controller separation, "
                  "arrival-release barriers, 32-bit events, CE and MEM_PACKET\n";
 } catch (const std::exception& error) {

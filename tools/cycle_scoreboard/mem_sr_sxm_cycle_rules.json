@@ -1,0 +1,47 @@
+{
+  "schema": "ftlpu.mem_sr_sxm.cycle.v1",
+  "sampling": {
+    "inputs_and_combinational_status": "LOW/PRE_POSEDGE",
+    "registered_state": "HIGH/POST_POSEDGE"
+  },
+  "stages": {
+    "S1": {
+      "verdict": "SR_CYCLE_PASS",
+      "signals": [
+        "inject_p0_valid_i", "inject_p0_data_i", "inject_p1_valid_i",
+        "inject_p1_data_i", "consume_i", "collision_o",
+        "invalid_consume_o", "state_valid_o", "state_data_o"
+      ]
+    },
+    "S2": {
+      "verdict": "MEM_SR_CYCLE_PASS",
+      "signals": [
+        "bank_issue_valid_i", "bank_issue_i", "boundary_valid_i",
+        "boundary_data_i", "mem_boundary_consume_o", "mem_producer_valid_o",
+        "mem_producer_data_o", "mem_producer_direction_o",
+        "mem_producer_stream_o", "mem_producer_boundary_o",
+        "state_valid_o", "state_data_o", "mem_fault_valid_o", "mem_busy_o"
+      ],
+      "rtl_read_timing": "RegisteredR1",
+      "cmodel_main_mode": "NOT_APPLICABLE_TO_CURRENT_RTL"
+    },
+    "S3": {
+      "status": "BLOCKED",
+      "reason": "The authoritative sxm_triangle_core is not connected to the formal instruction path. Legacy SxmSlice/native compatibility paths are not accepted substitutes."
+    },
+    "S4": {
+      "status": "BLOCKED",
+      "reason": "Depends on the S3 authoritative SXM instruction-path integration."
+    },
+    "S5": {
+      "status": "BLOCKED",
+      "reason": "SxmMatrixCore/SxmMatrixMemReference is not instantiated by TspSliceSystem and the RTL triangle integration is not instantiated by the formal FU cluster."
+    }
+  },
+  "policy": {
+    "fixed_cycle_offset": false,
+    "hard_padding": false,
+    "xz_to_zero": false,
+    "pin_level_signals": false
+  }
+}

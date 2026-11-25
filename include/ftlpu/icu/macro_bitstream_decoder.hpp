@@ -2,6 +2,8 @@
 
 #include "ftlpu/core/instruction_codec.hpp"
 #include "ftlpu/core/clone_ptr.hpp"
+#include "ftlpu/icu/raw_imem_word.hpp"
+#include "ftlpu/icu/mem_local_frontend_fetch.hpp"
 #include "ftlpu/icu/sxm_macro_instruction.hpp"
 
 #include <algorithm>
@@ -32,28 +34,10 @@ enum class IcuMacroQueueKind : std::uint8_t {
     MxmLoad,
     MxmCompute,
     MxmDequant,
+    MxmParamLoad,
+    MxmBackend,
     Vxm, SxmTranspose, SxmPermute, C2cDma, C2cTx, C2cRx,
 };
-
-template <std::size_t Bits>
-struct IcuRawImemWord {
-    static_assert(Bits >= 32 && Bits % 32 == 0);
-
-    static constexpr std::size_t bit_count = Bits;
-    static constexpr std::size_t lane_count = Bits / 32;
-    std::array<std::uint32_t, lane_count> lanes{};
-
-    bool bit(std::size_t index) const
-    {
-        if (index >= Bits)
-            throw std::out_of_range(
-                "ICU raw i-MEM bit index is outside the word");
-        return ((lanes[index / 32] >> (index % 32)) & 1u) != 0;
-    }
-};
-
-using IcuRawImemWord96 = IcuRawImemWord<96>;
-using IcuRawImemWord128 = IcuRawImemWord<128>;
 
 // All counters are cycle-accurate frontend counters. The legacy fields remain
 // at the top so existing performance consumers keep source compatibility.
@@ -152,6 +136,29 @@ class IcuMacroV1Decoder {
 public:
     using RawWord = IcuRawImemWord<WordBits>;
     using DecodedContext = DecodedIcuMacroContext<FuncInstruction>;
+    using MemFetchFrontend = MemLocalFrontendFetchModel<
+        hw::kIcuMemImemDepth,
+        hw::kIcuLocalImemResponseDepth,
+        hw::kIcuMacroWordFifoDepth,
+        ImemRequestInitiationInterval>;
+    using MemFetchPortSignals = typename MemFetchFrontend::Ports;
+    using MxmFetchFrontend = MxmLocalFrontendFetchModel<
+        hw::kIcuMxmImemDepth,
+        hw::kIcuLocalImemResponseDepth,
+        hw::kIcuMacroWordFifoDepth,
+        ImemRequestInitiationInterval>;
+    using MxmFetchPortSignals = typename MxmFetchFrontend::Ports;
+    static constexpr bool canonical_mxm_command =
+        std::is_same_v<FuncInstruction, MxmLoadCommand>
+        || std::is_same_v<FuncInstruction, MxmComputeCommand>
+        || std::is_same_v<FuncInstruction, MxmDequantCommand>
+        || std::is_same_v<FuncInstruction, MxmParamLoadCommand>
+        || std::is_same_v<FuncInstruction, MxmBackendCommand>;
+    static constexpr bool canonical_mxm_fetch = WordBits == 128
+        && ImemReadLatency == 2
+        && (canonical_mxm_command
+            || std::is_same_v<FuncInstruction, MxmControlInstruction>
+            || std::is_same_v<FuncInstruction, MxmDequantInstruction>);
 
     // Canonical local-iMEM read boundary.  The names match the formal RTL
     // connection between lpu_mem_imem_fetch and lpu_mem_local_imem.  This is a
@@ -203,6 +210,14 @@ public:
         if (image_->empty())
             throw StaticScheduleError(
                 "Macro raw i-MEM image has no control word");
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>
+            && WordBits == 96 && ImemReadLatency == 2) {
+            mem_fetch_frontend_.emplace();
+            mem_fetch_frontend_->bind_image(image_);
+        } else if constexpr (canonical_mxm_fetch) {
+            mxm_fetch_frontend_.emplace();
+            mxm_fetch_frontend_->bind_image(image_);
+        }
     }
 
     // Compatibility path for decoder unit tests: an unbounded current cycle
@@ -251,10 +266,14 @@ public:
             mem_cycle_state_ = mem_state_;
             mem_cycle_phase_ = rtl_mem_parser_phase_code();
             mem_cycle_reservoir_bits_ = mem_reservoir_bits_;
+            mem_word_fire_this_cycle_ = false;
+            begin_mem_fetch_cycle();
+            advance_mem_fetch_frontend(false);
+            end_mem_fetch_cycle();
+            return;
         }
-        mem_word_fire_this_cycle_ = false;
-        advance_fetch_frontend();
-        age_pending_fetches();
+        advance_fetch_frontend(false);
+        if constexpr (!canonical_mxm_fetch) age_pending_fetches();
     }
 
     // Priming stops only at an actual decode-ahead boundary: the parser has
@@ -385,6 +404,10 @@ public:
     // not expose storage contents or change the frontend credit contract.
     std::size_t word_fifo_level() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_fetch_frontend_->word_fifo_level();
+        if constexpr (canonical_mxm_fetch)
+            return mxm_fetch_frontend_->word_fifo_level();
         return word_fifo_.size();
     }
 
@@ -393,48 +416,129 @@ public:
     // interface.
     bool fetch_descriptor_started() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_fetch_frontend_->descriptor_started();
+        if constexpr (canonical_mxm_fetch)
+            return mxm_fetch_frontend_->descriptor_started();
         return fetch_descriptor_started_;
     }
     bool fetch_descriptor_active() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_fetch_frontend_->busy();
+        if constexpr (canonical_mxm_fetch)
+            return mxm_fetch_frontend_->busy();
         return fetch_descriptor_active_;
     }
-    bool fetch_complete() const noexcept { return fetch_complete_; }
+    bool fetch_complete() const noexcept
+    {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_fetch_complete_;
+        if constexpr (canonical_mxm_fetch)
+            return mxm_fetch_complete_;
+        return fetch_complete_;
+    }
     std::size_t next_fetch_address() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_fetch_frontend_->next_address();
+        if constexpr (canonical_mxm_fetch)
+            return mxm_fetch_frontend_->next_address();
         return next_fetch_address_;
     }
     std::size_t pending_fetch_level() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return static_cast<std::size_t>(
+                mem_fetch_frontend_->request_stage_valid())
+                + static_cast<std::size_t>(
+                    mem_fetch_frontend_->response_stage_valid());
+        if constexpr (canonical_mxm_fetch)
+            return static_cast<std::size_t>(
+                mxm_fetch_frontend_->request_stage_valid())
+                + static_cast<std::size_t>(
+                    mxm_fetch_frontend_->response_stage_valid());
         return pending_fetches_.size();
     }
     std::optional<std::size_t> pending_fetch_front_address() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            if (const auto response = mem_fetch_frontend_->response_stage())
+                return response->address;
+            if (const auto request = mem_fetch_frontend_->request_stage())
+                return request->address;
+            return std::nullopt;
+        }
+        if constexpr (canonical_mxm_fetch) {
+            if (const auto response = mxm_fetch_frontend_->response_stage())
+                return response->address;
+            if (const auto request = mxm_fetch_frontend_->request_stage())
+                return request->address;
+            return std::nullopt;
+        }
         if (pending_fetches_.empty()) return std::nullopt;
         return pending_fetches_.front().address;
     }
     std::optional<std::size_t>
     pending_fetch_front_remaining_cycles() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            if (mem_fetch_frontend_->response_stage_valid()) return 0;
+            if (mem_fetch_frontend_->request_stage_valid()) return 1;
+            return std::nullopt;
+        }
+        if constexpr (canonical_mxm_fetch) {
+            if (mxm_fetch_frontend_->response_stage_valid()) return 0;
+            if (mxm_fetch_frontend_->request_stage_valid()) return 1;
+            return std::nullopt;
+        }
         if (pending_fetches_.empty()) return std::nullopt;
         return pending_fetches_.front().remaining_cycles;
     }
     std::size_t response_fifo_level() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_fetch_frontend_->response_fifo_level();
+        if constexpr (canonical_mxm_fetch)
+            return mxm_fetch_frontend_->response_fifo_level();
         return response_fifo_.size();
     }
     std::optional<std::size_t> response_fifo_front_address() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            const auto head = mem_fetch_frontend_->response_fifo_head();
+            return head ? std::optional<std::size_t>(head->address)
+                        : std::nullopt;
+        }
+        if constexpr (canonical_mxm_fetch) {
+            const auto head = mxm_fetch_frontend_->response_fifo_head();
+            return head ? std::optional<std::size_t>(head->address)
+                        : std::nullopt;
+        }
         if (response_fifo_.empty()) return std::nullopt;
         return response_fifo_.front().address;
     }
     std::optional<std::size_t> word_fifo_front_address() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            const auto head = mem_fetch_frontend_->word_fifo_head();
+            return head ? std::optional<std::size_t>(head->address)
+                        : std::nullopt;
+        }
+        if constexpr (canonical_mxm_fetch) {
+            const auto head = mxm_fetch_frontend_->word_fifo_head();
+            return head ? std::optional<std::size_t>(head->address)
+                        : std::nullopt;
+        }
         if (word_fifo_.empty()) return std::nullopt;
         return word_fifo_.front().address;
     }
     std::size_t outstanding_payload_fetches() const noexcept
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_fetch_frontend_->payload_words_in_flight();
+        if constexpr (canonical_mxm_fetch)
+            return mxm_fetch_frontend_->payload_words_in_flight();
         return outstanding_payload_fetches_;
     }
 
@@ -458,6 +562,22 @@ public:
     const ImemReadPortSignals& imem_read_port_signals() const noexcept
     {
         return imem_read_ports_;
+    }
+
+    const MemFetchPortSignals& mem_fetch_port_signals() const noexcept
+    {
+        static const MemFetchPortSignals idle{};
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            return mem_fetch_frontend_ ? mem_fetch_frontend_->ports() : idle;
+        return idle;
+    }
+
+    const MxmFetchPortSignals& mxm_fetch_port_signals() const noexcept
+    {
+        static const MxmFetchPortSignals idle{};
+        if constexpr (canonical_mxm_fetch)
+            return mxm_fetch_frontend_ ? mxm_fetch_frontend_->ports() : idle;
+        return idle;
     }
 
 private:
@@ -836,6 +956,31 @@ private:
             if (kind_ != IcuMacroQueueKind::MxmDequant)
                 throw std::invalid_argument(
                     "MXM dequant Macro decoder has an invalid queue kind");
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmLoadCommand>) {
+            if (kind_ != IcuMacroQueueKind::MxmLoad)
+                throw std::invalid_argument(
+                    "MXM Load Macro decoder has an invalid queue kind");
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmComputeCommand>) {
+            if (kind_ != IcuMacroQueueKind::MxmCompute)
+                throw std::invalid_argument(
+                    "MXM Compute Macro decoder has an invalid queue kind");
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmDequantCommand>) {
+            if (kind_ != IcuMacroQueueKind::MxmDequant)
+                throw std::invalid_argument(
+                    "MXM Dequant Macro decoder has an invalid queue kind");
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmParamLoadCommand>) {
+            if (kind_ != IcuMacroQueueKind::MxmParamLoad)
+                throw std::invalid_argument(
+                    "MXM Param Load Macro decoder has an invalid queue kind");
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmBackendCommand>) {
+            if (kind_ != IcuMacroQueueKind::MxmBackend)
+                throw std::invalid_argument(
+                    "MXM Backend Macro decoder has an invalid queue kind");
         } else if constexpr (std::is_same_v<FuncInstruction, SxmInstruction>) {
             if (kind_ != IcuMacroQueueKind::SxmTranspose && kind_ != IcuMacroQueueKind::SxmPermute)
                 throw std::invalid_argument("SXM Macro decoder queue kind mismatch");
@@ -849,9 +994,11 @@ private:
     {
         switch (kind_) {
         case IcuMacroQueueKind::Mem: return kMemAddressBits;
-        case IcuMacroQueueKind::MxmLoad: return 2;
-        case IcuMacroQueueKind::MxmCompute: return 13;
-        case IcuMacroQueueKind::MxmDequant:
+        case IcuMacroQueueKind::MxmLoad: return canonical_mxm_command ? 1 : 2;
+        case IcuMacroQueueKind::MxmCompute: return canonical_mxm_command ? 6 : 13;
+        case IcuMacroQueueKind::MxmDequant: return canonical_mxm_command ? 1 : 0;
+        case IcuMacroQueueKind::MxmParamLoad: return 1;
+        case IcuMacroQueueKind::MxmBackend: return 10;
         case IcuMacroQueueKind::SxmTranspose:
         case IcuMacroQueueKind::SxmPermute: return 0;
         }
@@ -862,9 +1009,11 @@ private:
     {
         switch (kind_) {
         case IcuMacroQueueKind::Mem: return 32;
-        case IcuMacroQueueKind::MxmLoad: return 29;
-        case IcuMacroQueueKind::MxmDequant: return 16;
-        case IcuMacroQueueKind::MxmCompute: return 49;
+        case IcuMacroQueueKind::MxmLoad: return canonical_mxm_command ? 2 : 29;
+        case IcuMacroQueueKind::MxmDequant: return canonical_mxm_command ? 1 : 16;
+        case IcuMacroQueueKind::MxmCompute: return canonical_mxm_command ? 7 : 49;
+        case IcuMacroQueueKind::MxmParamLoad: return 1;
+        case IcuMacroQueueKind::MxmBackend: return 13;
         case IcuMacroQueueKind::SxmTranspose: return isa::sxm_macro_native_bits(true);
         case IcuMacroQueueKind::SxmPermute: return isa::sxm_macro_native_bits(false);
         }
@@ -873,6 +1022,8 @@ private:
 
     unsigned packed_native_instruction_bits(std::uint64_t opcode) const
     {
+        if constexpr (canonical_mxm_command)
+            return native_instruction_bits();
         if (kind_ == IcuMacroQueueKind::MxmLoad)
             return static_cast<MxmControlOpcode>(opcode & 0x3u)
                     == MxmControlOpcode::IS
@@ -893,12 +1044,17 @@ private:
         result.inner_interval = cursor; cursor += 32;
         result.outer_count = cursor; cursor += 32;
         result.outer_interval = cursor; cursor += 32;
-        if (kind_ != IcuMacroQueueKind::MxmDequant
-            && kind_ != IcuMacroQueueKind::SxmTranspose && kind_ != IcuMacroQueueKind::SxmPermute) {
+        if (canonical_mxm_command
+            || (kind_ != IcuMacroQueueKind::MxmDequant
+                && kind_ != IcuMacroQueueKind::SxmTranspose
+                && kind_ != IcuMacroQueueKind::SxmPermute)) {
             result.inner_stride = cursor; cursor += 32;
             result.outer_stride = cursor; cursor += 32;
         }
-        if (kind_ == IcuMacroQueueKind::MxmLoad
+        if constexpr (canonical_mxm_command) {
+            result.induction_enable = cursor;
+            cursor += 2;
+        } else if (kind_ == IcuMacroQueueKind::MxmLoad
             || kind_ == IcuMacroQueueKind::MxmCompute) {
             // Queue kind fixes which non-None induction target this bit means.
             result.induction_enable = cursor++;
@@ -938,6 +1094,8 @@ private:
         } else if constexpr (std::is_same_v<FuncInstruction,
                                  MxmDequantInstruction>) {
             return isa::encode_mxm_dequant_instruction(instruction);
+        } else if constexpr (canonical_mxm_command) {
+            return isa::encode_mxm_command(instruction);
         }
         throw std::logic_error(
             "Macro v1 native encode is unsupported for this instruction type");
@@ -986,8 +1144,12 @@ private:
                 "zero-width DDB stride fields received a non-zero stride");
         }
         if (layout.induction_enable != DdbFieldLayout::absent) {
-            result.payload.write(layout.induction_enable, 1,
-                schedule.induction_target != IcuInductionTarget::None);
+            if constexpr (canonical_mxm_command)
+                result.payload.write(layout.induction_enable, 2,
+                    static_cast<std::uint8_t>(schedule.induction_target));
+            else
+                result.payload.write(layout.induction_enable, 1,
+                    schedule.induction_target != IcuInductionTarget::None);
         }
         result.payload.write(layout.next_start_cycle, 32,
             descriptor.next_start_cycle);
@@ -1013,7 +1175,8 @@ private:
         auto validation_instruction =
             descriptor.descriptor_template.instruction;
         set_operand(validation_instruction,
-            static_cast<std::size_t>(descriptor.next_operand));
+            static_cast<std::size_t>(descriptor.next_operand),
+            schedule.induction_target);
         auto validation_schedule = schedule;
         validation_schedule.start_cycle = descriptor.next_start_cycle;
         validate_context(DecodedContext{descriptor.first_record_index,
@@ -1037,6 +1200,11 @@ private:
             result.outer_stride = static_cast<std::int32_t>(
                 payload.read(layout.outer_stride, 32));
         }
+        if constexpr (canonical_mxm_command) {
+            result.induction_target = static_cast<IcuInductionTarget>(
+                payload.read(layout.induction_enable, 2));
+            return result;
+        }
         switch (kind_) {
         case IcuMacroQueueKind::Mem:
             result.induction_target = IcuInductionTarget::MemAddress;
@@ -1052,6 +1220,10 @@ private:
                 layout.induction_enable, 1) != 0
                 ? IcuInductionTarget::MxmAccumulatorAddress
                 : IcuInductionTarget::None;
+            break;
+        case IcuMacroQueueKind::MxmParamLoad:
+        case IcuMacroQueueKind::MxmBackend:
+            result.induction_target = IcuInductionTarget::None;
             break;
         case IcuMacroQueueKind::SxmTranspose:
         case IcuMacroQueueKind::SxmPermute:
@@ -1210,12 +1382,109 @@ private:
                 ? MemState::IdleGlobal : MemState::DictStore;
             return;
         }
-        if (outstanding_payload_fetches_ == 0)
-            throw std::logic_error(
-                "MEM Macro payload response has no reserved reservoir slot");
-        --outstanding_payload_fetches_;
         mem_append_word(word);
         if (last) mem_input_last_ = true;
+    }
+
+    void begin_mem_fetch_cycle()
+    {
+        if (mem_fetch_cycle_open_)
+            throw std::logic_error(
+                "MEM canonical Fetch cycle opened more than once");
+        mem_fetch_cycle_open_ = true;
+        mem_fetch_advanced_this_cycle_ = false;
+    }
+
+    void end_mem_fetch_cycle()
+    {
+        if (!mem_fetch_cycle_open_ || !mem_fetch_advanced_this_cycle_)
+            throw std::logic_error(
+                "MEM canonical Fetch did not advance exactly once");
+        mem_fetch_cycle_open_ = false;
+    }
+
+    void advance_mem_fetch_frontend(bool allow_new_request)
+    {
+        if constexpr (!std::is_same_v<FuncInstruction, MemInstruction>
+            || WordBits != 96 || ImemReadLatency != 2) {
+            throw std::logic_error(
+                "MEM canonical Fetch called outside the 96-bit two-stage path");
+        } else {
+            if (!mem_fetch_cycle_open_ || mem_fetch_advanced_this_cycle_)
+                throw std::logic_error(
+                    "MEM canonical Fetch advanced more than once");
+            mem_fetch_advanced_this_cycle_ = true;
+
+            const auto response_level_before =
+                mem_fetch_frontend_->response_fifo_level();
+            const auto word_level_before =
+                mem_fetch_frontend_->word_fifo_level();
+
+            typename MemFetchFrontend::Inputs inputs;
+            inputs.start_valid_i =
+                !mem_fetch_frontend_->descriptor_started();
+            inputs.start_base_address_i = 0;
+            inputs.start_word_count_i = image_->size();
+            inputs.imem_request_accept_enable_i = allow_new_request;
+            inputs.word_accept_enable_i = true;
+            inputs.decoder_word_ready_i = mem_word_ready();
+            mem_fetch_frontend_->cycle(inputs);
+
+            const auto& ports = mem_fetch_frontend_->ports();
+            imem_read_ports_.imem_read_req_valid_o =
+                ports.imem_read_req_valid_o;
+            imem_read_ports_.imem_read_req_ready_i =
+                ports.imem_read_req_ready_i;
+            imem_read_ports_.imem_read_req_address_o =
+                ports.imem_read_req_address_o;
+            imem_read_ports_.imem_read_req_last_o =
+                ports.imem_read_req_last_o;
+            imem_read_ports_.imem_read_req_fire =
+                ports.imem_read_req_fire;
+            imem_read_ports_.imem_read_rsp_valid_i =
+                ports.imem_read_rsp_valid_i;
+            imem_read_ports_.imem_read_rsp_ready_o =
+                ports.imem_read_rsp_ready_o;
+            imem_read_ports_.imem_read_rsp_data_i =
+                ports.imem_read_rsp_valid_i
+                    ? std::optional<RawWord>(ports.imem_read_rsp_data_i)
+                    : std::nullopt;
+            imem_read_ports_.imem_read_rsp_last_i =
+                ports.imem_read_rsp_last_i;
+            imem_read_ports_.imem_read_rsp_fire =
+                ports.imem_read_rsp_fire;
+
+            if (ports.decoder_word_fire) {
+                mem_accept_word(
+                    ports.decoder_word_i, ports.decoder_word_last_i);
+                ++statistics_.word_fifo_reads;
+            }
+            if (mem_fetch_frontend_->done()) mem_fetch_complete_ = true;
+
+            const auto response_level_after =
+                mem_fetch_frontend_->response_fifo_level();
+            const auto word_level_after =
+                mem_fetch_frontend_->word_fifo_level();
+            const auto response_pops = static_cast<std::size_t>(
+                ports.imem_read_rsp_fire);
+            const bool response_push = response_level_after + response_pops
+                > response_level_before;
+            statistics_.response_fifo_reads += response_pops;
+            statistics_.response_fifo_writes += response_push;
+            statistics_.word_fifo_writes += ports.word_fire;
+            statistics_.response_fifo_occupancy_samples +=
+                response_level_after;
+            statistics_.word_fifo_occupancy_samples += word_level_after;
+            statistics_.response_fifo_peak_occupancy = std::max(
+                statistics_.response_fifo_peak_occupancy,
+                response_level_after);
+            statistics_.word_fifo_peak_occupancy = std::max(
+                statistics_.word_fifo_peak_occupancy, word_level_after);
+            statistics_.response_fifo_full_cycles +=
+                response_level_after == response_fifo_depth;
+            statistics_.word_fifo_full_cycles +=
+                word_level_after == word_fifo_depth;
+        }
     }
 
     std::uint64_t mem_template_payload(
@@ -1580,14 +1849,13 @@ private:
             mem_cycle_phase_ = rtl_mem_parser_phase_code();
             mem_cycle_reservoir_bits_ = mem_reservoir_bits_;
         }
-        mem_word_fire_this_cycle_ = false;
-        advance_fetch_frontend();
-
         if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
+            mem_word_fire_this_cycle_ = false;
+            begin_mem_fetch_cycle();
+            advance_mem_fetch_frontend(true);
             auto admitted = mem_tick(current_cycle,
                 active_occupancy < active_capacity);
-            begin_fetch_if_possible();
-            age_pending_fetches();
+            end_mem_fetch_cycle();
             if (waiting_for_bits_) {
                 ++statistics_.bit_wait_cycles;
                 ++statistics_.decoder_starvation_cycles;
@@ -1606,6 +1874,7 @@ private:
             return admitted;
         }
 
+        advance_fetch_frontend(true);
         auto admitted = expand_and_admit(
             current_cycle, active_occupancy, active_capacity,
             earliest_active_release_cycle);
@@ -1613,8 +1882,10 @@ private:
         // pop and refill in one cycle without a bypass into the apply datapath.
         apply_delta_queue();
         parser_step();
-        begin_fetch_if_possible();
-        age_pending_fetches();
+        if constexpr (!canonical_mxm_fetch) {
+            begin_fetch_if_possible();
+            age_pending_fetches();
+        }
 
         if (waiting_for_bits_) {
             ++statistics_.bit_wait_cycles;
@@ -1652,11 +1923,11 @@ private:
             || reservoir_.can_refill(0);
     }
 
-    void consume_fetched_word(std::size_t address)
+    void consume_fetched_word(
+        const RawWord& word, std::size_t address, bool last)
     {
-        const auto& word = (*image_)[address];
         if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
-            mem_accept_word(word, address + 1 == image_->size());
+            mem_accept_word(word, last);
             return;
         }
         ++statistics_.fetched_words;
@@ -1700,8 +1971,15 @@ private:
     // Three explicit sequential boundaries: two-cycle SRAM request pipeline,
     // local-iMEM response FIFO, and Macro word FIFO.  Ordering below permits
     // full+dequeue replacement but never an empty enqueue-to-dequeue bypass.
-    void advance_fetch_frontend()
+    void advance_fetch_frontend(bool allow_new_request)
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            throw std::logic_error(
+                "legacy Fetch frontend called for MEM decoder");
+        if constexpr (canonical_mxm_fetch) {
+            advance_mxm_fetch_frontend(allow_new_request);
+            return;
+        }
         const bool consume_word=word_fifo_head_ready();
         const bool response_valid = !response_fifo_.empty();
         const bool response_ready = word_fifo_.size() < word_fifo_depth
@@ -1719,7 +1997,8 @@ private:
         if (consume_word) {
             const auto address=word_fifo_.front().address;
             word_fifo_.pop_front();
-            consume_fetched_word(address);
+            consume_fetched_word((*image_)[address], address,
+                address + 1 == image_->size());
             ++statistics_.word_fifo_reads;
         }
 
@@ -1757,6 +2036,103 @@ private:
             word_fifo_.size()==word_fifo_depth;
     }
 
+    void advance_mxm_fetch_frontend(bool allow_new_request)
+    {
+        if constexpr (!canonical_mxm_fetch) {
+            throw std::logic_error(
+                "MXM canonical Fetch called outside the 128-bit two-stage path");
+        } else {
+            const auto response_level_before =
+                mxm_fetch_frontend_->response_fifo_level();
+            const auto word_level_before =
+                mxm_fetch_frontend_->word_fifo_level();
+            const auto decoder_head = mxm_fetch_frontend_->word_fifo_head();
+            // RTL exposes Macro Decoder word_ready independently from
+            // word_valid.  WaitingForControl always accepts the control word;
+            // afterwards reservoir credit owns readiness until Decoder done.
+            const bool decoder_ready = !control_latched_
+                || (!mxm_fetch_complete_ && !done()
+                    && reservoir_.can_refill(0));
+            // lpu_mxm_local_imem_frontend registers Fetch done into its sticky
+            // fetch_complete_q on the following edge.  Sample the prior-cycle
+            // done pulse before advancing the Fetch component so the CModel
+            // observes the same sequential boundary.
+            const bool fetch_done_before = mxm_fetch_frontend_->done();
+
+            typename MxmFetchFrontend::Inputs inputs;
+            inputs.start_valid_i =
+                !mxm_fetch_frontend_->descriptor_started();
+            inputs.start_base_address_i = 0;
+            inputs.start_word_count_i = image_->size();
+            inputs.imem_request_accept_enable_i = allow_new_request;
+            inputs.word_accept_enable_i = true;
+            inputs.decoder_word_ready_i = decoder_ready;
+            mxm_fetch_frontend_->cycle(inputs);
+
+            const auto& ports = mxm_fetch_frontend_->ports();
+            imem_read_ports_.imem_read_req_valid_o =
+                ports.imem_read_req_valid_o;
+            imem_read_ports_.imem_read_req_ready_i =
+                ports.imem_read_req_ready_i;
+            imem_read_ports_.imem_read_req_address_o =
+                ports.imem_read_req_address_o;
+            imem_read_ports_.imem_read_req_last_o =
+                ports.imem_read_req_last_o;
+            imem_read_ports_.imem_read_req_fire =
+                ports.imem_read_req_fire;
+            imem_read_ports_.imem_read_rsp_valid_i =
+                ports.imem_read_rsp_valid_i;
+            imem_read_ports_.imem_read_rsp_ready_o =
+                ports.imem_read_rsp_ready_o;
+            imem_read_ports_.imem_read_rsp_data_i =
+                ports.imem_read_rsp_valid_i
+                    ? std::optional<RawWord>(ports.imem_read_rsp_data_i)
+                    : std::nullopt;
+            imem_read_ports_.imem_read_rsp_last_i =
+                ports.imem_read_rsp_last_i;
+            imem_read_ports_.imem_read_rsp_fire =
+                ports.imem_read_rsp_fire;
+
+            if (ports.imem_read_req_fire
+                && ports.imem_read_req_address_o != 0)
+                ++outstanding_payload_fetches_;
+            if (ports.decoder_word_fire) {
+                if (!decoder_head)
+                    throw std::logic_error(
+                        "MXM local iMEM decoder fire has no Word FIFO head");
+                consume_fetched_word(ports.decoder_word_i,
+                    decoder_head->address,
+                    ports.decoder_word_last_i);
+                ++statistics_.word_fifo_reads;
+            }
+            if (fetch_done_before) mxm_fetch_complete_ = true;
+
+            const auto response_level_after =
+                mxm_fetch_frontend_->response_fifo_level();
+            const auto word_level_after =
+                mxm_fetch_frontend_->word_fifo_level();
+            const auto response_pops = static_cast<std::size_t>(
+                ports.imem_read_rsp_fire);
+            const bool response_push = response_level_after + response_pops
+                > response_level_before;
+            statistics_.response_fifo_reads += response_pops;
+            statistics_.response_fifo_writes += response_push;
+            statistics_.word_fifo_writes += ports.word_fire;
+            statistics_.response_fifo_occupancy_samples +=
+                response_level_after;
+            statistics_.word_fifo_occupancy_samples += word_level_after;
+            statistics_.response_fifo_peak_occupancy = std::max(
+                statistics_.response_fifo_peak_occupancy,
+                response_level_after);
+            statistics_.word_fifo_peak_occupancy = std::max(
+                statistics_.word_fifo_peak_occupancy, word_level_after);
+            statistics_.response_fifo_full_cycles +=
+                response_level_after == response_fifo_depth;
+            statistics_.word_fifo_full_cycles +=
+                word_level_after == word_fifo_depth;
+        }
+    }
+
     std::size_t pending_payload_fetch_count() const noexcept
     {
         return outstanding_payload_fetches_;
@@ -1764,6 +2140,9 @@ private:
 
     void begin_fetch_if_possible()
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            throw std::logic_error(
+                "legacy Fetch request path called for MEM decoder");
         // RTL accepts the fetch descriptor one cycle after PRIME and only
         // exposes its first local-iMEM request on the following cycle.  Keep
         // this boundary independent from control-word parsing.
@@ -1797,6 +2176,9 @@ private:
 
     void age_pending_fetches()
     {
+        if constexpr (std::is_same_v<FuncInstruction, MemInstruction>)
+            throw std::logic_error(
+                "legacy Fetch pipeline called for MEM decoder");
         for (auto& fetch : pending_fetches_)
             if (fetch.remaining_cycles != 0)
                 --fetch.remaining_cycles;
@@ -2018,6 +2400,21 @@ private:
             if (!plan.extended) plan.shape = static_cast<Shape>(bit_field(*header,1,2));
             plan.payload_bits = native_instruction_bits() + (plan.extended
                 ? kExtendedTemplatePayloadBits : compact_schedule_bits(plan.shape));
+        } else if constexpr (canonical_mxm_command) {
+            const auto native_bits = native_instruction_bits();
+            header_bits = 1 + native_bits + (plan.extended ? 0 : 4);
+            const auto header = peek_bits(header_bits);
+            if (!header.has_value()) return;
+            plan.native = bit_field(*header, 1, native_bits);
+            if (plan.extended) {
+                plan.payload_bits = kExtendedTemplatePayloadBits;
+            } else {
+                plan.shape = static_cast<Shape>(
+                    bit_field(*header, 1 + native_bits, 2));
+                plan.target = static_cast<std::uint8_t>(
+                    bit_field(*header, 1 + native_bits + 2, 2));
+                plan.payload_bits = compact_schedule_bits(plan.shape);
+            }
         } else {
             const auto opcode_header = peek_bits(3);
             if (!opcode_header.has_value()) return;
@@ -2200,6 +2597,21 @@ private:
                                  MxmDequantInstruction>) {
             return isa::decode_mxm_dequant_instruction(
                 static_cast<std::uint16_t>(native));
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmLoadCommand>) {
+            return isa::decode_mxm_load_command(native);
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmComputeCommand>) {
+            return isa::decode_mxm_compute_command(native);
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmDequantCommand>) {
+            return isa::decode_mxm_dequant_command(native);
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmParamLoadCommand>) {
+            return isa::decode_mxm_param_load_command(native);
+        } else if constexpr (std::is_same_v<FuncInstruction,
+                                 MxmBackendCommand>) {
+            return isa::decode_mxm_backend_command(native);
         } else {
             throw std::logic_error(
                 "Macro v1 native decode is unsupported for this instruction type");
@@ -2495,7 +2907,8 @@ private:
             ignore_timing ? 0 : current_cycle};
         set_operand(result.instruction, static_cast<std::size_t>(
             payload.read(layout.next_operand,
-                layout.summary.next_operand_bits)));
+                layout.summary.next_operand_bits)),
+            result.schedule.induction_target);
         validate_context(result);
 
         ++statistics_.decoded_contexts;
@@ -2555,7 +2968,8 @@ private:
         } else return decode_native(payload.read(layout.instruction,layout.summary.instruction_bits));
     }
 
-    void set_operand(FuncInstruction& instruction, std::size_t operand) const
+    void set_operand(FuncInstruction& instruction, std::size_t operand,
+        IcuInductionTarget target) const
     {
         if constexpr (std::is_same_v<FuncInstruction, MemInstruction>) {
             instruction.address = operand;
@@ -2569,6 +2983,49 @@ private:
                 instruction.weight_column = operand;
             else if (kind_ == IcuMacroQueueKind::MxmCompute)
                 instruction.accumulator_address = operand;
+        } else if constexpr (canonical_mxm_command) {
+            if (target == IcuInductionTarget::None) {
+                if (operand != 0)
+                    throw StaticScheduleError(
+                        "MXM Macro has an operand without an induction target");
+                return;
+            }
+            if constexpr (std::is_same_v<FuncInstruction, MxmLoadCommand>) {
+                if (target != IcuInductionTarget::MxmOperand0 || operand > 1)
+                    throw StaticScheduleError("invalid MXM Load Macro operand");
+                instruction.weight_buffer = operand != 0;
+            } else if constexpr (std::is_same_v<FuncInstruction,
+                                     MxmComputeCommand>) {
+                if (target == IcuInductionTarget::MxmOperand0) {
+                    if (operand > 30)
+                        throw StaticScheduleError(
+                            "invalid MXM Compute activation-stream operand");
+                    instruction.activation_stream =
+                        static_cast<std::uint8_t>(operand);
+                } else if (target == IcuInductionTarget::MxmOperand1) {
+                    if (operand > 1)
+                        throw StaticScheduleError(
+                            "invalid MXM Compute buffer operand");
+                    instruction.weight_buffer = operand != 0;
+                } else {
+                    throw StaticScheduleError(
+                        "invalid MXM Compute Macro induction target");
+                }
+            } else if constexpr (std::is_same_v<FuncInstruction,
+                                     MxmDequantCommand>
+                || std::is_same_v<FuncInstruction, MxmParamLoadCommand>) {
+                if (target != IcuInductionTarget::MxmOperand0 || operand > 1)
+                    throw StaticScheduleError(
+                        "invalid MXM parameter-buffer Macro operand");
+                instruction.param_buffer = operand != 0;
+            } else if constexpr (std::is_same_v<FuncInstruction,
+                                     MxmBackendCommand>) {
+                if (target != IcuInductionTarget::MxmOperand0
+                    || operand >= 1024)
+                    throw StaticScheduleError(
+                        "invalid MXM Backend Macro operand");
+                instruction.address = static_cast<std::uint16_t>(operand);
+            }
         } else {
             if (operand != 0)
                 throw StaticScheduleError(
@@ -2594,6 +3051,22 @@ private:
                 != IcuInductionTarget::MemAddress)
                 throw StaticScheduleError(
                     "decoded MEM Macro has an invalid induction target");
+        } else if constexpr (canonical_mxm_command) {
+            static_cast<void>(isa::encode_mxm_command(context.instruction));
+            const bool none = schedule.induction_target
+                == IcuInductionTarget::None;
+            bool target_valid = none
+                || schedule.induction_target == IcuInductionTarget::MxmOperand0;
+            if constexpr (std::is_same_v<FuncInstruction,
+                              MxmComputeCommand>)
+                target_valid = target_valid
+                    || schedule.induction_target
+                        == IcuInductionTarget::MxmOperand1;
+            if (!target_valid
+                || (none && (schedule.inner_stride != 0
+                    || schedule.outer_stride != 0)))
+                throw StaticScheduleError(
+                    "decoded MXM Macro has an invalid induction schedule");
         } else if constexpr (std::is_same_v<FuncInstruction,
                                  MxmControlInstruction>) {
             if (kind_ == IcuMacroQueueKind::MxmLoad) {
@@ -2640,6 +3113,16 @@ private:
 
     IcuMacroQueueKind kind_;
     std::shared_ptr<const std::vector<RawWord>> image_;
+    // MEM and MXM own canonical Local-iMEM/Fetch/Word-FIFO state.  The
+    // immutable image is shared; Current/Next copies clone only finite
+    // transport state. Generic FU decoders leave this optional disengaged and
+    // retain the legacy fetch state below until their RTL frontends migrate.
+    std::optional<MemFetchFrontend> mem_fetch_frontend_{};
+    bool mem_fetch_complete_{false};
+    bool mem_fetch_cycle_open_{false};
+    bool mem_fetch_advanced_this_cycle_{false};
+    std::optional<MxmFetchFrontend> mxm_fetch_frontend_{};
+    bool mxm_fetch_complete_{false};
     std::deque<PendingFetch> pending_fetches_{};
     std::deque<FetchedWord> response_fifo_{};
     std::deque<FetchedWord> word_fifo_{};

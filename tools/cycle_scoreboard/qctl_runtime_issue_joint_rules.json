@@ -1,0 +1,41 @@
+{
+  "schema": "ftlpu.qctl.runtime_issue_joint.normalized.v1",
+  "test_name": "qctl_runtime_issue_joint_cycle_scoreboard",
+  "title": "QCTL Runtime and MEM/MXM Issue Joint Cycle Scoreboard",
+  "required_fields": [
+    "schema", "run_id", "case_id", "source", "global_cycle",
+    "logical_cycle", "transport_tick", "phase", "sample_point",
+    "event_sequence", "module", "instance", "signal", "width",
+    "value", "event_type", "mapping_status", "source_ref"
+  ],
+  "allowed_event_types": ["SIGNAL_SAMPLE"],
+  "allowed_mapping_statuses": ["DIRECT", "NA"],
+  "comparable_mapping_statuses": ["DIRECT"],
+  "excluded_mapping_statuses": ["NA"],
+  "architecture": {
+    "events": [],
+    "phase": "HIGH",
+    "sample_point": "POST_POSEDGE",
+    "canonical_module": "qctl_runtime_issue"
+  },
+  "signal_rules": [
+    {
+      "name": "qctl_runtime_and_real_issue",
+      "category": "CANONICAL",
+      "signals": [
+        "logical_cycle", "head_valid", "head_cycle", "opcode", "operand",
+        "scheduler_ce", "sync_arrive", "sync_release", "notify_valid",
+        "notify_ready", "event_valid", "event_wait", "event_consume",
+        "mem_packet_valid", "mem_packet_ordinal", "mem_packet_retired",
+        "issue_valid", "issue_ready", "issue_fire", "issue_instruction",
+        "issue_cycle", "event_in_valid", "event_in_tag", "fault"
+      ],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "source_views": {
+        "CMODEL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"},
+        "RTL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"}
+      }
+    }
+  ]
+}

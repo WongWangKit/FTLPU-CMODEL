@@ -1,0 +1,35 @@
+{
+  "schema": "ftlpu.qctl.phase2b.normalized.v1",
+  "test_name": "qctl_phase2b_stimulus_diagnostic_scoreboard",
+  "title": "QCTL Phase 2-B Stimulus Diagnostic Scoreboard",
+  "required_fields": [
+    "schema", "run_id", "case_id", "source", "global_cycle",
+    "logical_cycle", "transport_tick", "phase", "sample_point",
+    "event_sequence", "module", "instance", "signal", "width",
+    "value", "event_type", "mapping_status", "source_ref"
+  ],
+  "allowed_event_types": ["SIGNAL_SAMPLE"],
+  "allowed_mapping_statuses": ["DIRECT", "NA", "CONFLICT"],
+  "comparable_mapping_statuses": ["DIRECT"],
+  "excluded_mapping_statuses": ["NA"],
+  "architecture": {
+    "events": [],
+    "phase": "POST_COMB",
+    "sample_point": "POST_COMB",
+    "canonical_module": "qctl_architecture",
+    "canonical_instance": "qctl_architecture"
+  },
+  "signal_rules": [
+    {
+      "name": "qctl_stimulus_diagnostics",
+      "category": "DIAGNOSTIC",
+      "signals": ["endpoint.program_record", "endpoint.opcode"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "source_views": {
+        "CMODEL": {"phase": "POST_COMB", "sample_point": "POST_COMB"},
+        "RTL": {"phase": "POST_COMB", "sample_point": "POST_COMB"}
+      }
+    }
+  ]
+}

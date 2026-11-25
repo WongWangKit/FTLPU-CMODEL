@@ -4,6 +4,7 @@
 #include "ftlpu/icu/instruction.hpp"
 #include "ftlpu/mem/slice.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
+#include "ftlpu/mxm/instruction.hpp"
 #include "ftlpu/sxm/instruction.hpp"
 #include "ftlpu/vxm/compact_instruction.hpp"
 
@@ -559,6 +560,10 @@ inline MxmControlInstruction decode_mxm_instruction(EncodedMxmInstruction word)
 inline EncodedMxmDequantInstruction encode_mxm_dequant_instruction(
     MxmDequantInstruction instruction)
 {
+    if (instruction.zero_point != 0) {
+        throw std::logic_error(
+            "MXM Dequant Zero Point is supplied by the RTL parameter stream, not the 16-bit Dequant ISA");
+    }
     return instruction.scale_bf16;
 }
 

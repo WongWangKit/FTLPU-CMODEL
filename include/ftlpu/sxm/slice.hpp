@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ftlpu/core/instruction_codec.hpp"
 #include "ftlpu/core/stream_port.hpp"
 #include "ftlpu/core/timing.hpp"
 #include "ftlpu/sxm/distributor.hpp"
@@ -86,6 +87,30 @@ public:
     static constexpr std::size_t kTransposeBytePlanes = 2;
     using UnitGroup = SxmUnitGroup<std::uint8_t>;
 
+    struct BoundarySample {
+        std::size_t tile{0};
+        StreamId stream{StreamId::East(0)};
+    };
+
+    struct HardwareInterfaceView {
+        bool run_i{true};
+        bool transpose_issue_valid_i{false};
+        isa::EncodedSxmInstruction transpose_issue_instruction_i{};
+        bool permute_issue_valid_i{false};
+        isa::EncodedSxmInstruction permute_issue_instruction_i{};
+        std::vector<BoundarySample> east_inner_valid_i{};
+        std::vector<StreamPayloadTileSegment> east_inner_data_i{};
+        std::vector<BoundarySample> east_outer_valid_o{};
+        std::vector<StreamPayloadTileSegment> east_outer_data_o{};
+        std::vector<BoundarySample> west_outer_valid_i{};
+        std::vector<StreamPayloadTileSegment> west_outer_data_i{};
+        std::vector<BoundarySample> west_inner_valid_o{};
+        std::vector<StreamPayloadTileSegment> west_inner_data_o{};
+        bool fault_o{false};
+        bool conflict_o{false};
+        bool busy_o{false};
+    };
+
 private:
     struct TransposeBank {
         using Block = std::array<
@@ -146,6 +171,7 @@ public:
         low_started_ = false;
         low_complete_ = false;
         cycle_events_.clear();
+        hardware_interface_view_ = {};
     }
 
     std::size_t cycle() const noexcept
@@ -198,6 +224,11 @@ public:
         return ports_;
     }
 
+    const HardwareInterfaceView& hardware_interface_view() const noexcept
+    {
+        return hardware_interface_view_;
+    }
+
     const std::optional<SxmInstruction>& transpose_instruction_at(std::size_t tile) const
     {
         if (tile >= hw::kTileRows) {
@@ -227,6 +258,30 @@ public:
         ports_.validate_for(fabric);
         if (!fabric.cycle_open()) {
             throw std::logic_error("SxmSlice::evaluate requires an open SR cycle");
+        }
+
+        hardware_interface_view_ = {};
+        hardware_interface_view_.run_i = true;
+        for (const auto& pending : pending_issues_) {
+            // Some CModel-only selectors (for example broadcast input row)
+            // deliberately have no current RTL packet representation. They
+            // keep executing in the CModel but are NOT_APPLICABLE to this
+            // canonical interface view and must not perturb model behavior.
+            try {
+                if (pending.opcode == SxmOpcode::Transpose) {
+                    hardware_interface_view_.transpose_issue_instruction_i =
+                        isa::encode_sxm_instruction(pending);
+                    hardware_interface_view_.transpose_issue_valid_i = true;
+                } else if (pending.opcode == SxmOpcode::Permute) {
+                    hardware_interface_view_.permute_issue_instruction_i =
+                        isa::encode_sxm_instruction(pending);
+                    hardware_interface_view_.permute_issue_valid_i = true;
+                }
+            } catch (const std::out_of_range&) {
+                // The issue is retained in pending_issues_ and validated by
+                // the normal CModel path below. Only the RTL interface sample
+                // is omitted when no legal 416-bit encoding exists.
+            }
         }
 
         next_ = std::make_unique<State>(*current_);
@@ -273,6 +328,16 @@ public:
         state.permute_instruction.reset();
         state.units.complete_cycle();
         advance_transpose_instructions();
+        hardware_interface_view_.busy_o = !pending_issues_.empty()
+            || next_state().units.issued_count() != 0
+            || next_state().permute_instruction.has_value()
+            || !next_state().fanout_outputs.empty();
+        for (const auto& row : next_state().transpose_instruction_rows)
+            hardware_interface_view_.busy_o =
+                hardware_interface_view_.busy_o || row.has_value();
+        for (const auto rows : next_state().transpose_bank.input_row_mask)
+            hardware_interface_view_.busy_o =
+                hardware_interface_view_.busy_o || rows != 0;
         low_complete_ = true;
     }
 
@@ -522,6 +587,7 @@ private:
                             instruction.input_row == SxmInstruction::kAllInputRows
                                 ? row * kTransposeBytePlanes + plane : plane].stream);
                     const auto input = fabric.segment(input_column, tile, source);
+                    record_boundary_input(tile, source, payload(input));
                     fabric.consume_segment(
                         input_column, tile, source, "SXM parallel FP16 Transpose");
                     for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
@@ -559,6 +625,7 @@ private:
         const char* producer)
     {
         const auto destination = StreamId::from_packed(output_stream.stream);
+        record_boundary_output(tile, destination, segment);
         fabric.stage_payload_segment(
             ports_.output_column(destination.direction()),
             tile,
@@ -714,7 +781,7 @@ private:
         return StreamId::from_packed(stream.stream);
     }
 
-    StreamState read_and_consume_inputs(StreamRegisterFabric& fabric, std::size_t tile) const
+    StreamState read_and_consume_inputs(StreamRegisterFabric& fabric, std::size_t tile)
     {
         StreamState inputs{};
         std::array<bool, hw::kStreams> required{};
@@ -752,6 +819,7 @@ private:
                 id.direction(),
                 "SXM");
             const auto segment = input.consume_segment(tile, id.index());
+            record_boundary_input(tile, id, payload(segment));
             for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                 inputs[packed][lane] = UnitGroup::Word {
                     segment[lane].data,
@@ -765,7 +833,7 @@ private:
     void write_outputs(
         StreamRegisterFabric& fabric,
         std::size_t tile,
-        const Evaluation& result) const
+        const Evaluation& result)
     {
         for (std::size_t packed = 0; packed < result.produced.size(); ++packed) {
             if (!result.produced[packed]) {
@@ -785,8 +853,47 @@ private:
                 ports_.output_column(id.direction()),
                 id.direction(),
                 "SXM");
+            record_boundary_output(tile, id, payload(segment));
             output.write_segment(tile, id.index(), segment);
         }
+    }
+
+    static StreamPayloadTileSegment payload(const StreamTileSegment& segment)
+    {
+        StreamPayloadTileSegment result{};
+        for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane)
+            result[lane] = segment[lane].data;
+        return result;
+    }
+
+    void record_boundary_input(
+        std::size_t tile,
+        StreamId stream,
+        const StreamPayloadTileSegment& data)
+    {
+        auto& valid = stream.direction() == StreamDirection::East
+            ? hardware_interface_view_.east_inner_valid_i
+            : hardware_interface_view_.west_outer_valid_i;
+        auto& payloads = stream.direction() == StreamDirection::East
+            ? hardware_interface_view_.east_inner_data_i
+            : hardware_interface_view_.west_outer_data_i;
+        valid.push_back(BoundarySample {tile, stream});
+        payloads.push_back(data);
+    }
+
+    void record_boundary_output(
+        std::size_t tile,
+        StreamId stream,
+        const StreamPayloadTileSegment& data)
+    {
+        auto& valid = stream.direction() == StreamDirection::East
+            ? hardware_interface_view_.east_outer_valid_o
+            : hardware_interface_view_.west_inner_valid_o;
+        auto& payloads = stream.direction() == StreamDirection::East
+            ? hardware_interface_view_.east_outer_data_o
+            : hardware_interface_view_.west_inner_data_o;
+        valid.push_back(BoundarySample {tile, stream});
+        payloads.push_back(data);
     }
 
     SxmStreamPortMap ports_;
@@ -799,6 +906,7 @@ private:
     bool low_complete_{};
     std::vector<std::string> cycle_events_{};
     bool trace_enabled_{true};
+    HardwareInterfaceView hardware_interface_view_{};
 
     State& next_state()
     {

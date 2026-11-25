@@ -1,8 +1,10 @@
 #include "ftlpu/core/bf16.hpp"
+#include "ftlpu/mxm/bf16_arithmetic.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -27,7 +29,9 @@ constexpr std::size_t kComputeCycle = 30;
 
 std::size_t east_read_to_mxm_latency(std::size_t slice)
 {
-    return ftlpu::hw::kMemGroups
+    // RegisteredR1 is the production default: one registered MEM-read cycle
+    // plus the forward route from the slice boundary to sxm_mxm.
+    return 1 + ftlpu::hw::kMemGroups
         + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 1
         - slice / ftlpu::hw::kMemSlicesPerGroup;
 }
@@ -271,12 +275,23 @@ void initialize_quantized_weights(ftlpu::TspSliceSystem& system)
 float reference(std::size_t column)
 {
     float sum = 0.0f;
-    for (std::size_t row = 0; row < ftlpu::hw::kMxmRows; ++row) {
-        const auto activation = ftlpu::Bf16::from_float(
-            activation_value(row)).to_float();
-        const auto weight = ftlpu::Bf16::from_float(
-            weight_value(row, column)).to_float();
-        sum += activation * weight;
+    for (std::size_t tile = 0; tile < ftlpu::hw::kTileRows; ++tile) {
+        auto activations = std::array<
+            std::uint16_t, ftlpu::hw::kLanesPerTile> {};
+        auto weights = std::array<
+            std::uint16_t, ftlpu::hw::kLanesPerTile> {};
+        for (std::size_t lane = 0;
+             lane < ftlpu::hw::kLanesPerTile;
+             ++lane) {
+            const auto row = tile * ftlpu::hw::kLanesPerTile + lane;
+            activations[lane] = ftlpu::Bf16::from_float(
+                activation_value(row)).bits();
+            weights[lane] = ftlpu::Bf16::from_float(
+                weight_value(row, column)).bits();
+        }
+        sum = ftlpu::mxm_numeric::fp32_add(
+            sum, ftlpu::mxm_numeric::bf16_dot(
+                activations, weights).value());
     }
     return sum;
 }
@@ -342,9 +357,11 @@ int main()
         }
     }
 
-    auto system = ftlpu::TspSliceSystem {};
-    initialize_inputs(system);
-    auto schedule = Schedule(system.icu());
+    // TspSliceSystem owns the complete local SRAM/FU state and is larger than
+    // the default Windows thread stack. Keep both subsystem instances on heap.
+    auto system = std::make_unique<ftlpu::TspSliceSystem>();
+    initialize_inputs(*system);
+    auto schedule = Schedule(system->icu());
 
     for (std::size_t block = 0;
          block < ftlpu::hw::kMxmSupercellsPerPlane;
@@ -391,16 +408,17 @@ int main()
     for (std::size_t cycle = 0;
          cycle < schedule.end_cycle() + 16;
          ++cycle) {
-        system.tick({});
+        system->tick({});
     }
 
     for (std::size_t column = 0;
          column < ftlpu::hw::kMxmColumns;
          ++column) {
-        const auto actual = system.mxm_unit(0).accumulator().value(
+        const auto actual = system->mxm_unit(0).accumulator().value(
             kAccumulatorAddress, column);
         const auto expected = reference(column);
-        if (std::fabs(actual - expected) > 1.0e-5f) {
+        if (std::bit_cast<std::uint32_t>(actual)
+            != std::bit_cast<std::uint32_t>(expected)) {
             std::cerr << "BF16 MXM mismatch at column=" << column
                       << " actual=" << actual
                       << " expected=" << expected << '\n';

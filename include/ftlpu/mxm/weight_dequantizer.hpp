@@ -3,6 +3,7 @@
 #include "ftlpu/core/bf16.hpp"
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/mxm/array.hpp"
+#include "ftlpu/mxm/bf16_arithmetic.hpp"
 #include "ftlpu/mxm/supercell.hpp"
 
 #include <array>
@@ -22,16 +23,25 @@ enum class MxmWeightInputMode {
 
 struct MxmDequantInstruction {
     std::uint16_t scale_bf16{Bf16::from_float(1.0f).bits()};
+    std::int8_t zero_point{0};
 
     static MxmDequantInstruction Scale(float scale)
     {
-        return MxmDequantInstruction {Bf16::from_float(scale).bits()};
+        return MxmDequantInstruction {Bf16::from_float(scale).bits(), 0};
+    }
+
+    static MxmDequantInstruction ScaleZeroPoint(
+        float scale, std::int8_t zero_point)
+    {
+        return MxmDequantInstruction {
+            Bf16::from_float(scale).bits(), zero_point};
     }
 
     static constexpr MxmDequantInstruction ScaleBits(
-        std::uint16_t scale_bf16) noexcept
+        std::uint16_t scale_bf16,
+        std::int8_t zero_point = 0) noexcept
     {
-        return MxmDequantInstruction {scale_bf16};
+        return MxmDequantInstruction {scale_bf16, zero_point};
     }
 
     float scale() const noexcept
@@ -81,7 +91,7 @@ public:
             convert_column(
                 input,
                 inner_column,
-                input_mode, instruction.scale_bf16,
+                input_mode, instruction,
                 output);
             return output;
         }
@@ -94,7 +104,7 @@ public:
             convert_column(
                 input,
                 column,
-                input_mode, instruction.scale_bf16,
+                input_mode, instruction,
                 output);
         }
         return output;
@@ -123,10 +133,11 @@ private:
     static void convert_column(
         const MxmWeightInput& input,
         std::size_t column,
-        MxmWeightInputMode mode, std::uint16_t dequant_scale_bf16,
+        MxmWeightInputMode mode,
+        MxmDequantInstruction instruction,
         Output& output)
     {
-        const auto scale = Bf16::from_bits(dequant_scale_bf16).to_float();
+        const auto scale = Bf16::from_bits(instruction.scale_bf16).to_float();
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             const auto& word = input.values[lane][column];
             if (!word.has_value()) {
@@ -138,11 +149,14 @@ private:
                     "MXM INT8 IW weight input contains more than one byte");
             }
             const auto byte = static_cast<std::uint8_t>(word->data);
-            const float quantized = mode == MxmWeightInputMode::Fp8DequantBf16
-                ? decode_e4m3fn(byte) : static_cast<float>(static_cast<std::int8_t>(byte));
+            const auto bits = mode == MxmWeightInputMode::Int8DequantBf16
+                ? mxm_numeric::int8_dequant_bf16(
+                    static_cast<std::int8_t>(byte),
+                    instruction.zero_point,
+                    instruction.scale_bf16)
+                : Bf16::from_float(decode_e4m3fn(byte) * scale).bits();
             output[lane][column] = MxmArray::Supercell::InputWord {
-                Bf16::from_float(
-                    static_cast<float>(quantized) * scale).bits(),
+                bits,
                 word->last,
             };
         }

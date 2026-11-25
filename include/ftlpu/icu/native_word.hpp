@@ -6,5 +6,7 @@ struct EncodedMemIcuWord { std::array<std::uint32_t,3> lanes{}; };
 struct EncodedMxmLoadIcuWord { std::array<std::uint32_t,4> lanes{}; };
 struct EncodedMxmDequantIcuWord { std::array<std::uint32_t,4> lanes{}; };
 struct EncodedMxmComputeIcuWord { std::array<std::uint32_t,4> lanes{}; };
+struct EncodedMxmParamLoadIcuWord { std::array<std::uint32_t,4> lanes{}; };
+struct EncodedMxmBackendIcuWord { std::array<std::uint32_t,4> lanes{}; };
 struct EncodedSxmIcuWord { std::array<std::uint32_t,3> lanes{}; };
 } // namespace ftlpu::isa

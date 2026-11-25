@@ -1,0 +1,105 @@
+{
+  "schema": "ftlpu.mxm.datapath.c1.trace.v1",
+  "test_name": "mxm_datapath_c1_cycle_scoreboard",
+  "title": "MXM Datapath C1 Cycle Scoreboard",
+  "required_fields": [
+    "schema", "run_id", "case_id", "source", "global_cycle",
+    "logical_cycle", "transport_tick", "phase", "sample_point",
+    "event_sequence", "module", "instance", "signal", "width", "value",
+    "event_type", "mapping_status", "source_ref"
+  ],
+  "allowed_event_types": ["SIGNAL_SAMPLE", "STATE_SAMPLE", "ARCH_EVENT"],
+  "allowed_mapping_statuses": [
+    "DIRECT", "DERIVED", "SEMANTIC", "PARTIAL", "UNMAPPED", "NA", "CONFLICT"
+  ],
+  "comparable_mapping_statuses": ["DIRECT", "DERIVED", "SEMANTIC", "PARTIAL"],
+  "excluded_mapping_statuses": ["UNMAPPED", "NA"],
+  "architecture": {
+    "events": [],
+    "phase": "LOW",
+    "sample_point": "PRE_POSEDGE",
+    "canonical_module": "architecture",
+    "canonical_instance": "architecture"
+  },
+  "signal_rules": [
+    {
+      "name": "dot_inputs_pre_posedge",
+      "signals": ["rst_ni", "valid_i", "activation_i", "weight_i", "tag_i"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "canonical_module": "lpu_mxm_bf16_dot_csa",
+      "canonical_instance": "dot0",
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "dot_pipeline_post_posedge",
+      "signals": [
+        "valid_q", "tag_q_0", "tag_q_1", "tag_q_2", "tag_q_3",
+        "tag_q_4", "tag_q_5", "tag_q_6", "tag_q_7", "tag_q_8",
+        "valid_o", "result_o", "tag_o", "alignment_lost_o"
+      ],
+      "event_types": ["SIGNAL_SAMPLE", "STATE_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "canonical_module": "lpu_mxm_bf16_dot_csa",
+      "canonical_instance": "dot0",
+      "source_views": {
+        "CMODEL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"},
+        "RTL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"}
+      }
+    },
+    {
+      "name": "fp32_add_inputs_pre_posedge",
+      "signals": ["rst_ni", "valid_i", "lhs_i", "rhs_i", "tag_i"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "canonical_module": "lpu_mxm_fp32_add_pipe",
+      "canonical_instance": "add0",
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "fp32_add_pipeline_post_posedge",
+      "signals": [
+        "a1_valid_q", "a2_valid_q", "a1_tag_q", "a2_tag_q",
+        "valid_o", "result_o", "tag_o"
+      ],
+      "event_types": ["SIGNAL_SAMPLE", "STATE_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "canonical_module": "lpu_mxm_fp32_add_pipe",
+      "canonical_instance": "add0",
+      "source_views": {
+        "CMODEL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"},
+        "RTL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"}
+      }
+    },
+    {
+      "name": "output_pipe_inputs_pre_posedge",
+      "signals": ["rst_ni", "valid_i", "bf16_i", "data_i", "meta_i"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "canonical_module": "lpu_mxm_output_pipe",
+      "canonical_instance": "output0",
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "output_pipe_post_posedge",
+      "signals": ["valid_o", "bf16_o", "data_o", "meta_o"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "canonical_module": "lpu_mxm_output_pipe",
+      "canonical_instance": "output0",
+      "source_views": {
+        "CMODEL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"},
+        "RTL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"}
+      }
+    }
+  ]
+}

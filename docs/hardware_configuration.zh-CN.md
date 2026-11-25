@@ -59,8 +59,8 @@ ICU 参数也由同一 JSON 生成，CModel 的实际队列模板与 SOFTWARE �
 | 公共字段 | 默认值 | 含义 |
 |---|---:|---|
 | `mem_macro_context_bits` / `mxm_macro_context_bits` | 256 | packed-v1 活跃 Context 位宽 |
-| `fetch_latency_cycles` | 1 | i-MEM 读响应延迟 |
-| `macro_imem_request_ii_cycles` | 1 | Macro 取指请求间隔 |
+| `fetch_latency_cycles` | 2 | i-MEM 同步读路径的寄存级数；MEM 当前固定为 request stage + response stage |
+| `macro_imem_request_ii_cycles` | 1 | 相邻 Macro i-MEM 读请求可被接受的最小间隔；与读响应延迟独立 |
 | `barrier_latency_cycles` | 35 | 原生同步通知传播延迟 |
 | `macro_reservoir_words` | 3 | 保留的 i-MEM 字数 |
 | `macro_decode_window_bits` | 64 | 解码窗口位宽 |
@@ -72,6 +72,12 @@ ICU 参数也由同一 JSON 生成，CModel 的实际队列模板与 SOFTWARE �
 | `queue_control_storage_version` | 1 | 共享池模式；0 为独立 RAM 兼容模式 |
 | `queue_control_pool_capacity` / `queue_control_pool_read_ii` | 512 / 1 | 全片共享池容量 / 请求间隔 |
 | `common_barrier_capacity` | 1024 | 旧 BARR 的全片表容量 |
+
+`fetch_latency_cycles` 不表示 FU 指令的发射间隔。i-MEM 的请求启动间隔由
+`macro_imem_request_ii_cycles` 控制，而 MEM 指令的实际发射周期由 Macro
+schedule、下游 ready 及调度状态共同决定。当前 MEM canonical frontend 对齐
+RTL 的两级同步读路径；从 request fire 到 Trace 中 response valid 的可见周期差
+还包含 response FIFO 的入队边界，不能据此把读路径级数解释为 3。
 
 修改物理配置后，两工程须使用同一文件重新配置和构建（CMake 参数 `-DFTLPU_HARDWARE_CONFIG=<JSON绝对路径>`），再以该文件作为 SOFTWARE 的 `--target-config` 重新编译程序。配置文件变化会触发 CMake 重新生成头文件；不必再修改 `hardware_params.hpp` 或队列模板。
 

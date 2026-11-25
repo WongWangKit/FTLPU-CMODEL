@@ -13,6 +13,8 @@ enum class IcuLocationKind : std::uint8_t {
     MxmLoad,
     MxmCompute,
     MxmDequant,
+    MxmParamLoad,
+    MxmBackend,
     Sxm,
     C2cTx,
     C2cDma,
@@ -66,6 +68,16 @@ struct IcuLocation {
     static constexpr IcuLocation MxmDequant(std::size_t mxm) noexcept
     {
         return {IcuLocationKind::MxmDequant, mxm, 0};
+    }
+
+    static constexpr IcuLocation MxmParamLoad(std::size_t mxm) noexcept
+    {
+        return {IcuLocationKind::MxmParamLoad, mxm, 0};
+    }
+
+    static constexpr IcuLocation MxmBackend(std::size_t mxm) noexcept
+    {
+        return {IcuLocationKind::MxmBackend, mxm, 0};
     }
 
     static constexpr IcuLocation Sxm(

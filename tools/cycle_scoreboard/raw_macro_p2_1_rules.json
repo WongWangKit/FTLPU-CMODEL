@@ -1,0 +1,211 @@
+{
+  "schema": "ftlpu.raw_macro.p2_1.trace.v1",
+  "test_name": "raw_macro_p2_1_fetch_cycle_scoreboard",
+  "title": "RAW Macro P2.1 Local-iMEM / Fetch Cycle Scoreboard",
+  "required_fields": [
+    "schema", "run_id", "case_id", "source", "global_cycle",
+    "logical_cycle", "transport_tick", "phase", "sample_point",
+    "event_sequence", "module", "instance", "signal", "width", "value",
+    "event_type", "mapping_status", "source_ref"
+  ],
+  "allowed_event_types": ["SIGNAL_SAMPLE", "STATE_SAMPLE", "ARCH_EVENT"],
+  "allowed_mapping_statuses": [
+    "DIRECT", "DERIVED", "SEMANTIC", "PARTIAL", "UNMAPPED",
+    "UNOBSERVABLE", "NA", "CONFLICT"
+  ],
+  "comparable_mapping_statuses": ["DIRECT", "DERIVED", "SEMANTIC", "PARTIAL"],
+  "excluded_mapping_statuses": ["UNMAPPED", "UNOBSERVABLE", "NA"],
+  "architecture": {
+    "events": [
+      "CASE_START", "START_FIRE", "REQUEST_FIRE", "RESPONSE_FIRE",
+      "WORD_FIRE", "DECODER_WORD_FIRE", "FAULT", "CASE_END"
+    ],
+    "phase": "LOW",
+    "sample_point": "PRE_POSEDGE",
+    "canonical_module": "architecture",
+    "canonical_instance": "mem_queue_0"
+  },
+  "signal_rules": [
+    {
+      "name": "fetch_descriptor_control",
+      "category": "CANONICAL",
+      "signals": [
+        "start_valid_i", "start_ready_o", "start_fire"
+      ],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "canonical_module": "lpu_mem_imem_fetch",
+      "canonical_instance": "mem_queue_0",
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "fetch_descriptor_payload_when_valid",
+      "category": "CANONICAL",
+      "signals": ["start_base_address_i", "start_word_count_i"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "canonical_module": "lpu_mem_imem_fetch",
+      "canonical_instance": "mem_queue_0",
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      },
+      "gate": {"signal": "start_valid_i", "equals": "1"}
+    },
+    {
+      "name": "imem_request_boundary",
+      "category": "CANONICAL",
+      "signals": [
+        "imem_read_req_valid_o", "imem_read_req_ready_i",
+        "imem_read_req_address_o", "imem_read_req_last_o",
+        "imem_read_req_fire"
+      ],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "canonical_module": "lpu_mem_imem_fetch",
+      "canonical_instance": "mem_queue_0",
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "imem_response_control",
+      "category": "CANONICAL",
+      "signals": [
+        "imem_read_rsp_valid_i", "imem_read_rsp_ready_o",
+        "imem_read_rsp_fire"
+      ],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "canonical_module": "lpu_mem_imem_fetch",
+      "canonical_instance": "mem_queue_0",
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "imem_response_payload_when_valid",
+      "category": "CANONICAL",
+      "signals": ["imem_read_rsp_data_i", "imem_read_rsp_last_i"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "canonical_module": "lpu_mem_imem_fetch",
+      "canonical_instance": "mem_queue_0",
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      },
+      "gate": {"signal": "imem_read_rsp_valid_i", "equals": "1"}
+    },
+    {
+      "name": "fetch_word_control",
+      "category": "CANONICAL",
+      "signals": ["word_valid_o", "word_ready_i", "word_fire"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "canonical_module": "lpu_mem_imem_fetch",
+      "canonical_instance": "mem_queue_0",
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "fetch_word_payload_when_valid",
+      "category": "CANONICAL",
+      "signals": ["word_o", "word_last_o"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "canonical_module": "lpu_mem_imem_fetch",
+      "canonical_instance": "mem_queue_0",
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      },
+      "gate": {"signal": "word_valid_o", "equals": "1"}
+    },
+    {
+      "name": "decoder_word_control",
+      "category": "CANONICAL",
+      "signals": ["word_valid_i", "word_ready_o", "decoder_word_fire"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "canonical_module": "lpu_mem_macro_decoder",
+      "canonical_instance": "mem_queue_0",
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "decoder_word_payload_when_valid",
+      "category": "CANONICAL",
+      "signals": ["word_i", "word_last_i"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "canonical_module": "lpu_mem_macro_decoder",
+      "canonical_instance": "mem_queue_0",
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      },
+      "gate": {"signal": "word_valid_i", "equals": "1"}
+    },
+    {
+      "name": "local_imem_post_state",
+      "category": "DIAGNOSTIC",
+      "signals": [
+        "request_stage_valid_q", "response_stage_valid_q", "outstanding_q",
+        "response_fifo_level"
+      ],
+      "event_types": ["STATE_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "canonical_module": "lpu_mem_local_imem",
+      "canonical_instance": "mem_queue_0",
+      "canonical_phase": "POSEDGE",
+      "canonical_sample_point": "POST_COMB",
+      "source_views": {
+        "CMODEL": {"phase": "POSEDGE", "sample_point": "POST_COMB"},
+        "RTL": {"phase": "POSEDGE", "sample_point": "POST_COMB"}
+      }
+    },
+    {
+      "name": "word_fifo_post_state",
+      "category": "DIAGNOSTIC",
+      "signals": ["word_fifo_level_o"],
+      "event_types": ["STATE_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "canonical_module": "lpu_mem_macro_frontend",
+      "canonical_instance": "mem_queue_0",
+      "canonical_phase": "POSEDGE",
+      "canonical_sample_point": "POST_COMB",
+      "source_views": {
+        "CMODEL": {"phase": "POSEDGE", "sample_point": "POST_COMB"},
+        "RTL": {"phase": "POSEDGE", "sample_point": "POST_COMB"}
+      }
+    },
+    {
+      "name": "fetch_post_state",
+      "category": "DIAGNOSTIC",
+      "signals": [
+        "busy_o", "done_o", "fault_o", "fault_code_o", "next_address_q",
+        "requests_remaining_q", "responses_remaining_q"
+      ],
+      "event_types": ["STATE_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "canonical_module": "lpu_mem_imem_fetch",
+      "canonical_instance": "mem_queue_0",
+      "canonical_phase": "POSEDGE",
+      "canonical_sample_point": "POST_COMB",
+      "source_views": {
+        "CMODEL": {"phase": "POSEDGE", "sample_point": "POST_COMB"},
+        "RTL": {"phase": "POSEDGE", "sample_point": "POST_COMB"}
+      }
+    }
+  ]
+}

@@ -19,7 +19,9 @@ constexpr std::array<std::size_t, 16> kRhsSlices {
 
 constexpr std::size_t west_read_latency(std::size_t slice)
 {
-    return slice / ftlpu::hw::kMemSlicesPerGroup + 1;
+    // RegisteredR1 commits the read response before a later SystemPhase lets
+    // VXM capture it, adding one cycle beyond the westward group traversal.
+    return slice / ftlpu::hw::kMemSlicesPerGroup + 2;
 }
 
 void enqueue_mem_at(

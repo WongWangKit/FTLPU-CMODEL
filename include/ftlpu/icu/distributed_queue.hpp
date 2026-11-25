@@ -9,6 +9,7 @@
 #include "ftlpu/icu/active_macro_context.hpp"
 #include "ftlpu/icu/macro_bitstream_decoder.hpp"
 #include "ftlpu/icu/queue_control.hpp"
+#include "ftlpu/icu/qctl_runtime.hpp"
 #include "ftlpu/mem/slice.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
 #include "ftlpu/sxm/instruction.hpp"
@@ -72,6 +73,8 @@ enum class IcuQueueRole : std::uint8_t {
     MxmLoad,
     MxmDequant,
     MxmCompute,
+    MxmParamLoad,
+    MxmBackend,
     Vxm,
     SxmTranspose,
     SxmPermute,
@@ -86,6 +89,8 @@ constexpr bool is_fu_loop_queue_role(IcuQueueRole role) noexcept
         || role == IcuQueueRole::MxmLoad
         || role == IcuQueueRole::MxmDequant
         || role == IcuQueueRole::MxmCompute
+        || role == IcuQueueRole::MxmParamLoad
+        || role == IcuQueueRole::MxmBackend
         || role == IcuQueueRole::SxmTranspose
         || role == IcuQueueRole::SxmPermute;
 }
@@ -127,6 +132,16 @@ struct IqEntryForRole<FuncInstruction, IcuQueueRole::MxmDequant> {
 template <typename FuncInstruction>
 struct IqEntryForRole<FuncInstruction, IcuQueueRole::MxmCompute> {
     using Type = isa::EncodedMxmComputeIcuWord;
+};
+
+template <typename FuncInstruction>
+struct IqEntryForRole<FuncInstruction, IcuQueueRole::MxmParamLoad> {
+    using Type = isa::EncodedMxmParamLoadIcuWord;
+};
+
+template <typename FuncInstruction>
+struct IqEntryForRole<FuncInstruction, IcuQueueRole::MxmBackend> {
+    using Type = isa::EncodedMxmBackendIcuWord;
 };
 
 template <typename FuncInstruction>
@@ -175,7 +190,9 @@ static_assert(sizeof(EncodedMemIcuSynchronizedPacket) == 24,
 
 template <IcuQueueRole Role> struct IcuNativeGeometry {
     static constexpr std::size_t bits = Role == IcuQueueRole::MxmLoad
-        || Role == IcuQueueRole::MxmCompute || Role == IcuQueueRole::MxmDequant ? 128 : 96;
+        || Role == IcuQueueRole::MxmCompute || Role == IcuQueueRole::MxmDequant
+        || Role == IcuQueueRole::MxmParamLoad || Role == IcuQueueRole::MxmBackend
+        ? 128 : 96;
 };
 
 enum class IcuQueueAction : std::uint8_t {
@@ -228,6 +245,21 @@ struct MemIssuePortSignals {
     std::uint8_t fault_code_o{0};
 };
 
+// Canonical direct Scheduler -> FU handshake for every formal Raw-Macro
+// frontend. MEM keeps MemIssuePortSignals as a compatibility view; MXM uses
+// this typed view so its native instruction width is not coerced.
+template <typename Instruction>
+struct MacroIssuePortSignals {
+    bool issue_valid_o{false};
+    bool issue_ready_i{false};
+    std::optional<Instruction> issue_instruction_o{};
+    std::uint32_t issue_cycle_o{0};
+    bool issue_fire{false};
+    bool conflict_o{false};
+    bool fault_o{false};
+    std::uint8_t fault_code_o{0};
+};
+
 // Canonical Program/MEM-local-frontend boundary.  The 128-bit carrier and
 // four 32-bit strobes match the Program Distribution network even though a
 // MEM Macro word consumes only the low 96 bits (strb 4'b0111).
@@ -245,6 +277,18 @@ struct MemLocalImemLoadPortSignals {
     bool configured_o{false};
     bool fault_o{false};
     std::uint8_t fault_code_o{0};
+};
+
+struct ProgramEndpointState {
+    bool configured{};
+    bool last_seen{};
+    std::size_t base{};
+    std::size_t next_address{};
+    std::size_t word_count{};
+    bool prime_started{};
+    std::uint8_t fault_code{};
+
+    bool ready() const noexcept { return !prime_started && fault_code == 0; }
 };
 
 struct MacroContextFifoPortSignals {
@@ -512,6 +556,7 @@ public:
         MacroAdmissionLookahead, MacroDdbRunCapacity,
         MacroImemRequestInitiationInterval>;
     using ImemReadPortSignals = typename MacroDecoder::ImemReadPortSignals;
+    using MemFetchPortSignals = typename MacroDecoder::MemFetchPortSignals;
 
     static_assert(
         InstructionBits >= 32,
@@ -519,6 +564,8 @@ public:
     static_assert(ImemDepth > 0);
     static_assert(IqDepth > 0);
     static_assert(FetchLatency > 0);
+    static_assert(QueueRole != IcuQueueRole::Mem || FetchLatency == 2,
+        "production MEM canonical frontend has a fixed two-stage read path");
     static_assert(MacroContextDepth > 0);
     static_assert(QueueRole==IcuQueueRole::Legacy || InstructionBits==IcuNativeGeometry<QueueRole>::bits,
         "native word width must match the physical i-MEM");
@@ -527,13 +574,19 @@ public:
                 && std::is_same_v<FuncInstruction, MemInstruction>)
             || (QueueRole == IcuQueueRole::MxmLoad
                 && std::is_same_v<FuncInstruction,
-                    MxmControlInstruction>)
+                    MxmLoadCommand>)
             || (QueueRole == IcuQueueRole::MxmDequant
                 && std::is_same_v<FuncInstruction,
-                    MxmDequantInstruction>)
+                    MxmDequantCommand>)
             || (QueueRole == IcuQueueRole::MxmCompute
                 && std::is_same_v<FuncInstruction,
-                    MxmControlInstruction>)
+                    MxmComputeCommand>)
+            || (QueueRole == IcuQueueRole::MxmParamLoad
+                && std::is_same_v<FuncInstruction,
+                    MxmParamLoadCommand>)
+            || (QueueRole == IcuQueueRole::MxmBackend
+                && std::is_same_v<FuncInstruction,
+                    MxmBackendCommand>)
             || (QueueRole == IcuQueueRole::Vxm
                 && std::is_same_v<FuncInstruction,
                     VxmCompactInstruction>)
@@ -586,12 +639,13 @@ public:
         QueueRole == IcuQueueRole::Mem
         || QueueRole == IcuQueueRole::MxmLoad
         || QueueRole == IcuQueueRole::MxmDequant
-        || QueueRole == IcuQueueRole::MxmCompute;
-    // MEM's final scheduler output is the FU issue boundary itself.  MXM keeps
-    // its existing finite look-ahead queue until its independent frontend
-    // contract is migrated.
+        || QueueRole == IcuQueueRole::MxmCompute
+        || QueueRole == IcuQueueRole::MxmParamLoad
+        || QueueRole == IcuQueueRole::MxmBackend;
+    // Formal MEM/MXM schedulers drive their FU issue valid/ready boundary
+    // directly. There is no decoded Scheduler -> FU instruction queue.
     static constexpr bool direct_macro_issue =
-        QueueRole == IcuQueueRole::Mem;
+        rtl_integrated_macro_frontend;
     static constexpr std::size_t timed_issue_depth =
         direct_macro_issue ? 0 : hw::kIcuFuTimedQueueDepth;
     static constexpr std::size_t timed_issue_lookahead =
@@ -614,6 +668,7 @@ public:
         mem_program_load_last_seen_ = false;
         mem_program_load_prime_started_ = false;
         mem_program_load_next_address_ = 0;
+        program_load_base_ = 0;
         mem_program_load_word_count_ = 0;
         mem_program_load_fault_code_ = 0;
     }
@@ -636,13 +691,14 @@ public:
         active_macro_count_ = 0;
         macro_remaining_points_ = 0;
         peak_active_macros_ = 0;
-        timed_issues_.clear();
+        if constexpr (!direct_macro_issue) timed_issues_.clear();
         peak_timed_issue_occupancy_ = 0;
         timed_issue_full_cycles_ = 0;
         timed_issue_writes_ = 0;
         timed_issue_reads_ = 0;
         mem_issue_ports_ = {};
-        mem_issue_fault_code_ = MemMacroSchedulerFault::None;
+        macro_issue_ports_ = {};
+        macro_issue_fault_code_ = MemMacroSchedulerFault::None;
         decoded_context_fifo_.clear();
         decoded_context_event_.reset();
         context_fifo_ports_ = {};
@@ -660,11 +716,16 @@ public:
         synchronized_issued_count_ = 0;
         synchronized_completed_count_ = 0;
         last_dispatched_pc_.reset();
-        notification_tokens_ = 0;
+        legacy_release_credits_ = 0;
         synchronized_notifications_.clear();
         notify_emitted_ = false;
         fetch_pc_ = 0;
         queue_controls_ = {};
+        qctl_endpoint_active_ = false;
+        qctl_endpoint_signals_ = {};
+        qctl_mem_packet_retired_o_ = false;
+        qctl_mem_packet_external_driven_ = false;
+        qctl_mem_packet_external_retired_i_ = false;
         queue_transport_executor_ = {};
         queue_control_end_cycle_ = 0;
         queue_control_wait_cycles_ = 0;
@@ -725,7 +786,7 @@ public:
         const std::array<std::uint32_t, 4>& load_data_i,
         std::uint8_t load_strb_i, bool load_last_i)
     {
-        if constexpr (QueueRole != IcuQueueRole::Mem) {
+        if constexpr (!has_program_endpoint) {
             throw std::logic_error(
                 "MEM local-iMEM load adapter used on a non-MEM queue");
         } else {
@@ -745,7 +806,7 @@ public:
             if (!ports.load_fire)
                 throw StaticScheduleError(
                     "MEM local iMEM rejected a Program load transfer");
-            const bool illegal = load_strb_i != 0x7
+            const bool illegal = load_strb_i != ((1U << (InstructionBits / 32)) - 1)
                 || load_imem_address_i >= ImemDepth
                 || mem_program_load_last_seen_
                 || (mem_program_load_configured_
@@ -762,6 +823,7 @@ public:
             for (std::size_t lane = 0; lane < word.lanes.size(); ++lane)
                 word.lanes[lane] = load_data_i[lane];
             write_raw_imem(load_imem_address_i, std::move(word));
+            if (!mem_program_load_configured_) program_load_base_ = load_imem_address_i;
             mem_program_load_configured_ = true;
             mem_program_load_last_seen_ = load_last_i;
             mem_program_load_next_address_ = load_imem_address_i + 1;
@@ -772,7 +834,7 @@ public:
 
     void prime_mem_program(IcuMacroQueueKind kind, std::size_t word_count)
     {
-        if constexpr (QueueRole != IcuQueueRole::Mem) {
+        if constexpr (!has_program_endpoint) {
             throw std::logic_error(
                 "MEM local-iMEM PRIME adapter used on a non-MEM queue");
         } else {
@@ -803,6 +865,20 @@ public:
     mem_local_imem_load_port_signals() const noexcept
     {
         return mem_local_imem_load_ports_;
+    }
+
+    static constexpr bool has_program_endpoint = QueueRole == IcuQueueRole::Mem
+        || QueueRole == IcuQueueRole::MxmLoad || QueueRole == IcuQueueRole::MxmDequant
+        || QueueRole == IcuQueueRole::MxmCompute
+        || QueueRole == IcuQueueRole::MxmParamLoad
+        || QueueRole == IcuQueueRole::MxmBackend;
+
+    ProgramEndpointState program_endpoint_state() const noexcept
+    {
+        return {mem_program_load_configured_, mem_program_load_last_seen_,
+            program_load_base_, mem_program_load_next_address_,
+            mem_program_load_word_count_, mem_program_load_prime_started_,
+            mem_program_load_fault_code_};
     }
 
     void configure_raw_macro(
@@ -868,6 +944,44 @@ public:
         queue_controls_.configure_shared(pool,std::move(controls),limit);
         queue_control_end_cycle_=end_cycle;
     }
+    // Production QCTL path: Pool/Cache/Controller live in the global runtime.
+    // The FU-local queue observes only the formal Endpoint -> Scheduler/FU
+    // outputs and reports MEM_PACKET retirement back after execution.
+    void enable_qctl_endpoint(std::uint32_t end_cycle = 0) noexcept
+    {
+        qctl_endpoint_active_ = true;
+        qctl_endpoint_signals_ = {};
+        queue_control_end_cycle_ = end_cycle;
+    }
+    bool qctl_endpoint_active() const noexcept
+    { return qctl_endpoint_active_; }
+    void disable_qctl_endpoint() noexcept
+    {
+        qctl_endpoint_active_ = false;
+        qctl_endpoint_signals_ = {};
+        qctl_mem_packet_retired_o_ = false;
+        qctl_mem_packet_external_driven_ = false;
+        qctl_mem_packet_external_retired_i_ = false;
+        queue_control_end_cycle_ = 0;
+    }
+    void drive_qctl_endpoint(const IcuQctlRuntime::QueueOutputs& signals) noexcept
+    {
+        qctl_endpoint_signals_ = signals;
+        qctl_mem_packet_retired_o_ = false;
+    }
+    // Optional architectural retirement input matching the formal RTL QCTL
+    // boundary.  Normal CModel production keeps using the Native transport
+    // executor; a hardware-facing harness may instead drive retirement once
+    // per cycle without bypassing the Queue Controller or Scheduler CE path.
+    void drive_qctl_mem_packet_retired_input(bool retired) noexcept
+    {
+        qctl_mem_packet_external_driven_ = true;
+        qctl_mem_packet_external_retired_i_ = retired;
+    }
+    bool take_qctl_mem_packet_retired() noexcept
+    {
+        return std::exchange(qctl_mem_packet_retired_o_, false);
+    }
     struct QueueTransportResult {
         std::optional<FuncInstruction> instruction;
         bool retired{false};
@@ -900,15 +1014,15 @@ public:
     {
         // The current MEM RTL declares frontend_ready only after fetch is
         // complete, Decoder done is high, and the Context FIFO head has been
-        // admitted (Scheduler prime_ready).  No instruction is executed or
-        // pre-generated during PRIME.  Timed MXM retains its independent
-        // look-ahead contract until that frontend is migrated.
+        // admitted (Scheduler prime_ready). No production MEM/MXM instruction
+        // is executed or pre-generated during PRIME.
         if constexpr (direct_macro_issue) {
             return raw_macro_mode_ && static_cast<bool>(macro_decoder_)
                 && macro_decoder_->fetch_complete()
                 && macro_decoder_->done()
                 && decoded_context_fifo_.empty()
-                && queue_controls_.primed();
+                && (qctl_endpoint_active_ ? qctl_endpoint_signals_.primed
+                                           : queue_controls_.primed());
         }
         constexpr auto prime_context_horizon = direct_macro_issue
             ? std::size_t{1}
@@ -928,7 +1042,8 @@ public:
         return raw_macro_mode_ && static_cast<bool>(macro_decoder_)
             && macro_decoder_->fetch_complete()
             && macro_decoder_->primed()
-            && queue_controls_.primed()
+            && (qctl_endpoint_active_ ? qctl_endpoint_signals_.primed
+                                       : queue_controls_.primed())
             && (!(urgent_pending() || urgent_buffered())
                 || active_macro_count_ == MacroContextDepth);
     }
@@ -939,10 +1054,9 @@ public:
             throw StaticScheduleError(
                 "ICU queue is not configured for a raw Macro image");
         decoded_context_event_.reset();
-        // The issue clock is stopped during priming.  MEM only prepares
-        // decoder/context state; it never executes or pre-generates an FU
-        // instruction.  Timed MXM paths retain their existing cycle-zero
-        // staging until their separate contract is migrated.
+        // The issue clock is stopped during priming. Production MEM/MXM only
+        // prepare decoder/context state; they never execute or pre-generate an
+        // FU instruction.
         if constexpr (rtl_integrated_macro_frontend && !direct_macro_issue)
             schedule_active_macro_to_timed(0);
         if constexpr (rtl_integrated_macro_frontend) {
@@ -950,8 +1064,17 @@ public:
                 active_macro_count_ < MacroContextDepth);
             admit_context_fifo_head(false,
                 context_fifo_ports_.dequeue_ready_i);
+            // PRIME runs with the Scheduler clock stopped.  The RTL Decoder
+            // nevertheless drains the complete packed image into the Context
+            // FIFO/Active Context RAM before frontend_ready can assert.  Do
+            // not apply the runtime AdmissionLookahead window to this phase;
+            // otherwise a legal first Context beyond that window can never
+            // become ready because the issue cycle is deliberately held at 0.
+            constexpr auto prime_decoder_cycle = direct_macro_issue
+                ? std::numeric_limits<std::size_t>::max()
+                : std::size_t{0};
             enqueue_decoded_context(macro_decoder_->tick(
-                0,decoded_context_fifo_.size(),
+                prime_decoder_cycle,decoded_context_fifo_.size(),
                 hw::kIcuMacroContextFifoDepth,
                 earliest_active_macro_release_cycle()));
         } else {
@@ -959,7 +1082,7 @@ public:
                 0, active_macro_count_, MacroContextDepth,
                 earliest_active_macro_release_cycle()), false);
         }
-        queue_controls_.prime_cycle();
+        if (!qctl_endpoint_active_) queue_controls_.prime_cycle();
     }
 
     const IcuMacroDecoderStatistics& macro_decoder_statistics() const noexcept
@@ -974,6 +1097,21 @@ public:
         static const ImemReadPortSignals idle{};
         return macro_decoder_
             ? macro_decoder_->imem_read_port_signals() : idle;
+    }
+
+    const MemFetchPortSignals& mem_fetch_port_signals() const noexcept
+    {
+        static const MemFetchPortSignals idle{};
+        return macro_decoder_
+            ? macro_decoder_->mem_fetch_port_signals() : idle;
+    }
+
+    const auto& mxm_fetch_port_signals() const noexcept
+    {
+        using Ports = typename MacroDecoder::MxmFetchPortSignals;
+        static const Ports idle{};
+        return macro_decoder_
+            ? macro_decoder_->mxm_fetch_port_signals() : idle;
     }
 
     std::size_t word_fifo_level() const noexcept
@@ -992,6 +1130,11 @@ public:
     bool macro_fetch_complete() const noexcept
     {
         return macro_decoder_ && macro_decoder_->fetch_complete();
+    }
+
+    bool macro_decoder_done() const noexcept
+    {
+        return macro_decoder_ && macro_decoder_->done();
     }
     std::uint8_t macro_decoder_state_code() const noexcept
     {
@@ -1352,9 +1495,30 @@ public:
         }
     }
 
+    std::optional<FuncInstruction> dispatch_macro_issue(bool issue_ready_i)
+        requires (QueueRole == IcuQueueRole::Mem
+            || QueueRole == IcuQueueRole::MxmLoad
+            || QueueRole == IcuQueueRole::MxmDequant
+            || QueueRole == IcuQueueRole::MxmCompute
+            || QueueRole == IcuQueueRole::MxmParamLoad
+            || QueueRole == IcuQueueRole::MxmBackend)
+    {
+        ensure_configured();
+        if (!raw_macro_mode_)
+            throw std::logic_error(
+                "direct issue pin view requires a formal Raw-Macro frontend");
+        return tick_raw_macro(issue_ready_i);
+    }
+
     const MemIssuePortSignals& mem_issue_port_signals() const noexcept
     {
         return mem_issue_ports_;
+    }
+
+    const MacroIssuePortSignals<FuncInstruction>&
+    macro_issue_port_signals() const noexcept
+    {
+        return macro_issue_ports_;
     }
 
     // Physical response capture remains live while all execution coordinates,
@@ -1406,6 +1570,21 @@ public:
         if (raw_macro_mode_) return raw_macro_ready();
         return configured_ && pending_fetches_.empty()
             && (fetch_pc_ == program_end_pc_ || iq_.size() == IqDepth);
+    }
+    bool local_frontend_ready(bool run) const {
+        if constexpr (has_program_endpoint) {
+            // RTL treats an unconfigured local Frontend as ready.  Once a
+            // Program Endpoint has accepted a word, Ready means PRIME has
+            // completed and therefore drops again when RUN takes ownership.
+            // The formal Endpoint is ready before its first WRITE, but the
+            // compatibility Native loader configures the legacy frontend
+            // without touching the Endpoint state.  That path must still
+            // wait for its real iMEM prefetch instead of starting empty.
+            if (!mem_program_load_configured_)
+                return !configured_ || frontend_ready();
+            return !run && frontend_ready();
+        }
+        return imem_occupancy()==0 || frontend_ready();
     }
     void prime_frontend_cycle() {
         if (raw_macro_mode_) { if (!raw_macro_ready()) prefetch_raw_macro(); return; }
@@ -1493,7 +1672,10 @@ public:
 
     void notify()
     {
-        ++notification_tokens_;
+        // Formal Raw-Macro QCTL uses the shared Arrival/Release Fabric.  It
+        // must never accumulate an out-of-band per-Queue release credit.
+        if (qctl_endpoint_active_) return;
+        ++legacy_release_credits_;
     }
 
     void notify(std::size_t synchronization_tag)
@@ -1539,8 +1721,11 @@ public:
     bool blocked_on_sync() const
     {
         if (raw_macro_mode_) {
+            if (qctl_endpoint_active_)
+                return qctl_endpoint_signals_.event_wait
+                    && !qctl_endpoint_signals_.event_fire;
             const auto* control=queue_controls_.cached_due(cycle_);
-            return control && ((control->opcode == IcuControlOpcode::Sync && !notification_tokens_)
+            return control && ((control->opcode == IcuControlOpcode::Sync && !legacy_release_credits_)
                 || (control->opcode == IcuControlOpcode::WaitEvent
                     && !has_tagged_notification(control->operand)));
         }
@@ -1571,7 +1756,7 @@ public:
                 std::get_if<IcuControlInstruction>(&iq_.front());
             if (control == nullptr) return false;
             if (control->opcode == IcuControlOpcode::Sync)
-                return notification_tokens_ == 0;
+                return legacy_release_credits_ == 0;
             if (control->opcode != IcuControlOpcode::WaitEvent)
                 return false;
             return lacksTaggedNotification(control->event_tag);
@@ -1582,7 +1767,7 @@ public:
             const auto subtype =
                 detail::raw_icu_extended_subtype(iq_.front());
             if (subtype == kSyncExtendedSubtype)
-                return notification_tokens_ == 0;
+                return legacy_release_credits_ == 0;
             if (subtype == kSynchronizedExtendedSubtype)
                 return lacksTaggedNotification(
                     decode_synchronized_header(iq_.front())
@@ -1602,6 +1787,11 @@ public:
     bool blocked_on_event(std::size_t event_tag) const
     {
         if (raw_macro_mode_) {
+            if (qctl_endpoint_active_)
+                return !qctl_endpoint_signals_.scheduler_counter_ce
+                    && (qctl_endpoint_signals_.sync_arrival_valid
+                        || (qctl_endpoint_signals_.event_wait
+                            && !qctl_endpoint_signals_.event_fire));
             const auto* control=queue_controls_.cached_due(cycle_);
             return control && control->opcode == IcuControlOpcode::WaitEvent
                 && control->operand == event_tag && !has_tagged_notification(event_tag);
@@ -1739,8 +1929,9 @@ public:
             return static_cast<bool>(macro_decoder_) && macro_decoder_->done()
                 && active_macro_count_ == 0
                 && decoded_context_fifo_.empty()
-                && timed_issues_.empty()
-                && queue_controls_.done()
+                && timed_issue_empty()
+                && (qctl_endpoint_active_ ? qctl_endpoint_signals_.done
+                                           : queue_controls_.done())
                 && cycle_ >= queue_control_end_cycle_;
         return fetch_pc_ == program_end_pc_
             && pending_fetches_.empty()
@@ -1771,7 +1962,10 @@ public:
     std::size_t issued_count() const noexcept { return issued_count_; }
     std::size_t active_macro_count() const noexcept { return active_macro_count_; }
     std::size_t timed_issue_occupancy() const noexcept
-    { return timed_issues_.size(); }
+    {
+        if constexpr (direct_macro_issue) return 0;
+        else return timed_issues_.size();
+    }
     std::size_t peak_timed_issue_occupancy() const noexcept
     { return peak_timed_issue_occupancy_; }
     std::size_t timed_issue_full_cycles() const noexcept
@@ -1833,7 +2027,7 @@ public:
                     : macro_decoder_->command_count()
                         - macro_decoder_->decoded_count()
                         + macro_decoder_->pending_decoded_contexts())
-                + macro_remaining_points() + timed_issues_.size()
+                + macro_remaining_points() + timed_issue_occupancy()
                 + decoded_context_fifo_.size();
         return iq_.size() + pending_fetches_.size()
             + (program_end_pc_ - fetch_pc_)
@@ -1955,30 +2149,12 @@ private:
     static void validate_native_instruction_role(
         const FuncInstruction& instruction)
     {
-        if constexpr (QueueRole == IcuQueueRole::MxmLoad) {
-            const auto isLoadInstruction =
-                instruction.opcode == MxmControlOpcode::IW
-                || (instruction.opcode == MxmControlOpcode::IS
-                    && instruction.decode_operation
-                        == MxmIsOperation::LoadActivation);
-            if (!isLoadInstruction) {
-                throw std::invalid_argument(
-                    "MXM LOAD ICU native queue accepts only IW and "
-                    "IsLoadActivation instructions");
-            }
-        } else if constexpr (QueueRole == IcuQueueRole::MxmCompute) {
-            const auto isComputeInstruction =
-                instruction.opcode == MxmControlOpcode::Compute
-                || instruction.opcode == MxmControlOpcode::AccumulatorRead
-                || (instruction.opcode == MxmControlOpcode::IS
-                    && instruction.decode_operation
-                        == MxmIsOperation::StreamCompute);
-            if (!isComputeInstruction) {
-                throw std::invalid_argument(
-                    "MXM COMPUTE ICU native queue accepts only Compute, "
-                    "AccumulatorRead, and IsStreamCompute instructions");
-            }
-        }
+        if constexpr (QueueRole == IcuQueueRole::MxmLoad
+            || QueueRole == IcuQueueRole::MxmCompute
+            || QueueRole == IcuQueueRole::MxmDequant
+            || QueueRole == IcuQueueRole::MxmParamLoad
+            || QueueRole == IcuQueueRole::MxmBackend)
+            static_cast<void>(isa::encode_mxm_command(instruction));
     }
 
     static Entry encode_native_word(const FuncInstruction& instruction)
@@ -1993,10 +2169,11 @@ private:
             if constexpr (QueueRole == IcuQueueRole::Mem) {
                 encoded = isa::encode_mem_instruction(instruction);
             } else if constexpr (QueueRole == IcuQueueRole::MxmLoad
-                || QueueRole == IcuQueueRole::MxmCompute) {
-                encoded = isa::encode_mxm_instruction(instruction);
-            } else if constexpr (QueueRole == IcuQueueRole::MxmDequant) {
-                encoded = isa::encode_mxm_dequant_instruction(instruction);
+                || QueueRole == IcuQueueRole::MxmCompute
+                || QueueRole == IcuQueueRole::MxmDequant
+                || QueueRole == IcuQueueRole::MxmParamLoad
+                || QueueRole == IcuQueueRole::MxmBackend) {
+                encoded = isa::encode_mxm_command(instruction);
             } else if constexpr (QueueRole == IcuQueueRole::Vxm) {
                 return isa::encode_vxm_icu_instruction(instruction);
             } else if constexpr (is_sxm_queue_role(QueueRole)) {
@@ -2027,24 +2204,36 @@ private:
                     "encoded MEM ICU native word has non-zero reserved bits");
             return isa::decode_mem_instruction(
                 detail::read_raw_icu_bits(word, 2, 64));
-        } else if constexpr (QueueRole == IcuQueueRole::MxmLoad
-            || QueueRole == IcuQueueRole::MxmCompute) {
-            if (!detail::raw_icu_bits_are_zero(
-                    word, 66, InstructionBits))
+        } else if constexpr (QueueRole == IcuQueueRole::MxmLoad) {
+            if (!detail::raw_icu_bits_are_zero(word, 4, InstructionBits))
                 throw std::logic_error(
-                    "encoded MXM ICU native word has non-zero reserved bits");
-            auto instruction = isa::decode_mxm_instruction(
-                detail::read_raw_icu_bits(word, 2, 64));
-            validate_native_instruction_role(instruction);
-            return instruction;
+                    "encoded MXM Load ICU word has non-zero reserved bits");
+            return isa::decode_mxm_load_command(
+                detail::read_raw_icu_bits(word, 2, 2));
+        } else if constexpr (QueueRole == IcuQueueRole::MxmCompute) {
+            if (!detail::raw_icu_bits_are_zero(word, 9, InstructionBits))
+                throw std::logic_error(
+                    "encoded MXM Compute ICU word has non-zero reserved bits");
+            return isa::decode_mxm_compute_command(
+                detail::read_raw_icu_bits(word, 2, 7));
         } else if constexpr (QueueRole == IcuQueueRole::MxmDequant) {
-            if (!detail::raw_icu_bits_are_zero(
-                    word, 18, InstructionBits))
+            if (!detail::raw_icu_bits_are_zero(word, 3, InstructionBits))
                 throw std::logic_error(
                     "encoded MXM dequant ICU native word has non-zero reserved bits");
-            return isa::decode_mxm_dequant_instruction(
-                static_cast<isa::EncodedMxmDequantInstruction>(
-                    detail::read_raw_icu_bits(word, 2, 16)));
+            return isa::decode_mxm_dequant_command(
+                detail::read_raw_icu_bits(word, 2, 1));
+        } else if constexpr (QueueRole == IcuQueueRole::MxmParamLoad) {
+            if (!detail::raw_icu_bits_are_zero(word, 3, InstructionBits))
+                throw std::logic_error(
+                    "encoded MXM Param Load ICU word has non-zero reserved bits");
+            return isa::decode_mxm_param_load_command(
+                detail::read_raw_icu_bits(word, 2, 1));
+        } else if constexpr (QueueRole == IcuQueueRole::MxmBackend) {
+            if (!detail::raw_icu_bits_are_zero(word, 15, InstructionBits))
+                throw std::logic_error(
+                    "encoded MXM Backend ICU word has non-zero reserved bits");
+            return isa::decode_mxm_backend_command(
+                detail::read_raw_icu_bits(word, 2, 13));
         } else if constexpr (QueueRole == IcuQueueRole::Vxm) {
             return isa::decode_vxm_icu_instruction(word);
         } else if constexpr (QueueRole == IcuQueueRole::C2cTx) {
@@ -2345,18 +2534,81 @@ private:
     {
         decoded_context_event_.reset();
         if constexpr (direct_macro_issue) {
-            mem_issue_ports_ = {};
-            mem_issue_ports_.mem_issue_ready_i = mem_issue_ready_i;
-            if (mem_issue_fault_code_ != MemMacroSchedulerFault::None) {
-                mem_issue_ports_.fault_o = true;
-                mem_issue_ports_.fault_code_o = static_cast<std::uint8_t>(
-                    mem_issue_fault_code_);
+            macro_issue_ports_ = {};
+            macro_issue_ports_.issue_ready_i = mem_issue_ready_i;
+            if (macro_issue_fault_code_ != MemMacroSchedulerFault::None) {
+                macro_issue_ports_.fault_o = true;
+                macro_issue_ports_.fault_code_o = static_cast<std::uint8_t>(
+                    macro_issue_fault_code_);
+                if constexpr (QueueRole == IcuQueueRole::Mem) {
+                    mem_issue_ports_ = {};
+                    mem_issue_ports_.mem_issue_ready_i = mem_issue_ready_i;
+                    mem_issue_ports_.fault_o = true;
+                    mem_issue_ports_.fault_code_o =
+                        macro_issue_ports_.fault_code_o;
+                }
                 return std::nullopt;
             }
+        }
+        if constexpr (QueueRole == IcuQueueRole::Mem) {
+            mem_issue_ports_ = {};
+            mem_issue_ports_.mem_issue_ready_i = mem_issue_ready_i;
         }
         context_fifo_ports_ = {};
         notify_emitted_ = false;
         begin_trace(IcuQueueAction::MacroWait);
+        if (qctl_endpoint_active_) {
+            if (qctl_endpoint_signals_.mem_packet_valid) {
+                if (qctl_mem_packet_external_driven_) {
+                    qctl_mem_packet_retired_o_ =
+                        qctl_mem_packet_external_retired_i_;
+                    qctl_mem_packet_external_driven_ = false;
+                    qctl_mem_packet_external_retired_i_ = false;
+                    macro_decoder_->hold_cycle();
+                    age_synchronized_notifications();
+                    ++queue_control_physical_cycles_;
+                    finish_trace();
+                    return std::nullopt;
+                }
+                if (!queue_transport_executor_)
+                    throw StaticScheduleError(
+                        "QCTL MEM_PACKET has no Native executor");
+                auto transport = queue_transport_executor_(
+                    qctl_endpoint_signals_.mem_packet_ordinal);
+                last_trace_.action = transport.action;
+                last_trace_.issue_pc = transport.issue_pc;
+                if (transport.instruction) {
+                    last_dispatched_ = transport.instruction;
+                    last_dispatched_pc_ = transport.issue_pc;
+                    ++issued_count_;
+                }
+                qctl_mem_packet_retired_o_ = transport.retired;
+                macro_decoder_->hold_cycle();
+                age_synchronized_notifications();
+                ++queue_control_physical_cycles_;
+                finish_trace();
+                return std::move(transport.instruction);
+            }
+            qctl_mem_packet_external_driven_ = false;
+            qctl_mem_packet_external_retired_i_ = false;
+            if (!qctl_endpoint_signals_.scheduler_counter_ce) {
+                if (qctl_endpoint_signals_.sync_arrival_valid)
+                    last_trace_.action = qctl_endpoint_signals_.retire_head
+                        ? IcuQueueAction::SyncRelease
+                        : IcuQueueAction::SyncWait;
+                else if (qctl_endpoint_signals_.event_wait)
+                    last_trace_.action = qctl_endpoint_signals_.event_fire
+                        ? IcuQueueAction::EventRelease
+                        : IcuQueueAction::EventWait;
+                else if (qctl_endpoint_signals_.notify_valid)
+                    last_trace_.action = IcuQueueAction::Notify;
+                macro_decoder_->hold_cycle();
+                age_synchronized_notifications();
+                ++queue_control_physical_cycles_;
+                finish_trace();
+                return std::nullopt;
+            }
+        } else {
         queue_controls_.begin_cycle();
         while (const auto* boundary=queue_controls_.due(cycle_)) {
             if (boundary->opcode == kQueueControlMemPacket) {
@@ -2388,6 +2640,7 @@ private:
             ++queue_control_physical_cycles_;
             finish_trace();
             return std::nullopt;
+        }
         }
 
         // Contexts visible at the beginning of the cycle may issue. A context
@@ -2423,7 +2676,7 @@ private:
         }
 
         finish_trace();
-        queue_controls_.end_cycle();
+        if (!qctl_endpoint_active_) queue_controls_.end_cycle();
         age_synchronized_notifications();
         ++queue_control_physical_cycles_;
         ++cycle_;
@@ -2694,11 +2947,11 @@ private:
     {
         switch (control.opcode) {
         case IcuControlOpcode::Sync:
-            if (!notification_tokens_) {
+            if (!legacy_release_credits_) {
                 last_trace_.action=IcuQueueAction::SyncWait;
                 return ControlResult::Wait;
             }
-            --notification_tokens_;
+            --legacy_release_credits_;
             last_trace_.action=IcuQueueAction::SyncRelease;
             return ControlResult::Retire;
         case IcuControlOpcode::WaitEvent: {
@@ -3094,6 +3347,12 @@ private:
         std::size_t pc{0};
     };
 
+    bool timed_issue_empty() const noexcept
+    {
+        if constexpr (direct_macro_issue) return true;
+        else return timed_issues_.empty();
+    }
+
     std::optional<FuncInstruction> issue_timed_macro()
     {
         if (timed_issues_.size() == timed_issue_depth)
@@ -3262,11 +3521,16 @@ private:
             if (!active.valid()) continue;
             if (active.issue_cycle() < cycle_) {
                 if constexpr (direct_macro_issue) {
-                    mem_issue_fault_code_ =
+                    macro_issue_fault_code_ =
                         MemMacroSchedulerFault::MissedIssue;
-                    mem_issue_ports_.fault_o = true;
-                    mem_issue_ports_.fault_code_o = static_cast<std::uint8_t>(
-                        mem_issue_fault_code_);
+                    macro_issue_ports_.fault_o = true;
+                    macro_issue_ports_.fault_code_o = static_cast<std::uint8_t>(
+                        macro_issue_fault_code_);
+                    if constexpr (QueueRole == IcuQueueRole::Mem) {
+                        mem_issue_ports_.fault_o = true;
+                        mem_issue_ports_.fault_code_o =
+                            macro_issue_ports_.fault_code_o;
+                    }
                 }
                 throw StaticScheduleError(
                     "ICU macro expansion missed an issue cycle");
@@ -3274,11 +3538,17 @@ private:
             if (active.issue_cycle() != cycle_) continue;
             if (selectedSlot.has_value()) {
                 if constexpr (direct_macro_issue) {
-                    mem_issue_fault_code_ = MemMacroSchedulerFault::Conflict;
-                    mem_issue_ports_.conflict_o = true;
-                    mem_issue_ports_.fault_o = true;
-                    mem_issue_ports_.fault_code_o = static_cast<std::uint8_t>(
-                        mem_issue_fault_code_);
+                    macro_issue_fault_code_ = MemMacroSchedulerFault::Conflict;
+                    macro_issue_ports_.conflict_o = true;
+                    macro_issue_ports_.fault_o = true;
+                    macro_issue_ports_.fault_code_o = static_cast<std::uint8_t>(
+                        macro_issue_fault_code_);
+                    if constexpr (QueueRole == IcuQueueRole::Mem) {
+                        mem_issue_ports_.conflict_o = true;
+                        mem_issue_ports_.fault_o = true;
+                        mem_issue_ports_.fault_code_o =
+                            macro_issue_ports_.fault_code_o;
+                    }
                 }
                 throw StaticScheduleError(
                     "overlapping ICU macros issue on the same queue cycle");
@@ -3294,19 +3564,39 @@ private:
         auto due = ActiveMacroCodec::unpack(dueSlot.payload);
         auto result = due.instruction;
         if constexpr (direct_macro_issue) {
+            macro_issue_ports_.issue_valid_o = true;
+            macro_issue_ports_.issue_instruction_o = result;
+            macro_issue_ports_.issue_cycle_o =
+                static_cast<std::uint32_t>(cycle_);
+            macro_issue_ports_.issue_fire = mem_issue_ready_i;
+        }
+        if constexpr (QueueRole == IcuQueueRole::Mem) {
             mem_issue_ports_.mem_issue_valid_o = true;
             mem_issue_ports_.mem_issue_instruction_o = result;
             mem_issue_ports_.mem_issue_cycle_o =
                 static_cast<std::uint32_t>(cycle_);
             mem_issue_ports_.mem_issue_fire = mem_issue_ready_i;
             if (!mem_issue_ready_i) {
-                mem_issue_fault_code_ =
+                macro_issue_fault_code_ =
                     MemMacroSchedulerFault::IssueBackpressure;
                 mem_issue_ports_.fault_o = true;
                 mem_issue_ports_.fault_code_o = static_cast<std::uint8_t>(
-                    mem_issue_fault_code_);
+                    macro_issue_fault_code_);
+                macro_issue_ports_.fault_o = true;
+                macro_issue_ports_.fault_code_o =
+                    mem_issue_ports_.fault_code_o;
                 throw StaticScheduleError(
                     "MEM Macro issue was backpressured on its due cycle");
+            }
+        } else if constexpr (direct_macro_issue) {
+            if (!mem_issue_ready_i) {
+                macro_issue_fault_code_ =
+                    MemMacroSchedulerFault::IssueBackpressure;
+                macro_issue_ports_.fault_o = true;
+                macro_issue_ports_.fault_code_o = static_cast<std::uint8_t>(
+                    macro_issue_fault_code_);
+                throw StaticScheduleError(
+                    "MXM Macro issue was backpressured on its due cycle");
             }
         }
         last_dispatched_ = result;
@@ -3355,6 +3645,13 @@ private:
     CopyOnWriteVector<std::optional<RawImemWord>> raw_imem_{};
     IcuMacroQueueKind raw_macro_kind_{IcuMacroQueueKind::Mem};
     IcuQueueControlFrontend queue_controls_{};
+    // Combinational Endpoint output snapshot for this physical cycle.  All
+    // persistent QCTL state remains owned by IcuQctlRuntime.
+    bool qctl_endpoint_active_{false};
+    IcuQctlRuntime::QueueOutputs qctl_endpoint_signals_{};
+    bool qctl_mem_packet_retired_o_{false};
+    bool qctl_mem_packet_external_driven_{false};
+    bool qctl_mem_packet_external_retired_i_{false};
     std::uint32_t queue_control_end_cycle_{0};
     std::function<QueueTransportResult(std::uint32_t)> queue_transport_executor_{};
     std::size_t queue_control_wait_cycles_{0};
@@ -3377,9 +3674,10 @@ private:
         decoded_context_fifo_{};
     std::optional<DecodedIcuMacroContext<FuncInstruction>>
         decoded_context_event_{};
-    // Used by the still-timed MXM frontends.  MEM reports depth zero and never
-    // reads or writes this host container.
-    std::deque<TimedIssue> timed_issues_{};
+    // Compatibility-only storage. Formal MEM/MXM instantiate std::monostate,
+    // so their object has no Scheduler -> FU decoded Instruction Queue.
+    std::conditional_t<direct_macro_issue, std::monostate,
+        std::deque<TimedIssue>> timed_issues_{};
     std::size_t peak_context_fifo_occupancy_{0};
     std::size_t context_fifo_full_cycles_{0};
     std::size_t context_fifo_writes_{0};
@@ -3390,13 +3688,15 @@ private:
     std::size_t timed_issue_writes_{0};
     std::size_t timed_issue_reads_{0};
     MemIssuePortSignals mem_issue_ports_{};
-    MemMacroSchedulerFault mem_issue_fault_code_{
+    MacroIssuePortSignals<FuncInstruction> macro_issue_ports_{};
+    MemMacroSchedulerFault macro_issue_fault_code_{
         MemMacroSchedulerFault::None};
     MemLocalImemLoadPortSignals mem_local_imem_load_ports_{};
     bool mem_program_load_configured_{false};
     bool mem_program_load_last_seen_{false};
     bool mem_program_load_prime_started_{false};
     std::size_t mem_program_load_next_address_{0};
+    std::size_t program_load_base_{0};
     std::size_t mem_program_load_word_count_{0};
     std::uint8_t mem_program_load_fault_code_{0};
     std::optional<std::uint32_t> last_macro_final_cycle_{};
@@ -3417,7 +3717,9 @@ private:
     std::size_t repeat_cooldown_{0};
     std::int64_t repeat_address_stride_{0};
     std::size_t repeat_index_{0};
-    std::size_t notification_tokens_{0};
+    // Legacy Native-IQ compatibility only. Formal Raw-Macro QCTL never reads
+    // or writes this credit; it uses the global Arrival/Release Fabric.
+    std::size_t legacy_release_credits_{0};
     std::deque<TaggedNotification> synchronized_notifications_{};
     bool notify_emitted_{false};
     std::size_t fetch_pc_{0};

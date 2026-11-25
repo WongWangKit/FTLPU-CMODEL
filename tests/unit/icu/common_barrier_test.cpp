@@ -99,12 +99,18 @@ void controller_events()
 }
 
 using Decoded = std::tuple<std::size_t, std::size_t, std::size_t>;
-std::vector<Decoded> decode_with_pause(unsigned pause_at)
+std::vector<Decoded> decode_with_pause(
+    unsigned pause_at, bool* paused_with_in_flight = nullptr)
 {
-    IcuMacroV1Decoder<MemInstruction, 96, 3> decoder(IcuMacroQueueKind::Mem, image);
+    IcuMacroV1Decoder<MemInstruction, 96, 2> decoder(IcuMacroQueueKind::Mem, image);
     std::vector<Decoded> result;
     for (unsigned step = 0; !decoder.done() && step < 80; ++step) {
         if (step == pause_at) {
+            const bool in_flight = decoder.pending_fetch_level() != 0
+                || decoder.response_fifo_level() != 0
+                || decoder.word_fifo_level() != 0;
+            if (paused_with_in_flight != nullptr)
+                *paused_with_in_flight = in_flight;
             const auto before = decoder.statistics().decoded_contexts;
             for (unsigned p = 0; p < 7; ++p) decoder.hold_cycle();
             require(decoder.statistics().decoded_contexts == before,
@@ -123,9 +129,15 @@ std::vector<Decoded> decode_with_pause(unsigned pause_at)
 void physical_response_and_context_hold()
 {
     const auto reference = decode_with_pause(999);
-    for (unsigned stage = 0; stage < 32; ++stage)
-        require(decode_with_pause(stage) == reference,
+    bool covered_in_flight_hold = false;
+    for (unsigned stage = 0; stage < 32; ++stage) {
+        bool paused_with_in_flight = false;
+        require(decode_with_pause(stage, &paused_with_in_flight) == reference,
             "decoder HOLD changed the reconstructed instruction sequence");
+        covered_in_flight_hold |= paused_with_in_flight;
+    }
+    require(covered_in_flight_hold,
+        "HOLD sweep never covered an in-flight MEM frontend state");
 
     using Queue = DistributedIcuQueue<MemInstruction, 96, 32, 4, 2, 4>;
     Queue raw;

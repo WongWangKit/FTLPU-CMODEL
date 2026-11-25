@@ -1,0 +1,67 @@
+{
+  "schema": "ftlpu.qctl.phase2b.normalized.v1",
+  "test_name": "qctl_phase2b_joint_cycle_scoreboard",
+  "title": "QCTL Phase 2-B Joint Cycle Scoreboard",
+  "required_fields": [
+    "schema", "run_id", "case_id", "source", "global_cycle",
+    "logical_cycle", "transport_tick", "phase", "sample_point",
+    "event_sequence", "module", "instance", "signal", "width",
+    "value", "event_type", "mapping_status", "source_ref"
+  ],
+  "allowed_event_types": ["SIGNAL_SAMPLE"],
+  "allowed_mapping_statuses": ["DIRECT", "NA", "CONFLICT"],
+  "comparable_mapping_statuses": ["DIRECT"],
+  "excluded_mapping_statuses": ["NA"],
+  "architecture": {
+    "events": [],
+    "phase": "POST_COMB",
+    "sample_point": "POST_COMB",
+    "canonical_module": "qctl_architecture",
+    "canonical_instance": "qctl_architecture"
+  },
+  "signal_rules": [
+    {
+      "name": "qctl_canonical_ports_and_boundaries",
+      "category": "CANONICAL",
+      "signals": [
+        "global_control.rst_n", "global_control.clear", "global_control.run",
+        "global_control.load_mode", "global_control.sync_participant_mask",
+        "global_control.mem_packet_retired_mask",
+        "partition_config.valid", "partition_config.ready", "partition_config.fire",
+        "partition_config.queue", "partition_config.base", "partition_config.count",
+        "partition_config.generation",
+        "record_load.valid", "record_load.ready", "record_load.fire",
+        "record_load.address", "record_load.data",
+        "event_ingress.valid", "event_ingress.ready", "event_ingress.fire",
+        "event_ingress.tag", "event_ingress.target_mask", "event_ingress.backpressure",
+        "global_status.queue_active", "global_status.all_primed",
+        "global_status.all_done", "global_status.fault", "global_status.fault_code",
+        "pool_fabric.request_valid_mask", "pool_fabric.request_ready_mask",
+        "pool_fabric.request_index_vector", "pool_fabric.request_generation_vector",
+        "pool_fabric.response_valid", "pool_fabric.response_queue",
+        "pool_fabric.response_data", "pool_fabric.response_error",
+        "event_buffer_fabric.wait_mask", "event_buffer_fabric.consume_mask",
+        "event_buffer_fabric.event_valid_mask", "event_buffer_fabric.event_tag",
+        "endpoint.configure_valid", "endpoint.configure_count",
+        "endpoint.configure_generation", "endpoint.pool_request_valid",
+        "endpoint.pool_request_ready", "endpoint.pool_request_fire",
+        "endpoint.pool_request_index", "endpoint.pool_request_generation",
+        "endpoint.pool_response_valid", "endpoint.pool_response_data",
+        "endpoint.pool_response_error", "endpoint.scheduler_ce",
+        "endpoint.local_cycle", "endpoint.event_valid", "endpoint.event_tag",
+        "endpoint.event_wait", "endpoint.event_consume", "endpoint.sync_arrive",
+        "endpoint.sync_release", "endpoint.notify_valid", "endpoint.notify_ready",
+        "endpoint.notify_fire", "endpoint.mem_packet_valid",
+        "endpoint.mem_packet_ordinal", "endpoint.mem_packet_retired",
+        "endpoint.mem_packet_fire", "endpoint.configured", "endpoint.primed",
+        "endpoint.done", "endpoint.fault", "endpoint.fault_code"
+      ],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "source_views": {
+        "CMODEL": {"phase": "POST_COMB", "sample_point": "POST_COMB"},
+        "RTL": {"phase": "POST_COMB", "sample_point": "POST_COMB"}
+      }
+    }
+  ]
+}

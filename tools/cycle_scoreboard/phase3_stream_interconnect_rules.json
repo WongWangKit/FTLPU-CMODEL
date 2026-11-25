@@ -1,0 +1,49 @@
+{
+  "schema": "ftlpu.phase3.stream_interconnect.normalized.v1",
+  "test_name": "phase3_r7_stream_interconnect_cycle_scoreboard",
+  "title": "Phase 3 R7 Stream Interconnect Cycle Scoreboard",
+  "required_fields": [
+    "schema", "run_id", "case_id", "source", "global_cycle",
+    "logical_cycle", "transport_tick", "phase", "sample_point",
+    "event_sequence", "module", "instance", "signal", "width",
+    "value", "event_type", "mapping_status", "source_ref"
+  ],
+  "allowed_event_types": ["SIGNAL_SAMPLE"],
+  "allowed_mapping_statuses": ["DIRECT"],
+  "comparable_mapping_statuses": ["DIRECT"],
+  "excluded_mapping_statuses": [],
+  "architecture": {
+    "events": [],
+    "phase": "PRE_POSEDGE",
+    "sample_point": "PRE_POSEDGE",
+    "canonical_module": "stream_interconnect",
+    "canonical_instance": "fu_cluster"
+  },
+  "signal_rules": [
+    {
+      "name": "phase3_r7_six_canonical_boundaries",
+      "category": "CANONICAL",
+      "signals": [
+        "stream_interconnect.vxm_east_to_mem_valid",
+        "stream_interconnect.vxm_east_to_mem_data",
+        "stream_interconnect.mem_east_to_sxm_valid",
+        "stream_interconnect.mem_east_to_sxm_data",
+        "stream_interconnect.sxm_east_to_mxm_valid",
+        "stream_interconnect.sxm_east_to_mxm_data",
+        "stream_interconnect.mxm_west_to_sxm_valid",
+        "stream_interconnect.mxm_west_to_sxm_data",
+        "stream_interconnect.sxm_west_to_mem_valid",
+        "stream_interconnect.sxm_west_to_mem_data",
+        "stream_interconnect.mem_west_to_vxm_valid",
+        "stream_interconnect.mem_west_to_vxm_data",
+        "stream_interconnect.stream_conflict"
+      ],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "source_views": {
+        "CMODEL": {"phase": "PRE_POSEDGE", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "PRE_POSEDGE", "sample_point": "PRE_POSEDGE"}
+      }
+    }
+  ]
+}

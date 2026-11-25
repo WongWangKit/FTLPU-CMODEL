@@ -21,7 +21,9 @@ struct ProgramImage {
         case ProgramStorage::Barr: return 8;
         case ProgramStorage::QueueEvents: case ProgramStorage::BarrierEvents: return 4;
         default: return kind==IcuMacroQueueKind::MxmLoad || kind==IcuMacroQueueKind::MxmCompute
-            || kind==IcuMacroQueueKind::MxmDequant ? 16 : 12;
+            || kind==IcuMacroQueueKind::MxmDequant
+            || kind==IcuMacroQueueKind::MxmParamLoad
+            || kind==IcuMacroQueueKind::MxmBackend ? 16 : 12;
         }
     }
     std::size_t word_count() const noexcept {return byte_count/word_bytes();}

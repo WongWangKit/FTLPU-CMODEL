@@ -1,0 +1,27 @@
+{
+  "schema": "ftlpu.mxm.datapath.c5.trace.v1",
+  "test_name": "mxm_datapath_c5_cycle_scoreboard",
+  "title": "MXM Datapath C5 Cycle Scoreboard",
+  "required_fields": ["schema","run_id","case_id","source","global_cycle","logical_cycle","transport_tick","phase","sample_point","event_sequence","module","instance","signal","width","value","event_type","mapping_status","source_ref"],
+  "allowed_event_types": ["SIGNAL_SAMPLE","STATE_SAMPLE","ARCH_EVENT"],
+  "allowed_mapping_statuses": ["DIRECT","DERIVED","SEMANTIC","PARTIAL","UNMAPPED","NA","CONFLICT"],
+  "comparable_mapping_statuses": ["DIRECT","DERIVED","SEMANTIC","PARTIAL"],
+  "excluded_mapping_statuses": ["UNMAPPED","NA"],
+  "architecture": {"events":[],"phase":"LOW","sample_point":"PRE_POSEDGE","canonical_module":"architecture","canonical_instance":"architecture"},
+  "signal_rules": [
+    {
+      "name":"result_return_pre_posedge",
+      "signals":["rst_ni","run_i","top_valid_i","top_i","top_tag_i"],
+      "event_types":["SIGNAL_SAMPLE"],"mapping_statuses":["DIRECT"],
+      "canonical_module":"lpu_mxm_result_return","canonical_instance":"result_return0",
+      "source_views":{"CMODEL":{"phase":"LOW","sample_point":"PRE_POSEDGE"},"RTL":{"phase":"LOW","sample_point":"PRE_POSEDGE"}}
+    },
+    {
+      "name":"result_return_post_posedge",
+      "signals":["left_valid_o","left_o","left_tag_o","down_valid_o","down_o","down_tag_o","left_link_valid_o","left_link_o","left_link_tag_o"],
+      "event_types":["SIGNAL_SAMPLE"],"mapping_statuses":["DIRECT"],
+      "canonical_module":"lpu_mxm_result_return","canonical_instance":"result_return0",
+      "source_views":{"CMODEL":{"phase":"HIGH","sample_point":"POST_POSEDGE"},"RTL":{"phase":"HIGH","sample_point":"POST_POSEDGE"}}
+    }
+  ]
+}

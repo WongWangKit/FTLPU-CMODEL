@@ -176,7 +176,7 @@ public:
         hw::kIcuMemMacroContextDepth,
         IcuQueueRole::Mem>;
     using MxmLoadIcu = DistributedIcuQueue<
-        MxmControlInstruction,
+        MxmLoadCommand,
         hw::kIcuMxmInstructionBits,
         hw::kIcuMxmImemDepth,
         hw::kIcuMxmIqDepth,
@@ -184,7 +184,7 @@ public:
         hw::kIcuMxmMacroContextDepth,
         IcuQueueRole::MxmLoad>;
     using MxmDequantIcu = DistributedIcuQueue<
-        MxmDequantInstruction,
+        MxmDequantCommand,
         hw::kIcuMxmInstructionBits,
         hw::kIcuMxmImemDepth,
         hw::kIcuMxmIqDepth,
@@ -192,13 +192,29 @@ public:
         hw::kIcuMxmMacroContextDepth,
         IcuQueueRole::MxmDequant>;
     using MxmComputeIcu = DistributedIcuQueue<
-        MxmControlInstruction,
+        MxmComputeCommand,
         hw::kIcuMxmInstructionBits,
         hw::kIcuMxmImemDepth,
         hw::kIcuMxmIqDepth,
         hw::kIcuFetchLatencyCycles,
         hw::kIcuMxmMacroContextDepth,
         IcuQueueRole::MxmCompute>;
+    using MxmParamLoadIcu = DistributedIcuQueue<
+        MxmParamLoadCommand,
+        hw::kIcuMxmInstructionBits,
+        hw::kIcuMxmImemDepth,
+        hw::kIcuMxmIqDepth,
+        hw::kIcuFetchLatencyCycles,
+        hw::kIcuMxmMacroContextDepth,
+        IcuQueueRole::MxmParamLoad>;
+    using MxmBackendIcu = DistributedIcuQueue<
+        MxmBackendCommand,
+        hw::kIcuMxmInstructionBits,
+        hw::kIcuMxmImemDepth,
+        hw::kIcuMxmIqDepth,
+        hw::kIcuFetchLatencyCycles,
+        hw::kIcuMxmMacroContextDepth,
+        IcuQueueRole::MxmBackend>;
     using SxmTransposeIcu = DistributedIcuQueue<
         SxmInstruction,
         hw::kIcuSxmInstructionBits,
@@ -254,6 +270,11 @@ public:
         std::size_t barrier_latency_cycles = hw::kIcuBarrierLatencyCycles)
         : barrier_latency_cycles_(barrier_latency_cycles)
     {
+        if constexpr (hw::kQueueControlStorageVersion != 0) {
+            qctl_runtime_.configure(hw::kQueueControlPoolCapacity,
+                kMemQueues + 5*kMxmQueues,hw::kQueueControlCacheDepth,
+                hw::kQueueControlReadLatency,hw::kQueueControlPoolReadIi,8);
+        }
     }
 
     void enable_clocked_mode()
@@ -344,14 +365,94 @@ public:
             IcuMacroQueueKind::MxmDequant, word_count);
     }
 
+    void write_mxm_param_load_raw_macro_imem(
+        std::size_t mxm, std::size_t address, MxmRawImemWord word)
+    {
+        mxm_param_load_iq(mxm).write_raw_imem(address, std::move(word));
+    }
+
+    void configure_mxm_param_load_raw_macro_imem(
+        std::size_t mxm, std::size_t word_count)
+    {
+        mxm_param_load_iq(mxm).configure_raw_macro(
+            IcuMacroQueueKind::MxmParamLoad, word_count);
+    }
+
+    void write_mxm_backend_raw_macro_imem(
+        std::size_t mxm, std::size_t address, MxmRawImemWord word)
+    {
+        mxm_backend_iq(mxm).write_raw_imem(address, std::move(word));
+    }
+
+    void configure_mxm_backend_raw_macro_imem(
+        std::size_t mxm, std::size_t word_count)
+    {
+        mxm_backend_iq(mxm).configure_raw_macro(
+            IcuMacroQueueKind::MxmBackend, word_count);
+    }
+
     // Runs all raw Macro frontends in parallel while the program cycle remains
     // stopped. Runtime can call this after writing/committing all raw images
     // and before enabling the global program issue clock.
     void configure_queue_control_pool(std::size_t capacity,std::size_t cache,std::size_t latency,std::size_t ii) {
-        queue_control_pool_.configure(capacity,kMemQueues+3*kMxmQueues,cache,latency,ii);
+        queue_control_pool_.configure(capacity,kMemQueues+5*kMxmQueues,cache,latency,ii);
     }
     IcuQueueControlPool& queue_control_pool() noexcept {return queue_control_pool_;}
     const IcuQueueControlPool& queue_control_pool() const noexcept {return queue_control_pool_;}
+    const IcuQctlGlobalInterfaceView& qctl_hardware_interface_view() const noexcept
+    { return qctl_runtime_.hardware_interface_view(); }
+    struct QctlRuntimeInputs {
+        bool event_valid{false};
+        std::uint32_t event_tag{0};
+        std::vector<bool> event_targets{};
+        std::vector<bool> mem_packet_retired{};
+    };
+    // Formal lpu_top runtime inputs.  This is an architectural QCTL boundary,
+    // not an SRAM-macro pin view.  Values are sampled once in LOW and affect
+    // the same Controller/Fabric/Endpoint production path as the RTL ports.
+    void drive_qctl_runtime_inputs(QctlRuntimeInputs inputs)
+    {
+        const auto count = kMemQueues + 5 * kMxmQueues;
+        if constexpr (hw::kQueueControlStorageVersion == 0)
+            throw std::logic_error("QCTL Runtime inputs require an enabled QCTL target");
+        if (!clock_managed_ || next_ || qctl_runtime_input_)
+            throw std::logic_error("QCTL Runtime inputs must be driven once before LOW");
+        if (inputs.event_targets.empty())
+            inputs.event_targets.assign(count, false);
+        if (inputs.mem_packet_retired.empty())
+            inputs.mem_packet_retired.assign(count, false);
+        if (inputs.event_targets.size() != count
+            || inputs.mem_packet_retired.size() != count)
+            throw std::invalid_argument("QCTL Runtime input width mismatch");
+        qctl_runtime_input_ = std::move(inputs);
+    }
+    // Dedicated lpu_top QCTL ingress. One set of input port values is
+    // driven before each system tick, independently of ProgramLoader.
+    void drive_qctl_program_load(IcuQctlRuntime::LoadInputs inputs)
+    {
+        if constexpr (hw::kQueueControlStorageVersion == 0)
+            throw std::logic_error("QCTL Program Load requires an enabled QCTL target");
+        if (!clock_managed_ || next_ || qctl_program_load_input_)
+            throw std::logic_error("QCTL Program Load inputs must be driven once before LOW");
+        qctl_program_load_input_=std::move(inputs);
+    }
+    IcuQctlRuntime::QueueOutputs qctl_queue_status(std::size_t queue) const
+    { return qctl_runtime_.queue_status(queue); }
+    std::optional<IcuQueueControl> qctl_committed_program_record(std::size_t address) const
+    { return qctl_runtime_.committed_program_record(address); }
+    std::optional<IcuQctlPool::Partition> qctl_committed_program_partition(std::size_t queue) const
+    { return qctl_runtime_.committed_program_partition(queue); }
+    bool qctl_undefined_program_read_response() const noexcept
+    { return qctl_runtime_.undefined_program_read_response(); }
+    void configure_qctl_sync_participants(std::vector<bool> participants)
+    {
+        if (participants.size() != kMemQueues + 5 * kMxmQueues)
+            throw std::invalid_argument("QCTL participant mask width mismatch");
+        qctl_sync_participants_ = std::move(participants);
+        qctl_runtime_.configure_barrier(qctl_sync_participants_);
+    }
+    void push_qctl_event(std::uint32_t tag, std::vector<bool> targets)
+    { qctl_runtime_.push_event(tag, std::move(targets)); }
     std::size_t prime_raw_macro_frontends()
     {
         std::size_t cycles=0;
@@ -368,6 +469,7 @@ public:
         };
         return ready(mem_queues_) && ready(mxm_load_queues_)
             && ready(mxm_dequant_queues_) && ready(mxm_compute_queues_)
+            && ready(mxm_param_load_queues_) && ready(mxm_backend_queues_)
             && ready(sxm_transpose_queues_) && ready(sxm_permute_queues_);
     }
 
@@ -383,6 +485,8 @@ public:
         tick(mxm_load_queues_);
         tick(mxm_dequant_queues_);
         tick(mxm_compute_queues_);
+        tick(mxm_param_load_queues_);
+        tick(mxm_backend_queues_);
         tick(sxm_transpose_queues_); tick(sxm_permute_queues_);
         queue_control_pool_.end_cycle(true);
     }
@@ -399,6 +503,8 @@ public:
         case IcuMacroQueueKind::MxmLoad: if(index>=kMxmQueues) break; fn(mxm_load_iq(index)); return;
         case IcuMacroQueueKind::MxmCompute: if(index>=kMxmQueues) break; fn(mxm_compute_iq(index)); return;
         case IcuMacroQueueKind::MxmDequant: if(index>=kMxmQueues) break; fn(mxm_dequant_iq(index)); return;
+        case IcuMacroQueueKind::MxmParamLoad: if(index>=kMxmQueues) break; fn(mxm_param_load_iq(index)); return;
+        case IcuMacroQueueKind::MxmBackend: if(index>=kMxmQueues) break; fn(mxm_backend_iq(index)); return;
         case IcuMacroQueueKind::Vxm: if(index>=kVxmQueues) break; fn(vxm_iq(index)); return;
         case IcuMacroQueueKind::SxmTranspose: if(index>=hw::kHemispheres) break; fn(sxm_transpose_iq(static_cast<Hemisphere>(index))); return;
         case IcuMacroQueueKind::SxmPermute: if(index>=hw::kHemispheres) break; fn(sxm_permute_iq(static_cast<Hemisphere>(index))); return;
@@ -453,7 +559,7 @@ public:
             visit_program_queue(image.kind,image.queue_index,image.storage==ProgramStorage::TransportImem,[&](auto& q) {
                 using Q=std::decay_t<decltype(q)>;
                 if(image.mode==IcuQueueMode::Macro) {
-                    if constexpr (Q::queue_role == IcuQueueRole::Mem) {
+                    if constexpr (Q::has_program_endpoint) {
                         std::array<std::uint32_t,4> load_data{};
                         for(std::size_t b=0;b<image.word_bytes();++b)
                             load_data[b/4] |= std::uint32_t(bytes[b])
@@ -540,7 +646,7 @@ public:
             visit_program_queue(image.kind,image.queue_index,image.storage==ProgramStorage::TransportImem,[&](auto& q) {
                 using Q=std::decay_t<decltype(q)>;
                 if(image.mode==IcuQueueMode::Macro) {
-                    if constexpr (Q::queue_role == IcuQueueRole::Mem)
+                    if constexpr (Q::has_program_endpoint)
                         q.prime_mem_program(image.kind,image.word_count());
                     else
                         q.configure_raw_macro(image.kind,image.word_count());
@@ -563,12 +669,34 @@ public:
                 entries.push_back({u32(p),opcode,u32(p+8)});
                 transport|=opcode==kQueueControlMemPacket;
             }
-            visit_program_queue(image.kind,image.queue_index,false,[&](auto& q) {
-                if constexpr(hw::kQueueControlStorageVersion != 0)
-                    q.configure_shared_queue_controls(queue_control_pool_,entries,hw::kQueueControlCapacity,image.end_cycle);
-                else q.configure_queue_controls(entries,hw::kQueueControlCapacity,hw::kQueueControlCacheDepth,
-                    hw::kQueueControlReadLatency,image.end_cycle);
-            });
+            if constexpr(hw::kQueueControlStorageVersion != 0) {
+                const auto qctl_queue = qctl_queue_id(image.kind,
+                    image.queue_index);
+                if (qctl_pool_next_base_ > hw::kQueueControlPoolCapacity
+                    || entries.size() > hw::kQueueControlPoolCapacity
+                        - qctl_pool_next_base_)
+                    throw std::invalid_argument("QCTL Pool capacity exceeded");
+                const auto generation = image.generation != 0
+                    ? image.generation : program_generation_;
+                if (generation == 0)
+                    throw std::invalid_argument("QCTL generation must be non-zero");
+                qctl_runtime_.configure_partition(qctl_queue,
+                    qctl_pool_next_base_, entries, generation);
+                qctl_pool_next_base_ += entries.size();
+                if (std::ranges::any_of(entries, [](const auto& entry) {
+                        return entry.opcode == IcuControlOpcode::Sync;
+                    }))
+                    qctl_sync_participants_[qctl_queue] = true;
+                qctl_runtime_.configure_barrier(qctl_sync_participants_);
+                visit_program_queue(image.kind,image.queue_index,false,
+                    [&](auto& q) { q.enable_qctl_endpoint(image.end_cycle); });
+            } else {
+                visit_program_queue(image.kind,image.queue_index,false,[&](auto& q) {
+                    q.configure_queue_controls(entries,hw::kQueueControlCapacity,
+                        hw::kQueueControlCacheDepth,
+                        hw::kQueueControlReadLatency,image.end_cycle);
+                });
+            }
             if(transport) enable_queue_control_transport(image.queue_index);
         } else if(image.storage==ProgramStorage::Barr) {
             committed_barriers_.clear();
@@ -593,7 +721,9 @@ public:
     template<class Fn> void for_each_program_queue(Fn&& fn) {
         for(auto& q:mem_queues_)fn(q);for(auto& q:mem_transport_queues_)fn(q);
         for(auto& q:mxm_load_queues_)fn(q);for(auto& q:mxm_compute_queues_)fn(q);
-        for(auto& q:mxm_dequant_queues_)fn(q);for(auto& q:vxm_queues_)fn(q);
+        for(auto& q:mxm_dequant_queues_)fn(q);
+        for(auto& q:mxm_param_load_queues_)fn(q);for(auto& q:mxm_backend_queues_)fn(q);
+        for(auto& q:vxm_queues_)fn(q);
         for(auto& q:sxm_transpose_queues_)fn(q);for(auto& q:sxm_permute_queues_)fn(q);
         for(auto& q:c2c_dma_queues_)fn(q);for(auto& q:c2c_tx_queues_)fn(q);for(auto& q:c2c_rx_queues_)fn(q);
     }
@@ -607,9 +737,16 @@ public:
         queue_control_pool_.begin_cycle();
         for_each_program_queue([](auto& q){q.prime_frontend_cycle();});
         queue_control_pool_.end_cycle(true);
+        if (qctl_runtime_.enabled() && !qctl_program_load_input_)
+            qctl_runtime_.prime_cycle();
+        update_qctl_queue_status();
     }
     bool program_frontends_ready() {
-        bool ready=true;for_each_program_queue([&](auto& q){ready &= q.imem_occupancy()==0 || q.frontend_ready();});return ready;
+        bool ready=true;
+        for_each_program_queue([&](auto& q) {
+            ready &= q.local_frontend_ready(program_issue_enabled_);
+        });
+        return ready;
     }
     void reset_program() {
         const auto physical=cycle_;
@@ -617,6 +754,12 @@ public:
         if constexpr(hw::kQueueControlStorageVersion != 0)
             configure_queue_control_pool(hw::kQueueControlPoolCapacity,hw::kQueueControlCacheDepth,
                 hw::kQueueControlReadLatency,hw::kQueueControlPoolReadIi);
+        qctl_runtime_.configure(hw::kQueueControlPoolCapacity,
+            kMemQueues + 5 * kMxmQueues, hw::kQueueControlCacheDepth,
+            hw::kQueueControlReadLatency, hw::kQueueControlPoolReadIi, 8);
+        qctl_pool_next_base_ = 0;
+        qctl_sync_participants_.assign(kMemQueues + 5 * kMxmQueues, false);
+        qctl_runtime_.configure_barrier(qctl_sync_participants_);
         program_control_stores_.clear();committed_barriers_.clear();
         program_loading_=true;program_issue_enabled_=false;compute_enabled_=false;
     }
@@ -629,6 +772,8 @@ public:
         for (auto& queue : mxm_load_queues_) queue.reset();
         for (auto& queue : mxm_dequant_queues_) queue.reset();
         for (auto& queue : mxm_compute_queues_) queue.reset();
+        for (auto& queue : mxm_param_load_queues_) queue.reset();
+        for (auto& queue : mxm_backend_queues_) queue.reset();
         for (auto& queue : sxm_transpose_queues_) queue.reset();
         for (auto& queue : sxm_permute_queues_) queue.reset();
         barrier_events_.clear();
@@ -641,6 +786,12 @@ public:
         mem_native_owners_.clear();
         queue_completion_events_ = {};
         queue_control_pool_.reset();
+        qctl_runtime_.configure(hw::kQueueControlPoolCapacity,
+            kMemQueues + 5 * kMxmQueues, hw::kQueueControlCacheDepth,
+            hw::kQueueControlReadLatency, hw::kQueueControlPoolReadIi, 8);
+        qctl_pool_next_base_ = 0;
+        qctl_sync_participants_.assign(kMemQueues + 5 * kMxmQueues, false);
+        qctl_runtime_.configure_barrier(qctl_sync_participants_);
         transport_overlap_enabled_ = false;
         compute_enabled_ = false;
         program_loading_ = true;
@@ -666,6 +817,12 @@ public:
         for (auto& queue : mxm_compute_queues_) {
             queue.reset();
         }
+        for (auto& queue : mxm_param_load_queues_) {
+            queue.reset();
+        }
+        for (auto& queue : mxm_backend_queues_) {
+            queue.reset();
+        }
         for (auto& queue : sxm_transpose_queues_) queue.reset();
         for (auto& queue : sxm_permute_queues_) queue.reset();
         for (auto& queue : c2c_tx_queues_) queue.reset();
@@ -681,6 +838,12 @@ public:
         mem_native_owners_.clear();
         queue_completion_events_ = {};
         queue_control_pool_.reset();
+        qctl_runtime_.configure(hw::kQueueControlPoolCapacity,
+            kMemQueues + 5 * kMxmQueues, hw::kQueueControlCacheDepth,
+            hw::kQueueControlReadLatency, hw::kQueueControlPoolReadIi, 8);
+        qctl_pool_next_base_ = 0;
+        qctl_sync_participants_.assign(kMemQueues + 5 * kMxmQueues, false);
+        qctl_runtime_.configure_barrier(qctl_sync_participants_);
         mem_transport_owner_count_ = 0;
         transport_overlap_enabled_ = false;
         queue_control_transport_enabled_.fill(false);
@@ -706,6 +869,12 @@ public:
             queue.push_nop(cycles);
         }
         for (auto& queue : mxm_compute_queues_) {
+            queue.push_nop(cycles);
+        }
+        for (auto& queue : mxm_param_load_queues_) {
+            queue.push_nop(cycles);
+        }
+        for (auto& queue : mxm_backend_queues_) {
             queue.push_nop(cycles);
         }
         for (auto& queue : sxm_transpose_queues_) queue.push_nop(cycles);
@@ -742,6 +911,14 @@ public:
         case IcuLocationKind::MxmDequant:
             check_mxm_queue(location.unit);
             mxm_dequant_queues_[location.unit].append_control(instruction);
+            return;
+        case IcuLocationKind::MxmParamLoad:
+            check_mxm_queue(location.unit);
+            mxm_param_load_queues_[location.unit].append_control(instruction);
+            return;
+        case IcuLocationKind::MxmBackend:
+            check_mxm_queue(location.unit);
+            mxm_backend_queues_[location.unit].append_control(instruction);
             return;
         case IcuLocationKind::Sxm:
             if (location.unit >= hw::kHemispheres) {
@@ -957,14 +1134,39 @@ public:
     void enqueue_mxm(std::size_t mxm, MxmControlInstruction instruction)
     {
         check_mxm_queue(mxm);
-        if (instruction.opcode == MxmControlOpcode::IW
-            || (instruction.opcode == MxmControlOpcode::IS
-                && instruction.decode_operation
-                    == MxmIsOperation::LoadActivation)) {
-            mxm_load_queues_[mxm].push_instruction(instruction);
-        } else {
-            mxm_compute_queues_[mxm].push_instruction(instruction);
-        }
+        static_cast<void>(instruction);
+        throw StaticScheduleError(
+            "Legacy MXM control instructions were removed; use one of the five native MXM command streams");
+    }
+
+    void enqueue_mxm_load(std::size_t mxm, MxmLoadCommand instruction)
+    {
+        check_mxm_queue(mxm);
+        mxm_load_queues_[mxm].push_instruction(instruction);
+    }
+
+    void enqueue_mxm_compute(std::size_t mxm, MxmComputeCommand instruction)
+    {
+        check_mxm_queue(mxm);
+        mxm_compute_queues_[mxm].push_instruction(instruction);
+    }
+
+    void enqueue_mxm_dequant(std::size_t mxm, MxmDequantCommand instruction)
+    {
+        check_mxm_queue(mxm);
+        mxm_dequant_queues_[mxm].push_instruction(instruction);
+    }
+
+    void enqueue_mxm_param_load(std::size_t mxm, MxmParamLoadCommand instruction)
+    {
+        check_mxm_queue(mxm);
+        mxm_param_load_queues_[mxm].push_instruction(instruction);
+    }
+
+    void enqueue_mxm_backend(std::size_t mxm, MxmBackendCommand instruction)
+    {
+        check_mxm_queue(mxm);
+        mxm_backend_queues_[mxm].push_instruction(instruction);
     }
 
     void enqueue_mxm_nop(std::size_t mxm, std::size_t cycles)
@@ -973,6 +1175,8 @@ public:
         mxm_load_queues_[mxm].push_nop(cycles);
         mxm_dequant_queues_[mxm].push_nop(cycles);
         mxm_compute_queues_[mxm].push_nop(cycles);
+        mxm_param_load_queues_[mxm].push_nop(cycles);
+        mxm_backend_queues_[mxm].push_nop(cycles);
     }
 
     void enqueue_mxm_load_nop(std::size_t mxm, std::size_t cycles)
@@ -988,7 +1192,9 @@ public:
         MxmDequantInstruction instruction)
     {
         check_mxm_queue(mxm);
-        mxm_dequant_queues_[mxm].push_instruction(instruction);
+        static_cast<void>(instruction);
+        throw StaticScheduleError(
+            "Legacy inline dequant parameters were removed; use ParamLoad plus Dequant command streams");
     }
 
 
@@ -1003,14 +1209,10 @@ public:
         IcuMacroSchedule schedule, MxmControlInstruction instruction)
     {
         check_mxm_queue(mxm);
-        if (instruction.opcode != MxmControlOpcode::IW
-            && !(instruction.opcode == MxmControlOpcode::IS
-                && instruction.decode_operation
-                    == MxmIsOperation::LoadActivation))
-            throw std::invalid_argument(
-                "MXM load macro requires an IW/load-activation instruction");
-        mxm_load_queues_[mxm].push_macro(
-            schedule, std::move(instruction));
+        static_cast<void>(schedule);
+        static_cast<void>(instruction);
+        throw StaticScheduleError(
+            "Legacy MXM load macro was removed; use MxmLoadCommand");
     }
 
 
@@ -1019,8 +1221,10 @@ public:
         IcuMacroSchedule schedule, MxmDequantInstruction instruction)
     {
         check_mxm_queue(mxm);
-        mxm_dequant_queues_[mxm].push_macro(
-            schedule, std::move(instruction));
+        static_cast<void>(schedule);
+        static_cast<void>(instruction);
+        throw StaticScheduleError(
+            "Legacy MXM dequant macro was removed; use ParamLoad plus Dequant command streams");
     }
 
 
@@ -1029,14 +1233,10 @@ public:
         IcuMacroSchedule schedule, MxmControlInstruction instruction)
     {
         check_mxm_queue(mxm);
-        if (instruction.opcode == MxmControlOpcode::IW
-            || (instruction.opcode == MxmControlOpcode::IS
-                && instruction.decode_operation
-                    == MxmIsOperation::LoadActivation))
-            throw std::invalid_argument(
-                "MXM compute macro cannot carry a load instruction");
-        mxm_compute_queues_[mxm].push_macro(
-            schedule, std::move(instruction));
+        static_cast<void>(schedule);
+        static_cast<void>(instruction);
+        throw StaticScheduleError(
+            "Legacy MXM compute macro was removed; use MxmComputeCommand");
     }
 
 
@@ -1337,22 +1537,33 @@ public:
         switch (location.kind) {
         case IcuLocationKind::Mem:
             check_mem_location(location);
-            mem_iq(mem_queue(
+            if (auto& queue = mem_iq(mem_queue(
                 static_cast<Hemisphere>(location.unit),
                 location.index,
-                location.bank)).notify();
+                location.bank)); !queue.qctl_endpoint_active()) queue.notify();
             return;
         case IcuLocationKind::Vxm:
             vxm_iq(location.index).notify();
             return;
         case IcuLocationKind::MxmLoad:
-            mxm_load_iq(location.unit).notify();
+            if (auto& queue = mxm_load_iq(location.unit);
+                !queue.qctl_endpoint_active()) queue.notify();
             return;
         case IcuLocationKind::MxmCompute:
-            mxm_compute_iq(location.unit).notify();
+            if (auto& queue = mxm_compute_iq(location.unit);
+                !queue.qctl_endpoint_active()) queue.notify();
             return;
         case IcuLocationKind::MxmDequant:
-            mxm_dequant_iq(location.unit).notify();
+            if (auto& queue = mxm_dequant_iq(location.unit);
+                !queue.qctl_endpoint_active()) queue.notify();
+            return;
+        case IcuLocationKind::MxmParamLoad:
+            if (auto& queue = mxm_param_load_iq(location.unit);
+                !queue.qctl_endpoint_active()) queue.notify();
+            return;
+        case IcuLocationKind::MxmBackend:
+            if (auto& queue = mxm_backend_iq(location.unit);
+                !queue.qctl_endpoint_active()) queue.notify();
             return;
         case IcuLocationKind::Sxm:
             if (location.unit >= hw::kHemispheres) {
@@ -1404,20 +1615,69 @@ public:
         switch (location.kind) {
         case IcuLocationKind::Mem:
             check_mem_location(location);
-            mem_iq(mem_queue(static_cast<Hemisphere>(location.unit),
-                location.index, location.bank)).notify(event_tag);
+            {
+                const auto queue = mem_queue(
+                    static_cast<Hemisphere>(location.unit),
+                    location.index, location.bank);
+                if (mem_iq(queue).qctl_endpoint_active()) {
+                    std::vector<bool> targets(
+                        kMemQueues + 5 * kMxmQueues, false);
+                    targets[queue] = true;
+                    qctl_runtime_.push_event(
+                        static_cast<std::uint32_t>(event_tag),
+                        std::move(targets));
+                } else {
+                    mem_iq(queue).notify(event_tag);
+                }
+            }
             return;
         case IcuLocationKind::Vxm:
             vxm_iq(location.index).notify(event_tag);
             return;
         case IcuLocationKind::MxmLoad:
-            mxm_load_iq(location.unit).notify(event_tag);
+            if (mxm_load_iq(location.unit).qctl_endpoint_active()) {
+                std::vector<bool> targets(
+                    kMemQueues + 5 * kMxmQueues, false);
+                targets[kMemQueues + location.unit] = true;
+                qctl_runtime_.push_event(static_cast<std::uint32_t>(event_tag),
+                    std::move(targets));
+            } else mxm_load_iq(location.unit).notify(event_tag);
             return;
         case IcuLocationKind::MxmCompute:
-            mxm_compute_iq(location.unit).notify(event_tag);
+            if (mxm_compute_iq(location.unit).qctl_endpoint_active()) {
+                std::vector<bool> targets(
+                    kMemQueues + 5 * kMxmQueues, false);
+                targets[kMemQueues + 2 * kMxmQueues + location.unit] = true;
+                qctl_runtime_.push_event(static_cast<std::uint32_t>(event_tag),
+                    std::move(targets));
+            } else mxm_compute_iq(location.unit).notify(event_tag);
             return;
         case IcuLocationKind::MxmDequant:
-            mxm_dequant_iq(location.unit).notify(event_tag);
+            if (mxm_dequant_iq(location.unit).qctl_endpoint_active()) {
+                std::vector<bool> targets(
+                    kMemQueues + 5 * kMxmQueues, false);
+                targets[kMemQueues + kMxmQueues + location.unit] = true;
+                qctl_runtime_.push_event(static_cast<std::uint32_t>(event_tag),
+                    std::move(targets));
+            } else mxm_dequant_iq(location.unit).notify(event_tag);
+            return;
+        case IcuLocationKind::MxmParamLoad:
+            if (mxm_param_load_iq(location.unit).qctl_endpoint_active()) {
+                std::vector<bool> targets(
+                    kMemQueues + 5 * kMxmQueues, false);
+                targets[kMemQueues + 3 * kMxmQueues + location.unit] = true;
+                qctl_runtime_.push_event(static_cast<std::uint32_t>(event_tag),
+                    std::move(targets));
+            } else mxm_param_load_iq(location.unit).notify(event_tag);
+            return;
+        case IcuLocationKind::MxmBackend:
+            if (mxm_backend_iq(location.unit).qctl_endpoint_active()) {
+                std::vector<bool> targets(
+                    kMemQueues + 5 * kMxmQueues, false);
+                targets[kMemQueues + 4 * kMxmQueues + location.unit] = true;
+                qctl_runtime_.push_event(static_cast<std::uint32_t>(event_tag),
+                    std::move(targets));
+            } else mxm_backend_iq(location.unit).notify(event_tag);
             return;
         case IcuLocationKind::Sxm:
             if (location.unit >= hw::kHemispheres || location.index > 1)
@@ -1459,6 +1719,10 @@ public:
             return mxm_compute_iq(location.unit).blocked_on_event(event_tag);
         case IcuLocationKind::MxmDequant:
             return mxm_dequant_iq(location.unit).blocked_on_event(event_tag);
+        case IcuLocationKind::MxmParamLoad:
+            return mxm_param_load_iq(location.unit).blocked_on_event(event_tag);
+        case IcuLocationKind::MxmBackend:
+            return mxm_backend_iq(location.unit).blocked_on_event(event_tag);
         case IcuLocationKind::Sxm:
             if (location.unit >= hw::kHemispheres || location.index > 1)
                 throw std::out_of_range(
@@ -1659,10 +1923,18 @@ public:
     void broadcast_notification()
     {
         for (auto& queue : vxm_queues_) queue.notify();
-        for (auto& queue : mem_queues_) queue.notify();
-        for (auto& queue : mxm_load_queues_) queue.notify();
-        for (auto& queue : mxm_dequant_queues_) queue.notify();
-        for (auto& queue : mxm_compute_queues_) queue.notify();
+        for (auto& queue : mem_queues_)
+            if (!queue.qctl_endpoint_active()) queue.notify();
+        for (auto& queue : mxm_load_queues_)
+            if (!queue.qctl_endpoint_active()) queue.notify();
+        for (auto& queue : mxm_dequant_queues_)
+            if (!queue.qctl_endpoint_active()) queue.notify();
+        for (auto& queue : mxm_compute_queues_)
+            if (!queue.qctl_endpoint_active()) queue.notify();
+        for (auto& queue : mxm_param_load_queues_)
+            if (!queue.qctl_endpoint_active()) queue.notify();
+        for (auto& queue : mxm_backend_queues_)
+            if (!queue.qctl_endpoint_active()) queue.notify();
         for (auto& queue : sxm_transpose_queues_) queue.notify();
         for (auto& queue : sxm_permute_queues_) queue.notify();
         for (auto& queue : c2c_tx_queues_) queue.notify();
@@ -1676,11 +1948,34 @@ public:
     // consumer boundary, while C2C transport queues may keep running.
     void broadcast_tagged_notification(std::size_t event_tag)
     {
+        std::vector<bool> qctl_targets(kMemQueues + 5 * kMxmQueues, false);
         for (auto& queue : vxm_queues_) queue.notify(event_tag);
-        for (auto& queue : mem_queues_) queue.notify(event_tag);
-        for (auto& queue : mxm_load_queues_) queue.notify(event_tag);
-        for (auto& queue : mxm_dequant_queues_) queue.notify(event_tag);
-        for (auto& queue : mxm_compute_queues_) queue.notify(event_tag);
+        for (std::size_t queue = 0; queue < kMemQueues; ++queue) {
+            if (mem_queues_[queue].qctl_endpoint_active())
+                qctl_targets[queue] = true;
+            else mem_queues_[queue].notify(event_tag);
+        }
+        for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
+            if (mxm_load_queues_[mxm].qctl_endpoint_active())
+                qctl_targets[kMemQueues + mxm] = true;
+            else mxm_load_queues_[mxm].notify(event_tag);
+            if (mxm_dequant_queues_[mxm].qctl_endpoint_active())
+                qctl_targets[kMemQueues + kMxmQueues + mxm] = true;
+            else mxm_dequant_queues_[mxm].notify(event_tag);
+            if (mxm_compute_queues_[mxm].qctl_endpoint_active())
+                qctl_targets[kMemQueues + 2 * kMxmQueues + mxm] = true;
+            else mxm_compute_queues_[mxm].notify(event_tag);
+            if (mxm_param_load_queues_[mxm].qctl_endpoint_active())
+                qctl_targets[kMemQueues + 3 * kMxmQueues + mxm] = true;
+            else mxm_param_load_queues_[mxm].notify(event_tag);
+            if (mxm_backend_queues_[mxm].qctl_endpoint_active())
+                qctl_targets[kMemQueues + 4 * kMxmQueues + mxm] = true;
+            else mxm_backend_queues_[mxm].notify(event_tag);
+        }
+        if (std::ranges::any_of(qctl_targets,
+                [](bool target) { return target; }))
+            qctl_runtime_.push_event(static_cast<std::uint32_t>(event_tag),
+                std::move(qctl_targets));
         for (auto& queue : sxm_transpose_queues_) queue.notify(event_tag);
         for (auto& queue : sxm_permute_queues_) queue.notify(event_tag);
     }
@@ -1725,11 +2020,12 @@ public:
         if(!program_loading_) common_barriers_.end_cycle();
         ++cycle_;
     }
+    template <typename MxmUnit>
     void dispatch(
         std::array<MemArrayModel, hw::kHemispheres>& mems,
         VxmSlice& vxm,
         std::array<SxmSlice, hw::kHemispheres>& sxms,
-        std::array<Mxm, kMxmQueues>& mxms,
+        std::array<MxmUnit, kMxmQueues>& mxms,
         std::ostream* os = nullptr,
         std::array<C2cEndpoint*, hw::kHemispheres> c2cs = {},
         std::array<C2cDmaEngine*, hw::kHemispheres> c2c_dmas = {})
@@ -1741,14 +2037,48 @@ public:
             return;
         }
         log_cycle_header(os);
+        const auto qctl_load_input=std::exchange(qctl_program_load_input_,std::nullopt);
+        const auto qctl_runtime_input=std::exchange(qctl_runtime_input_,std::nullopt);
+        const bool qctl_load_owns_pool=qctl_load_input
+            && (qctl_load_input->load_mode || qctl_load_input->clear);
+        const bool qctl_program_prefetch=qctl_load_input && !qctl_load_owns_pool
+            && (program_loading_ || !program_issue_enabled_);
+        if(qctl_load_owns_pool) apply_qctl_program_load(*qctl_load_input);
         if(!program_loading_) queue_control_pool_.begin_cycle();
 
-        compute_enabled_ = (!program_loading_ && common_barriers_.begin_cycle(program_issue_enabled_));
+        compute_enabled_ = (!program_loading_
+            && common_barriers_.begin_cycle(program_issue_enabled_ && !qctl_load_owns_pool));
+        // QCTL is a formal MEM/MXM control boundary.  Evaluate it exactly once
+        // before those Queues execute, then commit exactly once after all FU
+        // retirement feedback has been collected below.
+        if (qctl_runtime_input)
+            qctl_runtime_.drive_event_input(qctl_runtime_input->event_valid,
+                qctl_runtime_input->event_tag,
+                qctl_runtime_input->event_targets);
+        qctl_external_retire_inputs_ = qctl_runtime_input
+            ? qctl_runtime_input->mem_packet_retired : std::vector<bool>{};
+        const bool qctl_cycle_active = !program_loading_
+            && !qctl_load_owns_pool && !qctl_program_prefetch;
+        bool qctl_cycle_precompleted = false;
+        if (qctl_cycle_active)
+            begin_qctl_cycle(compute_enabled_);
+        // With the formal top-level runtime ports driven, Event and
+        // MEM_PACKET retirement are already sampled inputs for this active
+        // edge.  Commit QCTL before FU-local Scheduler advancement so those
+        // Queues observe the RTL POST_POSEDGE Controller outputs.  The normal
+        // semantic Native executor path still completes below after collecting
+        // its Queue-generated retirement feedback.
+        if (qctl_cycle_active && qctl_runtime_input) {
+            complete_qctl_cycle();
+            qctl_cycle_precompleted = true;
+        }
         if (!compute_enabled_ && !program_loading_) {
             for (auto& queue : vxm_queues_) queue.hold_compute_cycle();
             for (auto& queue : mxm_load_queues_) queue.hold_compute_cycle();
             for (auto& queue : mxm_dequant_queues_) queue.hold_compute_cycle();
             for (auto& queue : mxm_compute_queues_) queue.hold_compute_cycle();
+            for (auto& queue : mxm_param_load_queues_) queue.hold_compute_cycle();
+            for (auto& queue : mxm_backend_queues_) queue.hold_compute_cycle();
             for (auto& queue : sxm_transpose_queues_) queue.hold_compute_cycle();
             for (auto& queue : sxm_permute_queues_) queue.hold_compute_cycle();
         }
@@ -1926,49 +2256,82 @@ public:
             }
         }
 
-        if (compute_enabled_)
-        for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
-            const auto instruction =
-                mxm_dequant_queues_[mxm].dispatch_next();
-            if (!instruction.has_value()) {
-                continue;
-            }
-            mxms[mxm].control().issue_dequant_south(*instruction);
-            any = true;
-            if (os != nullptr) {
-                *os << "  ICU -> MXM" << mxm
-                    << ".dequant scale=" << instruction->scale() << '\n';
-            }
-        }
+        if constexpr (requires(MxmUnit& unit) {
+                unit.inputs();
+                unit.command_ready(true, MxmComputeCommand{});
+                unit.command_ready(true, MxmLoadCommand{});
+                unit.command_ready(true, MxmParamLoadCommand{});
+                unit.command_ready(true, MxmDequantCommand{});
+                unit.command_ready(true, MxmBackendCommand{});
+            }) {
+            for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
+                auto inputs = mxms[mxm].inputs();
+                inputs.run_i = compute_enabled_;
+                inputs.compute_enqueue_valid_i = false;
+                inputs.compute_launch_i = false;
+                inputs.load_enqueue_valid_i = false;
+                inputs.load_launch_i = false;
+                inputs.param_load_enqueue_valid_i = false;
+                inputs.param_load_launch_i = false;
+                inputs.dequant_enqueue_valid_i = false;
+                inputs.dequant_launch_i = false;
+                inputs.backend_enqueue_valid_i = false;
+                inputs.backend_launch_i = false;
 
-        if (compute_enabled_)
-        for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
-            const auto instruction = mxm_load_queues_[mxm].dispatch_next();
-            if (!instruction.has_value()) {
-                continue;
-            }
-            mxms[mxm].control().issue_south(*instruction);
-            any = true;
-            if (os != nullptr) {
-                *os << "  ICU -> MXM" << mxm << ".load " << describe_mxm(*instruction) << '\n';
-            }
-        }
+                if (compute_enabled_) {
+                    const auto issue = [](auto& queue, bool ready) {
+                        if (queue.raw_macro_mode())
+                            return queue.dispatch_macro_issue(ready);
+                        if (ready) return queue.dispatch_next();
+                        queue.hold_compute_cycle();
+                        return decltype(queue.dispatch_next()){};
+                    };
+                    const auto compute = issue(mxm_compute_queues_[mxm],
+                        mxms[mxm].command_ready(true, MxmComputeCommand{}));
+                    const auto load = issue(mxm_load_queues_[mxm],
+                        mxms[mxm].command_ready(true, MxmLoadCommand{}));
+                    const auto param = issue(mxm_param_load_queues_[mxm],
+                        mxms[mxm].command_ready(true, MxmParamLoadCommand{}));
+                    const auto dequant = issue(mxm_dequant_queues_[mxm],
+                        mxms[mxm].command_ready(true, MxmDequantCommand{}));
+                    const auto backend = issue(mxm_backend_queues_[mxm],
+                        mxms[mxm].command_ready(true, MxmBackendCommand{}));
 
-        if (compute_enabled_)
-        for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
-            const auto instruction = mxm_compute_queues_[mxm].dispatch_next();
-            if (!instruction.has_value()) {
-                continue;
-            }
-            mxms[mxm].control().issue_south(*instruction);
-            any = true;
-            if (os != nullptr) {
-                *os << "  ICU -> MXM" << mxm << ".compute " << describe_mxm(*instruction) << '\n';
+                    inputs.compute_enqueue_valid_i = compute.has_value();
+                    inputs.compute_launch_i = compute.has_value();
+                    if (compute) inputs.compute_instruction_i = *compute;
+                    inputs.load_enqueue_valid_i = load.has_value();
+                    inputs.load_launch_i = load.has_value();
+                    if (load) inputs.load_instruction_i = *load;
+                    inputs.param_load_enqueue_valid_i = param.has_value();
+                    inputs.param_load_launch_i = param.has_value();
+                    if (param) inputs.param_load_instruction_i = *param;
+                    inputs.dequant_enqueue_valid_i = dequant.has_value();
+                    inputs.dequant_launch_i = dequant.has_value();
+                    if (dequant) inputs.dequant_instruction_i = *dequant;
+                    inputs.backend_enqueue_valid_i = backend.has_value();
+                    inputs.backend_launch_i = backend.has_value();
+                    if (backend) inputs.backend_instruction_i = *backend;
+                    any = any || compute || load || param || dequant || backend;
+                }
+                mxms[mxm].drive(std::move(inputs));
             }
         }
 
         log_dispatch_idle(os, any);
         if(!program_loading_) common_barriers_.end_cycle();
+        if(qctl_cycle_active && !qctl_cycle_precompleted)
+            complete_qctl_cycle();
+        qctl_external_retire_inputs_.clear();
+        if(qctl_load_input && !qctl_load_owns_pool) {
+            if(qctl_program_prefetch) {
+                // The Pool response visible this LOW is accepted by the Cache
+                // at the common edge, including the final priming response.
+                qctl_runtime_.prime_cycle(true);
+                update_qctl_queue_status();
+            }
+            qctl_runtime_.observe_program_load_inputs(*qctl_load_input);
+        }
         if(!program_loading_) queue_control_pool_.end_cycle();
         ++cycle_;
     }
@@ -1996,8 +2359,18 @@ public:
         check_mxm_queue(mxm);
         return mxm_load_queues_[mxm];
     }
+    const MxmLoadIcu& mxm_load_iq(std::size_t mxm) const
+    {
+        check_mxm_queue(mxm);
+        return mxm_load_queues_[mxm];
+    }
 
     MxmDequantIcu& mxm_dequant_iq(std::size_t mxm)
+    {
+        check_mxm_queue(mxm);
+        return mxm_dequant_queues_[mxm];
+    }
+    const MxmDequantIcu& mxm_dequant_iq(std::size_t mxm) const
     {
         check_mxm_queue(mxm);
         return mxm_dequant_queues_[mxm];
@@ -2007,6 +2380,33 @@ public:
     {
         check_mxm_queue(mxm);
         return mxm_compute_queues_[mxm];
+    }
+    const MxmComputeIcu& mxm_compute_iq(std::size_t mxm) const
+    {
+        check_mxm_queue(mxm);
+        return mxm_compute_queues_[mxm];
+    }
+
+    MxmParamLoadIcu& mxm_param_load_iq(std::size_t mxm)
+    {
+        check_mxm_queue(mxm);
+        return mxm_param_load_queues_[mxm];
+    }
+    const MxmParamLoadIcu& mxm_param_load_iq(std::size_t mxm) const
+    {
+        check_mxm_queue(mxm);
+        return mxm_param_load_queues_[mxm];
+    }
+
+    MxmBackendIcu& mxm_backend_iq(std::size_t mxm)
+    {
+        check_mxm_queue(mxm);
+        return mxm_backend_queues_[mxm];
+    }
+    const MxmBackendIcu& mxm_backend_iq(std::size_t mxm) const
+    {
+        check_mxm_queue(mxm);
+        return mxm_backend_queues_[mxm];
     }
 
     SxmTransposeIcu& sxm_transpose_iq(Hemisphere hemisphere)
@@ -2042,7 +2442,7 @@ public:
     macro_queue_frontend_statistics() const
     {
         std::vector<IcuMacroQueueFrontendStatistics> result;
-        result.reserve(kMemQueues + 3 * kMxmQueues);
+        result.reserve(kMemQueues + 5 * kMxmQueues);
         const auto append = [&](IcuMacroQueueKind kind,
                                 std::size_t index,
                                 const auto& queue) {
@@ -2090,6 +2490,12 @@ public:
         for (std::size_t index = 0; index < mxm_compute_queues_.size(); ++index)
             append(IcuMacroQueueKind::MxmCompute, index,
                 mxm_compute_queues_[index]);
+        for (std::size_t index = 0; index < mxm_param_load_queues_.size(); ++index)
+            append(IcuMacroQueueKind::MxmParamLoad, index,
+                mxm_param_load_queues_[index]);
+        for (std::size_t index = 0; index < mxm_backend_queues_.size(); ++index)
+            append(IcuMacroQueueKind::MxmBackend, index,
+                mxm_backend_queues_[index]);
         for(std::size_t i=0;i<hw::kHemispheres;++i) {
             append(IcuMacroQueueKind::SxmTranspose,i,sxm_transpose_queues_[i]);
             append(IcuMacroQueueKind::SxmPermute,i,sxm_permute_queues_[i]);
@@ -2218,6 +2624,8 @@ public:
         collect_queues(mxm_load_queues_);
         collect_queues(mxm_dequant_queues_);
         collect_queues(mxm_compute_queues_);
+        collect_queues(mxm_param_load_queues_);
+        collect_queues(mxm_backend_queues_);
         collect_queues(sxm_transpose_queues_);
         collect_queues(sxm_permute_queues_);
         collect_queues(c2c_tx_queues_);
@@ -2504,6 +2912,8 @@ private:
         rebind(mxm_load_queues_);
         rebind(mxm_dequant_queues_);
         rebind(mxm_compute_queues_);
+        rebind(mxm_param_load_queues_);
+        rebind(mxm_backend_queues_);
         rebind(sxm_transpose_queues_);
         rebind(sxm_permute_queues_);
         rebind(c2c_tx_queues_);
@@ -2519,6 +2929,7 @@ private:
         std::size_t count = 0;
         const auto collect = [&count](auto& queues) {
             for (auto& queue : queues) {
+                if (queue.qctl_endpoint_active()) continue;
                 count += queue.take_notify() ? 1U : 0U;
             }
         };
@@ -2528,6 +2939,8 @@ private:
         collect(mxm_load_queues_);
         collect(mxm_dequant_queues_);
         collect(mxm_compute_queues_);
+        collect(mxm_param_load_queues_);
+        collect(mxm_backend_queues_);
         collect(sxm_transpose_queues_);
         collect(sxm_permute_queues_);
         collect(c2c_tx_queues_);
@@ -2541,6 +2954,197 @@ private:
             throw std::out_of_range(
                 "ICU MEM queue is outside the configured full-chip MEM queues");
         }
+    }
+
+    static std::size_t qctl_queue_id(IcuMacroQueueKind kind,
+        std::size_t index)
+    {
+        switch (kind) {
+        case IcuMacroQueueKind::Mem:
+            if (index < kMemQueues) return index;
+            break;
+        case IcuMacroQueueKind::MxmLoad:
+            if (index < kMxmQueues) return kMemQueues + index;
+            break;
+        case IcuMacroQueueKind::MxmDequant:
+            if (index < kMxmQueues)
+                return kMemQueues + kMxmQueues + index;
+            break;
+        case IcuMacroQueueKind::MxmCompute:
+            if (index < kMxmQueues)
+                return kMemQueues + 2 * kMxmQueues + index;
+            break;
+        case IcuMacroQueueKind::MxmParamLoad:
+            if (index < kMxmQueues)
+                return kMemQueues + 3 * kMxmQueues + index;
+            break;
+        case IcuMacroQueueKind::MxmBackend:
+            if (index < kMxmQueues)
+                return kMemQueues + 4 * kMxmQueues + index;
+            break;
+        default:
+            break;
+        }
+        throw std::invalid_argument(
+            "QCTL is defined only for MEM and MXM Queue identities");
+    }
+
+    void apply_qctl_program_load(const IcuQctlRuntime::LoadInputs& inputs)
+    {
+        qctl_runtime_.begin_load_cycle(inputs,true);
+        qctl_runtime_.complete_load_cycle();
+        if(inputs.clear) {
+            for_each_program_queue([](auto& queue) { queue.disable_qctl_endpoint(); });
+            return;
+        }
+        const auto& view=qctl_runtime_.hardware_interface_view();
+        const auto queue=inputs.partition_queue;
+        if(queue>=view.endpoint_configure_valid_o.size()
+            || !view.endpoint_configure_valid_o[queue] || view.pool.fault_o)
+            return;
+        if(queue<kMemQueues) mem_iq(queue).enable_qctl_endpoint();
+        else if(queue<kMemQueues+kMxmQueues)
+            mxm_load_iq(queue-kMemQueues).enable_qctl_endpoint();
+        else if(queue<kMemQueues+2*kMxmQueues)
+            mxm_dequant_iq(queue-kMemQueues-kMxmQueues).enable_qctl_endpoint();
+        else if(queue<kMemQueues+3*kMxmQueues)
+            mxm_compute_iq(queue-kMemQueues-2*kMxmQueues).enable_qctl_endpoint();
+        else if(queue<kMemQueues+4*kMxmQueues)
+            mxm_param_load_iq(queue-kMemQueues-3*kMxmQueues).enable_qctl_endpoint();
+        else
+            mxm_backend_iq(queue-kMemQueues-4*kMxmQueues).enable_qctl_endpoint();
+    }
+
+    void update_qctl_queue_status(bool use_cycle_outputs = false)
+    {
+        if (!qctl_runtime_.enabled()) return;
+        const auto status = [&](std::size_t queue) {
+            return use_cycle_outputs
+                ? qctl_runtime_.queue_cycle_status(queue)
+                : qctl_runtime_.queue_status(queue);
+        };
+        for (std::size_t queue = 0; queue < kMemQueues; ++queue)
+            if (mem_queues_[queue].qctl_endpoint_active())
+                mem_queues_[queue].drive_qctl_endpoint(status(queue));
+        for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
+            const auto load = kMemQueues + mxm;
+            const auto dequant = kMemQueues + kMxmQueues + mxm;
+            const auto compute = kMemQueues + 2 * kMxmQueues + mxm;
+            const auto param = kMemQueues + 3 * kMxmQueues + mxm;
+            const auto backend = kMemQueues + 4 * kMxmQueues + mxm;
+            if (mxm_load_queues_[mxm].qctl_endpoint_active())
+                mxm_load_queues_[mxm].drive_qctl_endpoint(
+                    status(load));
+            if (mxm_dequant_queues_[mxm].qctl_endpoint_active())
+                mxm_dequant_queues_[mxm].drive_qctl_endpoint(
+                    status(dequant));
+            if (mxm_compute_queues_[mxm].qctl_endpoint_active())
+                mxm_compute_queues_[mxm].drive_qctl_endpoint(
+                    status(compute));
+            if (mxm_param_load_queues_[mxm].qctl_endpoint_active())
+                mxm_param_load_queues_[mxm].drive_qctl_endpoint(
+                    status(param));
+            if (mxm_backend_queues_[mxm].qctl_endpoint_active())
+                mxm_backend_queues_[mxm].drive_qctl_endpoint(
+                    status(backend));
+        }
+    }
+
+    void begin_qctl_cycle(bool run)
+    {
+        if (!qctl_runtime_.enabled()) return;
+        const auto count = kMemQueues + 5 * kMxmQueues;
+        std::vector<std::uint32_t> cycles(count, 0);
+        std::vector<bool> enables(count, false);
+        for (std::size_t queue = 0; queue < kMemQueues; ++queue) {
+            cycles[queue] = static_cast<std::uint32_t>(mem_queues_[queue].cycle());
+            enables[queue] = run && mem_queues_[queue].qctl_endpoint_active();
+        }
+        for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
+            const auto load = kMemQueues + mxm;
+            const auto dequant = kMemQueues + kMxmQueues + mxm;
+            const auto compute = kMemQueues + 2 * kMxmQueues + mxm;
+            const auto param = kMemQueues + 3 * kMxmQueues + mxm;
+            const auto backend = kMemQueues + 4 * kMxmQueues + mxm;
+            cycles[load] = static_cast<std::uint32_t>(
+                mxm_load_queues_[mxm].cycle());
+            cycles[dequant] = static_cast<std::uint32_t>(
+                mxm_dequant_queues_[mxm].cycle());
+            cycles[compute] = static_cast<std::uint32_t>(
+                mxm_compute_queues_[mxm].cycle());
+            cycles[param] = static_cast<std::uint32_t>(
+                mxm_param_load_queues_[mxm].cycle());
+            cycles[backend] = static_cast<std::uint32_t>(
+                mxm_backend_queues_[mxm].cycle());
+            enables[load] = run
+                && mxm_load_queues_[mxm].qctl_endpoint_active();
+            enables[dequant] = run
+                && mxm_dequant_queues_[mxm].qctl_endpoint_active();
+            enables[compute] = run
+                && mxm_compute_queues_[mxm].qctl_endpoint_active();
+            enables[param] = run
+                && mxm_param_load_queues_[mxm].qctl_endpoint_active();
+            enables[backend] = run
+                && mxm_backend_queues_[mxm].qctl_endpoint_active();
+        }
+        const auto& outputs = qctl_runtime_.begin_cycle(cycles, enables);
+        for (std::size_t queue = 0; queue < kMemQueues; ++queue)
+            if (mem_queues_[queue].qctl_endpoint_active()) {
+                mem_queues_[queue].drive_qctl_endpoint(outputs[queue]);
+                if (!qctl_external_retire_inputs_.empty())
+                    mem_queues_[queue].drive_qctl_mem_packet_retired_input(
+                        qctl_external_retire_inputs_[queue]);
+            }
+        for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
+            const std::array<std::size_t, 5> ids{
+                kMemQueues + mxm,
+                kMemQueues + kMxmQueues + mxm,
+                kMemQueues + 2 * kMxmQueues + mxm,
+                kMemQueues + 3 * kMxmQueues + mxm,
+                kMemQueues + 4 * kMxmQueues + mxm};
+            auto drive = [&](auto& queue, std::size_t id) {
+                queue.drive_qctl_endpoint(outputs[id]);
+                if (!qctl_external_retire_inputs_.empty())
+                    queue.drive_qctl_mem_packet_retired_input(
+                        qctl_external_retire_inputs_[id]);
+            };
+            drive(mxm_load_queues_[mxm], ids[0]);
+            drive(mxm_dequant_queues_[mxm], ids[1]);
+            drive(mxm_compute_queues_[mxm], ids[2]);
+            drive(mxm_param_load_queues_[mxm], ids[3]);
+            drive(mxm_backend_queues_[mxm], ids[4]);
+        }
+    }
+
+    void complete_qctl_cycle()
+    {
+        if (!qctl_runtime_.enabled()) return;
+        std::vector<bool> retired(kMemQueues + 5 * kMxmQueues, false);
+        for (std::size_t queue = 0; queue < kMemQueues; ++queue)
+            retired[queue] =
+                mem_queues_[queue].take_qctl_mem_packet_retired();
+        for (std::size_t mxm = 0; mxm < kMxmQueues; ++mxm) {
+            retired[kMemQueues + mxm] =
+                mxm_load_queues_[mxm].take_qctl_mem_packet_retired();
+            retired[kMemQueues + kMxmQueues + mxm] =
+                mxm_dequant_queues_[mxm].take_qctl_mem_packet_retired();
+            retired[kMemQueues + 2 * kMxmQueues + mxm] =
+                mxm_compute_queues_[mxm].take_qctl_mem_packet_retired();
+            retired[kMemQueues + 3 * kMxmQueues + mxm] =
+                mxm_param_load_queues_[mxm].take_qctl_mem_packet_retired();
+            retired[kMemQueues + 4 * kMxmQueues + mxm] =
+                mxm_backend_queues_[mxm].take_qctl_mem_packet_retired();
+        }
+        // The formal lpu_top retirement vector is sampled at the QCTL
+        // boundary on this edge.  Do not route that input through a Queue's
+        // Current/Next state and then feed it back one cycle later.  Queues
+        // still receive the value above so external-retire mode suppresses
+        // their semantic executor; the architectural Controller retirement
+        // itself uses the sampled top-level vector directly.
+        if (!qctl_external_retire_inputs_.empty())
+            retired = qctl_external_retire_inputs_;
+        qctl_runtime_.complete_cycle(retired);
+        update_qctl_queue_status(true);
     }
 
     static void check_mem_location(const IcuLocation& location)
@@ -2746,6 +3350,8 @@ private:
     std::array<MxmDequantIcu, kMxmQueues>
         mxm_dequant_queues_{};
     std::array<MxmComputeIcu, kMxmQueues> mxm_compute_queues_{};
+    std::array<MxmParamLoadIcu, kMxmQueues> mxm_param_load_queues_{};
+    std::array<MxmBackendIcu, kMxmQueues> mxm_backend_queues_{};
     std::array<SxmTransposeIcu, hw::kHemispheres> sxm_transpose_queues_{};
     std::array<SxmPermuteIcu, hw::kHemispheres> sxm_permute_queues_{};
     std::array<C2cTxIcu, hw::kHemispheres> c2c_tx_queues_{};
@@ -2766,6 +3372,9 @@ private:
     std::vector<std::map<std::size_t, TransportOwner>> mem_native_owners_{};
     IcuQueueCompletionEvents queue_completion_events_{};
     IcuQueueControlPool queue_control_pool_{};
+    IcuQctlRuntime qctl_runtime_{};
+    std::size_t qctl_pool_next_base_{0};
+    std::vector<bool> qctl_sync_participants_{};
     std::size_t mem_transport_owner_count_{0};
     bool transport_overlap_enabled_{false};
     IcuCommonBarrierController common_barriers_{};
@@ -2773,6 +3382,9 @@ private:
     std::shared_ptr<InstructionControlUnit> next_{};
     std::deque<PendingRuntimeEvent> pending_runtime_events_{};
     std::deque<PendingProgramOperation> pending_program_operations_{};
+    std::optional<IcuQctlRuntime::LoadInputs> qctl_program_load_input_{};
+    std::optional<QctlRuntimeInputs> qctl_runtime_input_{};
+    std::vector<bool> qctl_external_retire_inputs_{};
     bool clock_managed_{false};
     bool low_prepared_{false};
     bool low_complete_{false};

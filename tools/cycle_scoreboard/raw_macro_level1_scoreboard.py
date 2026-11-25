@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Offline, rule-driven cycle scoreboard for RAW Macro Level1 JSONL traces."""
+"""Offline, rule-driven cycle scoreboard for RAW Macro JSONL traces.
+
+The default rules remain the frozen Level1 contract.  Newer levels select a
+different schema/rule file and may add exact fields and scope filtering.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +17,7 @@ from typing import Any, Iterable
 
 
 class TraceValidationError(RuntimeError):
-    """The trace is malformed or violates the frozen Level1 schema."""
+    """The trace is malformed or violates the selected frozen schema."""
 
 
 @dataclass(frozen=True)
@@ -35,7 +39,7 @@ def _has_xz(value: str) -> bool:
 def _record_summary(record: dict[str, Any] | None) -> dict[str, Any] | None:
     if record is None:
         return None
-    return {
+    result = {
         "line": record["_line"],
         "case_id": record["case_id"],
         "global_cycle": record["global_cycle"],
@@ -52,6 +56,12 @@ def _record_summary(record: dict[str, Any] | None) -> dict[str, Any] | None:
         "mapping_status": record["mapping_status"],
         "source_ref": record["source_ref"],
     }
+    for field in ("scope", "category", "hemisphere", "mem_slice", "bank",
+                  "tile", "opcode", "address", "stream", "direction",
+                  "preserve", "data"):
+        if field in record:
+            result[field] = record[field]
+    return result
 
 
 def load_rules(path: pathlib.Path) -> dict[str, Any]:
@@ -118,19 +128,21 @@ def load_trace(path: pathlib.Path, rules: dict[str, Any], expected_source: str) 
                 raise TraceValidationError(
                     f"{path}:{line_number}: source {record['source']!r} != {expected_source!r}"
                 )
-            for field in (
+            string_fields = rules.get("string_fields", [
                 "schema", "run_id", "case_id", "source", "phase",
                 "sample_point", "module", "instance", "signal", "value",
                 "event_type", "mapping_status", "source_ref",
-            ):
+            ])
+            integer_fields = rules.get("integer_fields", [
+                "global_cycle", "logical_cycle", "transport_tick",
+                "event_sequence", "width",
+            ])
+            for field in string_fields:
                 if not isinstance(record[field], str):
                     raise TraceValidationError(
                         f"{path}:{line_number}: {field} is not a string"
                     )
-            for field in (
-                "global_cycle", "logical_cycle", "transport_tick",
-                "event_sequence", "width",
-            ):
+            for field in integer_fields:
                 if not _is_int(record[field]):
                     raise TraceValidationError(
                         f"{path}:{line_number}: {field} is not an integer"
@@ -173,6 +185,14 @@ def load_trace(path: pathlib.Path, rules: dict[str, Any], expected_source: str) 
 
 def _source_view(rule: dict[str, Any], source: str) -> dict[str, str]:
     return rule.get("source_views", {}).get(source, {})
+
+
+def _scope_selected(
+    record: dict[str, Any], active_scopes: set[str] | None
+) -> bool:
+    if active_scopes is None or "scope" not in record:
+        return True
+    return record["scope"] in active_scopes
 
 
 def _view_matches(record: dict[str, Any], rule: dict[str, Any], source: str) -> bool:
@@ -289,7 +309,7 @@ def _difference(
     anchor = cmodel if cmodel is not None else rtl
     assert anchor is not None
     return {
-        "test": "raw_macro_level1_cycle_scoreboard",
+        "test": "raw_macro_cycle_scoreboard",
         "status": "FAIL",
         "category": category,
         "rule": rule_name,
@@ -329,6 +349,7 @@ def _compare_architecture(
     cmodel: LoadedTrace,
     rtl: LoadedTrace,
     rules: dict[str, Any],
+    active_scopes: set[str] | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     config = rules["architecture"]
     event_names = set(config["events"])
@@ -341,7 +362,97 @@ def _compare_architecture(
             and record["event_type"] == "ARCH_EVENT"
             and record["signal"] in event_names
             and record["mapping_status"] in comparable
+            and _scope_selected(record, active_scopes)
         ]
+
+    if config.get("comparison_mode", "SEQUENTIAL") == "KEYED_IDENTITY":
+        identity_fields = config.get("identity_fields", [
+            "case_id", "global_cycle", "logical_cycle", "transport_tick",
+            "phase", "sample_point", "signal",
+        ])
+        sample_aliases = config.get("sample_point_aliases", {})
+
+        def identity_value(record: dict[str, Any], field: str) -> Any:
+            value = record[field]
+            if field == "sample_point":
+                value = sample_aliases.get(value, value)
+            return value
+
+        def keyed(trace: LoadedTrace) -> dict[tuple[Any, ...], dict[str, Any]]:
+            records = [
+                record for record in trace.records
+                if record["event_type"] == "ARCH_EVENT"
+                and record["signal"] in event_names
+                and record["mapping_status"] in comparable
+                and _scope_selected(record, active_scopes)
+            ]
+            occurrences: collections.Counter[tuple[Any, ...]] = collections.Counter()
+            result: dict[tuple[Any, ...], dict[str, Any]] = {}
+            for record in records:
+                prefix = tuple(identity_value(record, field)
+                               for field in identity_fields)
+                occurrence = occurrences[prefix]
+                occurrences[prefix] += 1
+                result[prefix + (occurrence,)] = record
+            return result
+
+        left = keyed(cmodel)
+        right = keyed(rtl)
+        differences: list[dict[str, Any]] = []
+        coverage = {
+            "eligible": len(left) + len(right),
+            "compared": 0,
+            "matched": 0,
+            "mismatched": 0,
+            "comparison_mode": "KEYED_IDENTITY",
+            "identity_fields": identity_fields,
+            "sample_point_aliases": sample_aliases,
+        }
+        for key in sorted(set(left) | set(right), key=repr):
+            c_record = left.get(key)
+            r_record = right.get(key)
+            anchor = c_record if c_record is not None else r_record
+            assert anchor is not None
+            occurrence = int(key[-1])
+            normalized_sample = sample_aliases.get(
+                anchor["sample_point"], anchor["sample_point"])
+            if c_record is None:
+                differences.append(_annotate_normalized(_difference(
+                    "missing_cmodel", None, r_record, cmodel, rtl,
+                    "architecture"
+                ), config["canonical_module"], config["canonical_instance"],
+                    anchor["phase"], normalized_sample, occurrence))
+                coverage["mismatched"] += 1
+                continue
+            if r_record is None:
+                differences.append(_annotate_normalized(_difference(
+                    "missing_rtl", c_record, None, cmodel, rtl,
+                    "architecture"
+                ), config["canonical_module"], config["canonical_instance"],
+                    anchor["phase"], normalized_sample, occurrence))
+                coverage["mismatched"] += 1
+                continue
+            coverage["compared"] += 1
+            categories: list[str] = []
+            if c_record["width"] != r_record["width"]:
+                categories.append("width_mismatch")
+            if c_record["value"] != r_record["value"]:
+                categories.append(
+                    "xz_mismatch" if _has_xz(c_record["value"])
+                    or _has_xz(r_record["value"]) else "value_mismatch"
+                )
+            if not categories:
+                coverage["matched"] += 1
+            else:
+                difference = _annotate_normalized(_difference(
+                    categories[0], c_record, r_record, cmodel, rtl,
+                    "architecture"
+                ), config["canonical_module"], config["canonical_instance"],
+                    anchor["phase"], normalized_sample, occurrence)
+                difference["all_categories"] = categories
+                differences.append(difference)
+                coverage["mismatched"] += 1
+        return differences, coverage
 
     differences: list[dict[str, Any]] = []
     coverage = {"eligible": 0, "compared": 0, "matched": 0, "mismatched": 0}
@@ -413,13 +524,20 @@ def _select_rule_records(
     trace: LoadedTrace,
     rule: dict[str, Any],
     coverage: dict[str, Any],
+    active_scopes: set[str] | None,
 ) -> list[dict[str, Any]]:
     signals = set(rule["signals"])
     event_types = set(rule["event_types"])
     statuses = set(rule["mapping_statuses"])
     source_modules = set(rule.get("source_modules", {}).get(trace.source, []))
     selected: list[dict[str, Any]] = []
+    rule_scope = rule.get("scope")
+    if active_scopes is not None and rule_scope is not None \
+            and rule_scope not in active_scopes:
+        return selected
     for record in trace.records:
+        if not _scope_selected(record, active_scopes):
+            continue
         if record["signal"] not in signals:
             continue
         if record["event_type"] not in event_types:
@@ -458,10 +576,13 @@ def _compare_signal_rules(
     rtl: LoadedTrace,
     rules: dict[str, Any],
     coverage: dict[str, Any],
+    active_scopes: set[str] | None,
 ) -> list[dict[str, Any]]:
     differences: list[dict[str, Any]] = []
     for rule in rules["signal_rules"]:
         rule_stats = {
+            "scope": rule.get("scope", "UNSCOPED"),
+            "category": rule.get("category", "CANONICAL"),
             "cmodel_eligible": 0,
             "rtl_eligible": 0,
             "compared": 0,
@@ -470,8 +591,8 @@ def _compare_signal_rules(
             "missing_cmodel": 0,
             "missing_rtl": 0,
         }
-        c_records = _select_rule_records(cmodel, rule, coverage)
-        r_records = _select_rule_records(rtl, rule, coverage)
+        c_records = _select_rule_records(cmodel, rule, coverage, active_scopes)
+        r_records = _select_rule_records(rtl, rule, coverage, active_scopes)
         rule_stats["cmodel_eligible"] = len(c_records)
         rule_stats["rtl_eligible"] = len(r_records)
         c_keyed = _keyed_records(c_records, rule)
@@ -533,6 +654,58 @@ def _mapping_coverage(trace: LoadedTrace) -> dict[str, Any]:
     }
 
 
+def _audit_trace(
+    trace: LoadedTrace,
+    rules: dict[str, Any],
+    active_scopes: set[str] | None,
+) -> dict[str, Any]:
+    comparable = set(rules["comparable_mapping_statuses"])
+    event_names = set(rules.get("architecture", {}).get("events", []))
+    selected_rules = [
+        rule for rule in rules.get("signal_rules", [])
+        if active_scopes is None or rule.get("scope") is None
+        or rule.get("scope") in active_scopes
+    ]
+    selected_signals = {
+        signal for rule in selected_rules for signal in rule.get("signals", [])
+    }
+    eligible_modules: set[str] = set()
+    compared_signals: set[str] = set()
+    masked_scope = 0
+    masked_mapping = 0
+    for record in trace.records:
+        if not _scope_selected(record, active_scopes):
+            masked_scope += 1
+            continue
+        if record["mapping_status"] not in comparable:
+            masked_mapping += 1
+            continue
+        if record["event_type"] == "ARCH_EVENT" and record["signal"] in event_names:
+            eligible_modules.add(record["module"])
+            compared_signals.add(record["signal"])
+        elif record["signal"] in selected_signals:
+            eligible_modules.add(record["module"])
+            compared_signals.add(record["signal"])
+    captured_modules = sorted({record["module"] for record in trace.records})
+    return {
+        "captured_modules": captured_modules,
+        "captured_signals": sorted({record["signal"] for record in trace.records}),
+        "captured_events": sorted({
+            record["signal"] for record in trace.records
+            if record["event_type"] == "ARCH_EVENT"
+        }),
+        "compared_signals": sorted(compared_signals),
+        "mapping_status_counts": dict(sorted(collections.Counter(
+            record["mapping_status"] for record in trace.records).items())),
+        "masked_rows": masked_scope + masked_mapping,
+        "masked_by_scope_rows": masked_scope,
+        "masked_by_mapping_rows": masked_mapping,
+        "missing_mapping_rows": sum(
+            record["mapping_status"] == "UNMAPPED" for record in trace.records),
+        "uncompared_modules": sorted(set(captured_modules) - eligible_modules),
+    }
+
+
 def _sort_differences(differences: list[dict[str, Any]]) -> list[dict[str, Any]]:
     def key(item: dict[str, Any]) -> tuple[Any, ...]:
         case_rank = {"raw_two_issue": 0, "raw_repeat4": 1}.get(item["case_id"], 99)
@@ -554,6 +727,7 @@ def compare_traces(
     rtl: LoadedTrace,
     rules: dict[str, Any],
     max_differences: int = 100,
+    active_scopes: set[str] | None = None,
 ) -> dict[str, Any]:
     coverage: dict[str, Any] = {
         "CMODEL": _mapping_coverage(cmodel),
@@ -563,10 +737,11 @@ def compare_traces(
         "rules": {},
     }
     architecture_differences, architecture_coverage = _compare_architecture(
-        cmodel, rtl, rules
+        cmodel, rtl, rules, active_scopes
     )
     coverage["architecture"] = architecture_coverage
-    signal_differences = _compare_signal_rules(cmodel, rtl, rules, coverage)
+    signal_differences = _compare_signal_rules(
+        cmodel, rtl, rules, coverage, active_scopes)
     differences = _sort_differences(architecture_differences + signal_differences)
     compared = architecture_coverage["compared"] + sum(
         stats["compared"] for stats in coverage["rules"].values()
@@ -575,8 +750,33 @@ def compare_traces(
         stats["matched"] for stats in coverage["rules"].values()
     )
     status = "PASS" if not differences and compared > 0 else "FAIL"
+    per_category: dict[str, dict[str, int | float]] = {
+        "EVENT": {
+            "compared": architecture_coverage["compared"],
+            "matched": architecture_coverage["matched"],
+            "mismatched": architecture_coverage["mismatched"],
+        }
+    }
+    for stats in coverage["rules"].values():
+        category = str(stats["category"])
+        item = per_category.setdefault(category,
+            {"compared": 0, "matched": 0, "mismatched": 0})
+        for field in ("compared", "matched", "mismatched"):
+            item[field] = int(item[field]) + int(stats[field])
+    for item in per_category.values():
+        item["match_rate"] = (
+            float(item["matched"]) / float(item["compared"])
+            if item["compared"] else 0.0
+        )
+    coverage["per_category"] = per_category
+    coverage["active_scopes"] = sorted(active_scopes) if active_scopes else []
+    coverage["audit"] = {
+        "CMODEL": _audit_trace(cmodel, rules, active_scopes),
+        "RTL": _audit_trace(rtl, rules, active_scopes),
+    }
     return {
-        "test": "raw_macro_level1_cycle_scoreboard",
+        "test": rules.get("test_name", "raw_macro_level1_cycle_scoreboard"),
+        "title": rules.get("title", "RAW Macro Level1 Cycle Scoreboard"),
         "status": status,
         "schema": rules["schema"],
         "cmodel_trace": str(cmodel.path),
@@ -586,6 +786,7 @@ def compare_traces(
         "difference_count": len(differences),
         "first_difference": differences[0] if differences else None,
         "differences": differences[:max_differences],
+        "all_differences": differences,
         "differences_truncated": len(differences) > max_differences,
         "coverage": coverage,
     }
@@ -604,7 +805,7 @@ def _format_record(label: str, record: dict[str, Any] | None) -> list[str]:
 
 def text_report(result: dict[str, Any]) -> str:
     lines = [
-        "RAW Macro Level1 Cycle Scoreboard",
+        result.get("title", "RAW Macro Level1 Cycle Scoreboard"),
         f"Test: {result['test']}",
         f"Status: {result['status']}",
         f"Compared pairs: {result.get('compared_pairs', 0)}",
@@ -671,6 +872,35 @@ def text_report(result: dict[str, Any]) -> str:
                 f"compared={stats['compared']} matched={stats['matched']} "
                 f"mismatch={stats['mismatched']}"
             )
+        if coverage.get("per_category"):
+            lines.append("  per-category:")
+            for category, stats in sorted(coverage["per_category"].items()):
+                lines.append(
+                    f"    {category}: compared={stats['compared']} "
+                    f"matched={stats['matched']} mismatch={stats['mismatched']} "
+                    f"rate={stats['match_rate']:.6f}"
+                )
+        if coverage.get("audit"):
+            lines.append(
+                "  active scopes="
+                + (",".join(coverage.get("active_scopes", [])) or "<all>")
+            )
+            for source in ("CMODEL", "RTL"):
+                audit = coverage["audit"][source]
+                lines.append(
+                    f"  {source} audit: modules={','.join(audit['captured_modules'])}"
+                )
+                lines.append(
+                    f"    compared signals={','.join(audit['compared_signals']) or '<none>'}"
+                )
+                lines.append(
+                    f"    captured events={','.join(audit['captured_events']) or '<none>'}"
+                )
+                lines.append(
+                    f"    masked={audit['masked_rows']} "
+                    f"missing_mapping={audit['missing_mapping_rows']} "
+                    f"uncompared_modules={','.join(audit['uncompared_modules']) or '<none>'}"
+                )
     return "\n".join(lines) + "\n"
 
 
@@ -691,11 +921,16 @@ def run_comparison(
     rules_path: pathlib.Path,
     output_dir: pathlib.Path | None = None,
     max_differences: int = 100,
+    scopes: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     rules = load_rules(rules_path)
     cmodel = load_trace(cmodel_path, rules, "CMODEL")
     rtl = load_trace(rtl_path, rules, "RTL")
-    result = compare_traces(cmodel, rtl, rules, max_differences)
+    configured_scopes = list(scopes) if scopes is not None \
+        else list(rules.get("default_scopes", []))
+    active_scopes = set(configured_scopes) if configured_scopes else None
+    result = compare_traces(
+        cmodel, rtl, rules, max_differences, active_scopes)
     if output_dir is not None:
         text_path, json_path = write_reports(result, output_dir)
         result["text_report"] = str(text_path)
@@ -714,19 +949,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output-dir", type=pathlib.Path, required=True)
     parser.add_argument("--max-differences", type=int, default=100)
+    parser.add_argument(
+        "--scope", action="append", default=None,
+        help="compare one scope; repeat or use comma-separated names",
+    )
     arguments = parser.parse_args(argv)
 
     try:
+        scopes = None
+        if arguments.scope is not None:
+            scopes = [
+                item for group in arguments.scope
+                for item in group.split(",") if item
+            ]
         result = run_comparison(
             arguments.cmodel,
             arguments.rtl,
             arguments.rules,
             arguments.output_dir,
             arguments.max_differences,
+            scopes,
         )
     except (OSError, json.JSONDecodeError, TraceValidationError) as error:
         failure = {
-            "test": "raw_macro_level1_cycle_scoreboard",
+            "test": "raw_macro_cycle_scoreboard",
+            "title": "RAW Macro Cycle Scoreboard",
             "status": "FAIL",
             "validation_error": str(error),
         }

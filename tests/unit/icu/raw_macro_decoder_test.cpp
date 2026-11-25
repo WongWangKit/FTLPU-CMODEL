@@ -49,6 +49,33 @@ const std::vector<ftlpu::IcuRawImemWord128> kMxmDequantImage{
     {{{0x00000010u, 0x0007f000u, 0x00000000u, 0x00000000u}}},
 };
 
+std::vector<ftlpu::IcuRawImemWord128> make_canonical_mxm_image(
+    std::uint32_t start_cycle, std::uint64_t native,
+    std::size_t native_bits, std::size_t operand_bits)
+{
+    std::vector<ftlpu::IcuRawImemWord128> image(2);
+    image[0].lanes[0] = 0x15u;
+    std::size_t offset = 128;
+    auto push = [&](std::uint64_t value, std::size_t width) {
+        for (std::size_t bit = 0; bit < width; ++bit, ++offset)
+            image[offset / 128].lanes[(offset % 128) / 32]
+                |= std::uint32_t((value >> bit) & 1u) << (offset % 32);
+    };
+    push(0, 3);
+    push(start_cycle, 32);
+    push(0, operand_bits);
+    push(0, 1);
+    push(0, 1);
+    push(native, native_bits);
+    push(0, 2);
+    push(0, 2);
+    return image;
+}
+
+const auto kCanonicalMxmLoadImage = make_canonical_mxm_image(5, 0x2, 2, 1);
+const auto kCanonicalMxmComputeImage = make_canonical_mxm_image(6, 0x7, 7, 6);
+const auto kCanonicalMxmDequantImage = make_canonical_mxm_image(2, 0x1, 1, 1);
+
 const std::vector<ftlpu::IcuRawImemWord96> kMemExtendedImage{
     {{{0x00000015u, 0x00000000u, 0x00000000u}}},
     {{{0x000000a0u, 0x00627ff8u, 0x40041ffeu}}},
@@ -224,6 +251,33 @@ try {
             && backpressured.issued_count()==0,
         "due-cycle MEM backpressure was retried or lost its terminal fault");
 
+    InstructionControlUnit::MxmLoadIcu backpressuredMxm;
+    backpressuredMxm.load_raw_macro(
+        IcuMacroQueueKind::MxmLoad, kCanonicalMxmLoadImage);
+    prime(backpressuredMxm);
+    for (std::size_t cycle = 0; cycle != 5; ++cycle)
+        require(!backpressuredMxm.dispatch_macro_issue(true).has_value(),
+            "MXM Load issued before its scheduled cycle");
+    auto sawMxmBackpressureFault = false;
+    try {
+        static_cast<void>(backpressuredMxm.dispatch_macro_issue(false));
+    } catch (const StaticScheduleError&) {
+        sawMxmBackpressureFault = true;
+    }
+    const auto& blockedMxmPins =
+        backpressuredMxm.macro_issue_port_signals();
+    require(sawMxmBackpressureFault && blockedMxmPins.issue_valid_o
+            && !blockedMxmPins.issue_ready_i && !blockedMxmPins.issue_fire
+            && blockedMxmPins.fault_o
+            && blockedMxmPins.fault_code_o == static_cast<std::uint8_t>(
+                MemMacroSchedulerFault::IssueBackpressure)
+            && backpressuredMxm.issued_count() == 0,
+        "due-cycle MXM backpressure advanced or lost its terminal fault");
+    require(!backpressuredMxm.dispatch_macro_issue(true).has_value()
+            && backpressuredMxm.macro_issue_port_signals().fault_o
+            && backpressuredMxm.issued_count() == 0,
+        "MXM terminal issue fault retried or advanced the Active Context");
+
     const auto memDdbLayout =
         IcuMacroV1Decoder<MemInstruction, 96>(
             IcuMacroQueueKind::Mem, kMemImage).ddb_layout();
@@ -365,7 +419,7 @@ try {
         "compact MXM template did not use prefix/decode stages");
 
     using RtlMemDecoder = IcuMacroV1Decoder<
-        MemInstruction, 96, 1, 3, 64, 1, 8, 1>;
+        MemInstruction, 96, 2, 3, 64, 1, 8, 1>;
     RtlMemDecoder heldContext(IcuMacroQueueKind::Mem, kMemImage);
     for (std::size_t cycle = 0;
          cycle < 64 && heldContext.rtl_mem_state_code() != 10; ++cycle)
@@ -389,7 +443,7 @@ try {
         "OUTPUT_CONTEXT did not fire exactly once when ready returned");
 
     using TwoWordReservoirDecoder = IcuMacroV1Decoder<
-        MemInstruction, 96, 1, 2, 64, 8, 8, 8>;
+        MemInstruction, 96, 2, 2, 64, 8, 8, 8>;
     static_assert(TwoWordReservoirDecoder::reservoir_words == 2);
     TwoWordReservoirDecoder twoWordReservoir(
         IcuMacroQueueKind::Mem, kMemImage);
@@ -524,7 +578,7 @@ try {
     //   cycle 3: Read(address=100, stream=2)
     //   cycle 7: Read(address=101, stream=2)
     using ConstrainedMemQueue =
-        DistributedIcuQueue<MemInstruction, 96, 16, 4, 1, 4>;
+        DistributedIcuQueue<MemInstruction, 96, 16, 4, 2, 4>;
     ConstrainedMemQueue constrained;
     constrained.load_raw_macro(IcuMacroQueueKind::Mem, kMemImage);
     const auto constrainedPrimeCycles = prime(constrained);
@@ -562,29 +616,29 @@ try {
         icu.write_mem_raw_macro_imem(0, address, kMemImage[address]);
     icu.configure_mem_raw_macro_imem(0, kMemImage.size());
 
-    for (std::size_t address = 0; address < kMxmLoadImage.size(); ++address)
+    for (std::size_t address = 0; address < kCanonicalMxmLoadImage.size(); ++address)
         icu.write_mxm_load_raw_macro_imem(
-            0, address, kMxmLoadImage[address]);
-    icu.configure_mxm_load_raw_macro_imem(0, kMxmLoadImage.size());
+            0, address, kCanonicalMxmLoadImage[address]);
+    icu.configure_mxm_load_raw_macro_imem(0, kCanonicalMxmLoadImage.size());
 
-    for (std::size_t address = 0; address < kMxmComputeImage.size(); ++address)
+    for (std::size_t address = 0; address < kCanonicalMxmComputeImage.size(); ++address)
         icu.write_mxm_compute_raw_macro_imem(
-            0, address, kMxmComputeImage[address]);
-    icu.configure_mxm_compute_raw_macro_imem(0, kMxmComputeImage.size());
+            0, address, kCanonicalMxmComputeImage[address]);
+    icu.configure_mxm_compute_raw_macro_imem(0, kCanonicalMxmComputeImage.size());
 
-    for (std::size_t address = 0; address < kMxmDequantImage.size(); ++address)
+    for (std::size_t address = 0; address < kCanonicalMxmDequantImage.size(); ++address)
         icu.write_mxm_dequant_raw_macro_imem(
-            0, address, kMxmDequantImage[address]);
-    icu.configure_mxm_dequant_raw_macro_imem(0, kMxmDequantImage.size());
+            0, address, kCanonicalMxmDequantImage[address]);
+    icu.configure_mxm_dequant_raw_macro_imem(0, kCanonicalMxmDequantImage.size());
 
     const auto primeCycles = icu.prime_raw_macro_frontends();
     require(primeCycles >= 3,
         "system raw Macro frontend did not model fixed-width fetch cycles");
 
     std::vector<std::pair<std::size_t, std::size_t>> systemMemIssues;
-    std::optional<MxmControlInstruction> loadIssue;
-    std::optional<MxmControlInstruction> computeIssue;
-    std::optional<MxmDequantInstruction> dequantIssue;
+    std::optional<MxmLoadCommand> loadIssue;
+    std::optional<MxmComputeCommand> computeIssue;
+    std::optional<MxmDequantCommand> dequantIssue;
     for (std::size_t cycle = 0; cycle <= 7; ++cycle) {
         if (const auto instruction = icu.mem_iq(0).tick())
             systemMemIssues.emplace_back(cycle, instruction->address);
@@ -607,28 +661,29 @@ try {
                 {3, 100}, {7, 101}},
         "system raw MEM write API changed the decoded schedule");
     require(loadIssue.has_value()
-            && loadIssue->opcode == MxmControlOpcode::IW
-            && loadIssue->weight_column == 1,
+            && *loadIssue == MxmLoadCommand{true, false},
         "raw MXM load decoder reconstructed the wrong instruction");
     require(computeIssue.has_value()
-            && computeIssue->opcode == MxmControlOpcode::Compute
-            && computeIssue->accumulator_address == 100,
+            && *computeIssue == MxmComputeCommand{3, true},
         "raw MXM compute decoder reconstructed the wrong instruction");
     require(dequantIssue.has_value()
-            && dequantIssue->scale_bf16 == 0x3f80,
+            && *dequantIssue == MxmDequantCommand{true},
         "raw MXM dequant decoder reconstructed the wrong instruction");
     require(icu.mem_iq(0).timed_issue_writes() == 0
             && icu.mem_iq(0).timed_issue_reads() == 0
-            && icu.mxm_load_iq(0).timed_issue_writes() == 1
-            && icu.mxm_load_iq(0).timed_issue_reads() == 1
-            && icu.mxm_compute_iq(0).timed_issue_writes() == 1
-            && icu.mxm_compute_iq(0).timed_issue_reads() == 1
-            && icu.mxm_dequant_iq(0).timed_issue_writes() == 1
-            && icu.mxm_dequant_iq(0).timed_issue_reads() == 1,
-        "MEM direct issue or MXM timed issue accounting changed");
+            && icu.mxm_load_iq(0).timed_issue_writes() == 0
+            && icu.mxm_load_iq(0).timed_issue_reads() == 0
+            && icu.mxm_compute_iq(0).timed_issue_writes() == 0
+            && icu.mxm_compute_iq(0).timed_issue_reads() == 0
+            && icu.mxm_dequant_iq(0).timed_issue_writes() == 0
+            && icu.mxm_dequant_iq(0).timed_issue_reads() == 0,
+        "formal MEM/MXM unexpectedly used a timed issue queue");
     require(icu.mem_iq(0).peak_timed_issue_occupancy() == 0
-            && icu.mem_iq(0).timed_issue_occupancy() == 0,
-        "MEM unexpectedly used the removed timed issue queue");
+            && icu.mem_iq(0).timed_issue_occupancy() == 0
+            && icu.mxm_load_iq(0).peak_timed_issue_occupancy() == 0
+            && icu.mxm_compute_iq(0).peak_timed_issue_occupancy() == 0
+            && icu.mxm_dequant_iq(0).peak_timed_issue_occupancy() == 0,
+        "formal MEM/MXM unexpectedly used a timed issue queue");
 
     const auto statistics = icu.frontend_statistics();
     require(statistics.imem_entries == 9,
@@ -644,14 +699,14 @@ try {
         "raw Macro aggregate statistics omitted fetch or decoder activity");
     require(statistics.context_fifo_writes == 5
             && statistics.context_fifo_reads == 5
-            && statistics.timed_issue_writes == 3
-            && statistics.timed_issue_reads == 3,
-        "Macro Context/Timed FIFO aggregate accounting is not conserved");
+            && statistics.timed_issue_writes == 0
+            && statistics.timed_issue_reads == 0,
+        "Macro Context FIFO/direct issue accounting is not conserved");
     require(statistics.peak_imem_response_fifo_occupancy != 0
             && statistics.peak_macro_word_fifo_occupancy != 0
             && statistics.peak_context_fifo_occupancy != 0
-            && statistics.peak_timed_issue_occupancy != 0,
-        "Macro frontend FIFO occupancy is not observable");
+            && statistics.peak_timed_issue_occupancy == 0,
+        "Macro frontend FIFO/direct issue accounting is not observable");
 
     const auto queueStatistics = icu.macro_queue_frontend_statistics();
     require(queueStatistics.size() == 4,
@@ -684,13 +739,15 @@ try {
     require(memQueue->context_fifo_depth == 4
             && memQueue->timed_issue_depth == 0
             && memQueue->timed_issue_lookahead == 0
-            && loadQueue->timed_issue_depth == 16
-            && loadQueue->timed_issue_lookahead == 2,
-        "raw Macro per-queue statistics lost MEM/MXM issue geometry");
+            && loadQueue->timed_issue_depth == 0
+            && loadQueue->timed_issue_lookahead == 0
+            && computeQueue->timed_issue_depth == 0
+            && dequantQueue->timed_issue_depth == 0,
+        "raw Macro per-queue statistics lost direct MEM/MXM issue geometry");
     require(memQueue->ddb_entry_bits == 0
-            && loadQueue->ddb_entry_bits == 710
-            && computeQueue->ddb_entry_bits == 741
-            && dequantQueue->ddb_entry_bits == 630,
+            && loadQueue->ddb_entry_bits == 683
+            && computeQueue->ddb_entry_bits == 693
+            && dequantQueue->ddb_entry_bits == 682,
         "raw Macro per-queue statistics reported wrong DDB layouts");
 
     std::cout << "icu_raw_macro_decoder_test passed: prime_cycles="

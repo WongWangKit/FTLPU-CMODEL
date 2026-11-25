@@ -1,5 +1,29 @@
 # 时序重构变更记录
 
+## 2026-11-19：FU local iMEM SRAM 同步与正式 MXM 直发
+
+- 新增 `timing::Sram1Rw<T,Depth>`，按本地 RTL `lpu_sram` 建模单端口 1RW、
+  同步注册读、写占用端口、输出保持，以及 reset 不清 memory 的合同。
+- 新增独立 `timing::SramFifo<T,Depth>`；level、read-pending、SRAM return 和
+  output register 分离，最多一个在途读，支持非 2 次幂回绕和输出反压保持。
+- `LocalImemFrontendFetchModel` 参数化为 96/128 bit，并将 MEM 208 条与 MXM
+  Load/Dequant/Compute 12 条正式 local iMEM 取字路径接到同一 SRAM 原语。
+- Response FIFO、Macro Word FIFO、Context FIFO、Stream FIFO 等普通 FIFO 未替换；
+  VXM/SXM 当前无正式 local iMEM，保持 `NOT_IMPLEMENTED`。
+- 正式 MEM/MXM Scheduler 改为 typed valid/ready 直发；production 的
+  `timed_issue_depth/lookahead` 均为 0。Ready 低时锁存 terminal fault，只有
+  issue fire 才推进 Active Context。
+- 新增 SRAM primitive、SRAM FIFO、MXM 128-bit local-iMEM 与 MXM ready-low
+  定向测试；宿主 C++ 测试使用已保存 RTL 合同，不重跑 VCS。
+- ProgramLoader 将 160-word 任意字节吞吐 fixture 明确为 Native 装载测试，另用
+  合法 3-word MEM Raw-Macro fixture 验证 Program Distribution valid/ready/address/
+  strobe/last；不再把任意尾随字节冒充可完整解码的 Macro 程序。
+- 本轮 14 项受影响精确回归为 14/14 PASS；保存的 Level1 RTL Trace 与当前
+  CModel Trace 比较为 410/410、0 mismatch。正式 Hardware Interface View 覆盖
+  Program Load、local-iMEM read request/response、data/valid/last、backpressure、
+  FIFO level、Decoder/Context/Scheduler/MEM issue。物理 SRAM macro pins 属于
+  RTL-only Diagnostic，不要求 CModel 提供同名输出，也不作为本阶段验收门禁。
+
 ## 2026-11-14：独立工作区与 Checkpoint 1 迁移复验
 
 ### 工作区

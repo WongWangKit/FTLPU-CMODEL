@@ -1,0 +1,129 @@
+{
+  "schema": "ftlpu.mxm.full_path.c8.normalized.v1",
+  "test_name": "mxm_full_path_c8_cycle_scoreboard",
+  "title": "MXM Full Path C8 Cycle Scoreboard",
+  "required_fields": [
+    "schema", "run_id", "case_id", "source", "global_cycle",
+    "logical_cycle", "transport_tick", "phase", "sample_point",
+    "event_sequence", "module", "instance", "signal", "width",
+    "value", "event_type", "mapping_status", "source_ref"
+  ],
+  "allowed_event_types": ["SIGNAL_SAMPLE"],
+  "allowed_mapping_statuses": ["DIRECT", "DERIVED"],
+  "comparable_mapping_statuses": ["DIRECT", "DERIVED"],
+  "excluded_mapping_statuses": [],
+  "architecture": {
+    "events": [],
+    "phase": "HIGH",
+    "sample_point": "POST_POSEDGE",
+    "canonical_module": "lpu_mxm_core"
+  },
+  "signal_rules": [
+    {
+      "name": "command_fire_pre_posedge",
+      "category": "CANONICAL",
+      "signals": [
+        "compute_launch_fire", "load_launch_fire", "param_load_launch_fire",
+        "dequant_launch_fire", "backend_launch_fire"
+      ],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DERIVED"],
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "core_control_post_posedge",
+      "category": "CANONICAL",
+      "signals": [
+        "compute_row_valid_o", "load_row_valid_o", "param_load_row_valid_o",
+        "dequant_row_valid_o", "cell_weight_valid_o",
+        "cell_activation_valid_o", "backend_slot_valid_o", "alu_valid_o",
+        "bank_request_valid_o", "bank_write_o", "frontend_fault_o",
+        "backend_fault_o", "fault_o"
+      ],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "source_views": {
+        "CMODEL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"},
+        "RTL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"}
+      }
+    },
+    {
+      "name": "command_queue_level_post_posedge",
+      "category": "CANONICAL",
+      "signals": ["queue_level"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "source_views": {
+        "CMODEL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"},
+        "RTL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"}
+      }
+    },
+    {
+      "name": "pipeline_valid_post_posedge",
+      "category": "CANONICAL",
+      "signals": [
+        "partial_valid_o", "returned_valid_o", "backend_issue_valid_o",
+        "result_valid_o"
+      ],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "source_views": {
+        "CMODEL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"},
+        "RTL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"}
+      }
+    },
+    {
+      "name": "partial_payload_when_valid",
+      "category": "CANONICAL",
+      "signals": ["partial_o", "partial_tag_o"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "gate": {"signal": "partial_valid_o", "equals": "1"},
+      "source_views": {
+        "CMODEL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"},
+        "RTL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"}
+      }
+    },
+    {
+      "name": "returned_payload_when_valid",
+      "category": "CANONICAL",
+      "signals": ["returned_o", "returned_tag_o"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "gate": {"signal": "returned_valid_o", "equals": "1"},
+      "source_views": {
+        "CMODEL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"},
+        "RTL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"}
+      }
+    },
+    {
+      "name": "backend_issue_payload_when_valid",
+      "category": "CANONICAL",
+      "signals": ["backend_issue_operation_o", "backend_issue_address_o"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "gate": {"signal": "backend_issue_valid_o", "equals": "1"},
+      "source_views": {
+        "CMODEL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"},
+        "RTL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"}
+      }
+    },
+    {
+      "name": "result_payload_when_valid",
+      "category": "CANONICAL",
+      "signals": [
+        "result_bf16_o", "result_o", "result_address_o", "result_tag_o"
+      ],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "gate": {"signal": "result_valid_o", "equals": "1"},
+      "source_views": {
+        "CMODEL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"},
+        "RTL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"}
+      }
+    }
+  ]
+}

@@ -7,6 +7,7 @@
 #include "ftlpu/core/timing.hpp"
 #include "ftlpu/mxm/accumulator.hpp"
 #include "ftlpu/mxm/array.hpp"
+#include "ftlpu/mxm/bf16_arithmetic.hpp"
 #include "ftlpu/mxm/control_slice.hpp"
 
 #include <algorithm>
@@ -696,16 +697,24 @@ private:
             for (std::size_t output_lane = 0;
                  output_lane < hw::kMxmSupercellColumns;
                  ++output_lane) {
-                auto partial = 0.0f;
+                auto activation_bits = std::array<
+                    std::uint16_t, hw::kLanesPerTile> {};
+                auto weight_bits = std::array<
+                    std::uint16_t, hw::kLanesPerTile> {};
                 for (std::size_t lane = 0;
                      lane < hw::kLanesPerTile;
                      ++lane) {
-                    partial +=
+                    activation_bits[lane] = Bf16::from_float(
                         this->state().decode_activation_buffers[state.activation_buffer]
-                                                  [tile][column][lane]
-                        * (*weights)[lane][output_lane];
+                                                  [tile][column][lane]).bits();
+                    weight_bits[lane] = Bf16::from_float(
+                        (*weights)[lane][output_lane]).bits();
                 }
-                state.partial[partial_column][output_lane] += partial;
+                const auto partial = mxm_numeric::bf16_dot(
+                    activation_bits, weight_bits).value();
+                state.partial[partial_column][output_lane]
+                    = mxm_numeric::fp32_add(
+                        state.partial[partial_column][output_lane], partial);
             }
             this->state().last_computing[tile][column] = true;
             if (os != nullptr) {
@@ -726,19 +735,29 @@ private:
                     if (stage < tile + column) continue;
                     const auto output_lane = stage - tile - column;
                     if (output_lane >= hw::kLanesPerTile) continue;
-                    float partial = 0.0f;
+                    auto activation_bits = std::array<
+                        std::uint16_t, hw::kLanesPerTile> {};
+                    auto weight_bits = std::array<
+                        std::uint16_t, hw::kLanesPerTile> {};
                     for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
                         if (!this->state().decode_activation_valid[state.activation_buffer][tile][column][lane])
                             throw std::logic_error("IS-vector used an unloaded activation");
                         const auto word = input.consume_cell(tile, lane, column);
                         if (!word.valid)
                             throw std::logic_error("IS-vector weight did not arrive at its scheduled cycle");
-                        const auto weight = Bf16::from_float(
-                            static_cast<float>(static_cast<std::int8_t>(word.data))
-                            * state.dequant.scale()).to_float();
-                        partial += this->state().decode_activation_buffers[state.activation_buffer][tile][column][lane] * weight;
+                        activation_bits[lane] = Bf16::from_float(
+                            this->state().decode_activation_buffers[state.activation_buffer]
+                                [tile][column][lane]).bits();
+                        weight_bits[lane] = mxm_numeric::int8_dequant_bf16(
+                            static_cast<std::int8_t>(word.data),
+                            state.dequant.zero_point,
+                            state.dequant.scale_bf16);
                     }
-                    state.partial[column][output_lane] += partial;
+                    const auto partial = mxm_numeric::bf16_dot(
+                        activation_bits, weight_bits).value();
+                    state.partial[column][output_lane]
+                        = mxm_numeric::fp32_add(
+                            state.partial[column][output_lane], partial);
                     this->state().last_computing[tile][column] = true;
                 }
             }
@@ -871,7 +890,7 @@ private:
                  lane < hw::kMxmSupercellColumns;
                  ++lane) {
                 const auto value = output.values[tile][lane];
-                const auto raw = Bf16::from_float(value).bits();
+                const auto raw = mxm_numeric::fp32_to_bf16(value);
                 for (std::size_t byte = 0;
                      byte < sizeof(std::uint16_t);
                      ++byte) {
@@ -901,21 +920,41 @@ private:
                  ++local_column) {
                 const auto global_column =
                     column_block * hw::kMxmSupercellColumns + local_column;
-                for (std::size_t lane = 0;
-                     lane < hw::kLanesPerTile;
-                     ++lane) {
-                    const auto partial = event.data[output_row][lane]
-                        * static_cast<float>(
-                            array_.weight(
-                                event.weight_buffer,
-                                event.tile,
-                                column_block,
-                                lane,
-                                local_column,
-                                event.data_format));
-                    this->state().accumulators[event.weight_buffer][row][global_column]
-                        += partial;
+                auto partial = 0.0f;
+                if (event.data_format == MxmDataFormat::BFloat16) {
+                    auto activation_bits = std::array<
+                        std::uint16_t, hw::kLanesPerTile> {};
+                    auto weight_bits = std::array<
+                        std::uint16_t, hw::kLanesPerTile> {};
+                    for (std::size_t lane = 0;
+                         lane < hw::kLanesPerTile;
+                         ++lane) {
+                        activation_bits[lane] = Bf16::from_float(
+                            event.data[output_row][lane]).bits();
+                        weight_bits[lane] = array_.cell(
+                            event.tile, column_block).weight_bits(
+                                event.weight_buffer, lane, local_column);
+                    }
+                    partial = mxm_numeric::bf16_dot(
+                        activation_bits, weight_bits).value();
+                } else {
+                    for (std::size_t lane = 0;
+                         lane < hw::kLanesPerTile;
+                         ++lane) {
+                        partial += event.data[output_row][lane]
+                            * static_cast<float>(
+                                array_.weight(
+                                    event.weight_buffer,
+                                    event.tile,
+                                    column_block,
+                                    lane,
+                                    local_column,
+                                    event.data_format));
+                    }
                 }
+                auto& accumulator = this->state().accumulators
+                    [event.weight_buffer][row][global_column];
+                accumulator = mxm_numeric::fp32_add(accumulator, partial);
                 ++this->state().contribution_counts[event.weight_buffer][row][global_column];
             }
         }
@@ -1062,7 +1101,7 @@ private:
         const ResultValues& values)
     {
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
-            const auto raw = Bf16::from_float(values[lane]).bits();
+            const auto raw = mxm_numeric::fp32_to_bf16(values[lane]);
             for (std::size_t byte = 0; byte < sizeof(std::uint16_t); ++byte) {
                 output.write_cell(
                     column_block,

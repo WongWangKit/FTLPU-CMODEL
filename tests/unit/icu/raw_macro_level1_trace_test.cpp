@@ -514,6 +514,52 @@ void emit_low_snapshot(TraceWriter& writer, const CaseSpec& spec,
 
     if (observation.executed_stage == Stage::Prime
         || observation.executed_stage == Stage::Run) {
+        const auto& fetch = queue.mem_fetch_port_signals();
+        emit("lpu_mem_imem_fetch", "start_valid_i", 1,
+            binary(fetch.start_valid_i, 1), "SIGNAL_SAMPLE", "DIRECT",
+            "MacroBitstreamDecoder canonical MEM Fetch component");
+        emit("lpu_mem_imem_fetch", "start_ready_o", 1,
+            binary(fetch.start_ready_o, 1), "SIGNAL_SAMPLE", "DIRECT",
+            "MacroBitstreamDecoder canonical MEM Fetch component");
+        emit("lpu_mem_imem_fetch", "start_base_address_i", 4,
+            binary(fetch.start_base_address_i, 4), "SIGNAL_SAMPLE", "DIRECT",
+            "Level1 IMEM_DEPTH=16 instance");
+        emit("lpu_mem_imem_fetch", "start_word_count_i", 5,
+            binary(fetch.start_word_count_i, 5), "SIGNAL_SAMPLE", "DIRECT",
+            "MacroBitstreamDecoder production image size");
+        emit("lpu_mem_imem_fetch", "start_fire", 1,
+            binary(fetch.start_fire, 1), "SIGNAL_SAMPLE", "DIRECT",
+            "start_valid_i && start_ready_o");
+        emit("lpu_mem_imem_fetch", "word_valid_o", 1,
+            binary(fetch.word_valid_o, 1), "SIGNAL_SAMPLE", "DIRECT",
+            "canonical Fetch to Macro Word FIFO boundary");
+        emit("lpu_mem_imem_fetch", "word_ready_i", 1,
+            binary(fetch.word_ready_i, 1), "SIGNAL_SAMPLE", "DIRECT",
+            "canonical Fetch to Macro Word FIFO boundary");
+        emit("lpu_mem_imem_fetch", "word_o", 96,
+            binary(fetch.word_o.lanes), "SIGNAL_SAMPLE", "DIRECT",
+            "canonical Fetch to Macro Word FIFO boundary");
+        emit("lpu_mem_imem_fetch", "word_last_o", 1,
+            binary(fetch.word_last_o, 1), "SIGNAL_SAMPLE", "DIRECT",
+            "canonical Fetch to Macro Word FIFO boundary");
+        emit("lpu_mem_imem_fetch", "word_fire", 1,
+            binary(fetch.word_fire, 1), "SIGNAL_SAMPLE", "DIRECT",
+            "word_valid_o && word_ready_i");
+        emit("lpu_mem_macro_decoder", "word_valid_i", 1,
+            binary(fetch.decoder_word_valid_i, 1), "SIGNAL_SAMPLE", "DIRECT",
+            "canonical Macro Word FIFO to Decoder boundary");
+        emit("lpu_mem_macro_decoder", "word_ready_o", 1,
+            binary(fetch.decoder_word_ready_o, 1), "SIGNAL_SAMPLE", "DIRECT",
+            "canonical Macro Word FIFO to Decoder boundary");
+        emit("lpu_mem_macro_decoder", "word_i", 96,
+            binary(fetch.decoder_word_i.lanes), "SIGNAL_SAMPLE", "DIRECT",
+            "canonical Macro Word FIFO to Decoder boundary");
+        emit("lpu_mem_macro_decoder", "word_last_i", 1,
+            binary(fetch.decoder_word_last_i, 1), "SIGNAL_SAMPLE", "DIRECT",
+            "canonical Macro Word FIFO to Decoder boundary");
+        emit("lpu_mem_macro_decoder", "decoder_word_fire", 1,
+            binary(fetch.decoder_word_fire, 1), "SIGNAL_SAMPLE", "DIRECT",
+            "word_valid_i && word_ready_o");
         const auto& imem = queue.imem_read_port_signals();
         emit("lpu_mem_imem_fetch", "imem_read_req_valid_o", 1,
             binary(imem.imem_read_req_valid_o, 1), "SIGNAL_SAMPLE", "DIRECT",

@@ -27,9 +27,26 @@ Ddr4Config ddr_config()
 std::vector<std::uint8_t> image_bytes(bool mem, std::size_t words)
 {
     // Independent golden physical fixtures, also used by raw decoder tests.
-    const std::vector<std::uint32_t> lanes = mem
+    std::vector<std::uint32_t> lanes = mem
         ? std::vector<std::uint32_t>{0x25,0,0,0x02000021,0x180,0x00303200,0x400,0,0}
-        : std::vector<std::uint32_t>{0x15,0,0,0,0x28,0x04000008,0,0};
+        : std::vector<std::uint32_t>(8, 0);
+    if (!mem) {
+        lanes[0] = 0x15;
+        std::size_t offset = 128;
+        auto push = [&](std::uint64_t value, std::size_t width) {
+            for (std::size_t bit = 0; bit < width; ++bit, ++offset)
+                lanes[offset / 32] |= std::uint32_t((value >> bit) & 1u)
+                    << (offset % 32);
+        };
+        push(0, 3); // Dictionary count.
+        push(5, 32); // Absolute issue cycle.
+        push(0, 1); // Load operand.
+        push(0, 1); // One-template Run.
+        push(0, 1); // Compact Template.
+        push(2, 2); // weight_buffer=1, MATRIX mode.
+        push(0, 2); // Single schedule.
+        push(0, 2); // No induction target.
+    }
     std::vector<std::uint8_t> bytes(words * (mem ? 12 : 16));
     for (std::size_t b = 0; b < bytes.size(); ++b)
         bytes[b] = b < lanes.size() * 4
@@ -53,7 +70,7 @@ void stage(C2cDmaSystem& system, std::uint64_t address,
 void wait_ready(C2cDmaSystem& system)
 {
     for (std::size_t timeout = 0; !system.program_loader().ready_to_start(); ++timeout) {
-        require(timeout < 20000, "program load did not finish");
+        require(timeout < 20000, "wait_ready program load did not finish");
         system.tick();
     }
 }
@@ -61,15 +78,8 @@ void wait_ready(C2cDmaSystem& system)
 void compare(C2cDmaSystem& system, const ProgramImage& image,
     const std::vector<std::uint8_t>& bytes)
 {
-    for (std::size_t b = 0; b < bytes.size(); ++b) {
-        const auto lane = (b % image.word_bytes()) / 4;
-        const auto shift = (b % 4) * 8;
-        const auto word = b / image.word_bytes();
-        const auto value = image.kind == IcuMacroQueueKind::Mem
-            ? system.chip().icu().mem_iq(image.queue_index).read_raw_imem(word).lanes[lane]
-            : system.chip().icu().mxm_load_iq(image.queue_index).read_raw_imem(word).lanes[lane];
-        require(static_cast<std::uint8_t>(value >> shift) == bytes[b], "i-MEM byte mismatch");
-    }
+    const auto committed = system.chip().icu().read_program_image(image);
+    require(committed == bytes, "i-MEM byte mismatch");
 }
 
 ProgramLoadStatistics sweep(ProgramLoadConfig config, std::size_t depth = 16,
@@ -80,40 +90,48 @@ ProgramLoadStatistics sweep(ProgramLoadConfig config, std::size_t depth = 16,
     auto& loader = system->program_loader();
     const auto bytes = image_bytes(true, 160);
     stage(*system, 3, bytes); // Deliberately unaligned DDR source.
-    loader.submit({{3, IcuMacroQueueKind::Mem, 0, bytes.size()}}, system->cycle());
+    // This is a loader throughput fixture, not an executable Macro stream:
+    // only its leading words form a decoder fixture and the remaining bytes
+    // deliberately carry arbitrary data.  Keep it Native so a strict RTL
+    // Macro frontend is not asked to consume trailing non-program words.
+    const ProgramImage load_image{3, IcuMacroQueueKind::Mem, 0,
+        bytes.size(), IcuQueueMode::Native};
+    loader.submit({load_image}, system->cycle());
     C2cDmaEngine weights(system->ddr4(), 16);
     if (weight_reads) weights.issue(C2cDmaInstruction::Load(0x10000, 120));
     loader.start(); // Early start must stay held until every gate is satisfied.
-    bool sawMemProgramPort=false;
     for (std::size_t timeout = 0; !loader.ready_to_start(); ++timeout) {
-        require(timeout < 20000, "program load did not finish");
+        if (timeout >= 20000) {
+            const auto& queue = system->chip().icu().mem_iq(0);
+            const auto& decoder = queue.macro_decoder_statistics();
+            std::ostringstream diagnostic;
+            diagnostic << "sweep program load did not finish: state="
+                << static_cast<unsigned>(loader.state())
+                << " all_committed=" << loader.all_images_committed()
+                << " frontend_ready=" << queue.frontend_ready()
+                << " fetch_complete=" << queue.macro_fetch_complete()
+                << " decoder_fault=" << queue.macro_decoder_fault()
+                << " fault_code="
+                << static_cast<unsigned>(queue.macro_decoder_fault_code())
+                << " fetched_words=" << decoder.fetched_words
+                << " decoded_contexts=" << decoder.decoded_contexts
+                << " context_fifo=" << queue.context_fifo_occupancy()
+                << " active=" << queue.active_macro_count()
+                << " word_fifo=" << queue.word_fifo_level();
+            throw std::runtime_error(diagnostic.str());
+        }
         const auto words = loader.statistics().written_words;
         if (weight_reads) {
             weights.tick();
             while (weights.receive_ready()) weights.pop_received();
         }
         system->tick();
-        const auto& programPort=loader.mem_program_port_signals();
-        if(programPort.mem_program_valid_o) {
-            sawMemProgramPort=true;
-            require(programPort.mem_program_imem_address_o<160
-                    && programPort.mem_program_strb_o==0x7
-                    && programPort.mem_program_last_o
-                        ==(programPort.mem_program_imem_address_o==159)
-                    && programPort.mem_program_fire
-                        ==(programPort.mem_program_valid_o
-                            && programPort.mem_program_ready_i)
-                    && !programPort.mem_program_error_i,
-                "MEM Program port lost address/strobe/last handshake semantics");
-        }
         require(loader.statistics().written_words <= words + 1,
             "target committed more than one word per cycle");
         if (!loader.statistics().images[0].first_write_committed)
             rejects([&] { system->chip().icu().mem_iq(0).read_raw_imem(0); });
     }
     require(!loader.statistics().program_start, "start bypassed dependency gate");
-    require(sawMemProgramPort,
-        "MEM Program Distribution port was not observable");
     compare(*system, loader.statistics().images[0].image, bytes);
     const auto stats = loader.statistics();
     if (weight_reads)
@@ -139,10 +157,41 @@ ProgramLoadStatistics sweep(ProgramLoadConfig config, std::size_t depth = 16,
     return stats;
 }
 
+void macro_program_port()
+{
+    auto system = std::make_unique<C2cDmaSystem>(ddr_config(), 4);
+    const auto bytes = image_bytes(true, 3);
+    const ProgramImage image{0x60000, IcuMacroQueueKind::Mem, 0,
+        bytes.size(), IcuQueueMode::Macro};
+    stage(*system, image.source_address, bytes);
+    auto& loader = system->program_loader();
+    loader.submit({image}, system->cycle());
+    bool saw_port = false;
+    for (std::size_t timeout = 0; !loader.ready_to_start(); ++timeout) {
+        require(timeout < 2000, "valid MEM Macro program load did not finish");
+        system->tick();
+        const auto& port = loader.mem_program_port_signals();
+        if (!port.mem_program_valid_o) continue;
+        saw_port = true;
+        require(port.mem_program_imem_address_o < image.word_count()
+                && port.mem_program_strb_o == 0x7
+                && port.mem_program_last_o
+                    == (port.mem_program_imem_address_o + 1
+                        == image.word_count())
+                && port.mem_program_fire
+                    == (port.mem_program_valid_o
+                        && port.mem_program_ready_i)
+                && !port.mem_program_error_i,
+            "MEM Program port lost address/strobe/last handshake semantics");
+    }
+    require(saw_port, "MEM Program Distribution port was not observable");
+    compare(*system, image, bytes);
+}
+
 ProgramLoadStatistics relay_trace(std::size_t local_queue)
 {
     auto system=std::make_unique<C2cDmaSystem>(ddr_config(),4);
-    const auto payload=image_bytes(true,9);
+    const auto payload=image_bytes(true,3);
     const auto address=0x50000+local_queue*0x100;
     stage(*system,address,payload);
     ProgramImage image{address,IcuMacroQueueKind::Mem,local_queue,
@@ -199,11 +248,57 @@ void barrier_storage_and_activation() {
 
 }
 
+void qctl_zero_partition_production_path()
+{
+    auto system = std::make_unique<C2cDmaSystem>(ddr_config(), 4);
+    const auto macro_bytes = image_bytes(true, 3);
+    ProgramImage macro{0x70000, IcuMacroQueueKind::Mem, 0,
+        macro_bytes.size(), IcuQueueMode::Macro};
+    ProgramImage qctl{};
+    qctl.source_address = 0x71000;
+    qctl.kind = IcuMacroQueueKind::Mem;
+    qctl.queue_index = 0;
+    qctl.byte_count = 0;
+    qctl.storage = ProgramStorage::Qctl;
+    qctl.generation = 1;
+    ProgramImage events{};
+    events.source_address = 0x72000;
+    events.kind = IcuMacroQueueKind::Mem;
+    events.queue_index = 0;
+    events.byte_count = 0;
+    events.storage = ProgramStorage::QueueEvents;
+    events.generation = 1;
+    stage(*system, macro.source_address, macro_bytes);
+    auto& loader = system->program_loader();
+    loader.submit({macro, qctl, events}, system->cycle());
+    wait_ready(*system);
+    const auto& ready_view = system->chip().icu().qctl_hardware_interface_view();
+    require(ready_view.endpoint_configured_i[0]
+            && ready_view.endpoint_primed_i[0]
+            && ready_view.endpoint_done_i[0]
+            && ready_view.queue_active_o[0]
+            && !ready_view.fault_o,
+        "ProgramLoader did not configure/prime the zero-record QCTL endpoint");
+    loader.start();
+    loader.set_dependencies_ready(true);
+    for (std::size_t timeout = 0; !loader.kernel_done(); ++timeout) {
+        require(timeout < 200,
+            "production QCTL path did not complete its Macro workload");
+        system->tick();
+        require(!system->chip().icu().qctl_hardware_interface_view().fault_o,
+            "production QCTL path raised a fault");
+    }
+    require(system->chip().icu().mem_iq(0).cycle() != 0,
+        "zero-record QCTL endpoint did not pass Scheduler CE to MEM");
+}
+
 }
 
 int main() try
 {
     barrier_storage_and_activation();
+    macro_program_port();
+    qctl_zero_partition_production_path();
     ProgramLoadConfig config;
     config.bus_bytes_per_cycle = 32;
     config.route_latency_cycles = config.imem_write_ii_cycles
@@ -245,7 +340,7 @@ int main() try
     auto system = std::make_unique<C2cDmaSystem>(ddr_config(), 1,
         SystemHardwareConfiguration{}, config);
     auto& loader = system->program_loader();
-    const auto mem = image_bytes(true, 9), mxm = image_bytes(false, 7);
+    const auto mem = image_bytes(true, 3), mxm = image_bytes(false, 2);
     stage(*system, 0x1000, mem); stage(*system, 0x2000, mxm);
     const ProgramImage a{0x1000, IcuMacroQueueKind::Mem, 0, mem.size()};
     const ProgramImage b{0x2000, IcuMacroQueueKind::MxmLoad, 0, mxm.size()};

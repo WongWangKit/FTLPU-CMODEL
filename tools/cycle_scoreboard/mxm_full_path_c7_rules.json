@@ -1,0 +1,58 @@
+{
+  "schema": "ftlpu.mxm.full_path.c7.normalized.v1",
+  "test_name": "mxm_full_path_c7_cycle_scoreboard",
+  "title": "MXM Full Path C7 Cycle Scoreboard",
+  "required_fields": [
+    "schema", "run_id", "case_id", "source", "global_cycle",
+    "logical_cycle", "transport_tick", "phase", "sample_point",
+    "event_sequence", "module", "instance", "signal", "width",
+    "value", "event_type", "mapping_status", "source_ref"
+  ],
+  "allowed_event_types": ["SIGNAL_SAMPLE"],
+  "allowed_mapping_statuses": ["DIRECT", "DERIVED"],
+  "comparable_mapping_statuses": ["DIRECT", "DERIVED"],
+  "excluded_mapping_statuses": [],
+  "architecture": {
+    "events": [],
+    "phase": "LOW",
+    "sample_point": "PRE_POSEDGE",
+    "canonical_module": "lpu_mxm_macro_frontend"
+  },
+  "signal_rules": [
+    {
+      "name": "issue_valid_and_fire",
+      "category": "CANONICAL",
+      "signals": ["issue_valid_o", "issue_fire"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "valid_issue_payload",
+      "category": "CANONICAL",
+      "signals": ["issue_ready_i", "issue_instruction_o", "issue_cycle_o"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "gate": {"signal": "issue_valid_o", "equals": "1"},
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "aggregate_faults",
+      "category": "CANONICAL",
+      "signals": ["conflict_o", "fault_o"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "canonical_instance": "mxm0",
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    }
+  ]
+}

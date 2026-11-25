@@ -1,0 +1,73 @@
+{
+  "schema": "ftlpu.qctl.phase3.distributed.normalized.v1",
+  "test_name": "qctl_phase3_distributed_joint_cycle_scoreboard",
+  "title": "QCTL Phase 3 Distributed Load Joint Cycle Scoreboard",
+  "required_fields": [
+    "schema", "run_id", "case_id", "source", "global_cycle",
+    "logical_cycle", "transport_tick", "phase", "sample_point",
+    "event_sequence", "module", "instance", "signal", "width",
+    "value", "event_type", "mapping_status", "source_ref"
+  ],
+  "allowed_event_types": ["SIGNAL_SAMPLE"],
+  "allowed_mapping_statuses": ["DIRECT"],
+  "comparable_mapping_statuses": ["DIRECT"],
+  "excluded_mapping_statuses": [],
+  "architecture": {
+    "events": [],
+    "phase": "PRE_POSEDGE",
+    "sample_point": "PRE_POSEDGE",
+    "canonical_module": "qctl_architecture",
+    "canonical_instance": "qctl_architecture"
+  },
+  "signal_rules": [
+    {
+      "name": "qctl_phase3_distributed_canonical_signals",
+      "category": "CANONICAL",
+      "signals": [
+        "qctl_load_manager.load_mode",
+        "qctl_load_manager.partition_valid",
+        "qctl_load_manager.partition_ready",
+        "qctl_load_manager.partition_fire",
+        "qctl_load_manager.partition_queue",
+        "qctl_load_manager.partition_base",
+        "qctl_load_manager.partition_count",
+        "qctl_load_manager.partition_generation",
+        "qctl_load_manager.load_valid",
+        "qctl_load_manager.load_ready",
+        "qctl_load_manager.load_fire",
+        "qctl_load_manager.load_address",
+        "qctl_load_manager.load_data",
+        "qctl_relay_chain.relay_packet_valid",
+        "qctl_relay_chain.relay_packet_ready",
+        "qctl_relay_chain.relay_packet_kind",
+        "qctl_relay_chain.relay_packet_queue",
+        "qctl_relay_chain.relay_packet_offset",
+        "qctl_relay_chain.east_r0_input_fire",
+        "qctl_relay_chain.east_r0_local_fire",
+        "qctl_relay_chain.east_r0_output_valid",
+        "qctl_relay_chain.east_r0_output_ready",
+        "qctl_relay_chain.east_r0_fifo_level",
+        "qctl_relay_chain.east_r1_input_fire",
+        "qctl_relay_chain.east_r1_local_fire",
+        "qctl_relay_chain.east_r1_fifo_level",
+        "qctl_endpoint.endpoint_configure_valid",
+        "qctl_endpoint.endpoint_store_loaded",
+        "qctl_endpoint.endpoint_head_valid",
+        "qctl_endpoint.endpoint_head_error",
+        "qctl_endpoint.endpoint_configured",
+        "qctl_endpoint.endpoint_primed",
+        "qctl_endpoint.queue_active",
+        "qctl_global_subsystem.load_complete",
+        "qctl_global_subsystem.all_primed",
+        "qctl_global_subsystem.fault",
+        "qctl_global_subsystem.fault_code"
+      ],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "source_views": {
+        "CMODEL": {"phase": "PRE_POSEDGE", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "PRE_POSEDGE", "sample_point": "PRE_POSEDGE"}
+      }
+    }
+  ]
+}

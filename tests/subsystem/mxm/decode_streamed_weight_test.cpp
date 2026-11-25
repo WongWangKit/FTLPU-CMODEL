@@ -1,4 +1,5 @@
 #include "ftlpu/core/bf16.hpp"
+#include "ftlpu/mxm/bf16_arithmetic.hpp"
 #include "ftlpu/system/tsp_slice_system.hpp"
 
 #include <algorithm>
@@ -38,7 +39,9 @@ constexpr std::size_t kWeightWaves = kOutputBlocks * kOutputWidth / kDecodeN;
 
 std::size_t east_latency(std::size_t slice)
 {
-    return ftlpu::hw::kMemGroups
+    // RegisteredR1 is the production default: one registered MEM-read cycle
+    // plus the forward route from the slice boundary to sxm_mxm.
+    return 1 + ftlpu::hw::kMemGroups
         + ftlpu::hw::kC2cToSxmStreamRegisterColumns + 1
         - slice / ftlpu::hw::kMemSlicesPerGroup;
 }
@@ -181,19 +184,25 @@ ftlpu::Bf16 reference(std::size_t output)
 {
     float sum = 0.0f;
     for (std::size_t stage = 0; stage < ftlpu::hw::kTileRows; ++stage) {
-        float partial = 0.0f;
+        auto activations = std::array<
+            std::uint16_t, ftlpu::hw::kLanesPerTile> {};
+        auto weights = std::array<
+            std::uint16_t, ftlpu::hw::kLanesPerTile> {};
         for (std::size_t lane = 0; lane < ftlpu::hw::kLanesPerTile; ++lane) {
             const auto k = stage * ftlpu::hw::kLanesPerTile + lane;
-            const auto activation =
-                ftlpu::Bf16::from_float(activation_value(k)).to_float();
-            const auto weight = ftlpu::Bf16::from_float(
-                static_cast<float>(quantized_weight(k, output)) * kScale)
-                                    .to_float();
-            partial += activation * weight;
+            activations[lane] = ftlpu::Bf16::from_float(
+                activation_value(k)).bits();
+            weights[lane] = ftlpu::mxm_numeric::int8_dequant_bf16(
+                quantized_weight(k, output),
+                0,
+                ftlpu::Bf16::from_float(kScale).bits());
         }
-        sum += partial;
+        sum = ftlpu::mxm_numeric::fp32_add(
+            sum, ftlpu::mxm_numeric::bf16_dot(
+                activations, weights).value());
     }
-    return ftlpu::Bf16::from_float(sum);
+    return ftlpu::Bf16::from_bits(
+        ftlpu::mxm_numeric::fp32_to_bf16(sum));
 }
 
 void program(Schedule& schedule, bool vector, bool incomplete = false)

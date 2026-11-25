@@ -3,6 +3,8 @@
 #include "ftlpu/core/hardware_params.hpp"
 #include "ftlpu/core/stream.hpp"
 #include "ftlpu/core/timing.hpp"
+#include "ftlpu/core/bf16.hpp"
+#include "ftlpu/mxm/bf16_arithmetic.hpp"
 #include "ftlpu/mxm/data_format.hpp"
 
 #include <algorithm>
@@ -334,6 +336,21 @@ private:
         if (!weight_buffer_valid_state_.current()[activation.weight_buffer]) {
             throw std::logic_error("MXM compute requires a valid selected weight buffer");
         }
+        if (activation.data_format == MxmDataFormat::BFloat16) {
+            auto activation_bits = std::array<
+                std::uint16_t, hw::kLanesPerTile> {};
+            auto weight_bits = std::array<
+                std::uint16_t, hw::kLanesPerTile> {};
+            for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
+                activation_bits[lane] = Bf16::from_float(
+                    activation.data[lane]).bits();
+                weight_bits[lane] = weight_buffers_state_.current()
+                    [activation.weight_buffer][lane][column];
+            }
+            return mxm_numeric::bf16_dot(
+                activation_bits, weight_bits).value();
+        }
+
         float sum = 0.0f;
         for (std::size_t lane = 0; lane < hw::kLanesPerTile; ++lane) {
             sum += activation.data[lane]

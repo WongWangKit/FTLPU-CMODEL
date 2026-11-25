@@ -1,0 +1,96 @@
+{
+  "schema": "ftlpu.mxm.full_path.c7.frontend.normalized.v1",
+  "test_name": "mxm_full_path_c7_frontend_cycle_scoreboard",
+  "title": "MXM Full Path C7 Frontend Cycle Scoreboard",
+  "required_fields": [
+    "schema", "run_id", "case_id", "source", "global_cycle",
+    "logical_cycle", "transport_tick", "phase", "sample_point",
+    "event_sequence", "module", "instance", "signal", "width",
+    "value", "event_type", "mapping_status", "source_ref"
+  ],
+  "allowed_event_types": ["SIGNAL_SAMPLE"],
+  "allowed_mapping_statuses": ["DIRECT", "DERIVED"],
+  "comparable_mapping_statuses": ["DIRECT", "DERIVED"],
+  "excluded_mapping_statuses": [],
+  "architecture": {
+    "events": [],
+    "phase": "HIGH",
+    "sample_point": "POST_POSEDGE",
+    "canonical_module": "lpu_mxm_local_imem_frontend"
+  },
+  "signal_rules": [
+    {
+      "name": "frontend_pre_posedge_control",
+      "category": "CANONICAL",
+      "signals": [
+        "start_valid_i", "start_ready_o", "start_fire",
+        "imem_read_req_valid_o", "imem_read_req_ready_i",
+        "imem_read_req_fire", "imem_read_req_address_o",
+        "imem_read_req_last_o", "imem_read_rsp_valid_i",
+        "imem_read_rsp_ready_o", "imem_read_rsp_fire",
+        "word_valid_o", "word_ready_i", "word_fire",
+        "decoder_word_valid_i", "decoder_word_ready_o",
+        "decoder_word_fire", "context_enqueue_valid_i",
+        "context_enqueue_ready_o", "context_enqueue_fire",
+        "context_dequeue_valid_o", "context_dequeue_ready_i",
+        "context_dequeue_fire"
+      ],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT", "DERIVED"],
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "imem_response_last_when_valid",
+      "category": "CANONICAL",
+      "signals": ["imem_read_rsp_last_i"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "gate": {"signal": "imem_read_rsp_valid_i", "equals": "1"},
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "fetch_word_last_when_valid",
+      "category": "CANONICAL",
+      "signals": ["word_last_o"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "gate": {"signal": "word_valid_o", "equals": "1"},
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "decoder_word_last_when_valid",
+      "category": "CANONICAL",
+      "signals": ["decoder_word_last_i"],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "gate": {"signal": "decoder_word_valid_i", "equals": "1"},
+      "source_views": {
+        "CMODEL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"},
+        "RTL": {"phase": "LOW", "sample_point": "PRE_POSEDGE"}
+      }
+    },
+    {
+      "name": "frontend_post_posedge_state",
+      "category": "CANONICAL",
+      "signals": [
+        "word_fifo_level_o", "context_fifo_level_o", "active_count_o",
+        "fetch_complete_q", "decoder_done_o", "frontend_ready_o", "fault_o"
+      ],
+      "event_types": ["SIGNAL_SAMPLE"],
+      "mapping_statuses": ["DIRECT"],
+      "source_views": {
+        "CMODEL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"},
+        "RTL": {"phase": "HIGH", "sample_point": "POST_POSEDGE"}
+      }
+    }
+  ]
+}

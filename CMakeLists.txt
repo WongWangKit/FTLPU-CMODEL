@@ -6,6 +6,13 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# The header-only ICU/system models instantiate enough Debug COMDAT sections
+# to exceed COFF's default section count. /bigobj changes only the object-file
+# container limit; it does not alter modeled timing or runtime behavior.
+if(MSVC)
+    add_compile_options(/bigobj)
+endif()
+
 set(FTLPU_HARDWARE_CONFIG
     "${CMAKE_CURRENT_SOURCE_DIR}/config/ftlpu-lpu32.json"
     CACHE FILEPATH
@@ -69,6 +76,10 @@ ftlpu_add_test(wide_transport_codec_test tests/unit/core/wide_transport_codec_te
     unit.core.wide_transport_codec unit core mxm c2c fast)
 ftlpu_add_test(timing_test tests/unit/core/timing_test.cpp
     unit.core.timing unit core timing fast)
+ftlpu_add_test(sram_1rw_test tests/unit/core/sram_1rw_test.cpp
+    unit.core.sram_1rw unit core timing fast)
+ftlpu_add_test(sram_fifo_test tests/unit/core/sram_fifo_test.cpp
+    unit.core.sram_fifo unit core timing fast)
 
 ftlpu_add_test(stream_fabric_test tests/unit/stream/stream_fabric_test.cpp
     unit.stream.fabric unit stream fast)
@@ -77,6 +88,9 @@ ftlpu_add_test(stream_port_test tests/unit/stream/stream_port_test.cpp
 ftlpu_add_test(stream_fabric_clock_test
     tests/unit/stream/stream_fabric_clock_test.cpp
     unit.stream.clocked_fabric unit stream timing fast)
+ftlpu_add_test(stream_fabric_cycle_trace_test
+    tests/unit/stream/stream_fabric_cycle_trace_test.cpp
+    unit.stream.cycle_trace unit stream timing)
 
 ftlpu_add_test(mem_slice_test tests/unit/mem/slice_test.cpp
     unit.mem.slice unit mem fast)
@@ -91,6 +105,8 @@ ftlpu_add_test(mem_array_r1_test tests/unit/mem/mem_array_test.cpp
 target_compile_definitions(mem_array_r1_test PRIVATE FTLPU_TEST_MEM_R1=1)
 ftlpu_add_test(mem_read_mode_test tests/unit/mem/mem_read_mode_test.cpp
     unit.mem.read_mode unit mem fast)
+ftlpu_add_test(mem_sr_cycle_trace_test tests/unit/mem/mem_sr_cycle_trace_test.cpp
+    unit.mem.sr_cycle_trace unit mem stream timing)
 ftlpu_add_test(mem_clocked_test tests/unit/mem/mem_clocked_test.cpp
     unit.mem.clocked unit mem timing fast)
 ftlpu_add_test(vector_roundtrip_test tests/unit/mem/vector_roundtrip_test.cpp
@@ -108,6 +124,59 @@ ftlpu_add_test(mxm_clocked_test tests/unit/mxm/mxm_clocked_test.cpp
     unit.mxm.clocked unit mxm timing fast)
 ftlpu_add_test(mxm_weight_dequantizer_test tests/unit/mxm/weight_dequantizer_test.cpp
     unit.mxm.weight_dequantizer unit mxm fast)
+ftlpu_add_test(mxm_bf16_numeric_alignment_test
+    tests/unit/mxm/bf16_numeric_alignment_test.cpp
+    unit.mxm.bf16_numeric_alignment unit mxm fast)
+ftlpu_add_test(mxm_core_clocked_test tests/unit/mxm/core_clocked_test.cpp
+    unit.mxm.core_clocked unit mxm timing fast)
+add_executable(mxm_datapath_c1_cycle_trace_test
+    tests/unit/mxm/datapath_c1_cycle_trace_test.cpp)
+target_link_libraries(mxm_datapath_c1_cycle_trace_test PRIVATE ftlpu_cmodel)
+add_test(NAME unit.mxm.datapath_c1_cycle_trace
+    COMMAND $<TARGET_FILE:mxm_datapath_c1_cycle_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/mxm_c1_cycle")
+set_tests_properties(unit.mxm.datapath_c1_cycle_trace PROPERTIES
+    LABELS "unit;mxm;timing;cycle_trace")
+add_executable(mxm_datapath_c2_cycle_trace_test
+    tests/unit/mxm/datapath_c2_cycle_trace_test.cpp)
+target_link_libraries(mxm_datapath_c2_cycle_trace_test PRIVATE ftlpu_cmodel)
+add_test(NAME unit.mxm.datapath_c2_cycle_trace
+    COMMAND $<TARGET_FILE:mxm_datapath_c2_cycle_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/mxm_c2_cycle")
+set_tests_properties(unit.mxm.datapath_c2_cycle_trace PROPERTIES
+    LABELS "unit;mxm;timing;cycle_trace")
+add_executable(mxm_datapath_c3_cycle_trace_test
+    tests/unit/mxm/datapath_c3_cycle_trace_test.cpp)
+target_link_libraries(mxm_datapath_c3_cycle_trace_test PRIVATE ftlpu_cmodel)
+add_test(NAME unit.mxm.datapath_c3_cycle_trace
+    COMMAND $<TARGET_FILE:mxm_datapath_c3_cycle_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/mxm_c3_cycle")
+set_tests_properties(unit.mxm.datapath_c3_cycle_trace PROPERTIES
+    LABELS "unit;mxm;timing;cycle_trace")
+add_executable(mxm_datapath_c4_cycle_trace_test
+    tests/unit/mxm/datapath_c4_cycle_trace_test.cpp)
+target_link_libraries(mxm_datapath_c4_cycle_trace_test PRIVATE ftlpu_cmodel)
+add_test(NAME unit.mxm.datapath_c4_cycle_trace
+    COMMAND $<TARGET_FILE:mxm_datapath_c4_cycle_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/mxm_c4_cycle")
+set_tests_properties(unit.mxm.datapath_c4_cycle_trace PROPERTIES
+    LABELS "unit;mxm;timing;cycle_trace")
+add_executable(mxm_datapath_c5_cycle_trace_test
+    tests/unit/mxm/datapath_c5_cycle_trace_test.cpp)
+target_link_libraries(mxm_datapath_c5_cycle_trace_test PRIVATE ftlpu_cmodel)
+add_test(NAME unit.mxm.datapath_c5_cycle_trace
+    COMMAND $<TARGET_FILE:mxm_datapath_c5_cycle_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/mxm_c5_cycle")
+set_tests_properties(unit.mxm.datapath_c5_cycle_trace PROPERTIES
+    LABELS "unit;mxm;timing;cycle_trace")
+add_executable(mxm_datapath_c6_cycle_trace_test
+    tests/unit/mxm/datapath_c6_cycle_trace_test.cpp)
+target_link_libraries(mxm_datapath_c6_cycle_trace_test PRIVATE ftlpu_cmodel)
+add_test(NAME unit.mxm.datapath_c6_cycle_trace
+    COMMAND $<TARGET_FILE:mxm_datapath_c6_cycle_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/mxm_c6_cycle")
+set_tests_properties(unit.mxm.datapath_c6_cycle_trace PROPERTIES
+    LABELS "unit;mxm;timing;cycle_trace")
 
 ftlpu_add_test(vxm_alu_test tests/unit/vxm/alu_test.cpp
     unit.vxm.alu unit vxm fast)
@@ -151,10 +220,19 @@ ftlpu_add_test(icu_queue_control_test tests/unit/icu/queue_control_test.cpp
     unit.icu.queue_control unit icu fast)
 ftlpu_add_test(icu_qctl_runtime_test tests/unit/icu/qctl_runtime_test.cpp
     unit.icu.qctl_runtime unit icu timing fast)
+ftlpu_add_test(icu_qctl_phase2b_trace_test
+    tests/unit/icu/qctl_phase2b_trace_test.cpp
+    unit.icu.qctl_phase2b_trace unit icu timing fast)
 ftlpu_add_test(icu_macro_schedule_test tests/unit/icu/macro_schedule_test.cpp
     unit.icu.macro_schedule unit icu fast)
 ftlpu_add_test(icu_raw_macro_decoder_test tests/unit/icu/raw_macro_decoder_test.cpp
     unit.icu.raw_macro_decoder unit icu fast)
+ftlpu_add_test(icu_mxm_local_imem_fetch_test
+    tests/unit/icu/mxm_local_imem_fetch_test.cpp
+    unit.icu.mxm_local_imem_fetch unit icu mxm timing fast)
+ftlpu_add_test(icu_mxm_five_stream_test
+    tests/unit/icu/mxm_five_stream_icu_test.cpp
+    unit.icu.mxm_five_stream unit icu mxm timing fast)
 add_executable(raw_macro_level1_trace_test
     tests/unit/icu/raw_macro_level1_trace_test.cpp)
 target_link_libraries(raw_macro_level1_trace_test PRIVATE ftlpu_cmodel)
@@ -165,6 +243,47 @@ add_test(NAME unit.icu.raw_macro_level1_trace
         "${CMAKE_CURRENT_BINARY_DIR}/raw_macro_level1/cmodel_trace.jsonl")
 set_tests_properties(unit.icu.raw_macro_level1_trace PROPERTIES
     LABELS "unit;icu;timing;trace")
+add_executable(raw_macro_p2_1_fetch_trace_test
+    tests/unit/icu/raw_macro_p2_1_fetch_trace_test.cpp)
+target_link_libraries(raw_macro_p2_1_fetch_trace_test PRIVATE ftlpu_cmodel)
+add_test(NAME unit.icu.raw_macro_p2_1_fetch_trace
+    COMMAND $<TARGET_FILE:raw_macro_p2_1_fetch_trace_test>
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/support/raw_macro_p2_1/machine_words.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/support/raw_macro_p2_1/directed_cases.csv"
+        "${CMAKE_CURRENT_BINARY_DIR}/raw_macro_p2_1/cmodel_trace.jsonl")
+set_tests_properties(unit.icu.raw_macro_p2_1_fetch_trace PROPERTIES
+    LABELS "unit;icu;timing;trace;p2_1")
+add_executable(raw_macro_level2_trace_test
+    tests/unit/mem/raw_macro_level2_trace_test.cpp)
+target_link_libraries(raw_macro_level2_trace_test PRIVATE ftlpu_cmodel)
+target_include_directories(raw_macro_level2_trace_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/support)
+if(MSVC)
+    target_compile_options(raw_macro_level2_trace_test PRIVATE /UNDEBUG)
+else()
+    target_compile_options(raw_macro_level2_trace_test PRIVATE -UNDEBUG)
+endif()
+add_test(NAME unit.mem.raw_macro_level2_trace
+    COMMAND $<TARGET_FILE:raw_macro_level2_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/raw_macro_level2/cmodel_trace.jsonl"
+        "${CMAKE_CURRENT_BINARY_DIR}/raw_macro_level2/shared_input_manifest.json")
+set_tests_properties(unit.mem.raw_macro_level2_trace PROPERTIES
+    LABELS "unit;mem;icu;stream;timing;trace")
+add_executable(raw_macro_phase1_space_trace_test
+    tests/unit/mem/raw_macro_phase1_space_trace_test.cpp)
+target_link_libraries(raw_macro_phase1_space_trace_test PRIVATE ftlpu_cmodel)
+target_include_directories(raw_macro_phase1_space_trace_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/support)
+if(MSVC)
+    target_compile_options(raw_macro_phase1_space_trace_test PRIVATE /UNDEBUG)
+else()
+    target_compile_options(raw_macro_phase1_space_trace_test PRIVATE -UNDEBUG)
+endif()
+add_test(NAME unit.mem.raw_macro_phase1_space_trace
+    COMMAND $<TARGET_FILE:raw_macro_phase1_space_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/raw_macro_phase1_space")
+set_tests_properties(unit.mem.raw_macro_phase1_space_trace PROPERTIES
+    LABELS "unit;mem;icu;stream;timing;trace;phase1_space")
 ftlpu_add_test(icu_vxm_sequential_instruction_test
     tests/unit/icu/vxm_sequential_instruction_test.cpp
     unit.icu.vxm_sequential unit icu fast)
@@ -182,8 +301,60 @@ ftlpu_add_demo(icu_rtl_fifo_golden_trace
     tests/unit/icu/rtl_fifo_golden_trace.cpp)
 ftlpu_add_demo(instruction_dma_golden_trace
     tests/unit/icu/instruction_dma_golden_trace.cpp)
+ftlpu_add_test(program_load_command_controller_test
+    tests/unit/icu/program_load_command_controller_test.cpp
+    unit.icu.program_load_command_controller unit icu program timing fast)
+ftlpu_add_test(program_distribution_transport_test
+    tests/unit/icu/program_distribution_transport_test.cpp
+    unit.icu.program_distribution_transport unit icu program timing fast)
+add_executable(phase3_program_loading_trace_test
+    tests/subsystem/system/phase3_program_loading_trace_test.cpp)
+target_link_libraries(phase3_program_loading_trace_test PRIVATE ftlpu_cmodel)
+add_test(NAME subsystem.program.phase3_r2_trace
+    COMMAND $<TARGET_FILE:phase3_program_loading_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/phase3_r2_dma_reassembler_word_fifo"
+        r2)
+set_tests_properties(subsystem.program.phase3_r2_trace PROPERTIES
+    LABELS "subsystem;program;dma;icu;phase3")
+add_test(NAME subsystem.program.phase3_r3_trace
+    COMMAND $<TARGET_FILE:phase3_program_loading_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/phase3_r3_distributor_relay_elastic"
+        r3)
+set_tests_properties(subsystem.program.phase3_r3_trace PROPERTIES
+    LABELS "subsystem;program;dma;icu;phase3")
+
+foreach(endpoint mem mxm)
+    add_test(NAME subsystem.program.phase3_r4_${endpoint}_trace
+        COMMAND $<TARGET_FILE:phase3_program_loading_trace_test>
+            "${CMAKE_CURRENT_BINARY_DIR}/phase3_r4_program_endpoint"
+            r4_${endpoint})
+    set_tests_properties(subsystem.program.phase3_r4_${endpoint}_trace PROPERTIES
+        LABELS "subsystem;program;dma;icu;phase3")
+endforeach()
 
 # Subsystem tests: multiple hardware blocks connected by physical SR routes.
+add_test(NAME subsystem.program.phase3_r4_mxm_endpoint_direct_trace
+    COMMAND $<TARGET_FILE:phase3_program_loading_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/phase3_r4_mxm_endpoint_direct"
+        r4_mxm_endpoint_direct)
+set_tests_properties(subsystem.program.phase3_r4_mxm_endpoint_direct_trace PROPERTIES
+    LABELS "subsystem;program;icu;phase3")
+add_executable(phase3_qctl_program_load_trace_test
+    tests/subsystem/system/phase3_qctl_program_load_trace_test.cpp)
+target_link_libraries(phase3_qctl_program_load_trace_test PRIVATE ftlpu_cmodel)
+add_test(NAME subsystem.program.phase3_r5_qctl_direct_trace
+    COMMAND $<TARGET_FILE:phase3_qctl_program_load_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/phase3_r5_qctl_direct_load")
+set_tests_properties(subsystem.program.phase3_r5_qctl_direct_trace PROPERTIES
+    LABELS "subsystem;program;icu;phase3")
+add_executable(phase3_stream_interconnect_trace_test
+    tests/subsystem/system/phase3_stream_interconnect_trace_test.cpp)
+target_link_libraries(phase3_stream_interconnect_trace_test PRIVATE ftlpu_cmodel)
+add_test(NAME subsystem.program.phase3_r7_stream_interconnect_trace
+    COMMAND $<TARGET_FILE:phase3_stream_interconnect_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/phase3_r7_stream_interconnect")
+set_tests_properties(subsystem.program.phase3_r7_stream_interconnect_trace PROPERTIES
+    LABELS "subsystem;program;stream;phase3")
 ftlpu_add_test(c2c_test tests/subsystem/c2c/dual_chip_test.cpp
     subsystem.c2c.dual_chip subsystem c2c fast)
 ftlpu_add_test(c2c_clocked_test tests/subsystem/c2c/c2c_clocked_test.cpp
@@ -210,11 +381,41 @@ ftlpu_add_test(hardware_configuration_test tests/subsystem/system/hardware_confi
 ftlpu_add_test(tsp_timing_integration_test
     tests/subsystem/system/tsp_timing_integration_test.cpp
     subsystem.system.timing subsystem system timing fast)
+ftlpu_add_test(mem_sr_sxm_clock_integration_test
+    tests/subsystem/system/mem_sr_sxm_clock_integration_test.cpp
+    subsystem.system.mem_sr_sxm_clock subsystem system mem stream sxm timing fast)
 ftlpu_add_test(program_loader_test tests/subsystem/system/program_loader_test.cpp
     subsystem.program.loader subsystem program dma fast)
 ftlpu_add_test(program_loader_relay_mapping_test
     tests/subsystem/system/program_loader_relay_mapping_test.cpp
     subsystem.program.relay_mapping subsystem program dma fast)
+ftlpu_add_test(mxm_full_instruction_path_test
+    tests/subsystem/system/mxm_full_instruction_path_test.cpp
+    subsystem.system.mxm_full_instruction_path subsystem system icu mxm timing)
+add_executable(mxm_five_stream_cycle_trace_test
+    tests/subsystem/system/mxm_five_stream_cycle_trace_test.cpp)
+target_link_libraries(mxm_five_stream_cycle_trace_test PRIVATE ftlpu_cmodel)
+add_test(NAME subsystem.system.mxm_five_stream_cycle_trace
+    COMMAND $<TARGET_FILE:mxm_five_stream_cycle_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/mxm_full_path_cycle/c7")
+set_tests_properties(subsystem.system.mxm_five_stream_cycle_trace PROPERTIES
+    LABELS "subsystem;system;icu;mxm;timing")
+add_executable(mxm_full_path_cycle_trace_test
+    tests/subsystem/system/mxm_full_path_cycle_trace_test.cpp)
+target_link_libraries(mxm_full_path_cycle_trace_test PRIVATE ftlpu_cmodel)
+add_test(NAME subsystem.system.mxm_full_path_cycle_trace
+    COMMAND $<TARGET_FILE:mxm_full_path_cycle_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/mxm_full_path_cycle/c8")
+set_tests_properties(subsystem.system.mxm_full_path_cycle_trace PROPERTIES
+    LABELS "subsystem;system;icu;mxm;timing")
+add_executable(qctl_runtime_issue_joint_trace_test
+    tests/subsystem/system/qctl_runtime_issue_joint_trace_test.cpp)
+target_link_libraries(qctl_runtime_issue_joint_trace_test PRIVATE ftlpu_cmodel)
+add_test(NAME subsystem.system.qctl_runtime_issue_joint_trace
+    COMMAND $<TARGET_FILE:qctl_runtime_issue_joint_trace_test>
+        "${CMAKE_CURRENT_BINARY_DIR}/qctl_runtime_issue_joint/cmodel")
+set_tests_properties(subsystem.system.qctl_runtime_issue_joint_trace PROPERTIES
+    LABELS "subsystem;system;icu;qctl;mem;mxm;timing")
 add_test(NAME subsystem.program.configuration COMMAND "${CMAKE_COMMAND}"
     "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/subsystem/system/program_load_configuration_test.cmake")
