@@ -283,7 +283,12 @@ public:
     {
         check_mem_slice(mem_slice);
         check_bank(bank);
+        if (is_diagonal_mem_access(instruction.opcode)) {
+            check_diagonal_row_group(instruction.address, sram_.bank(mem_slice, bank).active_rows());
+            instruction.diagonal_phase = instruction.address % hw::kTileRows;
+        }
         const std::size_t port = instruction.opcode == MemOpcode::Write
+            || instruction.opcode == MemOpcode::DiagonalWrite
             // Owned banks are issued only by the routing adapter.
             || instruction.opcode == MemOpcode::Scatter ? 1 : 0;
         const bool resident_read=routing_owners_[mem_slice][bank]==kResidentWeightOwner && instruction.opcode==MemOpcode::Read;
@@ -592,6 +597,10 @@ private:
         switch (opcode) {
         case MemOpcode::Read:
             return "Read";
+        case MemOpcode::DiagonalRead:
+            return "DiagonalRead";
+        case MemOpcode::DiagonalWrite:
+            return "DiagonalWrite";
         case MemOpcode::Write:
             return "Write";
         case MemOpcode::Gather:
@@ -607,6 +616,8 @@ private:
         os << opcode_name(instruction.opcode);
         switch (instruction.opcode) {
         case MemOpcode::Read:
+        case MemOpcode::DiagonalRead:
+        case MemOpcode::DiagonalWrite:
         case MemOpcode::Write:
             os << "(a=" << instruction.address << ",s=" << instruction.stream << ")";
             break;
@@ -661,10 +672,12 @@ private:
                         }
                         switch (instruction->opcode) {
                         case MemOpcode::Read:
+                        case MemOpcode::DiagonalRead:
                             execute_read(fabric, mem_slice, bank, tile,
                                 *instruction);
                             break;
                         case MemOpcode::Write:
+                        case MemOpcode::DiagonalWrite:
                             execute_write(fabric, mem_slice, bank, tile,
                                 *instruction);
                             break;
@@ -1089,8 +1102,18 @@ private:
             for (auto& bank : mem_slice) {
                 for (auto& port : bank) {
                     for (std::size_t tile = hw::kTileRows - 1;
-                         tile > 0; --tile)
+                         tile > 0; --tile) {
                         port[tile] = port[tile - 1];
+                        auto& next = port[tile];
+                        if (next && is_diagonal_mem_access(next->opcode)) {
+                            if (++next->diagonal_phase == hw::kTileRows) {
+                                next->diagonal_phase = 0;
+                                next->address -= hw::kTileRows - 1;
+                            } else {
+                                ++next->address;
+                            }
+                        }
+                    }
                     port[0].reset();
                 }
             }

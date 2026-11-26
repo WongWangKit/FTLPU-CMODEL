@@ -17,7 +17,20 @@ enum class MemOpcode {
     // Opcode 2 was the retired dual-port ReadWrite instruction.
     Gather = 3,
     Scatter = 4,
+    DiagonalRead = 5,
+    DiagonalWrite = 6,
 };
+
+inline bool is_diagonal_mem_access(MemOpcode opcode)
+{
+    return opcode == MemOpcode::DiagonalRead || opcode == MemOpcode::DiagonalWrite;
+}
+
+inline void check_diagonal_row_group(std::size_t address, std::size_t rows = hw::kSramDepthRows)
+{
+    if (address >= rows / hw::kTileRows * hw::kTileRows)
+        throw std::out_of_range("MEM diagonal access requires a complete row group");
+}
 
 struct MemInstruction {
     MemOpcode opcode{MemOpcode::Read};
@@ -40,6 +53,9 @@ struct MemInstruction {
     std::uint64_t routing_owner{0}, routing_transfer{0};
     std::uint64_t expert_task_generation{0},expert_task_id{0};
 
+    // Phase local to this in-flight diagonal instruction.
+    std::size_t diagonal_phase{0};
+
     StreamId stream_id() const
     {
         return StreamId::from_packed(stream);
@@ -58,6 +74,20 @@ struct MemInstruction {
     static MemInstruction Read(std::size_t address, std::size_t packed_stream)
     {
         return Read(address, StreamId::from_packed(packed_stream));
+    }
+
+    // The root address selects a phase within an aligned group of S rows.
+    // Each following Superlane reads the next phase of the same group.
+    static MemInstruction DiagonalRead(std::size_t address, StreamId stream)
+    {
+        check_diagonal_row_group(address);
+        return MemInstruction {MemOpcode::DiagonalRead, address, stream.packed(), 0};
+    }
+
+    static MemInstruction DiagonalWrite(std::size_t address, StreamId stream)
+    {
+        check_diagonal_row_group(address);
+        return MemInstruction {MemOpcode::DiagonalWrite, address, stream.packed(), 0};
     }
 
     static MemInstruction Write(std::size_t address, StreamId stream)

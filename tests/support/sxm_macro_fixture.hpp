@@ -14,6 +14,8 @@ struct SxmMacroFixture {
         std::vector<IcuRawImemWord96> result(1);
         result[0].lanes[0]=7u | (static_cast<std::uint32_t>(entries.size())<<4);
         if(entries.empty()) return result;
+        const bool stream = entries.front().second.is_stream_operation();
+        if (stream) result[0].lanes[0] |= isa::kSxmStreamMacroFlag;
         std::size_t offset=96;
         const auto bits=[&](std::uint64_t value,unsigned width) {
             for(unsigned i=0;i<width;++i,++offset) {
@@ -29,7 +31,10 @@ struct SxmMacroFixture {
             const bool compact=schedule.inner_count<=2048 && schedule.inner_interval<=256;
             bits(!compact,1);
             if(compact) bits(schedule.inner_count==1?0:1,2);
-            isa::write_sxm_macro_native(instruction,transpose,bits);
+            if (instruction.is_stream_operation() != stream)
+                throw std::invalid_argument("mixed SXM macro image formats");
+            if (stream) isa::write_sxm_stream_macro(instruction,transpose,bits);
+            else isa::write_sxm_macro_native(instruction,transpose,bits);
             if(compact) {
                 if(schedule.inner_count>1) {
                     bits(schedule.inner_count-1,11);bits(schedule.inner_interval-1,8);bits(0,10);

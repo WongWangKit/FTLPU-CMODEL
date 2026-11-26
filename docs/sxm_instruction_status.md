@@ -1,8 +1,25 @@
 # SXM 指令与历史矩阵实验
 
-2026-11-20 起，CModel 每侧的 SXM 只执行整块流式转置。LPU32 按行接收 32×32 个双字节元素，各 SL 错开一拍。SL 内两个 8×8 bank 交替采集和转置读出，输入 FIFO、三级相邻 SL 固定交换、输出 FIFO 依次工作。首个输出在启动后第 38 拍，下块可在第 32 拍启动。旧时序的 raw-macro 需重编。实现见 include/ftlpu/sxm/fifo_transpose.hpp，周期常量见 include/ftlpu/sxm/fifo_timing.hpp。
+现有程序的整块 Transpose 继续使用 FIFO 通路。LPU32 各 SL 错开一拍接收数据，首个输出在启动后第 38 拍，下块可在第 32 拍启动。实现见 fifo_transpose.hpp 和 fifo_timing.hpp。
 
-旧 SmolLM2 prefill 手排用例直接向两条队列发送 local transpose 和独立 Permute，已退出当前 CModel 测试集，尚待新排程。旧 Permute 队列编号保留给二进制接口，不能执行数据交换。
+## MEM 中转的局部转置与跨层循环移位
+
+编译器也可以选择 MXM → SXM.LocalTranspose（可选）→ MEM 源区 → SXM.VectorRotate → MEM 目标区。MEM 指令管理 SRAM 地址。SXM 指令选择源和目的 SR、字节平面数（1 或 2）及旋转量。整层的 L 个 lane 一起移动。旧的任意映射 Permute 和转置 bank 读操作继续禁用。
+
+| 发射队列 | 指令 | 第 s 层的行为 |
+|---|---|---|
+| T | LocalTranspose(srcSR, dstSR, planes) | 在 t+s+r 采样第 r 行，t+s+L+c 输出原块的第 c 列。每 L 拍可开始一批。 |
+| MEM | DiagonalRead（原生操作码 5） | 从 SL0 给定的行地址开始，组内偏移每层加一，对 S 取模。沿用原有地址与 SR 位域。 |
+| P | VectorRotate(srcSR, dstSR, shift, planes) | 在 t+s 采样。目的层 d 在 t+S+d 得到源层 (d−shift) mod S。可每拍启动一个向量。 |
+| MEM | DiagonalWrite（原生操作码 6） | 与对角线读使用相同的变址规则，在目标区写回。普通读写继续逐层复制同一行地址。 |
+
+S 为 SL 数，L 为每层 lane 数。源和目标分配不重叠的完整 S 行组。对角线 h 的 SL0 初始读偏移为 (−h mod S)，初始写偏移为 h。SXM 右移量为 (−h mod S)，整条向量共用。编译器安排读写端口和 SR 可用周期。整块 FIFO Transpose 与 MEM 中转路径之间，在 SXM 排空后切换。
+
+本分支使用现有原生指令与 Macro v1 队列。SXM 原生队列字低两位为包类型，后接源 SR（6 位）、目的 SR（6 位）、平面数减一（1 位）及平移量（本配置的组跨度位宽）。T 的平移量为零。紧凑 SXM Macro 镜像用控制字 bit 28 标记，模板由同样的操作数和已有定时字段组成。原有 FIFO Macro 继续使用原格式。编译器可为每条对角线生成一条固定 shift 的重复描述符。MEM 可用原生指令或携带原生操作码的 extended Macro 模板。
+
+回归入口为 subsystem.sxm.mem_vector_rotate 和 unit.sxm.fifo_transpose。前者逐拍检查读写地址、SR 有效拍、落位及完整转置数据。4×8 的 East 侧从 BF16 单位矩阵乘起步，其他几何和 West 侧由 MEM 供数。
+
+旧 SmolLM2 prefill 手排用例所用的任意映射 Permute 已退出当前测试集，需按当前指令重新排程。
 
 ## 历史记录（2026-11-10）
 

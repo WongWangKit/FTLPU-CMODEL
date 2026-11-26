@@ -155,6 +155,8 @@ ftlpu_add_test(vxm_static_quantizer_test tests/unit/vxm/static_quantizer_test.cp
 ftlpu_add_test(vxm_log_test tests/unit/vxm/log_test.cpp
     unit.vxm.log unit vxm fast)
 
+ftlpu_add_test(sxm_mem_vector_rotate_test tests/subsystem/sxm/mem_vector_rotate_test.cpp
+    subsystem.sxm.mem_vector_rotate subsystem sxm mem)
 ftlpu_add_test(sxm_fifo_transpose_test tests/unit/sxm/fifo_transpose_test.cpp
     unit.sxm.fifo_transpose unit sxm fast)
 if(MSVC)

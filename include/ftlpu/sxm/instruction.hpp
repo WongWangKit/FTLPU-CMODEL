@@ -17,6 +17,8 @@ enum class SxmOpcode {
     Distribute,
     Transpose,
     Permute,
+    LocalTransposeToStream,
+    VectorRotate,
 };
 
 enum class SxmShiftSource {
@@ -72,6 +74,53 @@ struct SxmInstruction {
     std::size_t output_tile{kAllOutputTiles};
     StreamList src_streams{};
     StreamList dst_streams{};
+
+    bool is_stream_operation() const noexcept
+    {
+        return opcode == SxmOpcode::LocalTransposeToStream || opcode == SxmOpcode::VectorRotate;
+    }
+
+    // One byte stream or a consecutive low/high pair carrying a 16-bit element.
+    static SxmInstruction StreamOperation(SxmOpcode operation, SxmStreamId src,
+        SxmStreamId dst, std::size_t planes, std::size_t rotation = 0)
+    {
+        if ((operation != SxmOpcode::LocalTransposeToStream && operation != SxmOpcode::VectorRotate)
+            || (planes != 1 && planes != 2) || rotation >= hw::kTileRows
+            || (operation == SxmOpcode::LocalTransposeToStream && rotation != 0))
+            throw std::invalid_argument("invalid SXM stream operation");
+        for (auto base : {src.stream, dst.stream})
+            if (base >= hw::kStreams || base % hw::kStreamsPerDirection + planes > hw::kStreamsPerDirection)
+                throw std::invalid_argument("SXM stream range crosses direction boundary");
+        SxmInstruction instruction{};
+        instruction.opcode = operation;
+        instruction.shift_distance = rotation;
+        for (std::size_t p = 0; p < planes; ++p) {
+            instruction.src_streams.push_back({src.stream+p});
+            instruction.dst_streams.push_back({dst.stream+p});
+        }
+        return instruction;
+    }
+
+    void validate_stream_operation() const
+    {
+        if (src_streams.empty() || dst_streams.empty())
+            throw std::invalid_argument("missing SXM stream");
+        const auto expected = StreamOperation(opcode, src_streams.front(), dst_streams.front(),
+            src_streams.size(), shift_distance);
+        if (src_streams != expected.src_streams || dst_streams != expected.dst_streams)
+            throw std::invalid_argument("SXM byte planes must be consecutive");
+    }
+
+    static SxmInstruction LocalTranspose(SxmStreamId src, SxmStreamId dst, std::size_t planes = 2)
+    {
+        return StreamOperation(SxmOpcode::LocalTransposeToStream, src, dst, planes);
+    }
+
+    static SxmInstruction VectorRotate(SxmStreamId src, SxmStreamId dst,
+        std::size_t distance, std::size_t planes = 2)
+    {
+        return StreamOperation(SxmOpcode::VectorRotate, src, dst, planes, distance);
+    }
 
     static PermuteMap identity_map() {
         PermuteMap result{};

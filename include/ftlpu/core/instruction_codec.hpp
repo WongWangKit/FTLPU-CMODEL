@@ -305,6 +305,10 @@ inline MemInstruction decode_mem_instruction(EncodedMemInstruction word)
     switch (opcode) {
     case MemOpcode::Read:
         return MemInstruction::Read(address, stream);
+    case MemOpcode::DiagonalRead:
+        return MemInstruction::DiagonalRead(address, StreamId::from_packed(stream));
+    case MemOpcode::DiagonalWrite:
+        return MemInstruction::DiagonalWrite(address, StreamId::from_packed(stream));
     case MemOpcode::Write:
         return preserve_stream
             ? MemInstruction::WriteTap(address, stream)
@@ -644,8 +648,38 @@ inline VxmDecodedInstruction decode_vxm_instruction(
     return VxmCompactInstructionCodec::decode(queue, encoded);
 }
 
+inline constexpr unsigned kSxmStreamOperandBits = 13 + SxmEncodingLayout::kStrideBits;
+inline std::uint32_t encode_sxm_stream_operand(const SxmInstruction& instruction)
+{
+    instruction.validate_stream_operation();
+    return static_cast<std::uint32_t>(instruction.src_streams.front().stream
+        | (instruction.dst_streams.front().stream << 6)
+        | ((instruction.src_streams.size() - 1) << 12)
+        | (instruction.shift_distance << 13));
+}
+
+inline SxmInstruction decode_sxm_stream_operand(SxmOpcode operation, std::uint64_t bits)
+{
+    if (bits >> kSxmStreamOperandBits)
+        throw std::logic_error("nonzero reserved SXM stream operand bits");
+    return SxmInstruction::StreamOperation(operation, {static_cast<std::size_t>(bits & 63u)},
+        {static_cast<std::size_t>((bits >> 6) & 63u)}, 1 + ((bits >> 12) & 1u), bits >> 13);
+}
+
+// Preserve the local compact tag on small targets. Larger stream-list formats
+// use the all-ones count, which is always above the even maximum 2*LANES.
+inline constexpr unsigned kSxmStreamCountTag = hw::kSxmConcurrentStreamOps < 30
+    ? 30u : ((1u << SxmEncodingLayout::kCountBits) - 1u);
+
 inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instruction)
 {
+    if (instruction.is_stream_operation()) {
+        EncodedSxmInstruction encoded{};
+        encoded.words[0] = (kSxmStreamCountTag << 6) | (instruction.opcode == SxmOpcode::VectorRotate ? 3u : 2u);
+        encoded.words[1] = encode_sxm_stream_operand(instruction);
+        return encoded;
+    }
+
     constexpr std::size_t kMaxStreams = hw::kSxmConcurrentStreamOps;
     constexpr std::size_t kSrcOffset = SxmEncodingLayout::kRawHeaderBits;
     constexpr std::size_t kDstOffset = kSrcOffset + kMaxStreams * 6;
@@ -735,6 +769,14 @@ inline EncodedSxmInstruction encode_sxm_instruction(const SxmInstruction& instru
 
 inline SxmInstruction decode_sxm_instruction(const EncodedSxmInstruction& encoded)
 {
+    if ((encoded.words[0] >> 6) == kSxmStreamCountTag && ((encoded.words[0] & 63) == 2 || (encoded.words[0] & 63) == 3)) {
+        auto instruction = decode_sxm_stream_operand((encoded.words[0] & 1) ? SxmOpcode::VectorRotate
+            : SxmOpcode::LocalTransposeToStream, encoded.words[1]);
+        if (encode_sxm_instruction(instruction).words != encoded.words)
+            throw std::logic_error("nonzero reserved SXM stream-operation bits");
+        return instruction;
+    }
+
     constexpr std::size_t kMaxStreams = hw::kSxmConcurrentStreamOps;
     constexpr std::size_t kSrcOffset = SxmEncodingLayout::kRawHeaderBits;
     constexpr std::size_t kDstOffset = kSrcOffset + kMaxStreams * 6;

@@ -33,6 +33,48 @@ SxmInstruction read_sxm_macro_native(bool transpose, Read read) {
     if (!SxmFifoTranspose::accepts(result)) throw std::invalid_argument("invalid FIFO stream pair");
     return result;
 }
+// Compact stream-only Macro images mark control word bit 28. The original
+// FIFO template remains bit-identical, including its retired-row checks.
+inline constexpr std::uint32_t kSxmStreamMacroFlag = 1u << 28;
+inline SxmOpcode sxm_stream_queue_opcode(bool transpose) {
+    return transpose ? SxmOpcode::LocalTransposeToStream : SxmOpcode::VectorRotate;
+}
+template <typename Write>
+void write_sxm_stream_macro(const SxmInstruction& op, bool transpose, Write write) {
+    if (op.opcode != sxm_stream_queue_opcode(transpose))
+        throw std::invalid_argument("SXM compact template issued to the wrong queue");
+    write(encode_sxm_stream_operand(op), kSxmStreamOperandBits);
+}
+
+// The private T context retains its original width. Its selector can encode
+// both FIFO transpose and the plane count for a local transpose.
+template <typename Write>
+void pack_sxm_context(const SxmInstruction& op, bool transpose, Write write) {
+    if (!op.is_stream_operation()) {
+        write_sxm_macro_native(op, transpose, write);
+        return;
+    }
+    if (op.opcode != sxm_stream_queue_opcode(transpose))
+        throw std::invalid_argument("SXM operation does not match context");
+    const auto bits = encode_sxm_stream_operand(op);
+    if (!transpose) { write(bits, kSxmStreamOperandBits); return; }
+    write(op.src_streams.front().stream, 6);
+    write(op.dst_streams.front().stream, 6);
+    write(op.src_streams.size() - 1, SxmEncodingLayout::kRowBits);
+}
+template <typename Read>
+SxmInstruction unpack_sxm_context(bool transpose, Read read) {
+    if (!transpose)
+        return decode_sxm_stream_operand(SxmOpcode::VectorRotate, read(kSxmStreamOperandBits));
+    const auto src = read(6), dst = read(6), selector = read(SxmEncodingLayout::kRowBits);
+    if (selector <= 1)
+        return SxmInstruction::LocalTranspose({src}, {dst}, selector + 1);
+    if (selector != kSxmFifoTransposeRow)
+        throw std::invalid_argument("invalid SXM active context selector");
+    auto op = SxmInstruction::Transpose({{src},{src+1}}, {{dst},{dst+1}});
+    if (!SxmFifoTranspose::accepts(op)) throw std::invalid_argument("invalid FIFO stream pair");
+    return op;
+}
 } // namespace ftlpu::isa
 namespace ftlpu {
 template <std::size_t Bits>
@@ -102,7 +144,7 @@ public:
         State s;
         copy_timing(TimingCodec::unpack(t),s);
         std::size_t offset = 1;
-        s.instruction = isa::read_sxm_macro_native(Transpose,[&](unsigned width) {
+        s.instruction = isa::unpack_sxm_context(Transpose,[&](unsigned width) {
             auto value=p.read(offset,width); offset+=width; return value;
         });
         return s;
@@ -127,7 +169,7 @@ private:
     {
         Packed p; p.write(0,1,1);
         std::size_t offset=1;
-        isa::write_sxm_macro_native(ins,Transpose,[&](std::uint64_t value,unsigned width) {
+        isa::pack_sxm_context(ins,Transpose,[&](std::uint64_t value,unsigned width) {
             p.write(offset,width,value); offset+=width;
         });
         for(std::size_t i=0;i<112;++i) p.write(timing_offset+i,1,t.read(52+i,1));

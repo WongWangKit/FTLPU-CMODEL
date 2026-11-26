@@ -1015,7 +1015,7 @@ public:
 
     void enqueue_sxm_transpose(Hemisphere hemisphere, SxmInstruction instruction)
     {
-        if (!SxmFifoTranspose::accepts(instruction)) {
+        if (instruction.opcode != SxmOpcode::LocalTransposeToStream && !SxmFifoTranspose::accepts(instruction)) {
             throw std::invalid_argument("ICU SXM requires a full FIFO transpose with two contiguous byte streams");
         }
         const auto side = hemisphere_index(hemisphere);
@@ -1029,9 +1029,11 @@ public:
         enqueue_sxm_permute(Hemisphere::East, std::move(instruction));
     }
 
-    void enqueue_sxm_permute(Hemisphere, SxmInstruction)
+    void enqueue_sxm_permute(Hemisphere hemisphere, SxmInstruction instruction)
     {
-        throw std::invalid_argument("standalone SXM Permute is retired; recompile for FIFO transpose");
+        if (instruction.opcode != SxmOpcode::VectorRotate)
+            throw std::invalid_argument("the SXM P queue accepts VectorRotate");
+        sxm_permute_queues_[hemisphere_index(hemisphere)].push_instruction(std::move(instruction));
     }
 
 
@@ -2147,6 +2149,8 @@ private:
             return "Read";
         case MemOpcode::Write:
             return "Write";
+        case MemOpcode::DiagonalRead: return "DiagonalRead";
+        case MemOpcode::DiagonalWrite: return "DiagonalWrite";
         case MemOpcode::Gather:
             return "Gather";
         case MemOpcode::Scatter:
@@ -2228,7 +2232,12 @@ private:
         };
 
         std::ostringstream os;
-        os << (instruction.opcode == SxmOpcode::Transpose ? "Transpose" : "Permute");
+        if (instruction.opcode == SxmOpcode::VectorRotate)
+            os << "VectorRotate shift=" << instruction.shift_distance;
+        else if (instruction.opcode == SxmOpcode::LocalTransposeToStream)
+            os << "LocalTransposeToStream";
+        else
+            os << (instruction.opcode == SxmOpcode::Transpose ? "Transpose" : "Permute");
         if (!instruction.src_streams.empty()) os << " src=" << describe_streams(instruction.src_streams);
         if (!instruction.dst_streams.empty()) os << " dst=" << describe_streams(instruction.dst_streams);
         return os.str();

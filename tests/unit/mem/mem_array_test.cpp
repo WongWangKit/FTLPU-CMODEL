@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <memory>
 
 namespace {
 #ifdef FTLPU_TEST_MEM_R1
@@ -18,6 +19,46 @@ int main()
     constexpr std::size_t kMemSlice = 8; // group 2: east input SR2, east output SR3
     constexpr std::size_t kAddress = 64;
     const auto stream = ftlpu::StreamId::East(5);
+
+    // Read the last complete group, alternating diagonal and ordinary reads.
+    // A phase wrap must stay in this group in both Main and RegisteredR1.
+    {
+        auto storage = std::make_unique<ftlpu::MemArrayModel>(ftlpu::MemStreamPortMap::BetweenBoundaries(),
+            ftlpu::MemArrayModel::MissingStreamPolicy::Error, kReadTiming);
+        auto& mem = *storage;
+        constexpr auto layers = ftlpu::hw::kTileRows;
+        constexpr auto base = (ftlpu::hw::kSramDepthRows / layers - 1) * layers;
+        constexpr auto bank = ftlpu::hw::kMemBanksPerSlice - 1;
+        ftlpu::StreamRegisterFabric fabric(ftlpu::hw::kMemBoundaryStreamRegisterColumns);
+        for (std::size_t sl=0; sl<layers; ++sl)
+            for (std::size_t phase=0; phase<layers; ++phase)
+                mem.set_sram_lane_byte(kMemSlice,bank,sl,base+phase,0,
+                    static_cast<std::uint8_t>(sl*layers+phase));
+        const auto col = mem.ports().output_column(kMemSlice,stream.direction());
+        for (std::size_t t=0; t<3*layers+kReadLatency; ++t) {
+            if (t<2*layers) {
+                const auto row = base + t/2;
+                mem.enqueue_instruction(kMemSlice,bank,t%2
+                    ? ftlpu::MemInstruction::Read(row,stream)
+                    : ftlpu::MemInstruction::DiagonalRead(row,stream));
+            }
+            fabric.begin_cycle();
+            mem.evaluate(fabric);
+            fabric.stage_linear_links();
+            fabric.commit_cycle();
+            for (std::size_t sl=0; sl<layers; ++sl) {
+                const auto cell = fabric.cell(col,sl,0,stream);
+                if (t<sl+kReadLatency || t>=sl+kReadLatency+2*layers) {
+                    assert(!cell.valid);
+                    continue;
+                }
+                const auto issue = t-sl-kReadLatency;
+                const auto phase = (issue/2 + (issue%2 ? 0 : sl))%layers;
+                assert(cell.valid && cell.data == static_cast<std::uint8_t>(sl*layers+phase));
+            }
+        }
+    }
+
 
     {
         ftlpu::StreamRegisterFabric fabric(ftlpu::hw::kMemBoundaryStreamRegisterColumns);

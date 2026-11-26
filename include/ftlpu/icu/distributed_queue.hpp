@@ -1704,8 +1704,11 @@ private:
             } else if constexpr (QueueRole == IcuQueueRole::Vxm) {
                 return isa::encode_vxm_icu_instruction(instruction);
             } else if constexpr (is_sxm_queue_role(QueueRole)) {
-                throw std::invalid_argument(
-                    "SXM queues require packed Macro images");
+                constexpr auto operation = QueueRole == IcuQueueRole::SxmTranspose
+                    ? SxmOpcode::LocalTransposeToStream : SxmOpcode::VectorRotate;
+                if (instruction.opcode != operation)
+                    throw std::invalid_argument("SXM stream instruction does not match its queue");
+                encoded = isa::encode_sxm_stream_operand(instruction);
             } else if constexpr (QueueRole == IcuQueueRole::C2cTx
                 || QueueRole == IcuQueueRole::C2cRx
                 || QueueRole == IcuQueueRole::C2cDma) {
@@ -1764,9 +1767,13 @@ private:
             throw std::logic_error(
                 "C2C DMA native decode requires two consecutive words");
         } else {
-            static_cast<void>(word);
-            throw std::invalid_argument(
-                "SXM queues require packed Macro images");
+            static_assert(is_sxm_queue_role(QueueRole));
+            if (!detail::raw_icu_bits_are_zero(word, 2 + isa::kSxmStreamOperandBits, InstructionBits))
+                throw std::invalid_argument("nonzero reserved SXM stream instruction bits");
+            constexpr auto operation = QueueRole == IcuQueueRole::SxmTranspose
+                ? SxmOpcode::LocalTransposeToStream : SxmOpcode::VectorRotate;
+            return isa::decode_sxm_stream_operand(operation,
+                detail::read_raw_icu_bits(word, 2, isa::kSxmStreamOperandBits));
         }
     }
 

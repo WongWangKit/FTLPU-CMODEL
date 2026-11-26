@@ -735,7 +735,7 @@ private:
         DdbSlot result;
         if constexpr (std::is_same_v<FuncInstruction, SxmInstruction>) {
             auto offset = layout.instruction;
-            isa::write_sxm_macro_native(descriptor.descriptor_template.instruction,
+            isa::pack_sxm_context(descriptor.descriptor_template.instruction,
                 kind_ == IcuMacroQueueKind::SxmTranspose, [&](std::uint64_t value, unsigned width) {
                     result.payload.write(offset,width,value); offset += width;
                 });
@@ -939,7 +939,10 @@ private:
 
         if (address == 0) {
             const std::uint32_t low = word.lanes[0];
-            if ((low & 0xf0000000u) != 0)
+            const auto allowed = std::is_same_v<FuncInstruction, SxmInstruction>
+                ? isa::kSxmStreamMacroFlag : 0u;
+            stream_macro_ = (low & isa::kSxmStreamMacroFlag) != 0;
+            if ((low & 0xf0000000u & ~allowed) != 0)
                 throw StaticScheduleError(
                     "Macro control word has non-zero reserved bits");
             for (std::size_t lane = 1; lane < word.lanes.size(); ++lane)
@@ -1223,7 +1226,7 @@ private:
             const auto header = peek_bits(header_bits);
             if (!header) return;
             if (!plan.extended) plan.shape = static_cast<Shape>(bit_field(*header,1,2));
-            plan.payload_bits = native_instruction_bits() + (plan.extended
+            plan.payload_bits = (stream_macro_ ? isa::kSxmStreamOperandBits : native_instruction_bits()) + (plan.extended
                 ? kExtendedTemplatePayloadBits : compact_schedule_bits(plan.shape));
         } else {
             const auto opcode_header = peek_bits(3);
@@ -1305,12 +1308,16 @@ private:
                     cursor, template_plan_.shape, result.schedule);
             }
         } else if constexpr (std::is_same_v<FuncInstruction, SxmInstruction>) {
-            result.instruction = isa::read_sxm_macro_native(
-                kind_ == IcuMacroQueueKind::SxmTranspose, [&](unsigned width) {
-                    auto value = cursor.read(width);
-                    if (!value) throw StaticScheduleError("truncated SXM Macro template");
-                    return *value;
-                });
+            const bool transpose = kind_ == IcuMacroQueueKind::SxmTranspose;
+            auto read = [&](unsigned width) {
+                auto value = cursor.read(width);
+                if (!value) throw StaticScheduleError("truncated SXM Macro template");
+                return *value;
+            };
+            result.instruction = stream_macro_
+                ? isa::decode_sxm_stream_operand(isa::sxm_stream_queue_opcode(transpose),
+                    read(isa::kSxmStreamOperandBits))
+                : isa::read_sxm_macro_native(transpose, read);
             result.schedule = IcuMacroSchedule{};
             decoded = template_plan_.extended ? read_extended_schedule(cursor,result.schedule)
                 : read_compact_schedule(cursor,template_plan_.shape,result.schedule);
@@ -1800,7 +1807,7 @@ private:
         const auto layout = ddb_field_layout();
         if constexpr (std::is_same_v<FuncInstruction, SxmInstruction>) {
             auto offset = layout.instruction;
-            return isa::read_sxm_macro_native(kind_ == IcuMacroQueueKind::SxmTranspose,
+            return isa::unpack_sxm_context(kind_ == IcuMacroQueueKind::SxmTranspose,
                 [&](unsigned width) { auto value=payload.read(offset,width); offset+=width; return value; });
         } else return decode_native(payload.read(layout.instruction,layout.summary.instruction_bits));
     }
@@ -1903,6 +1910,7 @@ private:
     Reservoir reservoir_{};
     State state_{State::WaitingForControl};
     bool control_latched_{false};
+    bool stream_macro_{false};
     bool disabled_{false};
     bool waiting_for_bits_{false};
     bool decoder_active_this_cycle_{false};
